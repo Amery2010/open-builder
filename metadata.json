@@ -1,0 +1,5 @@
+{
+  "name": "AI Web Generator",
+  "description": "A v0-like AI website generator using Gemini and Sandpack",
+  "requestFramePermissions": []
+}

@@ -1,0 +1,37 @@
+import { useState } from 'react';
+import { ChatInterface } from './components/ChatInterface';
+import { CodeViewer } from './components/CodeViewer';
+import { generateCode } from './lib/gemini';
+
+export default function App() {
+  const [code, setCode] = useState(`export default function App() {\n  return (\n    <div>\n      Get Started\n    </div>\n  );\n}\n`);
+  const [isGenerating, setIsGenerating] = useState(false);
+
+  const handleGenerate = async (prompt: string) => {
+    setIsGenerating(true);
+    try {
+      const newCode = await generateCode(prompt, code);
+      if (newCode) {
+        setCode(newCode);
+      }
+    } catch (error) {
+      console.error("Error generating code:", error);
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  return (
+    <div className="flex h-screen w-full overflow-hidden bg-gray-50">
+      {/* Left Panel - Chat */}
+      <div className="w-[400px] shrink-0 h-full">
+        <ChatInterface onGenerate={handleGenerate} isGenerating={isGenerating} />
+      </div>
+
+      {/* Right Panel - Code/Preview */}
+      <div className="flex-1 h-full">
+        <CodeViewer code={code} onCodeChange={setCode} />
+      </div>
+    </div>
+  );
+}
