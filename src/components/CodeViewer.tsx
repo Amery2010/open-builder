@@ -3,8 +3,10 @@ import {
   SandpackLayout, 
   SandpackCodeEditor, 
   SandpackPreview,
+  SandpackConsole,
   SandpackFileExplorer,
-  useSandpack
+  useSandpack,
+  SANDBOX_TEMPLATES
 } from "@codesandbox/sandpack-react";
 import { useState, useEffect, useMemo } from "react";
 import { Eye, Code2, Monitor, Smartphone, Tablet } from "lucide-react";
@@ -23,7 +25,7 @@ function CodeUpdater({ onCodeChange }: { onCodeChange: (code: string) => void })
   // Debounce the update to avoid performance issues and cursor jumps
   useEffect(() => {
     // Only sync back if we are editing the main file
-    if (activeFile !== "/App.tsx") return;
+    if (activeFile !== "/App.jsx") return;
 
     const timer = setTimeout(() => {
       if (code) {
@@ -42,11 +44,29 @@ export function CodeViewer({ code, onCodeChange }: CodeViewerProps) {
   const [deviceSize, setDeviceSize] = useState<'desktop' | 'tablet' | 'mobile'>('desktop');
   
   const files = useMemo(() => ({
-    "/App.js": code,
-    "/index.js": `import { StrictMode } from "react";\nimport { createRoot } from \'react-dom/client\';\nimport "./styles.css";\n\nimport App from "./App";\n\nconst container = document.getElementById("app");\nconst root = createRoot(container);\nroot.render(\n  <StrictMode>\n    <App />\n </StrictMode>\n);`,
-    "/styles.css": `body {\n  min-height: 100vh;\n  margin: 0;\n  font-family: sans-serif;\n  -webkit-font-smoothing: auto;\n  -moz-font-smoothing: auto;\n  -moz-osx-font-smoothing: grayscale;\n  font-smoothing: auto;\n  text-rendering: optimizeLegibility;\n  font-smooth: always;\n  -webkit-tap-highlight-color: transparent;\n  -webkit-touch-callout: none;\n}\n\nh1 {\n  font-size: 1.5rem;\n}\n\n#app {\n  min-height: 100vh;\n}\n\n#app > div {\n  min-height: calc(100vh);\n}`,
-    "/public/index.html": `<!DOCTYPE html>\n<html lang="en">\n  <head>\n    <meta charset="UTF-8">\n    <meta name="viewport" content="width=device-width, initial-scale=1.0">\n    <title>Document</title>\n  </head>\n  <body>\n    <div id="app"></div>\n  </body>\n</html>`,
-  }), [code]);
+    ...SANDBOX_TEMPLATES['vite-react'].files,
+    "/App.jsx": {
+      code,
+    },
+    "/package.json": {
+      code: JSON.stringify({
+        scripts: {
+          dev: "vite",
+          build: "vite build",
+          preview: "vite preview",
+        },
+        dependencies: {
+          react: "^19.2.0",
+          "react-dom": "^19.2.0",
+        },
+        devDependencies: {
+          "@vitejs/plugin-react": "3.1.0",
+          vite: "4.1.4",
+          "esbuild-wasm": "^0.27.3",
+        },
+      }),
+    },
+  }), []);
 
   return (
     <div className="h-full flex flex-col bg-gray-50">
@@ -121,11 +141,10 @@ export function CodeViewer({ code, onCodeChange }: CodeViewerProps) {
       <div className="flex-1 overflow-hidden relative bg-gray-100/50">
         <SandpackProvider
           style={{ height: '100%' }}
-          template="react"
+          template="vite-react"
           theme="light"
           files={files}
           options={{
-            activeFile: "/App.js",
             classes: {
               "sp-wrapper": "block",
               "sp-layout": "flex flex-col md:flex-row",
@@ -143,13 +162,16 @@ export function CodeViewer({ code, onCodeChange }: CodeViewerProps) {
               deviceSize === 'mobile' ? "max-w-[375px] my-4 shadow-lg border border-gray-200 rounded-lg overflow-hidden bg-white h-[calc(100%-2rem)]" : "",
               deviceSize === 'desktop' ? "max-w-full h-full" : ""
             )}>
-              <SandpackPreview 
-                showNavigator={false} 
-                showOpenInCodeSandbox={false} 
-                showRefreshButton={true}
-                className="h-full w-full"
-                style={{ height: '100%' }}
-              />
+              <div className="flex flex-col">
+                <SandpackPreview 
+                  showNavigator={true} 
+                  showOpenInCodeSandbox={false} 
+                  showRefreshButton={true}
+                  className="h-full w-full"
+                  style={{ height: '100%' }}
+                />
+                <SandpackConsole />
+              </div>
             </div>
 
             <div className={cn(
@@ -159,7 +181,7 @@ export function CodeViewer({ code, onCodeChange }: CodeViewerProps) {
               <div className="w-60 border-r border-gray-200 h-full bg-white shrink-0 overflow-hidden flex flex-col">
                  <SandpackFileExplorer autoHiddenFiles={true} />
               </div>
-              <div className="flex-1 h-full overflow-hidden min-w-0">
+              <div className="flex flex-col flex-1 h-full overflow-hidden min-w-0">
                 <SandpackCodeEditor 
                   showTabs={false} 
                   showLineNumbers={true} 

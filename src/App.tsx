@@ -4,7 +4,11 @@ import { CodeViewer } from './components/CodeViewer';
 import { generateCode } from './lib/gemini';
 
 export default function App() {
-  const [code, setCode] = useState(`export default function App() {\n  return (\n    <div>\n      Get Started\n    </div>\n  );\n}\n`);
+  const [code, setCode] = useState(`export default function App() {
+  const data = "world"
+
+  return <h1>Hello {data}</h1>
+}`);
   const [isGenerating, setIsGenerating] = useState(false);
 
   const handleGenerate = async (prompt: string) => {
