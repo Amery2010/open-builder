@@ -9,7 +9,15 @@ import {
   SANDBOX_TEMPLATES,
 } from "@codesandbox/sandpack-react";
 import { useState, useEffect, useMemo } from "react";
-import { Eye, Code2, Monitor, Smartphone, Tablet } from "lucide-react";
+import {
+  Eye,
+  Code2,
+  Monitor,
+  Smartphone,
+  Tablet,
+  Terminal,
+} from "lucide-react";
+import { VITE_REACT_TYPESCRIPT_TEMPLATE } from "../constants/template";
 import { cn } from "../lib/utils";
 
 interface CodeViewerProps {
@@ -28,9 +36,6 @@ function CodeUpdater({
 
   // Debounce the update to avoid performance issues and cursor jumps
   useEffect(() => {
-    // Only sync back if we are editing the main file
-    if (activeFile !== "/App.jsx") return;
-
     const timer = setTimeout(() => {
       if (code) {
         onCodeChange(code);
@@ -48,34 +53,7 @@ export function CodeViewer({ code, onCodeChange }: CodeViewerProps) {
   const [deviceSize, setDeviceSize] = useState<"desktop" | "tablet" | "mobile">(
     "desktop",
   );
-
-  const files = useMemo(
-    () => ({
-      ...SANDBOX_TEMPLATES["vite-react"].files,
-      "/App.jsx": {
-        code,
-      },
-      "/package.json": {
-        code: JSON.stringify({
-          scripts: {
-            dev: "vite",
-            build: "vite build",
-            preview: "vite preview",
-          },
-          dependencies: {
-            react: "^19.2.0",
-            "react-dom": "^19.2.0",
-          },
-          devDependencies: {
-            "@vitejs/plugin-react": "3.1.0",
-            vite: "4.1.4",
-            "esbuild-wasm": "^0.27.3",
-          },
-        }),
-      },
-    }),
-    [],
-  );
+  const [showConsole, setShowConsole] = useState(false);
 
   return (
     <div className="h-full flex flex-col bg-gray-50">
@@ -154,7 +132,14 @@ export function CodeViewer({ code, onCodeChange }: CodeViewerProps) {
 
       {/* Content Area */}
       <div className="flex-1 w-[calc(100vw-400px)] overflow-hidden relative bg-gray-100/50">
-        <SandpackProvider template="vite-react" theme="light" files={files}>
+        <SandpackProvider
+          template="vite-react-ts"
+          theme="light"
+          options={{
+            activeFile: "/src/App.tsx",
+          }}
+          {...VITE_REACT_TYPESCRIPT_TEMPLATE}
+        >
           <CodeUpdater onCodeChange={onCodeChange} />
           <SandpackLayout>
             <div
@@ -162,21 +147,46 @@ export function CodeViewer({ code, onCodeChange }: CodeViewerProps) {
                 "h-full w-full transition-all duration-300 mx-auto",
                 viewMode === "preview" ? "block" : "hidden",
                 deviceSize === "tablet"
-                  ? "max-w-[768px] my-4 shadow-lg border border-gray-200 rounded-lg overflow-hidden bg-white h-[calc(100%-2rem)]"
+                  ? "max-w-3xl my-4 shadow-lg border border-gray-200 rounded-lg overflow-hidden bg-white h-[calc(100%-2rem)]"
                   : "",
                 deviceSize === "mobile"
-                  ? "max-w-[375px] my-4 shadow-lg border border-gray-200 rounded-lg overflow-hidden bg-white h-[calc(100%-2rem)]"
+                  ? "max-w-sm my-4 shadow-lg border border-gray-200 rounded-lg overflow-hidden bg-white h-[calc(100%-2rem)]"
                   : "",
                 deviceSize === "desktop" ? "max-w-full h-full" : "",
               )}
             >
-              <div className="flex flex-col h-full">
-                <SandpackPreview
-                  showNavigator={true}
-                  showOpenInCodeSandbox={false}
-                  showRefreshButton={true}
-                />
-                <SandpackConsole />
+              <div className="grid grid-rows-3 h-full">
+                <div
+                  className={cn(
+                    "transition-all duration-300 ease-in-out",
+                    showConsole ? "row-span-2" : "row-span-3",
+                  )}
+                >
+                  <SandpackPreview
+                    showNavigator={true}
+                    showOpenInCodeSandbox={false}
+                    showRefreshButton={true}
+                    actionsChildren={
+                      <button
+                        onClick={() => setShowConsole(!showConsole)}
+                        className={cn(
+                          "flex items-center justify-center w-7 h-7 rounded-full transition-colors text-(--sp-colors-clickable) bg-(--sp-colors-surface2) hover:text-(--sp-colors-hover) hover:bg-(--sp-colors-surface3) border border-(--sp-colors-surface3) cursor-pointer",
+                        )}
+                        title={showConsole ? "Hide console" : "Show console"}
+                      >
+                        <Terminal size={16} />
+                      </button>
+                    }
+                  />
+                </div>
+                <div
+                  className={cn(
+                    "overflow-hidden border-t border-gray-200",
+                    showConsole ? "row-span-1" : "max-h-0 border-t-0",
+                  )}
+                >
+                  <SandpackConsole />
+                </div>
               </div>
             </div>
 

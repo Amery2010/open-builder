@@ -17,6 +17,10 @@
   overflow-x: auto;
 }
 
+.sp-bridge-frame {
+  display: none;
+}
+
 .sp-console-list code {
   white-space: wrap;
 }
