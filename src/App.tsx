@@ -1,7 +1,7 @@
-import { useState } from 'react';
-import { ChatInterface } from './components/ChatInterface';
-import { CodeViewer } from './components/CodeViewer';
-import { generateCode } from './lib/gemini';
+import { useState } from "react";
+import { ChatInterface } from "./components/ChatInterface";
+import { CodeViewer } from "./components/CodeViewer";
+import { generateCode } from "./lib/gemini";
 
 export default function App() {
   const [code, setCode] = useState(`export default function App() {
@@ -26,14 +26,17 @@ export default function App() {
   };
 
   return (
-    <div className="flex h-screen w-full overflow-hidden bg-gray-50">
+    <div className="flex h-screen w-full bg-gray-50">
       {/* Left Panel - Chat */}
       <div className="w-[400px] shrink-0 h-full">
-        <ChatInterface onGenerate={handleGenerate} isGenerating={isGenerating} />
+        <ChatInterface
+          onGenerate={handleGenerate}
+          isGenerating={isGenerating}
+        />
       </div>
 
       {/* Right Panel - Code/Preview */}
-      <div className="flex-1 h-full">
+      <div className="flex-1 h-full min-w-0">
         <CodeViewer code={code} onCodeChange={setCode} />
       </div>
     </div>
