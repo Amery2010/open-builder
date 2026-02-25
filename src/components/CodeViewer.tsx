@@ -569,6 +569,7 @@ export function CodeViewer({
           options={{
             activeFile: sandpackCurrentFile,
           }}
+          style={{ height: "100%" }}
         >
           <SandpackListener onFileChange={onFileChange} />
           <SandpackLayout>

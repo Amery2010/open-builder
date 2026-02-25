@@ -147,3 +147,15 @@
     @apply bg-background text-foreground;
   }
 }
+
+/* Markdown content styles */
+.markdown-content {
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+
+/* Syntax highlighting adjustments */
+.hljs {
+  background: transparent !important;
+  padding: 0 !important;
+}

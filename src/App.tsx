@@ -67,38 +67,91 @@ export default function App() {
         },
         {
           onText: (delta) => {
-            console.log("AI:", delta);
-            // 实时更新最后一条 assistant 消息
             setMessages((prev) => {
-              const newMessages = [...prev];
-              const lastMsg = newMessages[newMessages.length - 1];
-
-              if (lastMsg && lastMsg.role === "assistant") {
-                // 更新现有的 assistant 消息
-                lastMsg.content = (lastMsg.content || "") + delta;
-              } else {
-                // 创建新的 assistant 消息
-                newMessages.push({
-                  role: "assistant",
-                  content: delta,
-                });
+              const last = prev[prev.length - 1];
+              if (last && last.role === "assistant") {
+                // 创建新对象，避免 mutate prev
+                return [
+                  ...prev.slice(0, -1),
+                  { ...last, content: (last.content || "") + delta },
+                ];
               }
-
-              return newMessages;
+              return [...prev, { role: "assistant", content: delta }];
             });
           },
           onToolCall: (name, id) => {
-            console.log(`Tool call: ${name} (${id})`);
+            setMessages((prev) => {
+              const last = prev[prev.length - 1];
+              if (last && last.role === "assistant") {
+                const alreadyExists = last.tool_calls?.some(
+                  (tc) => tc.id === id,
+                );
+                if (alreadyExists) return prev;
+                const newToolCall = {
+                  id,
+                  type: "function" as const,
+                  function: { name, arguments: "" },
+                };
+                return [
+                  ...prev.slice(0, -1),
+                  {
+                    ...last,
+                    tool_calls: [...(last.tool_calls || []), newToolCall],
+                  },
+                ];
+              }
+              return prev;
+            });
           },
           onToolResult: (name, args, result) => {
-            console.log(`Tool result: ${name}`, { args, result });
+            // 实时添加 tool result，尝试找到对应的 tool_call_id
+            setMessages((prev) => {
+              const newMessages = [...prev];
+
+              // 查找最后一条 assistant 消息中的 tool call
+              for (let i = newMessages.length - 1; i >= 0; i--) {
+                if (
+                  newMessages[i].role === "assistant" &&
+                  newMessages[i].tool_calls
+                ) {
+                  const toolCall = newMessages[i].tool_calls!.find(
+                    (tc) =>
+                      tc.function.name === name &&
+                      !newMessages.some(
+                        (m) => m.role === "tool" && m.tool_call_id === tc.id,
+                      ),
+                  );
+
+                  if (toolCall) {
+                    return [
+                      ...newMessages,
+                      {
+                        role: "tool",
+                        content: result,
+                        tool_call_id: toolCall.id,
+                      },
+                    ];
+                  }
+                  break;
+                }
+              }
+
+              // 如果找不到匹配的 tool call，仍然添加 result
+              return [
+                ...newMessages,
+                {
+                  role: "tool",
+                  content: result,
+                  tool_call_id: "",
+                },
+              ];
+            });
           },
           onFileChange: (newFiles, changes) => {
             setFiles(newFiles);
-            console.log("Files changed:", changes);
           },
           onComplete: (result) => {
-            // 完成时用完整的消息替换
+            // 完成时确保消息同步
             setMessages(result.messages);
           },
           onError: (error) => {
@@ -138,6 +191,14 @@ export default function App() {
     }
   };
 
+  const handleStopGeneration = () => {
+    const generator = generatorRef.current;
+    if (generator) {
+      generator.abort();
+    }
+    setIsGenerating(false);
+  };
+
   const handleFileChange = (path: string, content: string) => {
     setFiles((prev) => ({ ...prev, [path]: content }));
     const generator = generatorRef.current;
@@ -156,9 +217,10 @@ export default function App() {
   return (
     <div className="flex h-screen w-full bg-background">
       {/* Left Panel - Chat */}
-      <div className="w-[400px] shrink-0 h-full">
+      <div className="w-100 shrink-0 h-full">
         <ChatInterface
           onGenerate={handleGenerate}
+          onStop={handleStopGeneration}
           isGenerating={isGenerating}
           messages={messages}
           onOpenSettings={() => setIsSettingsOpen(true)}
