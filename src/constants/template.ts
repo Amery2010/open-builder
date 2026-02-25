@@ -32,7 +32,7 @@ createRoot(document.getElementById("root")!).render(
   </head>
   <body>
     <div id="root"></div>
-    <script type="module" src="src/main.tsx"></script>
+    <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
 `,
@@ -123,6 +123,6 @@ export default defineConfig({
 });`,
     },
   },
-  main: "src/main.tsx",
+  main: "/src/main.tsx",
   environment: "node",
 };
