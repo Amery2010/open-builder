@@ -3,7 +3,7 @@ import {
   GeneratorOptions,
   GeneratorEvents,
   ProjectFiles,
-} from "./web-app-generator";
+} from "./generator";
 
 /**
  * OpenAI 兼容客户端配置

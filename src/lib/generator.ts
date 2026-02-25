@@ -103,7 +103,7 @@ Guidelines:
 3. Default to modern HTML / CSS / JavaScript unless the user specifies otherwise.
 4. Batch multiple file creations into a single response when possible (parallel tool calls).
 5. For small edits, prefer patch_file over rewriting entire files with write_file.
-6. Always read_file before modifying a file whose current content you haven't seen.
+6. Always read files before modifying them. Use read_files (plural) when reading 2 or more files at once — never call read_file multiple times in a row.
 7. Briefly explain your plan before starting and summarize when finished.`;
 
 /** 内置工具定义 */
@@ -121,7 +121,7 @@ const BUILTIN_TOOLS: ToolDefinition[] = [
     type: "function",
     function: {
       name: "read_file",
-      description: "Read and return the full content of a file.",
+      description: "Read and return the full content of a single file. Use read_files instead when reading 2 or more files.",
       parameters: {
         type: "object",
         properties: {
@@ -131,6 +131,25 @@ const BUILTIN_TOOLS: ToolDefinition[] = [
           },
         },
         required: ["path"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "read_files",
+      description:
+        "Read and return the full content of multiple files at once. Always prefer this over calling read_file multiple times.",
+      parameters: {
+        type: "object",
+        properties: {
+          paths: {
+            type: "array",
+            items: { type: "string" },
+            description: "List of file paths relative to project root",
+          },
+        },
+        required: ["paths"],
       },
     },
   },
@@ -527,6 +546,10 @@ export class WebAppGenerator {
         result = this.toolReadFile(args.path);
         break;
 
+      case "read_files":
+        result = this.toolReadFiles(args.paths);
+        break;
+
       case "write_file":
         result = this.toolWriteFile(args.path, args.content, changes);
         break;
@@ -570,6 +593,20 @@ export class WebAppGenerator {
       return `Error: file not found — "${path}"`;
     }
     return this.files[path];
+  }
+
+  private toolReadFiles(paths: string[]): string {
+    if (!Array.isArray(paths) || paths.length === 0) {
+      return "Error: no paths provided";
+    }
+    return paths
+      .map((path) => {
+        if (!(path in this.files)) {
+          return `=== ${path} ===\nError: file not found`;
+        }
+        return `=== ${path} ===\n${this.files[path]}`;
+      })
+      .join("\n\n");
   }
 
   private toolWriteFile(
