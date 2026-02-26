@@ -2,7 +2,7 @@ import { useRef, useCallback } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { WebAppGenerator } from "../lib/generator";
 import { createOpenAIGenerator } from "../lib/client";
-import type { Message, ProjectFiles, AISettings } from "../types";
+import type { Message, ContentPart, ProjectFiles, AISettings } from "../types";
 
 interface UseGeneratorOptions {
   settings: AISettings;
@@ -10,6 +10,9 @@ interface UseGeneratorOptions {
   setMessages: Dispatch<SetStateAction<Message[]>>;
   setFiles: Dispatch<SetStateAction<ProjectFiles>>;
   setIsGenerating: Dispatch<SetStateAction<boolean>>;
+  setTemplate: Dispatch<SetStateAction<string>>;
+  restartSandpack: () => void;
+  setIsProjectInitialized: Dispatch<SetStateAction<boolean>>;
 }
 
 export function useGenerator({
@@ -18,6 +21,9 @@ export function useGenerator({
   setMessages,
   setFiles,
   setIsGenerating,
+  setTemplate,
+  restartSandpack,
+  setIsProjectInitialized,
 }: UseGeneratorOptions) {
   const generatorRef = useRef<WebAppGenerator | null>(null);
 
@@ -51,7 +57,7 @@ export function useGenerator({
               if (last?.role === "assistant") {
                 return [
                   ...prev.slice(0, -1),
-                  { ...last, content: (last.content || "") + delta },
+                  { ...last, content: ((typeof last.content === "string" ? last.content : "") || "") + delta },
                 ];
               }
               return [...prev, { role: "assistant", content: delta }];
@@ -107,11 +113,25 @@ export function useGenerator({
           onFileChange: (newFiles) => {
             setFiles(newFiles);
           },
+          onTemplateChange: (tmpl, newFiles) => {
+            setTemplate(tmpl);
+            setFiles(newFiles);
+            setIsProjectInitialized(true);
+            restartSandpack();
+          },
+          onDependenciesChange: (newFiles) => {
+            setFiles(newFiles);
+            restartSandpack();
+          },
           onComplete: (result) => {
             setMessages(result.messages);
           },
           onError: (error) => {
             console.error("Generation error:", error);
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: `⚠️ ${error.message || "Unknown error"}` },
+            ]);
           },
         },
         files,
@@ -119,17 +139,37 @@ export function useGenerator({
     }
 
     return generatorRef.current;
-  }, [settings, files, setMessages, setFiles]);
+  }, [settings, files, setMessages, setFiles, setTemplate, setIsProjectInitialized, restartSandpack]);
 
   const generate = useCallback(
-    async (prompt: string) => {
+    async (prompt: string, images?: string[]) => {
       setIsGenerating(true);
-      setMessages((prev) => [...prev, { role: "user", content: prompt }]);
+
+      // Build message content: multi-part if images present, plain string otherwise
+      let content: string | ContentPart[];
+      if (images && images.length > 0) {
+        const parts: ContentPart[] = [];
+        if (prompt) parts.push({ type: "text", text: prompt });
+        for (const url of images) {
+          parts.push({ type: "image_url", image_url: { url } });
+        }
+        content = parts;
+      } else {
+        content = prompt;
+      }
+
+      setMessages((prev) => [...prev, { role: "user", content }]);
       try {
         const generator = getGenerator();
-        if (generator) await generator.generate(prompt);
-      } catch (err) {
+        if (generator) await generator.generate(prompt, images);
+      } catch (err: any) {
         console.error("Error generating:", err);
+        if (err?.name !== "AbortError") {
+          setMessages((prev) => [
+            ...prev,
+            { role: "assistant", content: `⚠️ ${err?.message || "Unknown error"}` },
+          ]);
+        }
       } finally {
         setIsGenerating(false);
       }

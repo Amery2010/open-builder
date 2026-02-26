@@ -1,15 +1,46 @@
 import { useMemo } from "react";
-import type { Message } from "../types";
+import type { Message, ContentPart } from "../types";
 import type { MergedMessage, Block, TextBlock, ToolBlock } from "../types";
 
 const TOOL_NAMES: Record<string, string> = {
-  list_files: "列出文件",
-  read_file: "读取文件",
+  init_project: "初始化项目",
+  manage_dependencies: "管理依赖",
+  list_files: "列出项目文件",
+  // read_file: "读取文件",
   read_files: "读取文件",
   write_file: "写入文件",
   patch_file: "修改文件",
   delete_file: "删除文件",
+  search_in_files: "搜索文件",
 };
+
+/** Extract plain text from message content (string or multi-part array) */
+function getTextContent(
+  content: string | ContentPart[] | null | undefined,
+): string {
+  if (!content) return "";
+  if (typeof content === "string") return content.trim();
+  return content
+    .filter(
+      (p): p is Extract<ContentPart, { type: "text" }> => p.type === "text",
+    )
+    .map((p) => p.text)
+    .join("\n")
+    .trim();
+}
+
+/** Extract image URLs from multi-part content */
+function getImageUrls(
+  content: string | ContentPart[] | null | undefined,
+): string[] {
+  if (!content || typeof content === "string") return [];
+  return content
+    .filter(
+      (p): p is Extract<ContentPart, { type: "image_url" }> =>
+        p.type === "image_url",
+    )
+    .map((p) => p.image_url.url);
+}
 
 function mergeMessages(messages: Message[]): MergedMessage[] {
   const merged: MergedMessage[] = [];
@@ -18,19 +49,21 @@ function mergeMessages(messages: Message[]): MergedMessage[] {
     const msg = messages[i];
 
     if (msg.role === "user") {
-      const contents: string[] = [];
+      const blocks: Block[] = [];
       let j = i;
+      let bi = 0;
       while (j < messages.length && messages[j].role === "user") {
-        const c = messages[j].content?.trim();
-        if (c) contents.push(c);
+        const text = getTextContent(messages[j].content);
+        if (text) {
+          blocks.push({ type: "text", content: text, id: `text-${i}-${bi++}` });
+        }
+        for (const url of getImageUrls(messages[j].content)) {
+          blocks.push({ type: "image", url, id: `img-${i}-${bi++}` });
+        }
         j++;
       }
-      if (contents.length > 0) {
-        merged.push({
-          role: "user",
-          blocks: [{ type: "text", content: contents.join("\n\n"), id: `text-${i}` }],
-          id: `user-${i}`,
-        });
+      if (blocks.length > 0) {
+        merged.push({ role: "user", blocks, id: `user-${i}` });
       }
       i = j - 1;
     } else if (msg.role === "assistant") {
@@ -44,29 +77,42 @@ function mergeMessages(messages: Message[]): MergedMessage[] {
       ) {
         const cur = messages[j];
         if (cur.role === "assistant") {
-          const text = cur.content?.trim();
+          const text = getTextContent(cur.content);
           if (text) {
-            blocks.push({ type: "text", content: text, id: `text-${i}-${bi++}` } as TextBlock);
+            blocks.push({
+              type: "text",
+              content: text,
+              id: `text-${i}-${bi++}`,
+            } as TextBlock);
           }
           if (cur.tool_calls) {
             for (const tc of cur.tool_calls) {
               let args: Record<string, any> = {};
-              try { args = JSON.parse(tc.function.arguments); } catch { /* ignore */ }
+              try {
+                args = JSON.parse(tc.function.arguments);
+              } catch {
+                /* ignore */
+              }
               let result = "";
               for (let k = j + 1; k < messages.length; k++) {
-                if (messages[k].role === "tool" && messages[k].tool_call_id === tc.id) {
-                  result = messages[k].content?.trim() || "";
+                if (
+                  messages[k].role === "tool" &&
+                  messages[k].tool_call_id === tc.id
+                ) {
+                  result = getTextContent(messages[k].content) || "";
                   break;
                 }
               }
               const isReadFiles = tc.function.name === "read_files";
-              const paths: string[] | undefined = isReadFiles ? (args.paths as string[]) : undefined;
+              const paths: string[] | undefined = isReadFiles
+                ? (args.paths as string[])
+                : undefined;
               blocks.push({
                 type: "tool",
                 toolName: tc.function.name,
                 title: isReadFiles
                   ? `读取 ${paths?.length ?? 0} 个文件`
-                  : (TOOL_NAMES[tc.function.name] || tc.function.name),
+                  : TOOL_NAMES[tc.function.name] || tc.function.name,
                 path: args.path || "",
                 paths,
                 result,

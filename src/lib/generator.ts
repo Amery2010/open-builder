@@ -4,15 +4,22 @@
 //  所有文件以 Record<path, content> 形式存储，无任何 Node.js 依赖，可在浏览器运行
 // ============================================================================
 
+import { SANDBOX_TEMPLATES } from "@codesandbox/sandpack-react";
+
 // ═══════════════════════════════ 类型定义 ═══════════════════════════════════
 
 /** 项目文件：路径 → 内容 */
 export type ProjectFiles = Record<string, string>;
 
+/** OpenAI 多模态内容块 */
+export type ContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } };
+
 /** OpenAI 格式的消息 */
 export interface Message {
   role: "system" | "user" | "assistant" | "tool";
-  content: string | null;
+  content: string | ContentPart[] | null;
   tool_calls?: ToolCall[];
   tool_call_id?: string;
 }
@@ -87,6 +94,10 @@ export interface GeneratorEvents {
   onToolResult?: (name: string, args: unknown, result: string) => void;
   /** 项目文件发生变更 */
   onFileChange?: (files: ProjectFiles, changes: FileChange[]) => void;
+  /** 项目模板变更（init_project 触发） */
+  onTemplateChange?: (template: string, files: ProjectFiles) => void;
+  /** 项目依赖变更（manage_dependencies 触发，需要重启 Sandpack） */
+  onDependenciesChange?: (files: ProjectFiles) => void;
   /** 整个 generate 流程结束 */
   onComplete?: (result: GenerateResult) => void;
   /** 出错 */
@@ -111,29 +122,88 @@ const BUILTIN_TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "init_project",
+      description:
+        "Initialize the project with a Sandpack template. Call this FIRST when starting a new project. " +
+        "Available templates: " +
+        "static (plain HTML/CSS/JS), " +
+        "vanilla (vanilla JS with bundler), " +
+        "vanilla-ts (vanilla TypeScript), " +
+        "react (React with JavaScript), " +
+        "react-ts (React with TypeScript), " +
+        "vue (Vue 3 with JavaScript), " +
+        "vue-ts (Vue 3 with TypeScript), " +
+        "svelte (Svelte with JavaScript), " +
+        "angular (Angular with TypeScript), " +
+        "solid (SolidJS with TypeScript), " +
+        "vite (Vite vanilla), " +
+        "vite-react (Vite + React JS), " +
+        "vite-react-ts (Vite + React TypeScript, DEFAULT), " +
+        "vite-vue (Vite + Vue JS), " +
+        "vite-vue-ts (Vite + Vue TypeScript), " +
+        "vite-svelte (Vite + Svelte JS), " +
+        "vite-svelte-ts (Vite + Svelte TypeScript), " +
+        "nextjs (Next.js), " +
+        "astro (Astro), " +
+        "test-ts (TypeScript test runner).",
+      parameters: {
+        type: "object",
+        properties: {
+          template: {
+            type: "string",
+            description: "Template name from the available list",
+          },
+        },
+        required: ["template"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "manage_dependencies",
+      description:
+        "Add, remove, or update project dependencies by modifying package.json. " +
+        "This triggers a full project restart to install the new dependencies. " +
+        "Provide the complete updated package.json content.",
+      parameters: {
+        type: "object",
+        properties: {
+          package_json: {
+            type: "string",
+            description: "The complete package.json content to write",
+          },
+        },
+        required: ["package_json"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "list_files",
       description:
         "List all file paths currently in the project. Returns one path per line, or '(empty)' if no files exist.",
       parameters: { type: "object", properties: {} },
     },
   },
-  {
-    type: "function",
-    function: {
-      name: "read_file",
-      description: "Read and return the full content of a single file. Use read_files instead when reading 2 or more files.",
-      parameters: {
-        type: "object",
-        properties: {
-          path: {
-            type: "string",
-            description: "File path relative to project root",
-          },
-        },
-        required: ["path"],
-      },
-    },
-  },
+  // {
+  //   type: "function",
+  //   function: {
+  //     name: "read_file",
+  //     description: "Read and return the full content of a single file. Use read_files instead when reading 2 or more files.",
+  //     parameters: {
+  //       type: "object",
+  //       properties: {
+  //         path: {
+  //           type: "string",
+  //           description: "File path relative to project root",
+  //         },
+  //       },
+  //       required: ["path"],
+  //     },
+  //   },
+  // },
   {
     type: "function",
     function: {
@@ -211,6 +281,20 @@ const BUILTIN_TOOLS: ToolDefinition[] = [
           },
         },
         required: ["path", "patches"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "search_in_files",
+      description: "Search for a regex pattern across all project files",
+      parameters: {
+        type: "object",
+        properties: {
+          pattern: { type: "string", description: "Regex pattern" },
+        },
+        required: ["pattern"],
       },
     },
   },
@@ -304,8 +388,18 @@ export class WebAppGenerator {
   /**
    * 核心方法：发送用户消息，驱动 AI 通过 Tool Call 循环生成/修改项目文件
    */
-  async generate(userMessage: string): Promise<GenerateResult> {
-    this.messages.push({ role: "user", content: userMessage });
+  async generate(userMessage: string, images?: string[]): Promise<GenerateResult> {
+    // Build user message: multi-part if images present
+    if (images && images.length > 0) {
+      const parts: ContentPart[] = [];
+      if (userMessage) parts.push({ type: "text", text: userMessage });
+      for (const url of images) {
+        parts.push({ type: "image_url", image_url: { url } });
+      }
+      this.messages.push({ role: "user", content: parts });
+    } else {
+      this.messages.push({ role: "user", content: userMessage });
+    }
 
     const systemContent = this.buildSystemContent();
     let fullText = "";
@@ -404,10 +498,20 @@ export class WebAppGenerator {
     };
   }
 
+  private async parseApiError(res: Response): Promise<string> {
+    const text = await res.text();
+    try {
+      const json = JSON.parse(text);
+      const msg = json.error?.message || json.message || json.detail || json.msg;
+      if (msg) return `API error ${res.status}: ${msg}`;
+    } catch { /* not JSON */ }
+    return `API error ${res.status}: ${text}`;
+  }
+
   private async requestJSON(messages: Message[]): Promise<Message> {
     const res = await fetch(this.apiUrl, this.buildFetchInit(messages, false));
     if (!res.ok) {
-      throw new Error(`API error ${res.status}: ${await res.text()}`);
+      throw new Error(await this.parseApiError(res));
     }
 
     const json = await res.json();
@@ -433,7 +537,7 @@ export class WebAppGenerator {
   private async requestStream(messages: Message[]): Promise<Message> {
     const res = await fetch(this.apiUrl, this.buildFetchInit(messages, true));
     if (!res.ok) {
-      throw new Error(`API error ${res.status}: ${await res.text()}`);
+      throw new Error(await this.parseApiError(res));
     }
 
     const reader = res.body!.getReader();
@@ -538,13 +642,21 @@ export class WebAppGenerator {
     let result: string;
 
     switch (name) {
+      case "init_project":
+        result = this.toolInitProject(args.template, changes);
+        break;
+
+      case "manage_dependencies":
+        result = this.toolManageDependencies(args.package_json, changes);
+        break;
+
       case "list_files":
         result = this.toolListFiles();
         break;
 
-      case "read_file":
-        result = this.toolReadFile(args.path);
-        break;
+      // case "read_file":
+      //   result = this.toolReadFile(args.path);
+      //   break;
 
       case "read_files":
         result = this.toolReadFiles(args.paths);
@@ -566,6 +678,10 @@ export class WebAppGenerator {
         result = this.toolDeleteFile(args.path, changes);
         break;
 
+      case "search_in_files":
+        result = this.toolSearchInFiles(args.pattern);
+        break;
+
       default:
         if (this.customToolHandler) {
           try {
@@ -582,18 +698,49 @@ export class WebAppGenerator {
     return { result, changes };
   }
 
+  private toolInitProject(template: string, changes: FileChange[]): string {
+    const tmpl = SANDBOX_TEMPLATES[template as keyof typeof SANDBOX_TEMPLATES];
+    if (!tmpl) {
+      return `Error: unknown template "${template}". Use one of: ${Object.keys(SANDBOX_TEMPLATES).join(", ")}`;
+    }
+    const newFiles: ProjectFiles = {};
+    for (const [path, file] of Object.entries(tmpl.files)) {
+      const normalizedPath = path.startsWith("/") ? path.slice(1) : path;
+      const code = typeof file === "string" ? file : (file as { code: string }).code;
+      newFiles[normalizedPath] = code;
+      changes.push({ path: normalizedPath, action: "created" });
+    }
+    this.files = newFiles;
+    this.events.onTemplateChange?.(template, this.getFiles());
+    return `OK — initialized project with template "${template}" (${Object.keys(newFiles).length} files)`;
+  }
+
+  private toolManageDependencies(packageJson: string, changes: FileChange[]): string {
+    try {
+      JSON.parse(packageJson);
+    } catch {
+      return "Error: invalid JSON in package_json";
+    }
+    const pkgPath = Object.keys(this.files).find((p) => p.endsWith("package.json")) || "package.json";
+    const action: FileChange["action"] = pkgPath in this.files ? "modified" : "created";
+    this.files[pkgPath] = packageJson;
+    changes.push({ path: pkgPath, action });
+    this.events.onDependenciesChange?.(this.getFiles());
+    return `OK — ${action} ${pkgPath}, dependencies updated. Sandpack will restart.`;
+  }
+
   private toolListFiles(): string {
     const paths = Object.keys(this.files).sort();
     if (paths.length === 0) return "(empty project — no files)";
     return paths.join("\n");
   }
 
-  private toolReadFile(path: string): string {
-    if (!(path in this.files)) {
-      return `Error: file not found — "${path}"`;
-    }
-    return this.files[path];
-  }
+  // private toolReadFile(path: string): string {
+  //   if (!(path in this.files)) {
+  //     return `Error: file not found — "${path}"`;
+  //   }
+  //   return this.files[path];
+  // }
 
   private toolReadFiles(paths: string[]): string {
     if (!Array.isArray(paths) || paths.length === 0) {
@@ -650,6 +797,26 @@ export class WebAppGenerator {
     this.files[path] = content;
     changes.push({ path, action: "modified" });
     return log.join("\n");
+  }
+
+  private toolSearchInFiles(pattern: string): string {
+    let regex: RegExp;
+    try {
+      regex = new RegExp(pattern, "g");
+    } catch {
+      return `Error: invalid regex pattern — "${pattern}"`;
+    }
+    const results: string[] = [];
+    for (const [path, content] of Object.entries(this.files)) {
+      const lines = content.split("\n");
+      for (let i = 0; i < lines.length; i++) {
+        if (regex.test(lines[i])) {
+          results.push(`${path}:${i + 1}: ${lines[i].trim()}`);
+        }
+        regex.lastIndex = 0;
+      }
+    }
+    return results.length > 0 ? results.join("\n") : "(no matches found)";
   }
 
   private toolDeleteFile(path: string, changes: FileChange[]): string {

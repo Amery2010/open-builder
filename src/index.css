@@ -4,32 +4,34 @@
 
 @custom-variant dark (&:is(.dark *));
 
-.sp-wrapper {
+.editor .sp-wrapper {
   height: 100%;
 }
 
-.sp-layout {
+.editor .sp-layout {
   height: 100%;
   width: 100%;
   border: 0;
   border-radius: 0;
 }
 
-.sp-stack {
+.editor .sp-stack {
   width: 100%;
   height: 100%;
   overflow-x: auto;
+  gap: 0;
 }
 
-.sp-bridge-frame {
+.editor .sp-bridge-frame {
   display: none;
 }
 
-.sp-console-list code {
+.editor .sp-console-list code {
   white-space: wrap;
 }
 
 @theme inline {
+  --animate-blink: blink 1s step-end infinite;
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
@@ -158,4 +160,10 @@
 .hljs {
   background: transparent !important;
   padding: 0 !important;
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
 }

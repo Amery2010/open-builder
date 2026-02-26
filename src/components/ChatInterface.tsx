@@ -11,7 +11,7 @@ interface ChatInterfaceProps {
   messages: Message[];
   isGenerating: boolean;
   hasValidSettings: boolean;
-  onGenerate: (prompt: string) => Promise<void>;
+  onGenerate: (prompt: string, images?: string[]) => Promise<void>;
   onStop: () => void;
   onOpenSettings: () => void;
 }
@@ -25,6 +25,7 @@ export function ChatInterface({
   onOpenSettings,
 }: ChatInterfaceProps) {
   const [input, setInput] = useState("");
+  const [images, setImages] = useState<string[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const mergedMessages = useMergedMessages(messages);
 
@@ -34,31 +35,43 @@ export function ChatInterface({
 
   const handleSubmit = async (e: React.SyntheticEvent<HTMLFormElement>) => {
     e.preventDefault();
-    if (!input.trim() || isGenerating) return;
-    if (!hasValidSettings) { onOpenSettings(); return; }
+    if ((!input.trim() && images.length === 0) || isGenerating) return;
+    if (!hasValidSettings) {
+      onOpenSettings();
+      return;
+    }
     const prompt = input.trim();
+    const imgs = [...images];
     setInput("");
-    await onGenerate(prompt);
+    setImages([]);
+    await onGenerate(prompt, imgs.length > 0 ? imgs : undefined);
   };
 
   return (
     <div className="flex flex-col h-screen bg-background border-r">
       <ChatHeader isGenerating={isGenerating} onOpenSettings={onOpenSettings} />
 
-      <div className="flex-1 overflow-y-auto" style={{ scrollbarGutter: "stable" }}>
-        <div className="p-4 space-y-5">
-          {!hasValidSettings && <SettingsWarning onOpenSettings={onOpenSettings} />}
+      <div
+        className="flex flex-col flex-1 p-4 pb-0 overflow-y-auto space-y-4"
+        style={{ scrollbarGutter: "stable" }}
+      >
+        {!hasValidSettings && (
+          <SettingsWarning onOpenSettings={onOpenSettings} />
+        )}
 
-          {messages.length === 0 && hasValidSettings && (
-            <EmptyState onSelectSuggestion={setInput} />
-          )}
+        {messages.length === 0 && hasValidSettings && (
+          <EmptyState onSelectSuggestion={setInput} />
+        )}
 
-          {mergedMessages.map((msg) => (
-            <MessageBubble key={msg.id} message={msg} />
-          ))}
+        {mergedMessages.map((msg) => (
+          <MessageBubble
+            key={msg.id}
+            message={msg}
+            isGenerating={isGenerating}
+          />
+        ))}
 
-          <div ref={messagesEndRef} />
-        </div>
+        <div ref={messagesEndRef} />
       </div>
 
       <ChatInput
@@ -67,6 +80,8 @@ export function ChatInterface({
         onSubmit={handleSubmit}
         onStop={onStop}
         isGenerating={isGenerating}
+        images={images}
+        onImagesChange={setImages}
       />
     </div>
   );

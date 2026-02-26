@@ -8,7 +8,7 @@ interface ChatHeaderProps {
 
 export function ChatHeader({ isGenerating, onOpenSettings }: ChatHeaderProps) {
   return (
-    <div className="px-4 py-3 border-b bg-background flex items-center justify-between shrink-0">
+    <div className="h-14 px-4 border-b bg-background flex items-center justify-between shrink-0">
       <div className="flex items-center gap-2">
         <div className="w-8 h-8 rounded-lg bg-linear-to-br from-purple-500 to-pink-500 flex items-center justify-center">
           <Sparkles size={16} className="text-white" />
@@ -20,7 +20,12 @@ export function ChatHeader({ isGenerating, onOpenSettings }: ChatHeaderProps) {
           </p>
         </div>
       </div>
-      <Button variant="ghost" size="icon" onClick={onOpenSettings} className="h-8 w-8">
+      <Button
+        variant="ghost"
+        size="icon"
+        onClick={onOpenSettings}
+        className="h-8 w-8"
+      >
         <Settings size={18} />
       </Button>
     </div>

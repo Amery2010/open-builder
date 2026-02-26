@@ -13,7 +13,9 @@ export function SandpackListener({ onFileChange }: SandpackListenerProps) {
   useEffect(() => {
     const timer = setTimeout(() => {
       if (code && activeFile) {
-        const normalizedPath = activeFile.startsWith("/") ? activeFile.slice(1) : activeFile;
+        const normalizedPath = activeFile.startsWith("/")
+          ? activeFile.slice(1)
+          : activeFile;
         onFileChange(normalizedPath, code);
       }
     }, 500);

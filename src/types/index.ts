@@ -1,5 +1,6 @@
 export type {
   ProjectFiles,
+  ContentPart,
   Message,
   ToolCall,
   ToolDefinition,
@@ -20,6 +21,12 @@ export interface TextBlock {
   id: string;
 }
 
+export interface ImageBlock {
+  type: "image";
+  url: string;
+  id: string;
+}
+
 export interface ToolBlock {
   type: "tool";
   toolName: string;
@@ -30,7 +37,7 @@ export interface ToolBlock {
   id: string;
 }
 
-export type Block = TextBlock | ToolBlock;
+export type Block = TextBlock | ImageBlock | ToolBlock;
 
 export interface MergedMessage {
   role: "user" | "assistant";

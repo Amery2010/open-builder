@@ -1,24 +1,17 @@
-import { useState } from "react";
+import { useState, useCallback } from "react";
 import { loadSettings, saveSettings, isSettingsValid } from "../lib/settings";
-import { VITE_REACT_TYPESCRIPT_TEMPLATE } from "../lib/template";
 import type { Message, ProjectFiles, AISettings } from "../types";
 
-function initFiles(): ProjectFiles {
-  return Object.fromEntries(
-    Object.entries(VITE_REACT_TYPESCRIPT_TEMPLATE.files).map(([path, file]) => [
-      path.startsWith("/") ? path.slice(1) : path,
-      file.code,
-    ]),
-  );
-}
-
 export function useAppState() {
-  const [files, setFiles] = useState<ProjectFiles>(initFiles);
+  const [files, setFiles] = useState<ProjectFiles>({});
   const [currentFile, setCurrentFile] = useState("src/App.tsx");
   const [messages, setMessages] = useState<Message[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
   const [settings, setSettings] = useState<AISettings>(loadSettings);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [template, setTemplate] = useState<string>("vite-react-ts");
+  const [sandpackKey, setSandpackKey] = useState(0);
+  const [isProjectInitialized, setIsProjectInitialized] = useState(false);
 
   const hasValidSettings = isSettingsValid(settings);
 
@@ -26,6 +19,10 @@ export function useAppState() {
     setSettings(next);
     saveSettings(next);
   };
+
+  const restartSandpack = useCallback(() => {
+    setSandpackKey((k) => k + 1);
+  }, []);
 
   return {
     files,
@@ -41,5 +38,11 @@ export function useAppState() {
     isSettingsOpen,
     setIsSettingsOpen,
     handleSaveSettings,
+    template,
+    setTemplate,
+    sandpackKey,
+    restartSandpack,
+    isProjectInitialized,
+    setIsProjectInitialized,
   };
 }

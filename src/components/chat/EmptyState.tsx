@@ -13,7 +13,7 @@ interface EmptyStateProps {
 
 export function EmptyState({ onSelectSuggestion }: EmptyStateProps) {
   return (
-    <div className="flex flex-col items-center justify-center py-12 text-center">
+    <div className="flex-1 flex flex-col items-center justify-center py-12 text-center">
       <div className="w-16 h-16 rounded-2xl bg-linear-to-br from-purple-500 to-pink-500 flex items-center justify-center mb-4">
         <Sparkles size={32} className="text-white" />
       </div>
