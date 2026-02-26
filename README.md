@@ -10,7 +10,7 @@
 [![Vite](https://img.shields.io/badge/Vite-7.x-646CFF?logo=vite&logoColor=white)](https://vitejs.dev)
 [![Tailwind CSS](https://img.shields.io/badge/Tailwind_CSS-4.x-06B6D4?logo=tailwindcss&logoColor=white)](https://tailwindcss.com)
 
-[快速开始](#快速开始) · [功能特性](#功能特性) · [技术架构](#技术架构) · [贡献指南](CONTRIBUTING.md)
+[部署指南](#部署) · [快速开始](#快速开始) · [功能特性](#功能特性) · [技术架构](#技术架构) · [贡献指南](CONTRIBUTING.md)
 
 </div>
 
@@ -49,7 +49,7 @@ Open Builder 是一个完全运行在浏览器中的 AI 驱动 Web 应用生成�
 - **多会话管理** — 支持创建、切换、删除多个独立对话，历史记录持久化保存
 - **图片输入** — 支持上传截图或设计稿，AI 根据图片生成对应界面
 - **流式输出** — 实时展示 AI 思考过程和代码生成进度
-- **扩展思考** — 支持 Extended Thinking / Reasoning 模式（DeepSeek-R1、Claude 3.7 等）
+- **扩展思考** — 支持 Extended Thinking / Reasoning 模式（DeepSeek-R1、Claude 4.6 等）
 - **一键下载** — 将生成的项目打包为 ZIP 文件下载到本地
 - **移动端适配** — 响应式布局，移动端可内嵌预览生成的应用
 
@@ -64,7 +64,7 @@ Open Builder 是一个完全运行在浏览器中的 AI 驱动 Web 应用生成�
 
 ### 前置要求
 
-- Node.js 18+ 或 [Bun](https://bun.sh)
+- Node.js 20+ 或 [Bun](https://bun.sh)
 - 任意 OpenAI 兼容 API 的 Key
 
 ### 安装与运行
@@ -75,10 +75,10 @@ git clone https://github.com/Amery2010/open-builder.git
 cd open-builder
 
 # 安装依赖
-npm install
+pnpm install
 
 # 启动开发服务器
-npm run dev
+pnpm dev
 ```
 
 打开浏览器访问 `http://localhost:5173`，点击右上角设置图标配置你的 API Key 即可开始使用。
@@ -181,9 +181,9 @@ Open Builder 兼容所有 OpenAI Chat Completions 格式的 API：
 | -------- | ------------------------------------ | -------------------------------------------------------------------- |
 | OpenAI   | `gpt-5.3-codex`、`gpt-5.2`           | `https://api.openai.com/v1/chat/completions`                         |
 | DeepSeek | `deepseek-chat`、`deepseek-reasoner` | `https://api.deepseek.com/v1/chat/completions`                       |
-| 通义千问 | `qwen-max`、`qwen-coder-plus`        | `https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions` |
-| 月之暗面 | `moonshot-v1-128k`                   | `https://api.moonshot.cn/v1/chat/completions`                        |
-| 智谱 AI  | `glm-4`                              | `https://open.bigmodel.cn/api/paas/v4/chat/completions`              |
+| 通义千问 | `qwen-3.5`、`qwen3-coder-plus`       | `https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions` |
+| 月之暗面 | `kimi-k2.5`                          | `https://api.moonshot.cn/v1/chat/completions`                        |
+| 智谱 AI  | `glm-5`                              | `https://open.bigmodel.cn/api/paas/v4/chat/completions`              |
 
 > 推荐使用支持 Function Calling 的强力模型以获得最佳效果。
 
@@ -194,7 +194,7 @@ Open Builder 兼容所有 OpenAI Chat Completions 格式的 API：
 ### 构建生产版本
 
 ```bash
-npm run build
+pnpm build
 # 产物输出到 dist/ 目录
 ```
 
@@ -209,9 +209,30 @@ git push origin v1.0.0
 
 详见 [.github/workflows/deploy.yml](.github/workflows/deploy.yml)。
 
-### 部署到 Vercel / Netlify
+### 部署到 Vercel
 
-直接导入仓库，构建命令 `npm run build`，输出目录 `dist`，无需任何额外配置。
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FAmery2010%2Fopen-builder)
+
+或手动部署：导入 GitHub 仓库，框架预设选择 `Vite`，构建命令 `pnpm run build`，输出目录 `dist`，无需额外配置。
+
+### 部署到 Cloudflare Worker
+
+[![Deploy to Cloudflare Worker](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/Amery2010/open-builder)
+
+或手动部署：
+
+1. 登录 [Cloudflare Dashboard](https://dash.cloudflare.com/) → Workers & Pages → Create → Worker → Connect to Git
+2. 选择 `open-builder` 仓库，构建配置如下：
+
+| 配置项       | 值               |
+| ------------ | ---------------- |
+| 构建命令     | `pnpm run build` |
+| 输出目录     | `dist`           |
+| Node.js 版本 | `20`             |
+
+### 部署到 Netlify
+
+直接导入仓库，构建命令 `pnpm run build`，输出目录 `dist`，无需任何额外配置。
 
 ---
 
