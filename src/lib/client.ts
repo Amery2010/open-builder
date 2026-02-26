@@ -3,6 +3,7 @@ import {
   GeneratorOptions,
   GeneratorEvents,
   ProjectFiles,
+  ToolDefinition,
 } from "./generator";
 
 /**
@@ -17,10 +18,6 @@ export interface OpenAIClientConfig {
   model?: string;
   /** 是否启用流式输出 */
   stream?: boolean;
-  /** 温度参数 */
-  temperature?: number;
-  /** 最大 token 数 */
-  maxTokens?: number;
 }
 
 /**
@@ -30,15 +27,17 @@ export function createOpenAIGenerator(
   config: OpenAIClientConfig,
   events?: GeneratorEvents,
   initialFiles?: ProjectFiles,
+  customTools?: ToolDefinition[],
+  customToolHandler?: (name: string, args: unknown) => string | Promise<string>,
 ): WebAppGenerator {
   const options: GeneratorOptions = {
     apiUrl: config.apiUrl || "https://api.openai.com/v1/chat/completions",
     apiKey: config.apiKey,
-    model: config.model || "gpt-4o",
+    model: config.model || "gpt-5.3-codex",
     stream: config.stream ?? true,
-    temperature: config.temperature ?? 0,
-    maxTokens: config.maxTokens ?? 16384,
     initialFiles,
+    customTools,
+    customToolHandler,
   };
 
   return new WebAppGenerator(options, events);

@@ -1,3 +1,5 @@
+import type { Message as _Message, ProjectFiles as _ProjectFiles } from "../lib/generator";
+
 export type {
   ProjectFiles,
   ContentPart,
@@ -10,7 +12,7 @@ export type {
   GeneratorEvents,
 } from "../lib/generator";
 
-export type { AISettings } from "../lib/settings";
+export type { AISettings, WebSearchSettings } from "../store/settings";
 export type { OpenAIClientConfig } from "../lib/client";
 
 // ─── Chat UI types ────────────────────────────────────────────────────────────
@@ -27,6 +29,12 @@ export interface ImageBlock {
   id: string;
 }
 
+export interface ThinkingBlock {
+  type: "thinking";
+  content: string;
+  id: string;
+}
+
 export interface ToolBlock {
   type: "tool";
   toolName: string;
@@ -37,10 +45,23 @@ export interface ToolBlock {
   id: string;
 }
 
-export type Block = TextBlock | ImageBlock | ToolBlock;
+export type Block = TextBlock | ImageBlock | ThinkingBlock | ToolBlock;
 
 export interface MergedMessage {
   role: "user" | "assistant";
   blocks: Block[];
   id: string;
+}
+
+// ─── Conversation types ──────────────────────────────────────────────────────
+
+export interface Conversation {
+  id: string;
+  title: string;
+  messages: _Message[];
+  files: _ProjectFiles;
+  template: string;
+  isProjectInitialized: boolean;
+  createdAt: number;
+  updatedAt: number;
 }

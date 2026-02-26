@@ -1,4 +1,11 @@
-import { Eye, Code2, Monitor, Tablet, Smartphone, Download } from "lucide-react";
+import {
+  Eye,
+  Code2,
+  Monitor,
+  Tablet,
+  Smartphone,
+  Download,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import JSZip from "jszip";
 import { saveAs } from "file-saver";
@@ -87,14 +94,16 @@ export function ViewToolbar({
           </div>
         )}
 
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          onClick={() => downloadAsZip(files)}
-          title="下载项目"
-        >
-          <Download size={16} />
-        </Button>
+        {viewMode === "code" && (
+          <Button
+            variant="outline"
+            size="icon-sm"
+            onClick={() => downloadAsZip(files)}
+            title="下载项目"
+          >
+            <Download size={16} />
+          </Button>
+        )}
       </div>
     </div>
   );

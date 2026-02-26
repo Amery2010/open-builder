@@ -2,10 +2,14 @@ import { useRef, useCallback } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { WebAppGenerator } from "../lib/generator";
 import { createOpenAIGenerator } from "../lib/client";
-import type { Message, ContentPart, ProjectFiles, AISettings } from "../types";
+import { useConversationStore } from "../store/conversation";
+import { useSettingsStore } from "../store/settings";
+import { TAVILY_TOOLS, createTavilyToolHandler } from "../lib/tavily";
+import type { Message, ContentPart, ProjectFiles, AISettings, WebSearchSettings } from "../types";
 
 interface UseGeneratorOptions {
   settings: AISettings;
+  webSearchSettings: WebSearchSettings;
   files: ProjectFiles;
   setMessages: Dispatch<SetStateAction<Message[]>>;
   setFiles: Dispatch<SetStateAction<ProjectFiles>>;
@@ -17,6 +21,7 @@ interface UseGeneratorOptions {
 
 export function useGenerator({
   settings,
+  webSearchSettings,
   files,
   setMessages,
   setFiles,
@@ -26,9 +31,17 @@ export function useGenerator({
   setIsProjectInitialized,
 }: UseGeneratorOptions) {
   const generatorRef = useRef<WebAppGenerator | null>(null);
+  const activeId = useConversationStore((s) => s.activeId);
+  const prevActiveIdRef = useRef(activeId);
 
   const getGenerator = useCallback(() => {
     if (!settings.apiKey || !settings.apiUrl || !settings.model) return null;
+
+    // Invalidate on conversation switch
+    if (prevActiveIdRef.current !== activeId) {
+      generatorRef.current = null;
+      prevActiveIdRef.current = activeId;
+    }
 
     // Invalidate if settings changed
     if (generatorRef.current) {
@@ -36,13 +49,16 @@ export function useGenerator({
       if (
         g._apiKey !== settings.apiKey ||
         g._apiUrl !== settings.apiUrl ||
-        g._model !== settings.model
+        g._model !== settings.model ||
+        g._tavilyKey !== webSearchSettings.tavilyApiKey ||
+        g._tavilyUrl !== webSearchSettings.tavilyApiUrl
       ) {
         generatorRef.current = null;
       }
     }
 
     if (!generatorRef.current) {
+      const webConfigured = useSettingsStore.getState().isWebSearchConfigured();
       generatorRef.current = createOpenAIGenerator(
         {
           apiKey: settings.apiKey,
@@ -61,6 +77,18 @@ export function useGenerator({
                 ];
               }
               return [...prev, { role: "assistant", content: delta }];
+            });
+          },
+          onThinking: (delta) => {
+            setMessages((prev) => {
+              const last = prev[prev.length - 1];
+              if (last?.role === "assistant") {
+                return [
+                  ...prev.slice(0, -1),
+                  { ...last, thinking: (last.thinking || "") + delta },
+                ];
+              }
+              return [...prev, { role: "assistant", content: null, thinking: delta }];
             });
           },
           onToolCall: (name, id) => {
@@ -123,8 +151,8 @@ export function useGenerator({
             setFiles(newFiles);
             restartSandpack();
           },
-          onComplete: (result) => {
-            setMessages(result.messages);
+          onComplete: () => {
+            // Messages already kept in sync via onText/onToolCall/onToolResult.
           },
           onError: (error) => {
             console.error("Generation error:", error);
@@ -135,11 +163,13 @@ export function useGenerator({
           },
         },
         files,
+        webConfigured ? TAVILY_TOOLS : undefined,
+        webConfigured ? createTavilyToolHandler(webSearchSettings) : undefined,
       );
     }
 
     return generatorRef.current;
-  }, [settings, files, setMessages, setFiles, setTemplate, setIsProjectInitialized, restartSandpack]);
+  }, [settings, webSearchSettings, files, activeId, setMessages, setFiles, setTemplate, setIsProjectInitialized, restartSandpack]);
 
   const generate = useCallback(
     async (prompt: string, images?: string[]) => {
@@ -193,5 +223,31 @@ export function useGenerator({
     [setFiles],
   );
 
-  return { generate, stop, updateFiles };
+  const retry = useCallback(async () => {
+    setIsGenerating(true);
+    // Remove the error assistant message from UI
+    setMessages((prev) => {
+      const last = prev[prev.length - 1];
+      if (last?.role === "assistant" && typeof last.content === "string" && last.content.startsWith("⚠️")) {
+        return prev.slice(0, -1);
+      }
+      return prev;
+    });
+    try {
+      const generator = getGenerator();
+      if (generator) await generator.retry();
+    } catch (err: any) {
+      console.error("Error retrying:", err);
+      if (err?.name !== "AbortError") {
+        setMessages((prev) => [
+          ...prev,
+          { role: "assistant", content: `⚠️ ${err?.message || "Unknown error"}` },
+        ]);
+      }
+    } finally {
+      setIsGenerating(false);
+    }
+  }, [getGenerator, setIsGenerating, setMessages]);
+
+  return { generate, stop, retry, updateFiles };
 }

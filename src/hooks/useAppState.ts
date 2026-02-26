@@ -1,24 +1,47 @@
 import { useState, useCallback } from "react";
-import { loadSettings, saveSettings, isSettingsValid } from "../lib/settings";
-import type { Message, ProjectFiles, AISettings } from "../types";
+import { useSettingsStore } from "../store/settings";
+import { useConversationStore } from "../store/conversation";
+import type { Message, ProjectFiles } from "../types";
+
+// Stable default references to avoid infinite re-render with useSyncExternalStore
+const EMPTY_FILES: ProjectFiles = {};
+const EMPTY_MESSAGES: Message[] = [];
+const DEFAULT_TEMPLATE = "vite-react-ts";
 
 export function useAppState() {
-  const [files, setFiles] = useState<ProjectFiles>({});
+  // ── Conversation state from zustand ──
+  const activeConv = useConversationStore((s) =>
+    s.activeId ? (s.conversations[s.activeId] ?? null) : null,
+  );
+  const files = activeConv?.files ?? EMPTY_FILES;
+  const messages = activeConv?.messages ?? EMPTY_MESSAGES;
+  const template = activeConv?.template ?? DEFAULT_TEMPLATE;
+  const isProjectInitialized = activeConv?.isProjectInitialized ?? false;
+
+  const setMessages = useConversationStore((s) => s.setMessages);
+  const setFiles = useConversationStore((s) => s.setFiles);
+  const setTemplate = useConversationStore((s) => s.setTemplate);
+  const setIsProjectInitialized = useConversationStore(
+    (s) => s.setIsProjectInitialized,
+  );
+
+  // ── Settings state from zustand ──
+  const settings = useSettingsStore((s) => s.ai);
+  const webSearchSettings = useSettingsStore((s) => s.webSearch);
+  const setAI = useSettingsStore((s) => s.setAI);
+  const setWebSearch = useSettingsStore((s) => s.setWebSearch);
+  const isAIValid = useSettingsStore((s) => s.isAIValid);
+
+  const hasValidSettings = isAIValid();
+
+  const handleSaveSettings = setAI;
+  const handleSaveWebSearchSettings = setWebSearch;
+
+  // ── Ephemeral UI state ──
   const [currentFile, setCurrentFile] = useState("src/App.tsx");
-  const [messages, setMessages] = useState<Message[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
-  const [settings, setSettings] = useState<AISettings>(loadSettings);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [template, setTemplate] = useState<string>("vite-react-ts");
   const [sandpackKey, setSandpackKey] = useState(0);
-  const [isProjectInitialized, setIsProjectInitialized] = useState(false);
-
-  const hasValidSettings = isSettingsValid(settings);
-
-  const handleSaveSettings = (next: AISettings) => {
-    setSettings(next);
-    saveSettings(next);
-  };
 
   const restartSandpack = useCallback(() => {
     setSandpackKey((k) => k + 1);
@@ -38,6 +61,8 @@ export function useAppState() {
     isSettingsOpen,
     setIsSettingsOpen,
     handleSaveSettings,
+    webSearchSettings,
+    handleSaveWebSearchSettings,
     template,
     setTemplate,
     sandpackKey,

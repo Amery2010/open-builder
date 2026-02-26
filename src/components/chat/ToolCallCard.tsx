@@ -1,5 +1,15 @@
 import { useState } from "react";
-import { ChevronRight, FolderOpen, Eye, Files, FilePen, Wrench, Trash2 } from "lucide-react";
+import {
+  ChevronRight,
+  FolderOpen,
+  Eye,
+  Files,
+  FilePen,
+  Wrench,
+  Trash2,
+  Search,
+  Globe,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { FileTreeView } from "./FileTreeView";
@@ -12,14 +22,50 @@ const TOOL_ICONS: Record<string, React.ReactNode> = {
   write_file: <FilePen size={14} className="text-green-500" />,
   patch_file: <Wrench size={14} className="text-orange-400" />,
   delete_file: <Trash2 size={14} className="text-red-400" />,
+  web_search: <Search size={14} className="text-purple-500" />,
+  web_reader: <Globe size={14} className="text-teal-500" />,
 };
+
+function countSearchResults(result: string): {
+  ok: boolean;
+  count: number;
+  error?: string;
+} {
+  try {
+    const d = JSON.parse(result);
+    return { ok: d.ok, count: d.results?.length ?? 0, error: d.error };
+  } catch {
+    return { ok: false, count: 0, error: result };
+  }
+}
+
+function countWebReaderUrls(result: string): { url: string; ok: boolean }[] {
+  try {
+    const d = JSON.parse(result);
+    return (d.pages ?? []).map((p: any) => ({ url: p.url, ok: p.ok }));
+  } catch {
+    return [];
+  }
+}
 
 type ToolCallCardProps = Omit<ToolBlock, "type" | "id">;
 
-export function ToolCallCard({ toolName, title, path, paths, result }: ToolCallCardProps) {
+export function ToolCallCard({
+  toolName,
+  title,
+  path,
+  paths,
+  result,
+}: ToolCallCardProps) {
   const [expanded, setExpanded] = useState(false);
   const isSuccess = result && (result.startsWith("OK") || result.includes("✓"));
-  const isError = result && (result.startsWith("Error") || result.includes("✗"));
+  const isError =
+    result && (result.startsWith("Error") || result.includes("✗"));
+
+  const searchResultCount =
+    toolName === "web_search" && result ? countSearchResults(result).count : 0;
+  const readerUrls =
+    toolName === "web_reader" && result ? countWebReaderUrls(result) : [];
 
   return (
     <div className="border border-border/60 rounded-lg overflow-hidden bg-muted/30">
@@ -28,15 +74,30 @@ export function ToolCallCard({ toolName, title, path, paths, result }: ToolCallC
         onClick={() => setExpanded(!expanded)}
       >
         <span className="flex items-center shrink-0">
-          {TOOL_ICONS[toolName] ?? <Wrench size={14} className="text-muted-foreground" />}
+          {TOOL_ICONS[toolName] ?? (
+            <Wrench size={14} className="text-muted-foreground" />
+          )}
         </span>
-        <span className="text-xs font-medium flex-1 text-foreground">{title}</span>
-        {paths && paths.length > 0 ? (
+        <span className="text-xs font-medium flex-1 text-foreground">
+          {title}
+        </span>
+        {toolName === "web_search" && result ? (
+          <Badge variant="secondary" className="text-xs font-mono h-5">
+            {searchResultCount} 条结果
+          </Badge>
+        ) : toolName === "web_reader" && result ? (
+          <Badge variant="secondary" className="text-xs font-mono h-5">
+            {readerUrls.length} 个网页
+          </Badge>
+        ) : paths && paths.length > 0 ? (
           <Badge variant="secondary" className="text-xs font-mono h-5">
             {paths.length} 个文件
           </Badge>
         ) : path ? (
-          <Badge variant="secondary" className="text-xs font-mono h-5 max-w-35 truncate">
+          <Badge
+            variant="secondary"
+            className="text-xs font-mono h-5 max-w-35 truncate"
+          >
             {path}
           </Badge>
         ) : null}
@@ -54,7 +115,10 @@ export function ToolCallCard({ toolName, title, path, paths, result }: ToolCallC
         )}
         <ChevronRight
           size={13}
-          className={cn("text-muted-foreground transition-transform shrink-0", expanded && "rotate-90")}
+          className={cn(
+            "text-muted-foreground transition-transform shrink-0",
+            expanded && "rotate-90",
+          )}
         />
       </button>
 
@@ -65,7 +129,23 @@ export function ToolCallCard({ toolName, title, path, paths, result }: ToolCallC
           ) : toolName === "read_files" ? (
             <FileTreeView content={(paths || []).join("\n")} />
           ) : toolName === "read_file" ? (
-            <span className="text-xs text-muted-foreground italic">文件内容已隐藏</span>
+            <span className="text-xs text-muted-foreground italic">
+              文件内容已隐藏
+            </span>
+          ) : toolName === "web_search" ? (
+            <p className="text-xs text-muted-foreground">
+              {result.startsWith("Error")
+                ? `失败: ${result}`
+                : `已找到 ${searchResultCount} 条搜索结果`}
+            </p>
+          ) : toolName === "web_reader" ? (
+            <div className="space-y-0.5">
+              {readerUrls.map(({ url, ok }) => (
+                <p key={url} className="text-xs text-muted-foreground truncate">
+                  {ok ? "✓" : "✗"} {url}
+                </p>
+              ))}
+            </div>
           ) : (
             <pre className="text-xs font-mono whitespace-pre-wrap text-muted-foreground leading-relaxed">
               {result}

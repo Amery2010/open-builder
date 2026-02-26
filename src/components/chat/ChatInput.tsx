@@ -1,6 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import { SendHorizonal, Square, Loader2, ImagePlus, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
 
 interface ChatInputProps {
   input: string;
@@ -83,7 +84,7 @@ export function ChatInput({
   const hasContent = input.trim() || images.length > 0;
 
   return (
-    <div className="p-4 border-t bg-background shrink-0">
+    <div className="p-2 bg-background shrink-0">
       <form onSubmit={onSubmit}>
         {images.length > 0 && (
           <div className="flex gap-2 mb-2 flex-wrap">
@@ -105,7 +106,7 @@ export function ChatInput({
           </div>
         )}
         <div className="relative">
-          <textarea
+          <Textarea
             ref={textareaRef}
             value={input}
             onChange={(e) => {
@@ -117,7 +118,7 @@ export function ChatInput({
             placeholder="描述你想要的应用..."
             rows={1}
             disabled={isGenerating}
-            className="flex w-full rounded-md border border-input bg-background px-3 py-2.5 pr-20 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 resize-none overflow-y-auto"
+            className="pr-20 md:text-base resize-none overflow-y-auto min-h-0"
             style={{ maxHeight: 200 }}
           />
           <div className="absolute right-1.5 bottom-1.5 flex items-center gap-1">
@@ -135,7 +136,7 @@ export function ChatInput({
                   type="button"
                   size="icon"
                   variant="ghost"
-                  className="h-7 w-7 text-muted-foreground hover:text-foreground"
+                  className="w-7 h-7 text-muted-foreground hover:text-foreground"
                   title="上传图片"
                   onClick={() => fileInputRef.current?.click()}
                 >
@@ -149,7 +150,7 @@ export function ChatInput({
                 size="icon"
                 onClick={onStop}
                 variant={isHoveringStop ? "destructive" : "secondary"}
-                className="h-7 w-7 transition-all duration-200 rounded-full"
+                className="w-7 h-7 transition-all duration-200 rounded-full"
                 title="停止生成"
                 onMouseEnter={() => setIsHoveringStop(true)}
                 onMouseLeave={() => setIsHoveringStop(false)}
@@ -170,7 +171,7 @@ export function ChatInput({
                 type="submit"
                 size="icon"
                 disabled={!hasContent}
-                className="h-7 w-7"
+                className="w-7 h-7"
                 title="发送消息"
               >
                 <SendHorizonal size={16} />

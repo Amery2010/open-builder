@@ -22,6 +22,8 @@ export interface Message {
   content: string | ContentPart[] | null;
   tool_calls?: ToolCall[];
   tool_call_id?: string;
+  /** 模型思考过程（extended thinking） */
+  thinking?: string;
 }
 
 /** 工具调用 */
@@ -62,7 +64,7 @@ export interface GeneratorOptions {
   apiUrl: string;
   /** API 密钥 */
   apiKey: string;
-  /** 模型 ID, 如 "gpt-4o"、"deepseek-chat"、"claude-3-5-sonnet" */
+  /** 模型 ID, 如 "gpt-5.3-codex"、"deepseek-chat"、"claude-3-5-sonnet" */
   model: string;
   /** 自定义系统提示词（提供了合理默认值） */
   systemPrompt?: string;
@@ -72,22 +74,24 @@ export interface GeneratorOptions {
   maxIterations?: number;
   /** 是否启用流式输出（默认 true） */
   stream?: boolean;
-  /** 温度参数（默认 0） */
-  temperature?: number;
-  /** AI 单次回复最大 token 数（默认 16384） */
-  maxTokens?: number;
   /** 附加请求头 */
   headers?: Record<string, string>;
   /** 额外的自定义工具定义 */
   customTools?: ToolDefinition[];
   /** 自定义工具的执行回调（内置工具之外的分发到这里） */
   customToolHandler?: (name: string, args: unknown) => string | Promise<string>;
+  /** 是否启用 thinking（默认 true） */
+  thinking?: boolean;
+  /** thinking 的 budget_tokens（默认 10000） */
+  thinkingBudget?: number;
 }
 
 /** 事件回调 */
 export interface GeneratorEvents {
   /** AI 输出文本片段（流式时逐 chunk 触发） */
   onText?: (delta: string) => void;
+  /** AI 思考过程片段（流式时逐 chunk 触发） */
+  onThinking?: (delta: string) => void;
   /** AI 开始调用某个工具 */
   onToolCall?: (name: string, toolCallId: string) => void;
   /** 工具执行完毕 */
@@ -130,7 +134,7 @@ const BUILTIN_TOOLS: ToolDefinition[] = [
         "vanilla (vanilla JS with bundler), " +
         "vanilla-ts (vanilla TypeScript), " +
         "react (React with JavaScript), " +
-        "react-ts (React with TypeScript), " +
+        "react-ts (React with TypeScript, DEFAULT), " +
         "vue (Vue 3 with JavaScript), " +
         "vue-ts (Vue 3 with TypeScript), " +
         "svelte (Svelte with JavaScript), " +
@@ -138,12 +142,11 @@ const BUILTIN_TOOLS: ToolDefinition[] = [
         "solid (SolidJS with TypeScript), " +
         "vite (Vite vanilla), " +
         "vite-react (Vite + React JS), " +
-        "vite-react-ts (Vite + React TypeScript, DEFAULT), " +
+        "vite-react-ts (Vite + React TypeScript), " +
         "vite-vue (Vite + Vue JS), " +
         "vite-vue-ts (Vite + Vue TypeScript), " +
         "vite-svelte (Vite + Svelte JS), " +
         "vite-svelte-ts (Vite + Svelte TypeScript), " +
-        "nextjs (Next.js), " +
         "astro (Astro), " +
         "test-ts (TypeScript test runner).",
       parameters: {
@@ -333,11 +336,11 @@ export class WebAppGenerator {
   private readonly systemPrompt: string;
   private readonly maxIterations: number;
   private readonly useStream: boolean;
-  private readonly temperature: number;
-  private readonly maxTokens: number;
   private readonly extraHeaders: Record<string, string>;
   private readonly tools: ToolDefinition[];
   private readonly customToolHandler?: GeneratorOptions["customToolHandler"];
+  private readonly useThinking: boolean;
+  private readonly thinkingBudget: number;
 
   constructor(options: GeneratorOptions, events: GeneratorEvents = {}) {
     this.apiUrl = options.apiUrl;
@@ -346,11 +349,11 @@ export class WebAppGenerator {
     this.systemPrompt = options.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
     this.maxIterations = options.maxIterations ?? 30;
     this.useStream = options.stream ?? true;
-    this.temperature = options.temperature ?? 0;
-    this.maxTokens = options.maxTokens ?? 16384;
     this.extraHeaders = options.headers ?? {};
     this.tools = [...BUILTIN_TOOLS, ...(options.customTools ?? [])];
     this.customToolHandler = options.customToolHandler;
+    this.useThinking = options.thinking ?? true;
+    this.thinkingBudget = options.thinkingBudget ?? 10000;
 
     this.files = { ...(options.initialFiles ?? {}) };
     this.messages = [];
@@ -386,9 +389,20 @@ export class WebAppGenerator {
   }
 
   /**
+   * 重试：不添加新的用户消息，直接重新运行生成循环
+   * 用于错误后重试，此时用户消息已在历史中
+   */
+  async retry(): Promise<GenerateResult> {
+    return this._runGenerateLoop();
+  }
+
+  /**
    * 核心方法：发送用户消息，驱动 AI 通过 Tool Call 循环生成/修改项目文件
    */
-  async generate(userMessage: string, images?: string[]): Promise<GenerateResult> {
+  async generate(
+    userMessage: string,
+    images?: string[],
+  ): Promise<GenerateResult> {
     // Build user message: multi-part if images present
     if (images && images.length > 0) {
       const parts: ContentPart[] = [];
@@ -401,6 +415,10 @@ export class WebAppGenerator {
       this.messages.push({ role: "user", content: userMessage });
     }
 
+    return this._runGenerateLoop();
+  }
+
+  private async _runGenerateLoop(): Promise<GenerateResult> {
     const systemContent = this.buildSystemContent();
     let fullText = "";
     let aborted = false;
@@ -490,9 +508,10 @@ export class WebAppGenerator {
         model: this.model,
         messages,
         tools: this.tools.length > 0 ? this.tools : undefined,
-        temperature: this.temperature,
-        max_tokens: this.maxTokens,
         stream,
+        ...(this.useThinking
+          ? { thinking: { type: "enabled", budget_tokens: this.thinkingBudget } }
+          : {}),
       }),
       signal: this.ctrl.signal,
     };
@@ -502,9 +521,12 @@ export class WebAppGenerator {
     const text = await res.text();
     try {
       const json = JSON.parse(text);
-      const msg = json.error?.message || json.message || json.detail || json.msg;
+      const msg =
+        json.error?.message || json.message || json.detail || json.msg;
       if (msg) return `API error ${res.status}: ${msg}`;
-    } catch { /* not JSON */ }
+    } catch {
+      /* not JSON */
+    }
     return `API error ${res.status}: ${text}`;
   }
 
@@ -521,6 +543,9 @@ export class WebAppGenerator {
     if (choice.content) {
       this.events.onText?.(choice.content);
     }
+    if (choice.thinking) {
+      this.events.onThinking?.(choice.thinking);
+    }
     if (choice.tool_calls) {
       for (const tc of choice.tool_calls) {
         this.events.onToolCall?.(tc.function.name, tc.id);
@@ -531,6 +556,7 @@ export class WebAppGenerator {
       role: "assistant",
       content: choice.content ?? null,
       tool_calls: choice.tool_calls?.length ? choice.tool_calls : undefined,
+      thinking: choice.thinking ?? undefined,
     };
   }
 
@@ -545,6 +571,7 @@ export class WebAppGenerator {
 
     let buffer = "";
     let contentAccum = "";
+    let thinkingAccum = "";
     const toolCallAccum = new Map<
       number,
       { id: string; name: string; arguments: string }
@@ -579,6 +606,13 @@ export class WebAppGenerator {
         if (delta.content) {
           contentAccum += delta.content;
           this.events.onText?.(delta.content);
+        }
+
+        // Handle thinking delta (extended thinking / reasoning)
+        if (delta.reasoning_content || delta.thinking) {
+          const thinkingDelta = delta.reasoning_content || delta.thinking;
+          thinkingAccum += thinkingDelta;
+          this.events.onThinking?.(thinkingDelta);
         }
 
         if (delta.tool_calls) {
@@ -621,6 +655,7 @@ export class WebAppGenerator {
       role: "assistant",
       content: contentAccum || null,
       tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
+      thinking: thinkingAccum || undefined,
     };
   }
 
@@ -706,7 +741,8 @@ export class WebAppGenerator {
     const newFiles: ProjectFiles = {};
     for (const [path, file] of Object.entries(tmpl.files)) {
       const normalizedPath = path.startsWith("/") ? path.slice(1) : path;
-      const code = typeof file === "string" ? file : (file as { code: string }).code;
+      const code =
+        typeof file === "string" ? file : (file as { code: string }).code;
       newFiles[normalizedPath] = code;
       changes.push({ path: normalizedPath, action: "created" });
     }
@@ -715,14 +751,20 @@ export class WebAppGenerator {
     return `OK — initialized project with template "${template}" (${Object.keys(newFiles).length} files)`;
   }
 
-  private toolManageDependencies(packageJson: string, changes: FileChange[]): string {
+  private toolManageDependencies(
+    packageJson: string,
+    changes: FileChange[],
+  ): string {
     try {
       JSON.parse(packageJson);
     } catch {
       return "Error: invalid JSON in package_json";
     }
-    const pkgPath = Object.keys(this.files).find((p) => p.endsWith("package.json")) || "package.json";
-    const action: FileChange["action"] = pkgPath in this.files ? "modified" : "created";
+    const pkgPath =
+      Object.keys(this.files).find((p) => p.endsWith("package.json")) ||
+      "package.json";
+    const action: FileChange["action"] =
+      pkgPath in this.files ? "modified" : "created";
     this.files[pkgPath] = packageJson;
     changes.push({ path: pkgPath, action });
     this.events.onDependenciesChange?.(this.getFiles());

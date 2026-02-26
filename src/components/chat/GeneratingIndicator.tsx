@@ -27,7 +27,7 @@ export function GeneratingIndicator() {
     const interval = setInterval(() => {
       setFade(false);
       setTimeout(() => {
-        setIndex((i) => (i + 1) % VERBS.length);
+        setIndex(Math.floor(Math.random() * VERBS.length));
         setFade(true);
       }, 200);
     }, 2500);

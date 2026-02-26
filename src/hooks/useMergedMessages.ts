@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import type { Message, ContentPart } from "../types";
-import type { MergedMessage, Block, TextBlock, ToolBlock } from "../types";
+import type { MergedMessage, Block, TextBlock, ThinkingBlock, ToolBlock } from "../types";
 
 const TOOL_NAMES: Record<string, string> = {
   init_project: "初始化项目",
@@ -12,6 +12,8 @@ const TOOL_NAMES: Record<string, string> = {
   patch_file: "修改文件",
   delete_file: "删除文件",
   search_in_files: "搜索文件",
+  web_search: "搜索网页",
+  web_reader: "读取网页",
 };
 
 /** Extract plain text from message content (string or multi-part array) */
@@ -77,6 +79,14 @@ function mergeMessages(messages: Message[]): MergedMessage[] {
       ) {
         const cur = messages[j];
         if (cur.role === "assistant") {
+          // Thinking block (before text content)
+          if (cur.thinking) {
+            blocks.push({
+              type: "thinking",
+              content: cur.thinking,
+              id: `thinking-${i}-${bi++}`,
+            } as ThinkingBlock);
+          }
           const text = getTextContent(cur.content);
           if (text) {
             blocks.push({
@@ -104,6 +114,8 @@ function mergeMessages(messages: Message[]): MergedMessage[] {
                 }
               }
               const isReadFiles = tc.function.name === "read_files";
+              const isWebSearch = tc.function.name === "web_search";
+              const isWebReader = tc.function.name === "web_reader";
               const paths: string[] | undefined = isReadFiles
                 ? (args.paths as string[])
                 : undefined;
@@ -112,7 +124,11 @@ function mergeMessages(messages: Message[]): MergedMessage[] {
                 toolName: tc.function.name,
                 title: isReadFiles
                   ? `读取 ${paths?.length ?? 0} 个文件`
-                  : TOOL_NAMES[tc.function.name] || tc.function.name,
+                  : isWebSearch
+                    ? `搜索: ${args.query || ""}`
+                    : isWebReader
+                      ? `读取 ${(args.urls as string[])?.length ?? 0} 个网页`
+                      : TOOL_NAMES[tc.function.name] || tc.function.name,
                 path: args.path || "",
                 paths,
                 result,

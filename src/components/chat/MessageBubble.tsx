@@ -1,3 +1,5 @@
+import { useState, useEffect } from "react";
+import { RotateCcw, ChevronDown, ChevronRight, Brain } from "lucide-react";
 import { MarkdownContent } from "./MarkdownContent";
 import { ToolCallCard } from "./ToolCallCard";
 import { GeneratingIndicator } from "./GeneratingIndicator";
@@ -6,11 +8,15 @@ import type { MergedMessage, TextBlock, ImageBlock } from "../../types";
 interface MessageBubbleProps {
   message: MergedMessage;
   isGenerating?: boolean;
+  isLastAssistant?: boolean;
+  onRetry?: () => void;
 }
 
 export function MessageBubble({
   message,
   isGenerating = false,
+  isLastAssistant = false,
+  onRetry,
 }: MessageBubbleProps) {
   if (message.role === "user") {
     const textBlocks = message.blocks.filter(
@@ -46,13 +52,30 @@ export function MessageBubble({
     );
   }
 
+  // Check if the last text block is an error message
+  const lastTextBlock = [...message.blocks].reverse().find((b) => b.type === "text") as TextBlock | undefined;
+  const isError = lastTextBlock?.content.startsWith("⚠️");
+
   return (
     <div className="flex-1 min-w-0 space-y-2">
       {message.blocks.map((block) => {
+        if (block.type === "thinking") {
+          return <ThinkingBlockCard key={block.id} content={block.content} isStreaming={isGenerating && isLastAssistant} />;
+        }
         if (block.type === "text") {
+          const blockIsError = block.content.startsWith("⚠️");
           return (
             <div key={block.id} className="text-sm text-foreground">
               <MarkdownContent content={block.content} variant="assistant" />
+              {blockIsError && onRetry && (
+                <button
+                  onClick={onRetry}
+                  className="inline-flex items-center gap-1.5 mt-2 px-3 py-1.5 text-xs font-medium text-primary bg-primary/10 hover:bg-primary/20 rounded-lg transition-colors"
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  重试
+                </button>
+              )}
             </div>
           );
         }
@@ -61,7 +84,34 @@ export function MessageBubble({
         }
         return null;
       })}
-      {isGenerating && <GeneratingIndicator />}
+      {isGenerating && isLastAssistant && !isError && <GeneratingIndicator />}
+    </div>
+  );
+}
+
+function ThinkingBlockCard({ content, isStreaming }: { content: string; isStreaming: boolean }) {
+  const [expanded, setExpanded] = useState(isStreaming);
+
+  // Auto-collapse when streaming ends
+  useEffect(() => {
+    if (!isStreaming) setExpanded(false);
+  }, [isStreaming]);
+
+  return (
+    <div className="border border-border/50 rounded-lg overflow-hidden text-xs">
+      <button
+        onClick={() => setExpanded((v) => !v)}
+        className="flex items-center gap-1.5 w-full px-3 py-2 text-muted-foreground hover:bg-muted/50 transition-colors"
+      >
+        <Brain className="w-3.5 h-3.5" />
+        <span className="font-medium">思考过程</span>
+        {expanded ? <ChevronDown className="w-3.5 h-3.5 ml-auto" /> : <ChevronRight className="w-3.5 h-3.5 ml-auto" />}
+      </button>
+      {expanded && (
+        <div className="px-3 pb-2 text-muted-foreground max-h-60 overflow-y-auto">
+          <MarkdownContent content={content} variant="assistant" />
+        </div>
+      )}
     </div>
   );
 }
