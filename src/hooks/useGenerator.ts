@@ -223,6 +223,54 @@ export function useGenerator({
     [setFiles],
   );
 
+  const deleteFile = useCallback(
+    (path: string) => {
+      setFiles((prev) => {
+        const next = { ...prev };
+        // Delete exact match and all children (for folders)
+        const prefix = path + "/";
+        for (const key of Object.keys(next)) {
+          if (key === path || key.startsWith(prefix)) {
+            delete next[key];
+          }
+        }
+        generatorRef.current?.setFiles(next);
+        return next;
+      });
+    },
+    [setFiles],
+  );
+
+  const renameFile = useCallback(
+    (oldPath: string, newPath: string) => {
+      setFiles((prev) => {
+        const next: ProjectFiles = {};
+        const prefix = oldPath + "/";
+        for (const [key, value] of Object.entries(prev)) {
+          if (key === oldPath) {
+            next[newPath] = value;
+          } else if (key.startsWith(prefix)) {
+            next[newPath + key.slice(oldPath.length)] = value;
+          } else {
+            next[key] = value;
+          }
+        }
+        generatorRef.current?.setFiles(next);
+        return next;
+      });
+    },
+    [setFiles],
+  );
+
+  const moveFile = useCallback(
+    (sourcePath: string, targetFolder: string) => {
+      const fileName = sourcePath.split("/").pop()!;
+      const newPath = targetFolder ? `${targetFolder}/${fileName}` : fileName;
+      renameFile(sourcePath, newPath);
+    },
+    [renameFile],
+  );
+
   const retry = useCallback(async () => {
     setIsGenerating(true);
     // Remove the error assistant message from UI
@@ -249,5 +297,5 @@ export function useGenerator({
     }
   }, [getGenerator, setIsGenerating, setMessages]);
 
-  return { generate, stop, retry, updateFiles };
+  return { generate, stop, retry, updateFiles, deleteFile, renameFile, moveFile };
 }

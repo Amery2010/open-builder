@@ -53,7 +53,7 @@ export default function App() {
     setIsProjectInitialized,
   } = useAppState();
 
-  const { generate, stop, retry, updateFiles } = useGenerator({
+  const { generate, stop, retry, updateFiles, deleteFile, renameFile, moveFile } = useGenerator({
     settings,
     webSearchSettings,
     files,
@@ -104,6 +104,9 @@ export default function App() {
             currentFile={currentFile}
             onFileSelect={setCurrentFile}
             onFileChange={updateFiles}
+            onRenameFile={renameFile}
+            onDeleteFile={deleteFile}
+            onMoveFile={moveFile}
             template={template}
             sandpackKey={sandpackKey}
           />

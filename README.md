@@ -153,7 +153,7 @@ open-builder/
 | `write_file`          | 创建或覆写文件                     |
 | `patch_file`          | 精确搜索替换补丁（推荐用于小改动） |
 | `delete_file`         | 删除文件                           |
-| `search_in_files`     | 正则搜索文件内容                   |
+| `search_in_files`     | 全局搜索文件内容                   |
 | `web_search`          | 联网搜索（需配置 Tavily）          |
 | `web_reader`          | 读取网页内容                       |
 

@@ -1,6 +1,12 @@
 import { useMemo } from "react";
 import type { Message, ContentPart } from "../types";
-import type { MergedMessage, Block, TextBlock, ThinkingBlock, ToolBlock } from "../types";
+import type {
+  MergedMessage,
+  Block,
+  TextBlock,
+  ThinkingBlock,
+  ToolBlock,
+} from "../types";
 
 const TOOL_NAMES: Record<string, string> = {
   init_project: "初始化项目",
@@ -11,8 +17,8 @@ const TOOL_NAMES: Record<string, string> = {
   write_file: "写入文件",
   patch_file: "修改文件",
   delete_file: "删除文件",
-  search_in_files: "搜索文件",
-  web_search: "搜索网页",
+  search_in_files: "搜索文件内容",
+  web_search: "搜索网络",
   web_reader: "读取网页",
 };
 

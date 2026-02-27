@@ -21,6 +21,9 @@ interface CodeViewerProps {
   currentFile: string;
   onFileSelect: (path: string) => void;
   onFileChange: (path: string, content: string) => void;
+  onRenameFile: (oldPath: string, newPath: string) => void;
+  onDeleteFile: (path: string) => void;
+  onMoveFile: (sourcePath: string, targetFolder: string) => void;
   template: string;
   sandpackKey: number;
 }
@@ -30,6 +33,9 @@ export function CodeViewer({
   currentFile,
   onFileSelect,
   onFileChange,
+  onRenameFile,
+  onDeleteFile,
+  onMoveFile,
   template,
   sandpackKey,
 }: CodeViewerProps) {
@@ -133,7 +139,7 @@ export function CodeViewer({
                     showConsole ? "row-span-1" : "max-h-0 border-t-0",
                   )}
                 >
-                  <SandpackConsole />
+                  <SandpackConsole showSyntaxError={true} />
                 </div>
               </div>
             </div>
@@ -152,6 +158,9 @@ export function CodeViewer({
                   onFileSelect={onFileSelect}
                   onCreateFile={handleCreateFile}
                   onCreateFolder={handleCreateFolder}
+                  onRenameFile={onRenameFile}
+                  onDeleteFile={onDeleteFile}
+                  onMoveFile={onMoveFile}
                 />
               </div>
               <div className="flex flex-col flex-1 h-full overflow-x-auto min-w-0">
