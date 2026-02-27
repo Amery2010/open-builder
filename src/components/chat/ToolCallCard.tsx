@@ -9,6 +9,7 @@ import {
   Trash2,
   Search,
   Globe,
+  Terminal,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -24,6 +25,7 @@ const TOOL_ICONS: Record<string, React.ReactNode> = {
   delete_file: <Trash2 size={14} className="text-red-400" />,
   web_search: <Search size={14} className="text-purple-500" />,
   web_reader: <Globe size={14} className="text-teal-500" />,
+  get_console_logs: <Terminal size={14} className="text-sky-500" />,
 };
 
 function countSearchResults(result: string): {
@@ -48,6 +50,17 @@ function countWebReaderUrls(result: string): { url: string; ok: boolean }[] {
   }
 }
 
+function parseConsoleIssues(result: string): { level: "error" | "warn"; text: string }[] {
+  if (!result || result === "No console output yet.") return [];
+  return result
+    .split("\n")
+    .filter((line) => line.startsWith("[ERROR]") || line.startsWith("[WARN]"))
+    .map((line) => ({
+      level: line.startsWith("[ERROR]") ? "error" : "warn",
+      text: line.replace(/^\[(ERROR|WARN)\]\s*/, ""),
+    }));
+}
+
 type ToolCallCardProps = Omit<ToolBlock, "type" | "id">;
 
 export function ToolCallCard({
@@ -66,6 +79,10 @@ export function ToolCallCard({
     toolName === "web_search" && result ? countSearchResults(result).count : 0;
   const readerUrls =
     toolName === "web_reader" && result ? countWebReaderUrls(result) : [];
+  const consoleIssues =
+    toolName === "get_console_logs" && result ? parseConsoleIssues(result) : [];
+  const consoleErrorCount = consoleIssues.filter((i) => i.level === "error").length;
+  const consoleWarnCount = consoleIssues.filter((i) => i.level === "warn").length;
 
   return (
     <div className="border border-border/60 rounded-lg overflow-hidden bg-muted/30">
@@ -89,6 +106,16 @@ export function ToolCallCard({
           <Badge variant="secondary" className="text-xs font-mono h-5">
             {readerUrls.length} 个网页
           </Badge>
+        ) : toolName === "get_console_logs" && result ? (
+          consoleErrorCount > 0 ? (
+            <Badge variant="destructive" className="text-xs font-mono h-5">
+              {consoleErrorCount} 个错误{consoleWarnCount > 0 ? ` · ${consoleWarnCount} 个警告` : ""}
+            </Badge>
+          ) : consoleWarnCount > 0 ? (
+            <Badge variant="secondary" className="text-xs font-mono h-5 text-yellow-600">
+              {consoleWarnCount} 个警告
+            </Badge>
+          ) : null
         ) : paths && paths.length > 0 ? (
           <Badge variant="secondary" className="text-xs font-mono h-5">
             {paths.length} 个文件
@@ -105,9 +132,15 @@ export function ToolCallCard({
           <div
             className={cn(
               "w-1.5 h-1.5 rounded-full shrink-0",
-              isSuccess && "bg-green-500",
-              isError && "bg-red-500",
-              !isSuccess && !isError && "bg-gray-400",
+              toolName === "get_console_logs"
+                ? consoleErrorCount > 0
+                  ? "bg-red-500"
+                  : consoleWarnCount > 0
+                    ? "bg-yellow-400"
+                    : "bg-green-500"
+                : isSuccess && "bg-green-500",
+              toolName !== "get_console_logs" && isError && "bg-red-500",
+              toolName !== "get_console_logs" && !isSuccess && !isError && "bg-gray-400",
             )}
           />
         ) : (
@@ -132,6 +165,24 @@ export function ToolCallCard({
             <span className="text-xs text-muted-foreground italic">
               文件内容已隐藏
             </span>
+          ) : toolName === "get_console_logs" ? (
+            consoleIssues.length === 0 ? (
+              <p className="text-xs text-green-600">无错误或警告</p>
+            ) : (
+              <div className="space-y-1">
+                {consoleIssues.map((issue, i) => (
+                  <p
+                    key={i}
+                    className={cn(
+                      "text-xs font-mono whitespace-pre-wrap leading-relaxed",
+                      issue.level === "error" ? "text-red-500" : "text-yellow-600",
+                    )}
+                  >
+                    {issue.level === "error" ? "✗" : "⚠"} {issue.text}
+                  </p>
+                ))}
+              </div>
+            )
           ) : toolName === "web_search" ? (
             <p className="text-xs text-muted-foreground">
               {result.startsWith("Error")

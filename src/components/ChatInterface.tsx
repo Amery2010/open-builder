@@ -16,7 +16,6 @@ interface ChatInterfaceProps {
   hasValidSettings: boolean;
   onGenerate: (prompt: string, images?: string[]) => Promise<void>;
   onStop: () => void;
-  onRetry: () => Promise<void>;
   onOpenSettings: () => void;
   files: ProjectFiles;
   template: string;
@@ -30,7 +29,6 @@ export function ChatInterface({
   hasValidSettings,
   onGenerate,
   onStop,
-  onRetry,
   onOpenSettings,
   files,
   template,
@@ -104,7 +102,6 @@ export function ChatInterface({
                   message={msg}
                   isGenerating={isGenerating}
                   isLastAssistant={isLastAssistant}
-                  onRetry={isLastAssistant && !isGenerating ? onRetry : undefined}
                 />
               );
             })}

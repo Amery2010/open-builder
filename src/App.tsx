@@ -53,7 +53,7 @@ export default function App() {
     setIsProjectInitialized,
   } = useAppState();
 
-  const { generate, stop, retry, updateFiles, deleteFile, renameFile, moveFile } = useGenerator({
+  const { generate, stop, updateFiles, deleteFile, renameFile, moveFile } = useGenerator({
     settings,
     webSearchSettings,
     files,
@@ -88,7 +88,6 @@ export default function App() {
           hasValidSettings={hasValidSettings}
           onGenerate={generate}
           onStop={stop}
-          onRetry={retry}
           onOpenSettings={() => setIsSettingsOpen(true)}
           files={files}
           template={template}

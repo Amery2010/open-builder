@@ -119,7 +119,8 @@ Guidelines:
 4. Batch multiple file creations into a single response when possible (parallel tool calls).
 5. For small edits, prefer patch_file over rewriting entire files with write_file.
 6. Always read files before modifying them. Use read_files (plural) when reading 2 or more files at once — never call read_file multiple times in a row.
-7. Briefly explain your plan before starting and summarize when finished.`;
+7. Briefly explain your plan before starting and summarize when finished.
+8. After completing all file changes, call get_console_logs to check for runtime errors. If errors exist, fix them before finishing.`;
 
 /** 内置工具定义 */
 const BUILTIN_TOOLS: ToolDefinition[] = [
@@ -316,6 +317,17 @@ const BUILTIN_TOOLS: ToolDefinition[] = [
         },
         required: ["path"],
       },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_console_logs",
+      description:
+        "Get the browser console output from the running Sandpack preview. " +
+        "Use this after finishing code changes to check for runtime errors, warnings, or syntax errors. " +
+        "If errors are found, fix them immediately.",
+      parameters: { type: "object", properties: {} },
     },
   },
 ];

@@ -4,8 +4,14 @@ import { WebAppGenerator } from "../lib/generator";
 import { createOpenAIGenerator } from "../lib/client";
 import { useConversationStore } from "../store/conversation";
 import { useSettingsStore } from "../store/settings";
+import { useSandpackStore } from "../store/sandpack";
 import { TAVILY_TOOLS, createTavilyToolHandler } from "../lib/tavily";
 import type { Message, ContentPart, ProjectFiles, AISettings, WebSearchSettings } from "../types";
+
+const isErrorMessage = (m: Message) =>
+  m.role === "assistant" && typeof m.content === "string" && m.content.startsWith("⚠️");
+
+const removeErrorMessages = (prev: Message[]) => prev.filter((m) => !isErrorMessage(m));
 
 interface UseGeneratorOptions {
   settings: AISettings;
@@ -59,6 +65,25 @@ export function useGenerator({
 
     if (!generatorRef.current) {
       const webConfigured = useSettingsStore.getState().isWebSearchConfigured();
+      const tavilyHandler = webConfigured ? createTavilyToolHandler(webSearchSettings) : undefined;
+
+      const combinedToolHandler = async (name: string, args: unknown): Promise<string> => {
+        if (name === "get_console_logs") {
+          const { consoleLogs } = useSandpackStore.getState();
+          if (consoleLogs.length === 0) return "No console output yet.";
+          return consoleLogs
+            .map((log) => {
+              const data = log.data
+                .map((d) => (typeof d === "string" ? d : JSON.stringify(d)))
+                .join(" ");
+              return `[${log.method.toUpperCase()}] ${data}`;
+            })
+            .join("\n");
+        }
+        if (tavilyHandler) return tavilyHandler(name, args);
+        return `Error: unknown tool "${name}"`;
+      };
+
       generatorRef.current = createOpenAIGenerator(
         {
           apiKey: settings.apiKey,
@@ -157,14 +182,14 @@ export function useGenerator({
           onError: (error) => {
             console.error("Generation error:", error);
             setMessages((prev) => [
-              ...prev,
+              ...removeErrorMessages(prev),
               { role: "assistant", content: `⚠️ ${error.message || "Unknown error"}` },
             ]);
           },
         },
         files,
         webConfigured ? TAVILY_TOOLS : undefined,
-        webConfigured ? createTavilyToolHandler(webSearchSettings) : undefined,
+        combinedToolHandler,
       );
     }
 
@@ -188,7 +213,7 @@ export function useGenerator({
         content = prompt;
       }
 
-      setMessages((prev) => [...prev, { role: "user", content }]);
+      setMessages((prev) => [...removeErrorMessages(prev), { role: "user", content }]);
       try {
         const generator = getGenerator();
         if (generator) await generator.generate(prompt, images);
@@ -196,7 +221,7 @@ export function useGenerator({
         console.error("Error generating:", err);
         if (err?.name !== "AbortError") {
           setMessages((prev) => [
-            ...prev,
+            ...removeErrorMessages(prev),
             { role: "assistant", content: `⚠️ ${err?.message || "Unknown error"}` },
           ]);
         }
