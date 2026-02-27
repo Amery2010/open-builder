@@ -2,7 +2,7 @@
   "name": "open-builder",
   "description": "Open Builder is an open-source AI-powered app generator. Build web applications through natural language conversations.",
   "private": true,
-  "version": "1.1.0",
+  "version": "1.1.1",
   "type": "module",
   "scripts": {
     "dev": "vite",

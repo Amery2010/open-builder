@@ -394,6 +394,11 @@ export class WebAppGenerator {
     this.messages = [];
   }
 
+  /** 从外部状态同步对话历史（用于保持与 Store 的一致性） */
+  syncMessages(messages: Message[]): void {
+    this.messages = [...messages];
+  }
+
   /** 中止正在进行的 generate 请求 */
   abort(): void {
     this.ctrl?.abort();
@@ -632,7 +637,9 @@ export class WebAppGenerator {
             const idx: number = dtc.index;
 
             if (!toolCallAccum.has(idx)) {
-              toolCallAccum.set(idx, { id: "", name: "", arguments: "" });
+              // Pre-generate a random fallback ID in case the API doesn't send one
+              const fallbackId = `call_${Math.random().toString(36).substring(2, 11)}`;
+              toolCallAccum.set(idx, { id: fallbackId, name: "", arguments: "" });
             }
 
             const entry = toolCallAccum.get(idx)!;
@@ -654,14 +661,20 @@ export class WebAppGenerator {
 
     const toolCalls: ToolCall[] = [...toolCallAccum.entries()]
       .sort(([a], [b]) => a - b)
-      .map(([, entry]) => ({
-        id: entry.id,
-        type: "function" as const,
-        function: {
-          name: entry.name,
-          arguments: entry.arguments,
-        },
-      }));
+      .map(([, entry]) => {
+        // Ensure there is always a tool call ID, even if the API stream didn't provide one
+        if (!entry.id) {
+          entry.id = `call_${Math.random().toString(36).substring(2, 11)}`;
+        }
+        return {
+          id: entry.id,
+          type: "function" as const,
+          function: {
+            name: entry.name,
+            arguments: entry.arguments,
+          },
+        };
+      });
 
     return {
       role: "assistant",

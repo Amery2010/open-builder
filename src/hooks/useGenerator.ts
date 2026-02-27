@@ -117,12 +117,13 @@ export function useGenerator({
             });
           },
           onToolCall: (name, id) => {
+            const actualId = id || `call_${Math.random().toString(36).substring(2, 11)}`;
             setMessages((prev) => {
               const last = prev[prev.length - 1];
               if (last?.role === "assistant") {
-                if (last.tool_calls?.some((tc) => tc.id === id)) return prev;
+                if (last.tool_calls?.some((tc) => tc.id === actualId)) return prev;
                 const newToolCall = {
-                  id,
+                  id: actualId,
                   type: "function" as const,
                   function: { name, arguments: "" },
                 };
@@ -160,7 +161,13 @@ export function useGenerator({
                   break;
                 }
               }
-              return [...msgs, { role: "tool", content: result, tool_call_id: "" }];
+              // If not found, we shouldn't add an empty tool_call_id, but rather discard or warn,
+              // since OpenAI API rejects empty tool_call_id strings.
+              // Just to be safe, if we somehow don't find it, we skip appending or use a dummy ID.
+              // However, since it only gets emitted from the parser, it should always have an ID.
+              // Let's log a warning but still append to avoid losing the result, except we MUST have a valid ID.
+              console.warn("Couldn't find matching tool call for result:", _name);
+              return prev;
             });
           },
           onFileChange: (newFiles) => {
@@ -191,6 +198,14 @@ export function useGenerator({
         webConfigured ? TAVILY_TOOLS : undefined,
         combinedToolHandler,
       );
+
+      // Store config markers for invalidation comparison
+      const gen = generatorRef.current as any;
+      gen._apiKey = settings.apiKey;
+      gen._apiUrl = settings.apiUrl;
+      gen._model = settings.model;
+      gen._tavilyKey = webSearchSettings.tavilyApiKey;
+      gen._tavilyUrl = webSearchSettings.tavilyApiUrl;
     }
 
     return generatorRef.current;
@@ -213,9 +228,20 @@ export function useGenerator({
         content = prompt;
       }
 
+      // Get generator and sync its messages with the store BEFORE adding the new user message.
+      // This ensures the generator has the full conversation history even if it was recreated
+      // (e.g. after page refresh, settings change, or conversation switch).
+      const generator = getGenerator();
+      if (generator) {
+        const storeState = useConversationStore.getState();
+        const activeConv = storeState.activeId ? storeState.conversations[storeState.activeId] : null;
+        if (activeConv) {
+          generator.syncMessages(removeErrorMessages(activeConv.messages));
+        }
+      }
+
       setMessages((prev) => [...removeErrorMessages(prev), { role: "user", content }]);
       try {
-        const generator = getGenerator();
         if (generator) await generator.generate(prompt, images);
       } catch (err: any) {
         console.error("Error generating:", err);
@@ -308,7 +334,15 @@ export function useGenerator({
     });
     try {
       const generator = getGenerator();
-      if (generator) await generator.retry();
+      if (generator) {
+        // Sync messages from store (error message already removed by setMessages above)
+        const storeState = useConversationStore.getState();
+        const activeConv = storeState.activeId ? storeState.conversations[storeState.activeId] : null;
+        if (activeConv) {
+          generator.syncMessages(activeConv.messages);
+        }
+        await generator.retry();
+      }
     } catch (err: any) {
       console.error("Error retrying:", err);
       if (err?.name !== "AbortError") {
