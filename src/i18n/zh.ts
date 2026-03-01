@@ -45,7 +45,7 @@ export const zh = {
     },
   },
   chat: {
-    placeholder: "描述你想要的应用...",
+    placeholder: "一句话描述你想要的应用...",
     uploadImage: "上传图片",
     uploadFile: "上传文件",
     attachment: "添加附件",
@@ -148,8 +148,11 @@ export const zh = {
       patch_file: "修改文件",
       delete_file: "删除文件",
       search_in_files: "搜索文件内容",
+      get_console_logs: "检查控制台",
+      compact_context: "压缩上下文",
       web_search: "搜索网络",
       web_reader: "读取网页",
+      manage_memories: "管理记忆",
     },
   },
 };

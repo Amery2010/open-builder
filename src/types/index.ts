@@ -90,6 +90,26 @@ export interface ProjectSnapshot {
   createdAt: number;
 }
 
+// ─── Memory types ───────────────────────────────────────────────────────────
+
+export interface MemoryItem {
+  id: string;
+  content: string;
+  category: "preference" | "personal_info" | "instruction" | "fact" | "project";
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface MemoryOperation {
+  action: "add" | "update" | "delete";
+  /** Required for update and delete */
+  id?: string;
+  /** Required for add and update */
+  content?: string;
+  /** Required for add, optional for update */
+  category?: MemoryItem["category"];
+}
+
 // ─── Conversation types ──────────────────────────────────────────────────────
 
 /** Compressed context: summary text + the message index where compression starts */

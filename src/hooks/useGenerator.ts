@@ -6,6 +6,7 @@ import { useConversationStore } from "../store/conversation";
 import { useSettingsStore } from "../store/settings";
 import { useSandpackStore } from "../store/sandpack";
 import { TAVILY_TOOLS, createTavilyToolHandler } from "../lib/tavily";
+import { MEMORY_TOOLS, MEMORY_TOOL_NAME, createMemoryToolHandler, buildMemoryPromptSection } from "../lib/memory";
 import { useSnapshotStore } from "../store/snapshot";
 import { mergeMessages } from "../lib/mergeMessages";
 import { compressContext as doCompress } from "../lib/compressContext";
@@ -17,6 +18,64 @@ const isErrorMessage = (m: Message) =>
   m.role === "assistant" && typeof m.content === "string" && m.content.startsWith("⚠️");
 
 const removeErrorMessages = (prev: Message[]) => prev.filter((m) => !isErrorMessage(m));
+
+/**
+ * Filter out memory-related messages from the message array.
+ * Memory messages are:
+ *  - assistant messages where tool_calls contains manage_memories
+ *  - tool result messages with tool_call_ids matching manage_memories calls
+ *
+ * If an assistant message has BOTH text content AND memory tool_calls,
+ * keep the text but strip the memory tool_calls.
+ */
+function filterMemoryMessages(messages: Message[]): Message[] {
+  // First pass: collect all manage_memories tool_call IDs
+  const memoryToolCallIds = new Set<string>();
+  for (const msg of messages) {
+    if (msg.role === "assistant" && msg.tool_calls) {
+      for (const tc of msg.tool_calls) {
+        if (tc.function.name === MEMORY_TOOL_NAME) {
+          memoryToolCallIds.add(tc.id);
+        }
+      }
+    }
+  }
+
+  if (memoryToolCallIds.size === 0) return messages;
+
+  // Second pass: filter
+  const result: Message[] = [];
+  for (const msg of messages) {
+    // Skip tool result messages for memory operations
+    if (msg.role === "tool" && msg.tool_call_id && memoryToolCallIds.has(msg.tool_call_id)) {
+      continue;
+    }
+
+    if (msg.role === "assistant" && msg.tool_calls) {
+      const nonMemoryToolCalls = msg.tool_calls.filter(
+        (tc) => tc.function.name !== MEMORY_TOOL_NAME,
+      );
+
+      if (nonMemoryToolCalls.length === 0) {
+        // All tool_calls were memory operations
+        if (msg.content) {
+          // Keep the text content, remove tool_calls
+          result.push({ ...msg, tool_calls: undefined });
+        }
+        // If no content either, skip the entire message
+        continue;
+      }
+
+      // Some tool_calls were non-memory — keep those
+      result.push({ ...msg, tool_calls: nonMemoryToolCalls });
+      continue;
+    }
+
+    result.push(msg);
+  }
+
+  return result;
+}
 
 /** Apply compression: return summary + messages after compression point */
 function getMessagesForAPI(conv: Conversation): Message[] {
@@ -98,6 +157,7 @@ export function useGenerator({
     if (!generatorRef.current) {
       const webConfigured = useSettingsStore.getState().isWebSearchConfigured();
       const tavilyHandler = webConfigured ? createTavilyToolHandler(webSearchSettings) : undefined;
+      const memoryHandler = createMemoryToolHandler();
 
       const combinedToolHandler = async (name: string, args: unknown): Promise<string> => {
         if (name === "get_console_logs") {
@@ -111,6 +171,9 @@ export function useGenerator({
               return `[${log.method.toUpperCase()}] ${data}`;
             })
             .join("\n");
+        }
+        if (name === MEMORY_TOOL_NAME) {
+          return memoryHandler(name, args);
         }
         if (tavilyHandler) return tavilyHandler(name, args);
         return `Error: unknown tool "${name}"`;
@@ -245,6 +308,17 @@ export function useGenerator({
           onError: (error) => {
             console.error("Generation error:", error);
           },
+          onRetry: (attempt, maxAttempts, error) => {
+            console.warn(`Retrying API request (${attempt}/${maxAttempts}):`, error.message);
+            // Clear partial assistant message from the failed attempt
+            setMessages((prev) => {
+              const last = prev[prev.length - 1];
+              if (last?.role === "assistant") {
+                return prev.slice(0, -1);
+              }
+              return prev;
+            });
+          },
           onCompact: async () => {
             const s = useConversationStore.getState();
             const conv = s.activeId ? s.conversations[s.activeId] : null;
@@ -262,7 +336,7 @@ export function useGenerator({
           },
         },
         files,
-        webConfigured ? TAVILY_TOOLS : undefined,
+        [...(webConfigured ? TAVILY_TOOLS : []), ...MEMORY_TOOLS],
         combinedToolHandler,
       );
 
@@ -309,6 +383,8 @@ export function useGenerator({
         if (activeConv) {
           generator.syncMessages(getMessagesForAPI(activeConv));
         }
+        // Inject current memory context into system prompt
+        generator.setSystemPromptSuffix(buildMemoryPromptSection());
       }
 
       setMessages((prev) => [...removeErrorMessages(prev), { role: "user", content }]);
@@ -323,6 +399,8 @@ export function useGenerator({
           ]);
         }
       } finally {
+        // Filter memory messages from the persisted conversation (silent operation)
+        setMessages((prev) => filterMemoryMessages(prev));
         setIsGenerating(false);
       }
     },
@@ -417,6 +495,7 @@ export function useGenerator({
         if (activeConv) {
           generator.syncMessages(getMessagesForAPI(activeConv));
         }
+        generator.setSystemPromptSuffix(buildMemoryPromptSection());
         await generator.retry();
       }
     } catch (err: any) {
@@ -428,6 +507,7 @@ export function useGenerator({
         ]);
       }
     } finally {
+      setMessages((prev) => filterMemoryMessages(prev));
       setIsGenerating(false);
     }
   }, [getGenerator, setIsGenerating, setMessages]);
@@ -473,6 +553,7 @@ export function useGenerator({
         if (activeConv) {
           generator.syncMessages(getMessagesForAPI(activeConv));
         }
+        generator.setSystemPromptSuffix(buildMemoryPromptSection());
         await generator.generate("Please continue where you left off and complete any unfinished tasks.");
       }
     } catch (err: any) {
@@ -484,6 +565,7 @@ export function useGenerator({
         ]);
       }
     } finally {
+      setMessages((prev) => filterMemoryMessages(prev));
       setIsGenerating(false);
     }
   }, [getGenerator, setIsGenerating, setMessages]);

@@ -84,6 +84,10 @@ export interface GeneratorOptions {
   thinking?: boolean;
   /** thinking 的 budget_tokens（默认 10000） */
   thinkingBudget?: number;
+  /** Max auto-retry attempts for failed API requests (default 3) */
+  maxRetries?: number;
+  /** Base delay in ms for exponential backoff (default 1000) */
+  retryDelay?: number;
 }
 
 /** 事件回调 */
@@ -106,6 +110,8 @@ export interface GeneratorEvents {
   onComplete?: (result: GenerateResult) => void;
   /** 出错 */
   onError?: (error: Error) => void;
+  /** API request is being retried after a failure */
+  onRetry?: (attempt: number, maxAttempts: number, error: Error) => void;
   /** 上下文压缩，返回压缩后的消息列表 */
   onCompact?: () => Promise<Message[] | null>;
 }
@@ -390,6 +396,9 @@ export class WebAppGenerator {
   private readonly customToolHandler?: GeneratorOptions["customToolHandler"];
   private readonly useThinking: boolean;
   private readonly thinkingBudget: number;
+  private readonly maxRetries: number;
+  private readonly retryDelay: number;
+  private systemPromptSuffix: string = "";
 
   constructor(options: GeneratorOptions, events: GeneratorEvents = {}) {
     this.apiUrl = options.apiUrl;
@@ -403,6 +412,8 @@ export class WebAppGenerator {
     this.customToolHandler = options.customToolHandler;
     this.useThinking = options.thinking ?? true;
     this.thinkingBudget = options.thinkingBudget ?? 10000;
+    this.maxRetries = options.maxRetries ?? 3;
+    this.retryDelay = options.retryDelay ?? 1000;
 
     this.files = { ...(options.initialFiles ?? {}) };
     this.messages = [];
@@ -434,6 +445,11 @@ export class WebAppGenerator {
   /** 从外部状态同步对话历史（用于保持与 Store 的一致性） */
   syncMessages(messages: Message[]): void {
     this.messages = [...messages];
+  }
+
+  /** Set a dynamic suffix to append to the system prompt (e.g., memory context) */
+  setSystemPromptSuffix(suffix: string): void {
+    this.systemPromptSuffix = suffix;
   }
 
   /** 中止正在进行的 generate 请求 */
@@ -497,9 +513,7 @@ export class WebAppGenerator {
           ...this.messages,
         ];
 
-        const assistantMsg = this.useStream
-          ? await this.requestStream(requestMessages)
-          : await this.requestJSON(requestMessages);
+        const assistantMsg = await this.requestWithRetry(requestMessages);
 
         this.messages.push(assistantMsg);
         if (assistantMsg.content) {
@@ -576,13 +590,53 @@ export class WebAppGenerator {
 
   // ══════════════════════════ 内部方法 ══════════════════════════════════════
 
+  /** Check if an error is retryable */
+  private isRetryableError(err: any): boolean {
+    if (err.name === "AbortError") return false;
+    if (err.status) return err.status === 429 || err.status >= 500;
+    // No HTTP status → likely a network error, retryable
+    return true;
+  }
+
+  /** Sleep that can be interrupted by abort signal */
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(resolve, ms);
+      this.ctrl?.signal.addEventListener(
+        "abort",
+        () => {
+          clearTimeout(timer);
+          reject(new DOMException("Aborted", "AbortError"));
+        },
+        { once: true },
+      );
+    });
+  }
+
+  /** Wrap API request with retry logic */
+  private async requestWithRetry(messages: Message[]): Promise<Message> {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return this.useStream
+          ? await this.requestStream(messages)
+          : await this.requestJSON(messages);
+      } catch (err: any) {
+        if (!this.isRetryableError(err) || attempt >= this.maxRetries) throw err;
+        this.events.onRetry?.(attempt + 1, this.maxRetries, err);
+        const delay =
+          this.retryDelay * Math.pow(2, attempt) + Math.random() * 500;
+        await this.sleep(delay);
+      }
+    }
+  }
+
   private buildSystemContent(): string {
     const paths = Object.keys(this.files).sort();
     const listing =
       paths.length > 0
         ? "\n\nCurrent project files:\n" + paths.map((p) => `- ${p}`).join("\n")
         : "\n\nThe project is empty — no files yet.";
-    return this.systemPrompt + listing;
+    return this.systemPrompt + listing + this.systemPromptSuffix;
   }
 
   private buildFetchInit(messages: Message[], stream: boolean): RequestInit {
@@ -626,7 +680,9 @@ export class WebAppGenerator {
   private async requestJSON(messages: Message[]): Promise<Message> {
     const res = await fetch(this.apiUrl, this.buildFetchInit(messages, false));
     if (!res.ok) {
-      throw new Error(await this.parseApiError(res));
+      const error = new Error(await this.parseApiError(res));
+      (error as any).status = res.status;
+      throw error;
     }
 
     const json = await res.json();
@@ -656,7 +712,9 @@ export class WebAppGenerator {
   private async requestStream(messages: Message[]): Promise<Message> {
     const res = await fetch(this.apiUrl, this.buildFetchInit(messages, true));
     if (!res.ok) {
-      throw new Error(await this.parseApiError(res));
+      const error = new Error(await this.parseApiError(res));
+      (error as any).status = res.status;
+      throw error;
     }
 
     const reader = res.body!.getReader();

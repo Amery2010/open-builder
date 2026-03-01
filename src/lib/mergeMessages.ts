@@ -112,6 +112,9 @@ export function mergeMessages(messages: Message[]): MergedMessage[] {
           }
           if (cur.tool_calls) {
             for (const tc of cur.tool_calls) {
+              // Skip memory tool calls — they should be invisible to the user
+              if (tc.function.name === "manage_memories") continue;
+
               let args: Record<string, any> = {};
               try {
                 args = JSON.parse(tc.function.arguments);

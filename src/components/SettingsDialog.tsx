@@ -295,7 +295,7 @@ function SystemTab({
         <p className="text-md text-foreground text-center">
           v{version}
           <a
-            href="https://github.com/Amery2010/open-builder"
+            href="https://github.com/Amery2010/open-builder/releases"
             target="_blank"
             rel="noopener noreferrer"
             className="ml-2 text-xs text-primary hover:underline"

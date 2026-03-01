@@ -74,7 +74,7 @@ export function CodeViewer({
   };
 
   return (
-    <div className="editor h-full flex flex-col bg-background">
+    <div className="editor w-full h-full flex flex-col bg-background">
       <ViewToolbar
         viewMode={viewMode}
         onViewModeChange={setViewMode}

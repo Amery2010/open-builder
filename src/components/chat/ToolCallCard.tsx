@@ -24,6 +24,7 @@ const TOOL_ICONS: Record<string, React.ReactNode> = {
   write_file: <FilePen size={14} className="text-green-500" />,
   patch_file: <Wrench size={14} className="text-orange-400" />,
   delete_file: <Trash2 size={14} className="text-red-400" />,
+  search_in_files: <Search size={14} className="text-amber-500" />,
   web_search: <Search size={14} className="text-purple-500" />,
   web_reader: <Globe size={14} className="text-teal-500" />,
   get_console_logs: <Terminal size={14} className="text-sky-500" />,

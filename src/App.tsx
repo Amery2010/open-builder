@@ -89,7 +89,7 @@ export default function App() {
 
   // Reset ephemeral state on conversation switch
   useEffect(() => {
-    setCurrentFile("src/App.tsx");
+    // setCurrentFile("src/App.tsx");
     restartSandpack();
   }, [activeId]);
 
@@ -104,10 +104,10 @@ export default function App() {
   return (
     <ResizablePanelGroup className="flex h-screen w-full bg-background">
       <ResizablePanel
-        className="h-screen w-full md:w-100 shrink-0 overflow-hidden"
+        className="h-screen w-full md:w-100 md:flex-1 shrink-0 overflow-hidden"
         defaultSize="30%"
         minSize={360}
-        maxSize="50%"
+        maxSize={isMobile ? "100%" : "50%"}
       >
         <ChatInterface
           messages={messages}
@@ -128,33 +128,39 @@ export default function App() {
         />
       </ResizablePanel>
 
-      <ResizableHandle />
+      {!isMobile ? (
+        <>
+          <ResizableHandle className="hidden md:flex" />
 
-      <ResizablePanel className="h-screen flex-1 min-w-0 overflow-hidden">
-        {isProjectInitialized && !isMobile ? (
-          <CodeViewer
-            files={files}
-            currentFile={currentFile}
-            onFileSelect={setCurrentFile}
-            onFileChange={updateFiles}
-            onRenameFile={renameFile}
-            onDeleteFile={deleteFile}
-            onMoveFile={moveFile}
-            template={template}
-            sandpackKey={sandpackKey}
-          />
-        ) : (
-          <div className="text-center max-w-md px-6 hidden md:flex items-center justify-center bg-muted/30">
-            <div className="text-5xl mb-6">🚀</div>
-            <h2 className="text-xl font-semibold text-foreground mb-2">
-              {t.app.startBuilding}
-            </h2>
-            <p className="text-muted-foreground text-sm leading-relaxed">
-              {t.app.startBuildingDesc}
-            </p>
-          </div>
-        )}
-      </ResizablePanel>
+          <ResizablePanel className="w-full h-screen min-w-0 hidden md:flex overflow-hidden">
+            {isProjectInitialized && !isMobile ? (
+              <CodeViewer
+                files={files}
+                currentFile={currentFile}
+                onFileSelect={setCurrentFile}
+                onFileChange={updateFiles}
+                onRenameFile={renameFile}
+                onDeleteFile={deleteFile}
+                onMoveFile={moveFile}
+                template={template}
+                sandpackKey={sandpackKey}
+              />
+            ) : (
+              <div className="flex w-full h-full min-w-0 items-center justify-center bg-muted/30">
+                <div className="text-center max-w-md px-6">
+                  <div className="text-5xl mb-6">🚀</div>
+                  <h2 className="text-xl font-semibold text-foreground mb-2">
+                    {t.app.startBuilding}
+                  </h2>
+                  <p className="text-muted-foreground text-sm leading-relaxed">
+                    {t.app.startBuildingDesc}
+                  </p>
+                </div>
+              </div>
+            )}
+          </ResizablePanel>
+        </>
+      ) : null}
 
       <SettingsDialog
         isOpen={isSettingsOpen}

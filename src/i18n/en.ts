@@ -156,8 +156,11 @@ export const en: typeof zh = {
       patch_file: "Patch File",
       delete_file: "Delete File",
       search_in_files: "Search Files",
+      get_console_logs: "Check Console",
+      compact_context: "Compact Context",
       web_search: "Web Search",
       web_reader: "Read Web Page",
+      manage_memories: "Manage Memories",
     },
   },
 };

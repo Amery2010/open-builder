@@ -133,10 +133,10 @@ const assistantComponents = {
     className?.includes("contains-task-list") ? (
       <ul className="my-2 space-y-1">{children}</ul>
     ) : (
-      <ul className="list-disc list-inside my-2 space-y-1">{children}</ul>
+      <ul className="list-disc pl-4.5 my-2 space-y-1">{children}</ul>
     ),
   ol: ({ children }: any) => (
-    <ol className="list-decimal list-inside my-2 space-y-1">{children}</ol>
+    <ol className="list-decimal pl-4.5 my-2 space-y-1">{children}</ol>
   ),
   li: ({ children, className }: any) =>
     className?.includes("task-list-item") ? (
@@ -225,7 +225,7 @@ interface MarkdownContentProps {
 
 export const MarkdownContent = memo(
   ({ content, variant }: MarkdownContentProps) => (
-    <>
+    <div className="markdown-content">
       <HljsTheme />
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
@@ -234,7 +234,7 @@ export const MarkdownContent = memo(
       >
         {content}
       </ReactMarkdown>
-    </>
+    </div>
   ),
 );
 MarkdownContent.displayName = "MarkdownContent";
