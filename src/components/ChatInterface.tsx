@@ -226,7 +226,7 @@ export function ChatInterface({
   };
 
   return (
-    <div className="relative flex flex-col h-screen bg-background">
+    <div className="relative flex flex-col h-full bg-background">
       <ChatHeader
         isGenerating={isGenerating}
         onOpenSettings={onOpenSettings}

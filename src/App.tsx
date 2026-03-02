@@ -95,16 +95,16 @@ export default function App() {
 
   if (!hasHydrated) {
     return (
-      <div className="flex h-screen w-full items-center justify-center bg-background">
+      <div className="flex h-full w-full items-center justify-center bg-background">
         <p className="text-sm text-muted-foreground">{t.app.loading}</p>
       </div>
     );
   }
 
   return (
-    <ResizablePanelGroup className="flex h-screen w-full bg-background">
+    <ResizablePanelGroup className="flex h-full w-full bg-background">
       <ResizablePanel
-        className="h-screen w-full md:w-100 md:flex-1 shrink-0 overflow-hidden"
+        className="h-full w-full md:w-100 md:flex-1 shrink-0 overflow-hidden"
         defaultSize="30%"
         minSize={360}
         maxSize={isMobile ? "100%" : "50%"}
@@ -132,7 +132,7 @@ export default function App() {
         <>
           <ResizableHandle className="hidden md:flex" />
 
-          <ResizablePanel className="w-full h-screen min-w-0 hidden md:flex overflow-hidden">
+          <ResizablePanel className="w-full h-full min-w-0 hidden md:flex overflow-hidden">
             {isProjectInitialized && !isMobile ? (
               <CodeViewer
                 files={files}
