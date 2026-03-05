@@ -132,22 +132,27 @@ export function mergeMessages(messages: Message[]): MergedMessage[] {
                 }
               }
               const isReadFiles = tc.function.name === "read_files";
-              const isWebSearch = tc.function.name === "web_search";
-              const isWebReader = tc.function.name === "web_reader";
               const paths: string[] | undefined = isReadFiles
                 ? (args.paths as string[])
                 : undefined;
               const toolName = tc.function.name as keyof typeof t.tool.names;
+
+              // Generate title based on tool type
+              let title = t.tool.names[toolName] || tc.function.name;
+              if (isReadFiles) {
+                title = `${t.tool.found}${paths?.length ?? 0} ${t.tool.files}`;
+              } else if (args.query) {
+                title = `${t.tool.names[toolName]}: ${args.query}`;
+              } else if (args.packageName) {
+                title = `${t.tool.names[toolName]}: ${args.packageName}`;
+              } else if (args.urls) {
+                title = `${t.tool.found}${(args.urls as string[])?.length ?? 0} ${t.tool.pages}`;
+              }
+
               blocks.push({
                 type: "tool",
                 toolName: tc.function.name,
-                title: isReadFiles
-                  ? `${t.tool.found}${paths?.length ?? 0} ${t.tool.files}`
-                  : isWebSearch
-                    ? `${t.tool.names.web_search}: ${args.query || ""}`
-                    : isWebReader
-                      ? `${t.tool.found}${(args.urls as string[])?.length ?? 0} ${t.tool.pages}`
-                      : t.tool.names[toolName] || tc.function.name,
+                title,
                 path: args.path || "",
                 paths,
                 result,

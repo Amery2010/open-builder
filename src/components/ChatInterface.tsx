@@ -163,6 +163,7 @@ export function ChatInterface({
           break;
         case "clear":
           useConversationStore.getState().setMessages([]);
+          onSetFiles({});
           break;
         case "compact":
           onCompressContext();
@@ -178,7 +179,7 @@ export function ChatInterface({
           break;
       }
     },
-    [onCompressContext, onReview, onRetry, onContinue],
+    [onCompressContext, onReview, onRetry, onContinue, onSetFiles],
   );
 
   // Find the last assistant message ID for streaming indicator

@@ -10,6 +10,8 @@ import {
   Search,
   Globe,
   Terminal,
+  Image,
+  Package,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -27,6 +29,9 @@ const TOOL_ICONS: Record<string, React.ReactNode> = {
   search_in_files: <Search size={14} className="text-amber-500" />,
   web_search: <Search size={14} className="text-purple-500" />,
   web_reader: <Globe size={14} className="text-teal-500" />,
+  image_search: <Image size={14} className="text-pink-500" />,
+  search_npm_packages: <Package size={14} className="text-blue-500" />,
+  get_npm_package_detail: <Package size={14} className="text-blue-500" />,
   get_console_logs: <Terminal size={14} className="text-sky-500" />,
 };
 
@@ -40,6 +45,45 @@ function countSearchResults(result: string): {
     return { ok: d.ok, count: d.results?.length ?? 0, error: d.error };
   } catch {
     return { ok: false, count: 0, error: result };
+  }
+}
+
+function countImageResults(result: string): {
+  ok: boolean;
+  count: number;
+  error?: string;
+} {
+  try {
+    const d = JSON.parse(result);
+    return { ok: d.ok, count: d.images?.length ?? 0, error: d.error };
+  } catch {
+    return { ok: false, count: 0, error: result };
+  }
+}
+
+function parseNpmSearchResult(result: string): {
+  success: boolean;
+  count: number;
+  error?: string;
+} {
+  try {
+    const d = JSON.parse(result);
+    return { success: d.success, count: d.data?.length ?? 0, error: d.error };
+  } catch {
+    return { success: false, count: 0, error: result };
+  }
+}
+
+function parseNpmDetailResult(result: string): {
+  success: boolean;
+  name?: string;
+  error?: string;
+} {
+  try {
+    const d = JSON.parse(result);
+    return { success: d.success, name: d.data?.name, error: d.error };
+  } catch {
+    return { success: false, error: result };
   }
 }
 
@@ -82,6 +126,12 @@ export const ToolCallCard = memo(function ToolCallCard({
 
   const searchResultCount =
     toolName === "web_search" && result ? countSearchResults(result).count : 0;
+  const imageResultCount =
+    toolName === "image_search" && result ? countImageResults(result).count : 0;
+  const npmSearchCount =
+    toolName === "search_npm_packages" && result ? parseNpmSearchResult(result).count : 0;
+  const npmDetailName =
+    toolName === "get_npm_package_detail" && result ? parseNpmDetailResult(result).name : "";
   const readerUrls =
     toolName === "web_reader" && result ? countWebReaderUrls(result) : [];
   const consoleIssues =
@@ -110,6 +160,18 @@ export const ToolCallCard = memo(function ToolCallCard({
         {toolName === "web_search" && result ? (
           <Badge variant="secondary" className="text-xs font-mono h-5">
             {searchResultCount} {t.tool.results}
+          </Badge>
+        ) : toolName === "image_search" && result ? (
+          <Badge variant="secondary" className="text-xs font-mono h-5">
+            {imageResultCount} {t.tool.images}
+          </Badge>
+        ) : toolName === "search_npm_packages" && result ? (
+          <Badge variant="secondary" className="text-xs font-mono h-5">
+            {npmSearchCount} {t.tool.packages}
+          </Badge>
+        ) : toolName === "get_npm_package_detail" && result && npmDetailName ? (
+          <Badge variant="secondary" className="text-xs font-mono h-5 max-w-35 truncate">
+            {npmDetailName}
           </Badge>
         ) : toolName === "web_reader" && result ? (
           <Badge variant="secondary" className="text-xs font-mono h-5">
@@ -206,6 +268,24 @@ export const ToolCallCard = memo(function ToolCallCard({
               {result.startsWith("Error")
                 ? `${t.tool.failed}${result}`
                 : `${t.tool.found}${searchResultCount} ${t.tool.searchResults}`}
+            </p>
+          ) : toolName === "image_search" ? (
+            <p className="text-xs text-muted-foreground">
+              {result.startsWith("Error")
+                ? `${t.tool.failed}${result}`
+                : `${t.tool.found}${imageResultCount} ${t.tool.imageResults}`}
+            </p>
+          ) : toolName === "search_npm_packages" ? (
+            <p className="text-xs text-muted-foreground">
+              {result.includes('"success":false')
+                ? `${t.tool.failed}${parseNpmSearchResult(result).error}`
+                : `${t.tool.found}${npmSearchCount} ${t.tool.npmPackages}`}
+            </p>
+          ) : toolName === "get_npm_package_detail" ? (
+            <p className="text-xs text-muted-foreground">
+              {result.includes('"success":false')
+                ? `${t.tool.failed}${parseNpmDetailResult(result).error}`
+                : `${t.tool.found}${npmDetailName}`}
             </p>
           ) : toolName === "web_reader" ? (
             <div className="space-y-0.5">

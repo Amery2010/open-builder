@@ -7,7 +7,12 @@ export const zh = {
   },
   settings: {
     title: "设置",
-    tabs: { model: "模型设置", search: "联网搜索", system: "系统设置" },
+    tabs: {
+      model: "模型设置",
+      search: "联网搜索",
+      asset: "素材搜索",
+      system: "系统设置",
+    },
     cancel: "取消",
     save: "保存设置",
     apiKey: { hint: "你的 API 密钥，将保存在浏览器本地存储中" },
@@ -29,6 +34,15 @@ export const zh = {
     tavilyUrl: { hint: "可选。默认使用 Tavily 官方 API 地址" },
     firecrawlKey: { hint: "可选。配置后启用联网搜索和网页读取功能" },
     firecrawlUrl: { hint: "可选。默认使用 Firecrawl 官方 API 地址" },
+    assetSearch: {
+      desc: "配置后，AI 将能够搜索高质量的图片素材",
+      engine: "搜索引擎",
+      disabled: "停用",
+    },
+    pixabayKey: { hint: "可选。配置后启用图片素材搜索功能" },
+    pixabayUrl: { hint: "可选。默认使用 Pixabay 官方 API 地址" },
+    unsplashKey: { hint: "可选。配置后启用图片素材搜索功能" },
+    unsplashUrl: { hint: "可选。默认使用 Unsplash 官方 API 地址" },
     language: {
       label: "语言",
       system: "跟随系统",
@@ -140,6 +154,8 @@ export const zh = {
   },
   tool: {
     results: "条结果",
+    images: "张图片",
+    packages: "个包",
     pages: "个网页",
     errors: "个错误",
     warnings: "个警告",
@@ -149,6 +165,8 @@ export const zh = {
     failed: "失败: ",
     found: "已找到 ",
     searchResults: "条搜索结果",
+    imageResults: "张图片素材",
+    npmPackages: "个 npm 包",
     names: {
       init_project: "初始化项目",
       manage_dependencies: "管理依赖",
@@ -162,6 +180,9 @@ export const zh = {
       compact_context: "压缩上下文",
       web_search: "搜索网络",
       web_reader: "读取网页",
+      image_search: "搜索图片",
+      search_npm_packages: "搜索 NPM 包",
+      get_npm_package_detail: "获取 NPM 包详情",
       manage_memories: "管理记忆",
     },
   },

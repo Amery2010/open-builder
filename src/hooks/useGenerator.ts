@@ -6,18 +6,43 @@ import { useConversationStore } from "../store/conversation";
 import { useSettingsStore } from "../store/settings";
 import { useSandpackStore } from "../store/sandpack";
 import { SEARCH_TOOLS, createSearchToolHandler } from "../lib/search";
-import { MEMORY_TOOLS, MEMORY_TOOL_NAME, createMemoryToolHandler, buildMemoryPromptSection } from "../lib/memory";
+import {
+  ASSET_SEARCH_TOOLS,
+  createAssetSearchToolHandler,
+} from "../lib/assetSearch";
+import {
+  NPM_SEARCH_TOOLS,
+  createNpmSearchToolHandler,
+} from "../lib/npmSearch";
+import {
+  MEMORY_TOOLS,
+  MEMORY_TOOL_NAME,
+  createMemoryToolHandler,
+  buildMemoryPromptSection,
+} from "../lib/memory";
 import { useSnapshotStore } from "../store/snapshot";
 import { mergeMessages } from "../lib/mergeMessages";
 import { compressContext as doCompress } from "../lib/compressContext";
 import { generateSmartTitle } from "../lib/smartName";
 import { DEFAULT_TITLE } from "../store/conversation";
-import type { Message, ContentPart, Conversation, ProjectFiles, AISettings, WebSearchSettings, Attachment } from "../types";
+import type {
+  Message,
+  ContentPart,
+  Conversation,
+  ProjectFiles,
+  AISettings,
+  WebSearchSettings,
+  AssetSearchSettings,
+  Attachment,
+} from "../types";
 
 const isErrorMessage = (m: Message) =>
-  m.role === "assistant" && typeof m.content === "string" && m.content.startsWith("⚠️");
+  m.role === "assistant" &&
+  typeof m.content === "string" &&
+  m.content.startsWith("⚠️");
 
-const removeErrorMessages = (prev: Message[]) => prev.filter((m) => !isErrorMessage(m));
+const removeErrorMessages = (prev: Message[]) =>
+  prev.filter((m) => !isErrorMessage(m));
 
 /**
  * Filter out memory-related messages from the message array.
@@ -47,7 +72,11 @@ function filterMemoryMessages(messages: Message[]): Message[] {
   const result: Message[] = [];
   for (const msg of messages) {
     // Skip tool result messages for memory operations
-    if (msg.role === "tool" && msg.tool_call_id && memoryToolCallIds.has(msg.tool_call_id)) {
+    if (
+      msg.role === "tool" &&
+      msg.tool_call_id &&
+      memoryToolCallIds.has(msg.tool_call_id)
+    ) {
       continue;
     }
 
@@ -82,10 +111,26 @@ function getMessagesForAPI(conv: Conversation): Message[] {
   const ctx = conv.compressedContext;
   if (!ctx) return removeErrorMessages(conv.messages);
   const recent = removeErrorMessages(conv.messages.slice(ctx.fromIndex));
-  console.log("[compress-debug] fromIndex:", ctx.fromIndex, "total:", conv.messages.length, "recent:", recent.length, "summary:", ctx.summary.slice(0, 60));
+  console.log(
+    "[compress-debug] fromIndex:",
+    ctx.fromIndex,
+    "total:",
+    conv.messages.length,
+    "recent:",
+    recent.length,
+    "summary:",
+    ctx.summary.slice(0, 60),
+  );
   return [
-    { role: "user", content: `[Previous conversation summary]\n${ctx.summary}` },
-    { role: "assistant", content: "Understood. I'll continue based on the conversation summary above." },
+    {
+      role: "user",
+      content: `[Previous conversation summary]\n${ctx.summary}`,
+    },
+    {
+      role: "assistant",
+      content:
+        "Understood. I'll continue based on the conversation summary above.",
+    },
     ...recent,
   ];
 }
@@ -98,7 +143,9 @@ function createSnapshotForCurrentState() {
   const merged = mergeMessages(conv.messages);
   for (let i = merged.length - 1; i >= 0; i--) {
     if (merged[i].role === "assistant") {
-      useSnapshotStore.getState().createSnapshot(conv.id, merged[i].id, conv.files);
+      useSnapshotStore
+        .getState()
+        .createSnapshot(conv.id, merged[i].id, conv.files);
       return;
     }
   }
@@ -107,6 +154,7 @@ function createSnapshotForCurrentState() {
 interface UseGeneratorOptions {
   settings: AISettings;
   webSearchSettings: WebSearchSettings;
+  assetSearchSettings: AssetSearchSettings;
   files: ProjectFiles;
   setMessages: Dispatch<SetStateAction<Message[]>>;
   setFiles: Dispatch<SetStateAction<ProjectFiles>>;
@@ -119,6 +167,7 @@ interface UseGeneratorOptions {
 export function useGenerator({
   settings,
   webSearchSettings,
+  assetSearchSettings,
   files,
   setMessages,
   setFiles,
@@ -138,7 +187,8 @@ export function useGenerator({
   const lastThinkingTimeRef = useRef(0);
 
   const getGenerator = useCallback(() => {
-    if (!settings.apiKey || !settings.apiBaseUrl || !settings.model) return null;
+    if (!settings.apiKey || !settings.apiBaseUrl || !settings.model)
+      return null;
 
     // Invalidate on conversation switch
     if (prevActiveIdRef.current !== activeId) {
@@ -154,7 +204,9 @@ export function useGenerator({
         g._apiBaseUrl !== settings.apiBaseUrl ||
         g._model !== settings.model ||
         g._searchEngine !== webSearchSettings.engine ||
-        g._firecrawlKey !== webSearchSettings.firecrawlApiKey
+        g._firecrawlKey !== webSearchSettings.firecrawlApiKey ||
+        g._assetEngine !== assetSearchSettings.engine ||
+        g._pixabayKey !== assetSearchSettings.pixabayApiKey
       ) {
         generatorRef.current = null;
       }
@@ -162,10 +214,22 @@ export function useGenerator({
 
     if (!generatorRef.current) {
       const webConfigured = useSettingsStore.getState().isWebSearchConfigured();
-      const searchHandler = webConfigured ? createSearchToolHandler(webSearchSettings) : undefined;
+      const assetConfigured = useSettingsStore
+        .getState()
+        .isAssetSearchConfigured();
+      const searchHandler = webConfigured
+        ? createSearchToolHandler(webSearchSettings)
+        : undefined;
+      const assetSearchHandler = assetConfigured
+        ? createAssetSearchToolHandler(assetSearchSettings)
+        : undefined;
       const memoryHandler = createMemoryToolHandler();
+      const npmSearchHandler = createNpmSearchToolHandler();
 
-      const combinedToolHandler = async (name: string, args: unknown): Promise<string> => {
+      const combinedToolHandler = async (
+        name: string,
+        args: unknown,
+      ): Promise<string> => {
         if (name === "get_console_logs") {
           const { consoleLogs } = useSandpackStore.getState();
           if (consoleLogs.length === 0) return "No console output yet.";
@@ -180,6 +244,12 @@ export function useGenerator({
         }
         if (name === MEMORY_TOOL_NAME) {
           return memoryHandler(name, args);
+        }
+        if (name === "search_npm_packages" || name === "get_npm_package_detail") {
+          return npmSearchHandler(name, args);
+        }
+        if (name === "image_search" && assetSearchHandler) {
+          return assetSearchHandler(name, args);
         }
         if (searchHandler) return searchHandler(name, args);
         return `Error: unknown tool "${name}"`;
@@ -206,7 +276,13 @@ export function useGenerator({
                       if (last?.role === "assistant") {
                         return [
                           ...prev.slice(0, -1),
-                          { ...last, content: ((typeof last.content === "string" ? last.content : "") || "") + char },
+                          {
+                            ...last,
+                            content:
+                              ((typeof last.content === "string"
+                                ? last.content
+                                : "") || "") + char,
+                          },
                         ];
                       }
                       return [...prev, { role: "assistant", content: char }];
@@ -214,7 +290,10 @@ export function useGenerator({
                     lastCharTimeRef.current = timestamp;
                   }
                 }
-                if (textBufferRef.current.length > 0 || typewriterTimerRef.current) {
+                if (
+                  textBufferRef.current.length > 0 ||
+                  typewriterTimerRef.current
+                ) {
                   typewriterTimerRef.current = requestAnimationFrame(typeChar);
                 } else {
                   typewriterTimerRef.current = null;
@@ -230,7 +309,8 @@ export function useGenerator({
                 if (timestamp - lastThinkingTimeRef.current >= 20) {
                   if (thinkingBufferRef.current.length > 0) {
                     const char = thinkingBufferRef.current[0];
-                    thinkingBufferRef.current = thinkingBufferRef.current.slice(1);
+                    thinkingBufferRef.current =
+                      thinkingBufferRef.current.slice(1);
                     setMessages((prev) => {
                       const last = prev[prev.length - 1];
                       if (last?.role === "assistant") {
@@ -239,13 +319,20 @@ export function useGenerator({
                           { ...last, thinking: (last.thinking || "") + char },
                         ];
                       }
-                      return [...prev, { role: "assistant", content: null, thinking: char }];
+                      return [
+                        ...prev,
+                        { role: "assistant", content: null, thinking: char },
+                      ];
                     });
                     lastThinkingTimeRef.current = timestamp;
                   }
                 }
-                if (thinkingBufferRef.current.length > 0 || thinkingTimerRef.current) {
-                  thinkingTimerRef.current = requestAnimationFrame(typeThinking);
+                if (
+                  thinkingBufferRef.current.length > 0 ||
+                  thinkingTimerRef.current
+                ) {
+                  thinkingTimerRef.current =
+                    requestAnimationFrame(typeThinking);
                 } else {
                   thinkingTimerRef.current = null;
                 }
@@ -267,18 +354,26 @@ export function useGenerator({
                 if (last?.role === "assistant") {
                   return [
                     ...prev.slice(0, -1),
-                    { ...last, content: ((typeof last.content === "string" ? last.content : "") || "") + remainingText },
+                    {
+                      ...last,
+                      content:
+                        ((typeof last.content === "string"
+                          ? last.content
+                          : "") || "") + remainingText,
+                    },
                   ];
                 }
                 return prev;
               });
             }
 
-            const actualId = id || `call_${Math.random().toString(36).substring(2, 11)}`;
+            const actualId =
+              id || `call_${Math.random().toString(36).substring(2, 11)}`;
             setMessages((prev) => {
               const last = prev[prev.length - 1];
               if (last?.role === "assistant") {
-                if (last.tool_calls?.some((tc) => tc.id === actualId)) return prev;
+                if (last.tool_calls?.some((tc) => tc.id === actualId))
+                  return prev;
                 const newToolCall = {
                   id: actualId,
                   type: "function" as const,
@@ -286,7 +381,10 @@ export function useGenerator({
                 };
                 return [
                   ...prev.slice(0, -1),
-                  { ...last, tool_calls: [...(last.tool_calls || []), newToolCall] },
+                  {
+                    ...last,
+                    tool_calls: [...(last.tool_calls || []), newToolCall],
+                  },
                 ];
               }
               return prev;
@@ -298,7 +396,10 @@ export function useGenerator({
               for (let i = msgs.length - 1; i >= 0; i--) {
                 if (msgs[i].role === "assistant" && msgs[i].tool_calls) {
                   const toolCallIndex = msgs[i].tool_calls!.findIndex(
-                    (tc) => !msgs.some((m) => m.role === "tool" && m.tool_call_id === tc.id),
+                    (tc) =>
+                      !msgs.some(
+                        (m) => m.role === "tool" && m.tool_call_id === tc.id,
+                      ),
                   );
                   if (toolCallIndex !== -1) {
                     const toolCall = msgs[i].tool_calls![toolCallIndex];
@@ -312,8 +413,18 @@ export function useGenerator({
                       },
                     };
                     const updatedMsgs = [...msgs];
-                    updatedMsgs[i] = { ...msgs[i], tool_calls: updatedToolCalls };
-                    return [...updatedMsgs, { role: "tool", content: result, tool_call_id: toolCall.id }];
+                    updatedMsgs[i] = {
+                      ...msgs[i],
+                      tool_calls: updatedToolCalls,
+                    };
+                    return [
+                      ...updatedMsgs,
+                      {
+                        role: "tool",
+                        content: result,
+                        tool_call_id: toolCall.id,
+                      },
+                    ];
                   }
                   break;
                 }
@@ -323,7 +434,10 @@ export function useGenerator({
               // Just to be safe, if we somehow don't find it, we skip appending or use a dummy ID.
               // However, since it only gets emitted from the parser, it should always have an ID.
               // Let's log a warning but still append to avoid losing the result, except we MUST have a valid ID.
-              console.warn("Couldn't find matching tool call for result:", _name);
+              console.warn(
+                "Couldn't find matching tool call for result:",
+                _name,
+              );
               return prev;
             });
           },
@@ -357,8 +471,14 @@ export function useGenerator({
                     ...prev.slice(0, -1),
                     {
                       ...last,
-                      content: textBufferRef.current ? ((typeof last.content === "string" ? last.content : "") || "") + textBufferRef.current : last.content,
-                      thinking: thinkingBufferRef.current ? (last.thinking || "") + thinkingBufferRef.current : last.thinking
+                      content: textBufferRef.current
+                        ? ((typeof last.content === "string"
+                            ? last.content
+                            : "") || "") + textBufferRef.current
+                        : last.content,
+                      thinking: thinkingBufferRef.current
+                        ? (last.thinking || "") + thinkingBufferRef.current
+                        : last.thinking,
                     },
                   ];
                 }
@@ -380,24 +500,31 @@ export function useGenerator({
                 settings.apiBaseUrl,
                 settings.apiKey,
                 settings.model,
-              ).then((title) => {
-                if (title) {
-                  const current = useConversationStore.getState();
-                  const currentConv = current.conversations[conv.id];
-                  if (currentConv && currentConv.title === DEFAULT_TITLE) {
-                    useConversationStore.getState().renameConversation(conv.id, title);
+              )
+                .then((title) => {
+                  if (title) {
+                    const current = useConversationStore.getState();
+                    const currentConv = current.conversations[conv.id];
+                    if (currentConv && currentConv.title === DEFAULT_TITLE) {
+                      useConversationStore
+                        .getState()
+                        .renameConversation(conv.id, title);
+                    }
                   }
-                }
-              }).catch(() => {
-                // Silently ignore smart naming failures
-              });
+                })
+                .catch(() => {
+                  // Silently ignore smart naming failures
+                });
             }
           },
           onError: (error) => {
             console.error("Generation error:", error);
           },
           onRetry: (attempt, maxAttempts, error) => {
-            console.warn(`Retrying API request (${attempt}/${maxAttempts}):`, error.message);
+            console.warn(
+              `Retrying API request (${attempt}/${maxAttempts}):`,
+              error.message,
+            );
             // Clear partial assistant message from the failed attempt
             setMessages((prev) => {
               const last = prev[prev.length - 1];
@@ -424,7 +551,12 @@ export function useGenerator({
           },
         },
         files,
-        [...(webConfigured ? SEARCH_TOOLS : []), ...MEMORY_TOOLS],
+        [
+          ...(webConfigured ? SEARCH_TOOLS : []),
+          ...(assetConfigured ? ASSET_SEARCH_TOOLS : []),
+          ...NPM_SEARCH_TOOLS,
+          ...MEMORY_TOOLS,
+        ],
         combinedToolHandler,
       );
 
@@ -435,10 +567,23 @@ export function useGenerator({
       gen._model = settings.model;
       gen._searchEngine = webSearchSettings.engine;
       gen._firecrawlKey = webSearchSettings.firecrawlApiKey;
+      gen._assetEngine = assetSearchSettings.engine;
+      gen._pixabayKey = assetSearchSettings.pixabayApiKey;
     }
 
     return generatorRef.current;
-  }, [settings, webSearchSettings, files, activeId, setMessages, setFiles, setTemplate, setIsProjectInitialized, restartSandpack]);
+  }, [
+    settings,
+    webSearchSettings,
+    assetSearchSettings,
+    files,
+    activeId,
+    setMessages,
+    setFiles,
+    setTemplate,
+    setIsProjectInitialized,
+    restartSandpack,
+  ]);
 
   const generate = useCallback(
     async (prompt: string, attachments?: Attachment[]) => {
@@ -453,7 +598,10 @@ export function useGenerator({
           if (att.type === "image") {
             parts.push({ type: "image_url", image_url: { url: att.content } });
           } else {
-            parts.push({ type: "text", text: `[File: ${att.name} | ${att.size}]\n${att.content}` });
+            parts.push({
+              type: "text",
+              text: `[File: ${att.name} | ${att.size}]\n${att.content}`,
+            });
           }
         }
         content = parts;
@@ -467,7 +615,9 @@ export function useGenerator({
       const generator = getGenerator();
       if (generator) {
         const storeState = useConversationStore.getState();
-        const activeConv = storeState.activeId ? storeState.conversations[storeState.activeId] : null;
+        const activeConv = storeState.activeId
+          ? storeState.conversations[storeState.activeId]
+          : null;
         if (activeConv) {
           generator.syncMessages(getMessagesForAPI(activeConv));
         }
@@ -475,7 +625,10 @@ export function useGenerator({
         generator.setSystemPromptSuffix(buildMemoryPromptSection());
       }
 
-      setMessages((prev) => [...removeErrorMessages(prev), { role: "user", content }]);
+      setMessages((prev) => [
+        ...removeErrorMessages(prev),
+        { role: "user", content },
+      ]);
       try {
         if (generator) await generator.generate(prompt, attachments);
       } catch (err: any) {
@@ -483,7 +636,10 @@ export function useGenerator({
         if (err?.name !== "AbortError") {
           setMessages((prev) => [
             ...removeErrorMessages(prev),
-            { role: "assistant", content: `⚠️ ${err?.message || "Unknown error"}` },
+            {
+              role: "assistant",
+              content: `⚠️ ${err?.message || "Unknown error"}`,
+            },
           ]);
         }
       } finally {
@@ -512,8 +668,13 @@ export function useGenerator({
             ...prev.slice(0, -1),
             {
               ...last,
-              content: textBufferRef.current ? ((typeof last.content === "string" ? last.content : "") || "") + textBufferRef.current : last.content,
-              thinking: thinkingBufferRef.current ? (last.thinking || "") + thinkingBufferRef.current : last.thinking
+              content: textBufferRef.current
+                ? ((typeof last.content === "string" ? last.content : "") ||
+                    "") + textBufferRef.current
+                : last.content,
+              thinking: thinkingBufferRef.current
+                ? (last.thinking || "") + thinkingBufferRef.current
+                : last.thinking,
             },
           ];
         }
@@ -605,7 +766,9 @@ export function useGenerator({
       if (generator) {
         // Sync messages from store (error message already removed by setMessages above)
         const storeState = useConversationStore.getState();
-        const activeConv = storeState.activeId ? storeState.conversations[storeState.activeId] : null;
+        const activeConv = storeState.activeId
+          ? storeState.conversations[storeState.activeId]
+          : null;
         if (activeConv) {
           generator.syncMessages(getMessagesForAPI(activeConv));
         }
@@ -617,7 +780,10 @@ export function useGenerator({
       if (err?.name !== "AbortError") {
         setMessages((prev) => [
           ...prev,
-          { role: "assistant", content: `⚠️ ${err?.message || "Unknown error"}` },
+          {
+            role: "assistant",
+            content: `⚠️ ${err?.message || "Unknown error"}`,
+          },
         ]);
       }
     } finally {
@@ -628,7 +794,9 @@ export function useGenerator({
 
   const compressContext = useCallback(async () => {
     const storeState = useConversationStore.getState();
-    const conv = storeState.activeId ? storeState.conversations[storeState.activeId] : null;
+    const conv = storeState.activeId
+      ? storeState.conversations[storeState.activeId]
+      : null;
     if (!conv) return;
 
     setIsGenerating(true);
@@ -646,7 +814,10 @@ export function useGenerator({
     } catch (err: any) {
       setMessages((prev) => [
         ...removeErrorMessages(prev),
-        { role: "assistant", content: `⚠️ ${err?.message || "Compression failed"}` },
+        {
+          role: "assistant",
+          content: `⚠️ ${err?.message || "Compression failed"}`,
+        },
       ]);
     } finally {
       setIsGenerating(false);
@@ -654,7 +825,9 @@ export function useGenerator({
   }, [settings, setMessages, setIsGenerating]);
 
   const review = useCallback(async () => {
-    await generate("Please review all project files for security vulnerabilities. Use list_files and read_files to examine the code. Report any security issues found with severity and location, or confirm no issues were detected. If issues are found, ask if I should fix them automatically.");
+    await generate(
+      "Please review all project files for security vulnerabilities. Use list_files and read_files to examine the code. Report any security issues found with severity and location, or confirm no issues were detected. If issues are found, ask if I should fix them automatically.",
+    );
   }, [generate]);
 
   const continueTask = useCallback(async () => {
@@ -663,19 +836,26 @@ export function useGenerator({
       const generator = getGenerator();
       if (generator) {
         const storeState = useConversationStore.getState();
-        const activeConv = storeState.activeId ? storeState.conversations[storeState.activeId] : null;
+        const activeConv = storeState.activeId
+          ? storeState.conversations[storeState.activeId]
+          : null;
         if (activeConv) {
           generator.syncMessages(getMessagesForAPI(activeConv));
         }
         generator.setSystemPromptSuffix(buildMemoryPromptSection());
-        await generator.generate("Please continue where you left off and complete any unfinished tasks.");
+        await generator.generate(
+          "Please continue where you left off and complete any unfinished tasks.",
+        );
       }
     } catch (err: any) {
       console.error("Error continuing:", err);
       if (err?.name !== "AbortError") {
         setMessages((prev) => [
           ...prev,
-          { role: "assistant", content: `⚠️ ${err?.message || "Unknown error"}` },
+          {
+            role: "assistant",
+            content: `⚠️ ${err?.message || "Unknown error"}`,
+          },
         ]);
       }
     } finally {
@@ -684,5 +864,16 @@ export function useGenerator({
     }
   }, [getGenerator, setIsGenerating, setMessages]);
 
-  return { generate, stop, retry, continueTask, updateFiles, deleteFile, renameFile, moveFile, compressContext, review };
+  return {
+    generate,
+    stop,
+    retry,
+    continueTask,
+    updateFiles,
+    deleteFile,
+    renameFile,
+    moveFile,
+    compressContext,
+    review,
+  };
 }

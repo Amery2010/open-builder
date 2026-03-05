@@ -250,16 +250,20 @@ export function ChatInput({
     const items = e.clipboardData.items;
     for (const item of items) {
       if (isImageType(item.type)) {
-        e.preventDefault();
         const file = item.getAsFile();
-        if (file) processFile(file);
-        return;
+        if (file) {
+          e.preventDefault();
+          processFile(file);
+          return;
+        }
       }
       if (isAcceptedFileType(item.type)) {
-        e.preventDefault();
         const file = item.getAsFile();
-        if (file) processFile(file);
-        return;
+        if (file) {
+          e.preventDefault();
+          processFile(file);
+          return;
+        }
       }
     }
   };

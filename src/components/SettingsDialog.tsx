@@ -12,6 +12,7 @@ import {
 import {
   AISettings,
   WebSearchSettings,
+  AssetSearchSettings,
   SystemSettings,
   Language,
   Theme,
@@ -47,6 +48,8 @@ interface SettingsDialogProps {
   onSave: (settings: AISettings) => void;
   webSearchSettings: WebSearchSettings;
   onSaveWebSearch: (settings: WebSearchSettings) => void;
+  assetSearchSettings: AssetSearchSettings;
+  onSaveAssetSearch: (settings: AssetSearchSettings) => void;
   systemSettings: SystemSettings;
   onSaveSystem: (settings: SystemSettings) => void;
 }
@@ -58,6 +61,8 @@ export function SettingsDialog({
   onSave,
   webSearchSettings,
   onSaveWebSearch,
+  assetSearchSettings,
+  onSaveAssetSearch,
   systemSettings,
   onSaveSystem,
 }: SettingsDialogProps) {
@@ -65,6 +70,8 @@ export function SettingsDialog({
   const [formData, setFormData] = useState<AISettings>(settings);
   const [webSearchForm, setWebSearchForm] =
     useState<WebSearchSettings>(webSearchSettings);
+  const [assetSearchForm, setAssetSearchForm] =
+    useState<AssetSearchSettings>(assetSearchSettings);
   const [systemForm, setSystemForm] = useState<SystemSettings>(systemSettings);
 
   useEffect(() => {
@@ -76,12 +83,17 @@ export function SettingsDialog({
   }, [webSearchSettings]);
 
   useEffect(() => {
+    setAssetSearchForm(assetSearchSettings);
+  }, [assetSearchSettings]);
+
+  useEffect(() => {
     setSystemForm(systemSettings);
   }, [systemSettings]);
 
   const handleSave = () => {
     onSave(formData);
     onSaveWebSearch(webSearchForm);
+    onSaveAssetSearch(assetSearchForm);
     onSaveSystem(systemForm);
     onClose();
   };
@@ -100,6 +112,7 @@ export function SettingsDialog({
           <TabsList className="w-full">
             <TabsTrigger value="model">{t.settings.tabs.model}</TabsTrigger>
             <TabsTrigger value="search">{t.settings.tabs.search}</TabsTrigger>
+            <TabsTrigger value="asset">{t.settings.tabs.asset}</TabsTrigger>
             <TabsTrigger value="system">{t.settings.tabs.system}</TabsTrigger>
           </TabsList>
 
@@ -111,6 +124,14 @@ export function SettingsDialog({
           {/* ── 联网搜索 ── */}
           <TabsContent value="search" className="py-4 space-y-4">
             <WebSearchTab form={webSearchForm} setForm={setWebSearchForm} />
+          </TabsContent>
+
+          {/* ── 素材搜索 ── */}
+          <TabsContent value="asset" className="py-4 space-y-4">
+            <AssetSearchTab
+              form={assetSearchForm}
+              setForm={setAssetSearchForm}
+            />
           </TabsContent>
 
           {/* ── 系统设置 ── */}
@@ -370,11 +391,11 @@ function WebSearchTab({
             <SelectItem value="firecrawl">Firecrawl</SelectItem>
           </SelectContent>
         </Select>
-      </div>
 
-      <p className="text-xs text-muted-foreground">
-        {t.settings.webSearch.desc}
-      </p>
+        <p className="text-xs text-muted-foreground">
+          {t.settings.webSearch.desc}
+        </p>
+      </div>
 
       {form.engine === "tavily" && (
         <>
@@ -455,6 +476,131 @@ function WebSearchTab({
             />
             <p className="text-xs text-muted-foreground">
               {t.settings.firecrawlUrl.hint}
+            </p>
+          </div>
+        </>
+      )}
+    </>
+  );
+}
+
+/* ── Asset Search Tab ── */
+
+function AssetSearchTab({
+  form,
+  setForm,
+}: {
+  form: AssetSearchSettings;
+  setForm: (v: AssetSearchSettings) => void;
+}) {
+  const t = useT();
+  return (
+    <>
+      <div className="space-y-2">
+        <Label htmlFor="assetEngine">
+          <Search size={16} className="inline mr-1" />
+          {t.settings.assetSearch.engine}
+        </Label>
+        <Select
+          value={form.engine}
+          onValueChange={(v) => setForm({ ...form, engine: v as any })}
+        >
+          <SelectTrigger id="assetEngine" className="w-full">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="disabled">
+              {t.settings.assetSearch.disabled}
+            </SelectItem>
+            <SelectItem value="pixabay">Pixabay</SelectItem>
+            <SelectItem value="unsplash">Unsplash</SelectItem>
+          </SelectContent>
+        </Select>
+
+        <p className="text-xs text-muted-foreground">
+          {t.settings.assetSearch.desc}
+        </p>
+      </div>
+
+      {form.engine === "pixabay" && (
+        <>
+          <div className="space-y-2">
+            <Label htmlFor="pixabayApiKey">
+              <Key size={16} className="inline mr-1" />
+              Pixabay API Key
+            </Label>
+            <Input
+              id="pixabayApiKey"
+              type="password"
+              value={form.pixabayApiKey}
+              onChange={(e) =>
+                setForm({ ...form, pixabayApiKey: e.target.value })
+              }
+              placeholder="..."
+            />
+            <p className="text-xs text-muted-foreground">
+              {t.settings.pixabayKey.hint}
+            </p>
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="pixabayApiUrl">
+              <Globe size={16} className="inline mr-1" />
+              Pixabay API URL
+            </Label>
+            <Input
+              id="pixabayApiUrl"
+              type="text"
+              value={form.pixabayApiUrl}
+              onChange={(e) =>
+                setForm({ ...form, pixabayApiUrl: e.target.value })
+              }
+              placeholder="https://pixabay.com/api"
+            />
+            <p className="text-xs text-muted-foreground">
+              {t.settings.pixabayUrl.hint}
+            </p>
+          </div>
+        </>
+      )}
+
+      {form.engine === "unsplash" && (
+        <>
+          <div className="space-y-2">
+            <Label htmlFor="unsplashApiKey">
+              <Key size={16} className="inline mr-1" />
+              Unsplash API Key
+            </Label>
+            <Input
+              id="unsplashApiKey"
+              type="password"
+              value={form.unsplashApiKey}
+              onChange={(e) =>
+                setForm({ ...form, unsplashApiKey: e.target.value })
+              }
+              placeholder="..."
+            />
+            <p className="text-xs text-muted-foreground">
+              {t.settings.unsplashKey.hint}
+            </p>
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="unsplashApiUrl">
+              <Globe size={16} className="inline mr-1" />
+              Unsplash API URL
+            </Label>
+            <Input
+              id="unsplashApiUrl"
+              type="text"
+              value={form.unsplashApiUrl}
+              onChange={(e) =>
+                setForm({ ...form, unsplashApiUrl: e.target.value })
+              }
+              placeholder="https://api.unsplash.com"
+            />
+            <p className="text-xs text-muted-foreground">
+              {t.settings.unsplashUrl.hint}
             </p>
           </div>
         </>

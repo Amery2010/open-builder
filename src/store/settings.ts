@@ -17,6 +17,14 @@ export interface WebSearchSettings {
   firecrawlApiUrl: string;
 }
 
+export interface AssetSearchSettings {
+  engine: "pixabay" | "unsplash" | "disabled";
+  pixabayApiKey: string;
+  pixabayApiUrl: string;
+  unsplashApiKey: string;
+  unsplashApiUrl: string;
+}
+
 export type Language = "system" | "zh" | "en";
 export type Theme = "system" | "light" | "dark";
 
@@ -34,16 +42,19 @@ export interface ModelCache {
 interface SettingsState {
   ai: AISettings;
   webSearch: WebSearchSettings;
+  assetSearch: AssetSearchSettings;
   system: SystemSettings;
   modelCache: ModelCache | null;
 
   setAI: (settings: AISettings) => void;
   setWebSearch: (settings: WebSearchSettings) => void;
+  setAssetSearch: (settings: AssetSearchSettings) => void;
   setSystem: (settings: SystemSettings) => void;
   setModelCache: (cache: ModelCache) => void;
   clearModelCache: () => void;
   isAIValid: () => boolean;
   isWebSearchConfigured: () => boolean;
+  isAssetSearchConfigured: () => boolean;
 }
 
 // ─── Store ────────────────────────────────────────────────────────────────────
@@ -63,6 +74,13 @@ export const useSettingsStore = create<SettingsState>()(
         firecrawlApiKey: "",
         firecrawlApiUrl: "https://api.firecrawl.dev",
       },
+      assetSearch: {
+        engine: "disabled",
+        pixabayApiKey: "",
+        pixabayApiUrl: "https://pixabay.com/api",
+        unsplashApiKey: "",
+        unsplashApiUrl: "https://api.unsplash.com",
+      },
       system: {
         language: "system" as Language,
         theme: "system" as Theme,
@@ -77,6 +95,7 @@ export const useSettingsStore = create<SettingsState>()(
           },
         }),
       setWebSearch: (settings) => set({ webSearch: settings }),
+      setAssetSearch: (settings) => set({ assetSearch: settings }),
       setSystem: (settings) => set({ system: settings }),
       setModelCache: (cache) => set({ modelCache: cache }),
       clearModelCache: () => set({ modelCache: null }),
@@ -93,14 +112,23 @@ export const useSettingsStore = create<SettingsState>()(
         if (webSearch.engine === "firecrawl") return !!webSearch.firecrawlApiKey;
         return false;
       },
+
+      isAssetSearchConfigured: () => {
+        const { assetSearch } = get();
+        if (assetSearch.engine === "disabled") return false;
+        if (assetSearch.engine === "pixabay") return !!assetSearch.pixabayApiKey;
+        if (assetSearch.engine === "unsplash") return !!assetSearch.unsplashApiKey;
+        return false;
+      },
     }),
     {
       name: "open-builder-settings",
-      version: 2,
+      version: 3,
       storage: createJSONStorage(() => localStorage),
       partialize: (state) => ({
         ai: state.ai,
         webSearch: state.webSearch,
+        assetSearch: state.assetSearch,
         system: state.system,
       }),
       migrate: (persisted: unknown, version: number) => {
@@ -117,6 +145,17 @@ export const useSettingsStore = create<SettingsState>()(
           state.webSearch.engine = state.webSearch.tavilyApiKey ? "tavily" : "disabled";
           state.webSearch.firecrawlApiKey = "";
           state.webSearch.firecrawlApiUrl = "https://api.firecrawl.dev";
+        }
+        if (version < 3) {
+          if (!state.assetSearch) {
+            state.assetSearch = {
+              engine: "disabled",
+              pixabayApiKey: "",
+              pixabayApiUrl: "https://pixabay.com/api",
+              unsplashApiKey: "",
+              unsplashApiUrl: "https://api.unsplash.com",
+            };
+          }
         }
         return state as any;
       },

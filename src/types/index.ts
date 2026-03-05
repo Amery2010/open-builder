@@ -12,7 +12,7 @@ export type {
   GeneratorEvents,
 } from "../lib/generator";
 
-export type { AISettings, WebSearchSettings } from "../store/settings";
+export type { AISettings, WebSearchSettings, AssetSearchSettings } from "../store/settings";
 export type { OpenAIClientConfig } from "../lib/client";
 
 // ─── Chat UI types ────────────────────────────────────────────────────────────

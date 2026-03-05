@@ -6,7 +6,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and
 
 ---
 
-## [1.2.0] - 2026-02-28
+## [1.2.0] - 2026-03-05
 
 ### Added
 
@@ -18,6 +18,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and
 - File attachment upload as context input
 - Auto session naming based on conversation content
 - Drag to resize chat and editor panels
+- Image search tool supporting Pixabay and Unsplash
+- NPM search tool for package discovery
+- Global memory tool call for persistent AI context
+- Automatic retry mechanism for failed requests
+- Tauri framework integration for cross-platform desktop app builds
 
 ### Refactored
 
@@ -27,6 +32,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and
 - Improved message list rendering
 - Refactored session list into a sidebar with context menu
 - Rewrote system command descriptions for better project build requirement expression
+- Web search service now supports Tavily and Firecrawl
+- Settings page model and logic improvements
+- Slash commands now appear in correct context
+- Text output effects optimization
+- Markdown rendering improvements for better user experience
+
+### Documentation
+
+- Added English documentation
+- Updated project documentation
 
 ### Misc
 

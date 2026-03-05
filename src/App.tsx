@@ -54,6 +54,8 @@ export default function App() {
     handleSaveSettings,
     webSearchSettings,
     handleSaveWebSearchSettings,
+    assetSearchSettings,
+    handleSaveAssetSearchSettings,
     systemSettings,
     handleSaveSystemSettings,
     template,
@@ -78,6 +80,7 @@ export default function App() {
   } = useGenerator({
     settings,
     webSearchSettings,
+    assetSearchSettings,
     files,
     setMessages,
     setFiles,
@@ -169,6 +172,8 @@ export default function App() {
         onSave={handleSaveSettings}
         webSearchSettings={webSearchSettings}
         onSaveWebSearch={handleSaveWebSearchSettings}
+        assetSearchSettings={assetSearchSettings}
+        onSaveAssetSearch={handleSaveAssetSearchSettings}
         systemSettings={systemSettings}
         onSaveSystem={handleSaveSystemSettings}
       />

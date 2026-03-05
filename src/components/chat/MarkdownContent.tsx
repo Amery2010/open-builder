@@ -46,7 +46,6 @@ function extractLang(children: React.ReactNode): string {
   return "";
 }
 
-
 function CodeBlockHeader({
   lang,
   preRef,
@@ -176,6 +175,16 @@ const assistantComponents = {
   ),
   strong: ({ children }: any) => (
     <strong className="font-semibold">{children}</strong>
+  ),
+  img: ({ src, alt }: any) => (
+    <figure className="my-3">
+      <img src={src} alt={alt} className="rounded-md max-w-full h-auto" />
+      {alt && (
+        <figcaption className="text-xs text-muted-foreground text-center mt-2">
+          {alt}
+        </figcaption>
+      )}
+    </figure>
   ),
 };
 

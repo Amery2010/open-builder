@@ -9,7 +9,12 @@ export const en: typeof zh = {
   },
   settings: {
     title: "Settings",
-    tabs: { model: "Model", search: "Web Search", system: "System" },
+    tabs: {
+      model: "Model",
+      search: "Web Search",
+      asset: "Asset Search",
+      system: "System",
+    },
     cancel: "Cancel",
     save: "Save",
     apiKey: { hint: "Your API key will be saved in browser local storage" },
@@ -38,6 +43,23 @@ export const en: typeof zh = {
     },
     firecrawlUrl: {
       hint: "Optional. Uses Firecrawl official API address by default",
+    },
+    assetSearch: {
+      desc: "After configuration, AI will be able to search for high-quality images",
+      engine: "Search Engine",
+      disabled: "Disabled",
+    },
+    pixabayKey: {
+      hint: "Optional. Enables image asset search after configuration",
+    },
+    pixabayUrl: {
+      hint: "Optional. Uses Pixabay official API address by default",
+    },
+    unsplashKey: {
+      hint: "Optional. Enables image asset search after configuration",
+    },
+    unsplashUrl: {
+      hint: "Optional. Uses Unsplash official API address by default",
     },
     language: {
       label: "Language",
@@ -150,6 +172,8 @@ export const en: typeof zh = {
   },
   tool: {
     results: "results",
+    images: "images",
+    packages: "packages",
     pages: "pages",
     errors: "errors",
     warnings: "warnings",
@@ -159,6 +183,8 @@ export const en: typeof zh = {
     failed: "Failed: ",
     found: "Found ",
     searchResults: "search results",
+    imageResults: "image assets",
+    npmPackages: "npm packages",
     names: {
       init_project: "Initialize Project",
       manage_dependencies: "Manage Dependencies",
@@ -172,6 +198,9 @@ export const en: typeof zh = {
       compact_context: "Compact Context",
       web_search: "Web Search",
       web_reader: "Read Web Page",
+      image_search: "Image Search",
+      search_npm_packages: "Search NPM Packages",
+      get_npm_package_detail: "Get NPM Package Detail",
       manage_memories: "Manage Memories",
     },
   },

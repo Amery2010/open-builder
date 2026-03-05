@@ -28,9 +28,11 @@ export function useAppState() {
   // ── Settings state from zustand ──
   const settings = useSettingsStore((s) => s.ai);
   const webSearchSettings = useSettingsStore((s) => s.webSearch);
+  const assetSearchSettings = useSettingsStore((s) => s.assetSearch);
   const systemSettings = useSettingsStore((s) => s.system);
   const setAI = useSettingsStore((s) => s.setAI);
   const setWebSearch = useSettingsStore((s) => s.setWebSearch);
+  const setAssetSearch = useSettingsStore((s) => s.setAssetSearch);
   const setSystem = useSettingsStore((s) => s.setSystem);
   const isAIValid = useSettingsStore((s) => s.isAIValid);
 
@@ -38,6 +40,7 @@ export function useAppState() {
 
   const handleSaveSettings = setAI;
   const handleSaveWebSearchSettings = setWebSearch;
+  const handleSaveAssetSearchSettings = setAssetSearch;
   const handleSaveSystemSettings = setSystem;
 
   // ── Ephemeral UI state ──
@@ -66,6 +69,8 @@ export function useAppState() {
     handleSaveSettings,
     webSearchSettings,
     handleSaveWebSearchSettings,
+    assetSearchSettings,
+    handleSaveAssetSearchSettings,
     systemSettings,
     handleSaveSystemSettings,
     template,
