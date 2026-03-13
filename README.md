@@ -1,7 +1,5 @@
 <div align="center">
 
-English | [简体中文](README.zh-CN.md)
-
 # Open Builder
 
 **AI-Powered Web App Generator — Describe in natural language, instantly generate runnable projects**
@@ -15,6 +13,8 @@ English | [简体中文](README.zh-CN.md)
 
 [Deployment](#deployment) · [Quick Start](#quick-start) · [Features](#features) · [Architecture](#architecture) · [Contributing](CONTRIBUTING.md)
 
+English | [简体中文](README.zh-CN.md)
+
 </div>
 
 ---
@@ -27,7 +27,7 @@ No backend server required — all computation happens in the browser. Your API 
 
 It also supports building as a desktop app (macOS / Windows / Linux) and mobile app (iOS / Android) via [Tauri](https://tauri.app), delivering a native application experience.
 
-> Compatible with any OpenAI Chat Completions API, including OpenAI, Anthropic Claude, DeepSeek, Qwen, and other major model providers.
+> An API service compatible with a wide range of mainstream models—such as OpenAI, Anthropic, Google, Ollama, and others.
 
 ---
 
@@ -147,21 +147,21 @@ User Message → AI Planning → Tool Call → Execute → Return Result → AI 
 
 Built-in tools:
 
-| Tool                     | Description                                |
-| ------------------------ | ------------------------------------------ |
-| `init_project`           | Initialize Sandpack project template       |
-| `manage_dependencies`    | Modify package.json to manage dependencies |
-| `list_files`             | List all project files                     |
-| `read_files`             | Batch read file contents                   |
-| `write_file`             | Create or overwrite a file                 |
-| `patch_file`             | Precise search-and-replace patch           |
-| `delete_file`            | Delete a file                              |
-| `search_in_files`        | Global file content search                 |
-| `web_search`             | Web search (supports Tavily, Firecrawl)    |
-| `web_reader`             | Read web page content                      |
-| `image_search`           | Image search (supports Pixabay, Unsplash)  |
-| `search_npm_packages`    | NPM package search                         |
-| `get_npm_package_detail` | Get detailed information about NPM package |
+| Tool                     | Description                                       |
+| ------------------------ | ------------------------------------------------- |
+| `init_project`           | Initialize Sandpack project template              |
+| `manage_dependencies`    | Modify package.json to manage dependencies        |
+| `list_files`             | List all project files                            |
+| `read_files`             | Batch read file contents                          |
+| `write_file`             | Create or overwrite a file                        |
+| `patch_file`             | Precise search-and-replace patch                  |
+| `delete_file`            | Delete a file                                     |
+| `search_in_files`        | Global file content search                        |
+| `web_search`             | Web search (supports Built-in, Tavily, Firecrawl) |
+| `web_reader`             | Read web page content                             |
+| `image_search`           | Image search (supports Pixabay, Unsplash)         |
+| `search_npm_packages`    | NPM package search                                |
+| `get_npm_package_detail` | Get detailed information about NPM package        |
 
 ### Tech Stack
 
@@ -182,15 +182,18 @@ Built-in tools:
 
 ## Supported Models
 
-Open Builder is compatible with any OpenAI Chat Completions API:
+Open Builder is compatible with the API formats of mainstream large language models:
 
-| Provider | Recommended Models                   | API URL                                                              |
-| -------- | ------------------------------------ | -------------------------------------------------------------------- |
-| OpenAI   | `gpt-5.3-codex`, `gpt-5.2`           | `https://api.openai.com/v1/chat/completions`                         |
-| DeepSeek | `deepseek-chat`, `deepseek-reasoner` | `https://api.deepseek.com/v1/chat/completions`                       |
-| Qwen     | `qwen-3.5`, `qwen3-coder-plus`       | `https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions` |
-| Moonshot | `kimi-k2.5`                          | `https://api.moonshot.cn/v1/chat/completions`                        |
-| Zhipu AI | `glm-5`                              | `https://open.bigmodel.cn/api/paas/v4/chat/completions`              |
+| Provider  | Recommended Models                   | API URL                                                              |
+| --------- | ------------------------------------ | -------------------------------------------------------------------- |
+| OpenAI    | `gpt-5.3-codex`, `gpt-5.2`           | `https://api.openai.com/v1/responses`                                |
+| Anthropic | `claude-4.6-sonnet`, `claude-opus-4` | `https://api.anthropic.com/v1/messages`                              |
+| Google    | `gemini-2.0-flash-exp`               | `https://generativelanguage.googleapis.com/v1beta/models`            |
+| DeepSeek  | `deepseek-chat`, `deepseek-reasoner` | `https://api.deepseek.com/v1/chat/completions`                       |
+| Qwen      | `qwen-3.5`, `qwen3-coder-plus`       | `https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions` |
+| Moonshot  | `kimi-k2.5`                          | `https://api.moonshot.cn/v1/chat/completions`                        |
+| Zhipu AI  | `glm-5`                              | `https://open.bigmodel.cn/api/paas/v4/chat/completions`              |
+| Ollama    | `gpt-oss:120b`、`qwen3:8b`           | `http://localhost:11434/v1/chat/completions`                         |
 
 > For best results, use a model with strong Function Calling support.
 
