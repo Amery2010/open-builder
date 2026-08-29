@@ -19,6 +19,7 @@ import {
   sanitizeToolExecutionOutputForHistory,
   sanitizeToolResultForHistory,
 } from "../utils/message-security";
+import { formatDesignSelectionContext } from "../design/selection-context";
 
 export const MODEL_MESSAGE_LIMITS = {
   maxTextChars: 160_000,
@@ -132,10 +133,18 @@ export function messagesToModelMessages(
         break;
 
       case "user": {
+        const designSelectionContext = formatDesignSelectionContext(
+          msg.metadata?.designSelection,
+        );
         if (typeof msg.content === "string") {
           result.push({
             role: "user",
-            content: truncateModelText(msg.content, "user message"),
+            content: truncateModelText(
+              designSelectionContext
+                ? `${msg.content}\n\n${designSelectionContext}`
+                : msg.content,
+              "user message",
+            ),
           });
         } else if (Array.isArray(msg.content)) {
           const parts: UserContent = msg.content.map((part: ContentPart) => {
@@ -175,6 +184,9 @@ export function messagesToModelMessages(
               image: imageUrl,
             };
           });
+          if (designSelectionContext) {
+            parts.push({ type: "text", text: designSelectionContext });
+          }
           result.push({ role: "user", content: parts });
         }
         break;

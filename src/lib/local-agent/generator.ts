@@ -251,12 +251,16 @@ export class LocalAgentGenerator implements GenerationBackend {
   private currentRunId: string | null = null;
   private abortRequested = false;
   private planApproved = false;
+  private nativeSearchAllowed = true;
+  private conversationContextAllowed = true;
   private lastPrompt = "";
   private lastFailureHadActivity = false;
 
   private conversationSnapshot(): Conversation {
     return (
-      this.config.getConversation?.() ?? {
+      (this.conversationContextAllowed
+        ? this.config.getConversation?.()
+        : null) ?? {
         id: this.config.conversationId ?? "local-agent-ephemeral",
         title: "Local agent",
         messages: this.host.getMessages(),
@@ -317,6 +321,14 @@ export class LocalAgentGenerator implements GenerationBackend {
 
   setExecutionMode(mode: ExecutionMode): void {
     this.host.setExecutionMode(mode);
+  }
+
+  setNativeSearchAllowed(allowed: boolean): void {
+    this.nativeSearchAllowed = allowed;
+  }
+
+  setConversationContextAllowed(allowed: boolean): void {
+    this.conversationContextAllowed = allowed;
   }
 
   setAllowedMcpAliases(aliases: ReadonlySet<string>): void {
@@ -386,12 +398,12 @@ export class LocalAgentGenerator implements GenerationBackend {
     attachments: ResolvedAttachment[],
     allowResume: boolean,
   ): Promise<GenerateResult> {
+    this.abortRequested = false;
     if (!(await supportsLocalAgents())) {
       throw new Error(
         "Local CLI agents are available only in the desktop application.",
       );
     }
-    this.abortRequested = false;
     this.planApproved = false;
     this.host.beginExternalRun();
     const conversation = this.conversationSnapshot();
@@ -505,6 +517,7 @@ export class LocalAgentGenerator implements GenerationBackend {
     const runContext = this.host.getRunContext();
     const nativeSearch =
       this.config.nativeSearch &&
+      this.nativeSearchAllowed &&
       (runContext.mode === "chat" || runContext.mode === "plan");
     const toolSpecs = await serializeLocalToolSet(
       tools,
@@ -856,6 +869,7 @@ export function createLocalAgentGenerator(
     | "initialSkillContext"
     | "systemPrompt"
     | "maxIterations"
+    | "prepareInitializedProject"
   >,
 ): LocalAgentGenerator {
   const host = new WebAppGenerator(
@@ -886,7 +900,13 @@ export async function runLocalUtilityText(
   config: Pick<LocalAgentClientConfig, "provider" | "model" | "effort">,
   instructions: string,
   prompt: string,
+  options: { timeoutMs?: number; signal?: AbortSignal } = {},
 ): Promise<string> {
+  if (options.signal?.aborted) {
+    throw options.signal.reason instanceof Error
+      ? options.signal.reason
+      : new DOMException("The operation was aborted.", "AbortError");
+  }
   let text = "";
   const generator = createLocalAgentGenerator(
     { ...config, nativeSearch: false },
@@ -901,6 +921,48 @@ export async function runLocalUtilityText(
       systemPrompt: instructions,
     },
   );
-  await generator.generate(prompt);
+  const generation = generator.generate(prompt);
+  const timeoutMs = options.timeoutMs;
+  const signal = options.signal;
+  let timeoutId: ReturnType<typeof globalThis.setTimeout> | undefined;
+  let abortHandler: (() => void) | undefined;
+  try {
+    const guards: Promise<never>[] = [];
+    if (timeoutMs && Number.isFinite(timeoutMs) && timeoutMs > 0) {
+      guards.push(
+        new Promise<never>((_resolve, reject) => {
+          timeoutId = globalThis.setTimeout(() => {
+            generator.abort();
+            const error = new Error(
+              `Local utility generation timed out after ${timeoutMs}ms.`,
+            );
+            error.name = "TimeoutError";
+            reject(error);
+          }, timeoutMs);
+        }),
+      );
+    }
+    if (signal) {
+      guards.push(
+        new Promise<never>((_resolve, reject) => {
+          abortHandler = () => {
+            generator.abort();
+            reject(
+              signal.reason instanceof Error
+                ? signal.reason
+                : new DOMException("The operation was aborted.", "AbortError"),
+            );
+          };
+          signal.addEventListener("abort", abortHandler, { once: true });
+        }),
+      );
+    }
+    await Promise.race([generation, ...guards]);
+  } finally {
+    if (timeoutId !== undefined) globalThis.clearTimeout(timeoutId);
+    if (signal && abortHandler) {
+      signal.removeEventListener("abort", abortHandler);
+    }
+  }
   return text.trim();
 }

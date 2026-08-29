@@ -1,0 +1,63 @@
+:root {
+  --bg: #ededed;
+  --surface: #f7f7f7;
+  --surface-warm: #ffffff;
+  --fg: #1a1a1a;
+  --fg-2: #303030;
+  --muted: #5f5f5f;
+  --meta: #666666;
+  --border: #dedede;
+  --border-soft: #e8e8e8;
+  --accent: #07c160;
+  --accent-on: #0b2b1a;
+  --accent-hover: #10b160;
+  --accent-active: #07a854;
+  --success: #07a854;
+  --warn: #b56b00;
+  --danger: #d93b3b;
+  --font-display:
+    -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", "Noto Sans SC", "Segoe UI", sans-serif;
+  --font-body:
+    -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", "Noto Sans SC", "Segoe UI", sans-serif;
+  --font-mono:
+    ui-monospace, "SF Mono", "Roboto Mono", Menlo, Monaco, Consolas, monospace;
+  --text-xs: 12px;
+  --text-sm: 14px;
+  --text-base: 16px;
+  --text-lg: 18px;
+  --text-xl: 22px;
+  --text-2xl: 28px;
+  --text-3xl: 36px;
+  --text-4xl: 48px;
+  --leading-body: 1.6;
+  --leading-tight: 1.25;
+  --tracking-display: -0.01em;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+  --section-y-desktop: 72px;
+  --section-y-tablet: 48px;
+  --section-y-phone: 32px;
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 16px;
+  --radius-pill: 9999px;
+  --elev-flat: none;
+  --elev-ring: 0 0 0 1px #dedede;
+  --elev-raised: 0 8px 28px rgba(0, 0, 0, 0.1);
+  --focus-ring: 0 0 0 3px rgba(7, 193, 96, 0.32);
+  --motion-fast: 100ms;
+  --motion-base: 180ms;
+  --ease-standard: cubic-bezier(0.25, 0.1, 0.25, 1);
+  --container-max: 1200px;
+  --container-gutter-desktop: 24px;
+  --container-gutter-tablet: 20px;
+  --container-gutter-phone: 16px;
+}

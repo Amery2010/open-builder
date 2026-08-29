@@ -6,7 +6,7 @@ import type {
   GenerationBackend,
   GeneratorEvents,
 } from "../lib/ai/generator";
-import { useConversationStore } from "../store/conversation";
+import { DEFAULT_TITLE, useConversationStore } from "../store/conversation";
 import { useSettingsStore } from "../store/settings";
 import { useInteractiveStore } from "../store/interactive";
 import { useSubagentStore } from "../store/subagent";
@@ -23,6 +23,9 @@ import type {
   Attachment,
   GeneratorRunState,
   StructuredGenerationError,
+  WorkspaceMode,
+  DesignSelectionContext,
+  ResolvedAttachment,
 } from "../types";
 import { useMemoryStore } from "../store/memory";
 import { useFileOperations } from "./useFileOperations";
@@ -38,7 +41,11 @@ import {
 } from "../lib/ai/run-guard";
 import { getT } from "../i18n";
 import type { McpRuntimeBundle } from "../lib/mcp/runtime";
-import type { ExecutionMode, RuntimePlatform } from "../lib/ai/tools-schema";
+import type {
+  ExecutionMode,
+  RuntimePlatform,
+  ToolProfile,
+} from "../lib/ai/tools-schema";
 import { TOOL_POLICY_VERSION } from "../lib/ai/tool-policy-version";
 import { getSkillRegistry } from "../lib/skills/instance";
 import {
@@ -61,6 +68,21 @@ import { PLAN_MODE_SYSTEM_SUFFIX } from "../lib/ai/plan-mode";
 import { buildRunSystemPromptSuffix } from "../lib/ai/run-system-prompt";
 import { buildCustomSystemPromptSection } from "../lib/ai/custom-system-prompt";
 import { appendBufferedAssistantOutput } from "../lib/utils/stream-output";
+import {
+  DESIGN_MODE_SYSTEM_SUFFIX,
+  loadDesignSystemContext,
+} from "../lib/ai/design-mode";
+import { formatDesignSelectionForModel } from "../lib/design/selection-context";
+import {
+  buildDesignReviewRequirementsContext,
+  buildDesignReviewSemanticContext,
+  DESIGN_REVIEW_REQUEST,
+  DESIGN_REVIEW_SYSTEM_SUFFIX,
+  getDesignReviewScreenshotByteLength,
+  validateDesignReviewScreenshots,
+  type DesignReviewScreenshot,
+} from "../lib/design/review";
+import { useDesignReviewStore } from "../store/design-review";
 
 interface GeneratorConfigSnapshot {
   runtime: AISettings["runtime"];
@@ -170,6 +192,42 @@ const AUTO_QA_PROMPT =
 interface GenerateRunOptions {
   skipAutoQa?: boolean;
   forcedSkillIds?: string[];
+  designSelection?: DesignSelectionContext;
+  allowDesignSystemApply?: boolean;
+  /** Request-scoped preparation that must run after the optimistic message and
+   * loading state are visible, but before generator setup and provider I/O. */
+  prepareRun?: () => Promise<void>;
+}
+
+function getConversationWorkspaceContext(conversationId: string | undefined): {
+  workspaceMode: WorkspaceMode;
+  promptWorkspaceMode: WorkspaceMode;
+  mode: ExecutionMode;
+  profile: ToolProfile;
+} {
+  const conversation = conversationId
+    ? useConversationStore.getState().conversations[conversationId]
+    : undefined;
+  const workspaceMode = conversation?.workspaceMode ?? "auto";
+  const returnsToDesign =
+    workspaceMode === "plan" && conversation?.planReturnMode === "design";
+  return {
+    workspaceMode,
+    promptWorkspaceMode:
+      workspaceMode === "design" || returnsToDesign ? "design" : workspaceMode,
+    mode: workspaceMode === "plan" ? "plan" : "chat",
+    profile:
+      workspaceMode === "design" || returnsToDesign ? "design" : "default",
+  };
+}
+
+function sameProjectFiles(first: ProjectFiles, second: ProjectFiles): boolean {
+  const firstPaths = Object.keys(first);
+  const secondPaths = Object.keys(second);
+  return (
+    firstPaths.length === secondPaths.length &&
+    firstPaths.every((path) => first[path] === second[path])
+  );
 }
 
 interface GeneratorRuntime {
@@ -191,6 +249,8 @@ interface GeneratorRuntime {
     mode?: ExecutionMode;
     runtimePlatform: RuntimePlatform;
     allowedDynamicNames?: ReadonlySet<string>;
+    profile?: ToolProfile;
+    allowDesignSystemApply?: boolean;
   }) => ToolSet;
 }
 
@@ -225,18 +285,24 @@ function loadGeneratorRuntime(): Promise<GeneratorRuntime> {
         mode = planMode ? "plan" : "chat",
         runtimePlatform,
         allowedDynamicNames = new Set(),
+        profile = "default",
+        allowDesignSystemApply = false,
       }: {
         custom: ToolSet;
         planMode: boolean;
         mode?: ExecutionMode;
         runtimePlatform: RuntimePlatform;
         allowedDynamicNames?: ReadonlySet<string>;
+        profile?: ToolProfile;
+        allowDesignSystemApply?: boolean;
       }): ToolSet =>
         toolsSchema.buildToolSetForRun({
           custom,
           mode,
           platform: runtimePlatform,
           allowedDynamicNames,
+          profile,
+          allowDesignSystemApply,
         });
 
       return {
@@ -296,11 +362,13 @@ export function useGenerator({
   const lastCharTimeRef = useRef(0);
   const lastThinkingTimeRef = useRef(0);
   const runConversationIdRef = useRef<string | null>(null);
+  const generationRunEpochRef = useRef(0);
   const forcedSkillsPromptRef = useRef("");
   const customSystemPromptRef = useRef("");
   const requestPromptContextRef = useRef("");
   const baseCustomToolSetRef = useRef<ToolSet>({});
   const mcpRuntimeRef = useRef<McpRuntimeBundle | null>(null);
+  const activeToolProfileRef = useRef<ToolProfile>("default");
 
   const clearOutputBuffers = useCallback(() => {
     if (typewriterTimerRef.current) {
@@ -327,18 +395,21 @@ export function useGenerator({
 
   useEffect(
     () => () => {
+      generationRunEpochRef.current += 1;
       generatorConstructionEpochRef.current += 1;
       clearOutputBuffers();
       forcedSkillsPromptRef.current = "";
       customSystemPromptRef.current = "";
       requestPromptContextRef.current = "";
       mcpRuntimeRef.current = null;
+      activeToolProfileRef.current = "default";
       generatorRef.current?.abort();
     },
     [clearOutputBuffers],
   );
 
   const invalidateGenerator = useCallback(() => {
+    generationRunEpochRef.current += 1;
     generatorConstructionEpochRef.current += 1;
     generatorRef.current?.abort();
     generatorRef.current = null;
@@ -349,6 +420,7 @@ export function useGenerator({
     requestPromptContextRef.current = "";
     baseCustomToolSetRef.current = {};
     mcpRuntimeRef.current = null;
+    activeToolProfileRef.current = "default";
     clearOutputBuffers();
     setIsThinkingStreaming(false);
     useInteractiveStore.getState().rejectAllPending("project reset");
@@ -357,6 +429,7 @@ export function useGenerator({
 
   useEffect(() => {
     if (prevActiveIdRef.current === activeId) return;
+    generationRunEpochRef.current += 1;
     generatorConstructionEpochRef.current += 1;
     generatorRef.current?.abort();
     generatorRef.current = null;
@@ -367,6 +440,7 @@ export function useGenerator({
     requestPromptContextRef.current = "";
     baseCustomToolSetRef.current = {};
     mcpRuntimeRef.current = null;
+    activeToolProfileRef.current = "default";
     clearOutputBuffers();
     prevActiveIdRef.current = activeId;
     useInteractiveStore.getState().rejectAllPending("conversation switched");
@@ -391,7 +465,11 @@ export function useGenerator({
   }, [settings]);
 
   const generateLocalUtilityText = useCallback(
-    async (instructions: string, prompt: string) => {
+    async (
+      instructions: string,
+      prompt: string,
+      options?: { timeoutMs?: number; signal?: AbortSignal },
+    ) => {
       const provider = settings.localAgent.provider;
       const preferences = settings.localAgent[provider];
       const { runLocalUtilityText } =
@@ -404,9 +482,36 @@ export function useGenerator({
         },
         instructions,
         prompt,
+        options,
       );
     },
     [settings.localAgent],
+  );
+
+  const generateUtilityText = useCallback(
+    async (
+      instructions: string,
+      prompt: string,
+      options?: { timeoutMs?: number; signal?: AbortSignal },
+    ) => {
+      if (settings.runtime === "localCli") {
+        return generateLocalUtilityText(instructions, prompt, options);
+      }
+      const [{ generateText }, { getProviderModel }] = await Promise.all([
+        import("ai"),
+        import("../lib/ai/provider"),
+      ]);
+      const result = await generateText({
+        model: getProviderModel(await resolveEffectiveConfig()),
+        instructions,
+        prompt,
+        maxRetries: 0,
+        abortSignal: options?.signal,
+        timeout: options?.timeoutMs,
+      });
+      return result.text.trim();
+    },
+    [generateLocalUtilityText, resolveEffectiveConfig, settings.runtime],
   );
 
   const { triggerSmartTitle, compressContext } = useTitleAndCompression({
@@ -515,6 +620,7 @@ export function useGenerator({
       runConversationIdRef.current = null;
       baseCustomToolSetRef.current = {};
       mcpRuntimeRef.current = null;
+      activeToolProfileRef.current = "default";
       clearOutputBuffers();
       setIsThinkingStreaming(false);
       prevActiveIdRef.current = currentActiveId;
@@ -539,6 +645,7 @@ export function useGenerator({
       generatorConfigRef.current = null;
       baseCustomToolSetRef.current = {};
       mcpRuntimeRef.current = null;
+      activeToolProfileRef.current = "default";
     }
 
     if (!generatorRef.current) {
@@ -632,6 +739,24 @@ export function useGenerator({
           });
           return approved;
         },
+        onDesignSystemApplied: (reference) => {
+          if (!isCurrentGeneratorRun(generatorConversationId)) return;
+          useConversationStore.getState().setDesignState((current) => ({
+            ...current,
+            selectedSystem: reference,
+            appliedSystem: reference,
+          }));
+        },
+        getSelectedDesignSystemId: () =>
+          generatorConversationId
+            ? useConversationStore.getState().conversations[
+                generatorConversationId
+              ]?.designState?.selectedSystem?.id
+            : undefined,
+        onDesignReviewSubmitted: (report) => {
+          if (!isCurrentGeneratorRun(generatorConversationId)) return;
+          useDesignReviewStore.getState().complete(report);
+        },
         filesBridge: {
           getFiles: () =>
             isCurrentGeneratorRun(generatorConversationId)
@@ -709,11 +834,14 @@ export function useGenerator({
           : undefined,
       });
 
-      const initialPlanMode =
-        useSettingsStore.getState().system.planModeEnabled;
+      const initialWorkspace = getConversationWorkspaceContext(
+        generatorConversationId,
+      );
       const initialTools = runtime.buildToolSet({
         custom: customToolSet,
-        planMode: initialPlanMode,
+        planMode: initialWorkspace.mode === "plan",
+        mode: initialWorkspace.mode,
+        profile: initialWorkspace.profile,
         runtimePlatform,
       });
 
@@ -917,7 +1045,9 @@ export function useGenerator({
           setIsThinkingStreaming(false);
           setRunState("completed");
           flushOutputBuffers();
-          createSnapshotForCurrentState();
+          if (activeToolProfileRef.current !== "design_review") {
+            createSnapshotForCurrentState();
+          }
         },
         onError: (error) => {
           if (!isCurrentGeneratorRun(generatorConversationId)) return;
@@ -992,10 +1122,11 @@ export function useGenerator({
         },
         onPlanApproved: async () => {
           if (!isCurrentGeneratorRun(generatorConversationId)) return;
-          const { system, setSystem } = useSettingsStore.getState();
-          if (system.planModeEnabled) {
-            setSystem({ ...system, planModeEnabled: false });
-          }
+          const returnMode = useConversationStore
+            .getState()
+            .returnFromPlan(generatorConversationId);
+          const profile: ToolProfile =
+            returnMode === "design" ? "design" : "default";
           generatorRef.current?.setReadOnlyMode(false);
           generatorRef.current?.setExecutionMode("chat");
           const mcpRuntime = await runtime.mcpManager.prepareRuntime();
@@ -1020,6 +1151,8 @@ export function useGenerator({
           return runtime.buildToolSet({
             custom,
             planMode: false,
+            mode: "chat",
+            profile,
             runtimePlatform,
             allowedDynamicNames: new Set(mcpRuntime.aliases.keys()),
           });
@@ -1030,6 +1163,86 @@ export function useGenerator({
           }
           return dispatchSubagent(...args);
         },
+        prepareInitializedProject: async (initializedFiles, context) => {
+          if (
+            activeToolProfileRef.current !== "design" ||
+            !generatorConversationId
+          ) {
+            return;
+          }
+          if (
+            context.signal.aborted ||
+            !isCurrentGeneratorRun(generatorConversationId)
+          ) {
+            throw new DOMException("conversation switched", "AbortError");
+          }
+          const selectedAtStart =
+            useConversationStore.getState().conversations[
+              generatorConversationId
+            ]?.designState?.selectedSystem;
+          if (!selectedAtStart || selectedAtStart.source === "legacy") return;
+
+          const [applyModule, projectFilesModule] = await Promise.all([
+            import("../lib/design-systems/apply"),
+            import("../lib/utils/project-files"),
+          ]);
+          const pkg = await applyModule.loadDesignSystemPackage(
+            selectedAtStart.id,
+          );
+          if (
+            context.signal.aborted ||
+            !isCurrentGeneratorRun(generatorConversationId)
+          ) {
+            throw new DOMException("conversation switched", "AbortError");
+          }
+          const selectedNow =
+            useConversationStore.getState().conversations[
+              generatorConversationId
+            ]?.designState?.selectedSystem;
+          if (
+            !selectedNow ||
+            selectedNow.id !== selectedAtStart.id ||
+            selectedNow.digest !== selectedAtStart.digest
+          ) {
+            throw new Error(
+              "The selected Design system changed during project initialization. Retry the request.",
+            );
+          }
+          if (
+            selectedAtStart.digest &&
+            pkg.reference.digest !== selectedAtStart.digest
+          ) {
+            throw new Error(
+              "The selected Design system package changed. Select it again before retrying.",
+            );
+          }
+          const applied = applyModule.applyDesignSystemPackage(
+            initializedFiles,
+            pkg,
+          );
+          const validation = projectFilesModule.validateProjectFiles(
+            applied.files,
+          );
+          if (!validation.ok) throw new Error(validation.error);
+
+          return {
+            files: applied.files,
+            changes: applied.changes,
+            resultNote: `applied selected design system "${pkg.reference.id}" and wrote root DESIGN.md and tokens.css`,
+            onCommitted: () => {
+              useConversationStore
+                .getState()
+                .setDesignStateForConversation(
+                  generatorConversationId,
+                  (current) => ({
+                    ...current,
+                    selectedSystem: pkg.reference,
+                    appliedSystem: pkg.reference,
+                  }),
+                );
+            },
+          };
+        },
         runtimePlatform,
       } satisfies Pick<
         import("../lib/ai/generator").GeneratorOptions,
@@ -1039,6 +1252,7 @@ export function useGenerator({
         | "requestPlanApproval"
         | "onPlanApproved"
         | "dispatchSubagent"
+        | "prepareInitializedProject"
         | "runtimePlatform"
       >;
 
@@ -1143,17 +1357,33 @@ export function useGenerator({
       dynamicOptions: {
         includeMcp?: boolean;
         mode?: ExecutionMode;
+        workspaceMode?: WorkspaceMode;
+        profile?: ToolProfile;
+        allowDesignSystemApply?: boolean;
         customSystemPromptSnapshot?: string;
       } = {},
     ) => {
       const runtime = await loadGeneratorRuntime();
-      const planMode = useSettingsStore.getState().system.planModeEnabled;
-      const mode = dynamicOptions.mode ?? (planMode ? "plan" : "chat");
+      const conversationId = generator.getRunContext().conversationId;
+      const workspace = getConversationWorkspaceContext(conversationId);
+      const promptWorkspaceMode =
+        dynamicOptions.workspaceMode ?? workspace.promptWorkspaceMode;
+      const mode = dynamicOptions.mode ?? workspace.mode;
+      const profile = dynamicOptions.profile ?? workspace.profile;
+      const isDesignReview = profile === "design_review";
+      activeToolProfileRef.current = profile;
+      generator.setNativeSearchAllowed?.(mode !== "auto_qa" && !isDesignReview);
+      generator.setConversationContextAllowed?.(!isDesignReview);
       const mcpRuntime = await runtime.mcpManager.prepareRuntime({
-        includeMcp: mode === "auto_qa" ? false : dynamicOptions.includeMcp,
+        includeMcp:
+          mode === "auto_qa" || isDesignReview
+            ? false
+            : dynamicOptions.includeMcp,
       });
       mcpRuntimeRef.current =
-        dynamicOptions.includeMcp === false ? null : mcpRuntime;
+        dynamicOptions.includeMcp === false || isDesignReview
+          ? null
+          : mcpRuntime;
       const customToolSet = {
         ...baseCustomToolSetRef.current,
         ...mcpRuntime.tools,
@@ -1161,11 +1391,13 @@ export function useGenerator({
       generator.setCustomToolSet(customToolSet);
       generator.setExecutionMode(mode);
       generator.setAllowedMcpAliases(
-        mode === "chat"
-          ? new Set(mcpRuntime.aliases.keys())
-          : mode === "plan"
-            ? mcpRuntime.planModeToolNames
-            : new Set(),
+        isDesignReview
+          ? new Set()
+          : mode === "chat"
+            ? new Set(mcpRuntime.aliases.keys())
+            : mode === "plan"
+              ? mcpRuntime.planModeToolNames
+              : new Set(),
       );
       generator.setTools(
         runtime.buildToolSet({
@@ -1179,13 +1411,17 @@ export function useGenerator({
               : mode === "plan"
                 ? mcpRuntime.planModeToolNames
                 : new Set(),
+          profile,
+          allowDesignSystemApply:
+            profile === "design" &&
+            dynamicOptions.allowDesignSystemApply === true,
         }),
       );
       if (mcpRuntime.warnings.length > 0) {
         console.warn("Some MCP servers are unavailable:", mcpRuntime.warnings);
       }
       const memorySuffix =
-        mode === "chat"
+        mode === "chat" && !isDesignReview
           ? runtime.buildMemoryPromptSection(useMemoryStore.getState().getAll())
           : "";
       const customSystemPromptSnapshot =
@@ -1195,7 +1431,11 @@ export function useGenerator({
       skillContext.clear();
       let skillsSuffix = "";
       let forcedSkillsSuffix = "";
-      if ((mode === "chat" || mode === "plan") && runtime.isSkillsAvailable()) {
+      if (
+        !isDesignReview &&
+        (mode === "chat" || mode === "plan") &&
+        runtime.isSkillsAvailable()
+      ) {
         const registry = await runtime.getSkillRegistry();
         skillsSuffix = runtime.buildSkillsPromptSection(
           registry.getAutoEnabled(),
@@ -1208,6 +1448,14 @@ export function useGenerator({
           "Forced skills cannot be loaded because skill storage is unavailable.",
         );
       }
+      const designState = conversationId
+        ? useConversationStore.getState().conversations[conversationId]
+            ?.designState
+        : undefined;
+      const designSystemContext =
+        promptWorkspaceMode === "design"
+          ? await loadDesignSystemContext(designState)
+          : "";
       const promptSuffix = buildRunSystemPromptSuffix({
         mode,
         memory: memorySuffix,
@@ -1215,6 +1463,9 @@ export function useGenerator({
         mandatorySkills: forcedSkillsSuffix,
         customSystemPrompt: customSystemPromptSnapshot,
         planMode: PLAN_MODE_SYSTEM_SUFFIX,
+        workspaceMode: promptWorkspaceMode,
+        designMode: DESIGN_MODE_SYSTEM_SUFFIX,
+        designSystem: designSystemContext,
       });
       const customSystemPromptSuffix =
         mode === "chat" || mode === "plan"
@@ -1225,9 +1476,14 @@ export function useGenerator({
       // Keep the exact request-start snapshot for an approved Plan's next
       // provider iteration, even if settings change while approval is pending.
       requestPromptContextRef.current =
-        skillsSuffix + customSystemPromptSuffix + forcedSkillsSuffix;
+        skillsSuffix +
+        customSystemPromptSuffix +
+        forcedSkillsSuffix +
+        (promptWorkspaceMode === "design"
+          ? DESIGN_MODE_SYSTEM_SUFFIX + designSystemContext
+          : "");
       generator.setUntrustedReferenceContext(
-        mode === "auto_qa" ? "" : mcpRuntime.instructions,
+        mode === "auto_qa" || isDesignReview ? "" : mcpRuntime.instructions,
       );
       generator.setSystemPromptSuffix(promptSuffix);
     },
@@ -1235,11 +1491,26 @@ export function useGenerator({
   );
 
   const runAutomaticQa = useCallback(
-    async (generator: GenerationBackend, result: GenerateResult | null) => {
-      const runConversationId = runConversationIdRef.current;
-      if (!isCurrentGeneratorRun(runConversationId)) return;
+    async (
+      generator: GenerationBackend,
+      result: GenerateResult | null,
+      runConversationId: string,
+      runEpoch: number,
+    ) => {
+      const isCurrentRun = () =>
+        generationRunEpochRef.current === runEpoch &&
+        isCurrentGeneratorRun(runConversationId);
+      if (!isCurrentRun()) return;
       const system = useSettingsStore.getState().system;
-      if (!system.autoQaEnabled || system.planModeEnabled) return;
+      const conversation = runConversationId
+        ? useConversationStore.getState().conversations[runConversationId]
+        : undefined;
+      if (
+        !system.autoQaEnabled ||
+        conversation?.workspaceMode === "plan" ||
+        conversation?.workspaceMode === "design"
+      )
+        return;
       if (!result || result.aborted || result.maxIterationsReached) return;
       if (Object.keys(generator.getFiles()).length === 0) return;
 
@@ -1247,7 +1518,7 @@ export function useGenerator({
         includeMcp: false,
         mode: "auto_qa",
       });
-      if (!isCurrentGeneratorRun(runConversationId)) return;
+      if (!isCurrentRun()) return;
       setRunState("autoQa");
       useInteractiveStore.getState().rejectAllPending("automatic QA started");
       setMessages((prev) => [
@@ -1262,7 +1533,7 @@ export function useGenerator({
         await generator.generate(AUTO_QA_PROMPT);
       } catch (err: any) {
         if (err?.name === "AbortError") throw err;
-        if (!isCurrentGeneratorRun(runConversationId)) return;
+        if (!isCurrentRun()) return;
         console.error("Automatic QA failed:", err);
         appendGenerationError(
           new Error(`Automatic QA failed: ${err?.message || "Unknown error"}`),
@@ -1285,6 +1556,8 @@ export function useGenerator({
     ) => {
       const runConversationId = useConversationStore.getState().activeId;
       if (!runConversationId) return;
+      const runEpoch = ++generationRunEpochRef.current;
+      generatorRef.current?.abort();
       const customSystemPromptSnapshot =
         useSettingsStore.getState().system.customSystemPrompt;
       runConversationIdRef.current = runConversationId;
@@ -1294,92 +1567,104 @@ export function useGenerator({
       setIsGenerating(true);
 
       const content = prompt;
+      const modelPrompt = formatDesignSelectionForModel(
+        prompt,
+        options.designSelection,
+      );
       const attachmentRefs = attachments?.map(toAttachmentRef) ?? [];
+      const messageMetadata =
+        attachmentRefs.length > 0 || options.designSelection
+          ? {
+              ...(attachmentRefs.length > 0
+                ? { attachments: attachmentRefs }
+                : {}),
+              ...(options.designSelection
+                ? { designSelection: options.designSelection }
+                : {}),
+            }
+          : undefined;
 
-      let userMessageAdded = false;
+      const previousConversation =
+        useConversationStore.getState().conversations[runConversationId];
+      const currentRequest: Message = {
+        role: "user",
+        content,
+        forcedSkillIds: options.forcedSkillIds,
+        ...(messageMetadata ? { metadata: messageMetadata } : {}),
+      };
+      const titleRequest =
+        previousConversation?.messages.find(
+          (message) =>
+            message.role === "user" && message.metadata?.origin !== "auto_qa",
+        ) ?? currentRequest;
+      const shouldGenerateTitle = previousConversation?.title === DEFAULT_TITLE;
+      const isCurrentRun = () =>
+        generationRunEpochRef.current === runEpoch &&
+        isCurrentGeneratorRun(runConversationId);
+
+      useInteractiveStore.getState().rejectAllPending("new generation started");
+      setMessages((prev) => [...removeErrorMessages(prev), currentRequest]);
+      if (shouldGenerateTitle) {
+        void triggerSmartTitle({
+          conversationId: runConversationId,
+          firstRequest: titleRequest,
+          config: {
+            apiType: settings.apiType,
+            apiBaseUrl: settings.apiBaseUrl,
+            apiKey: settings.apiKey,
+            model: settings.model,
+          },
+        });
+      }
+
       try {
+        await options.prepareRun?.();
+        if (!isCurrentRun()) return;
         const resolvedAttachments = attachments?.length
           ? await resolveAttachmentsForModel(attachments)
           : undefined;
+        if (!isCurrentRun()) return;
         const generator = await getGenerator();
-        if (!isCurrentGeneratorRun(runConversationId)) return;
+        if (!isCurrentRun()) return;
         if (generator) {
-          const storeState = useConversationStore.getState();
-          const activeConv = runConversationId
-            ? storeState.conversations[runConversationId]
-            : null;
-          if (activeConv) {
-            generator.syncMessages(await getMessagesForAPI(activeConv));
+          if (previousConversation) {
+            generator.syncMessages(
+              await getMessagesForAPI(previousConversation),
+            );
           }
+          if (!isCurrentRun()) return;
           await applyDynamicGeneratorState(
             generator,
             options.forcedSkillIds ?? [],
-            { customSystemPromptSnapshot },
+            {
+              customSystemPromptSnapshot,
+              allowDesignSystemApply: options.allowDesignSystemApply,
+            },
           );
         }
-        if (!isCurrentGeneratorRun(runConversationId)) return;
-        useInteractiveStore
-          .getState()
-          .rejectAllPending("new generation started");
-
-        setMessages((prev) => [
-          ...removeErrorMessages(prev),
-          {
-            role: "user",
-            content,
-            forcedSkillIds: options.forcedSkillIds,
-            ...(attachmentRefs.length > 0
-              ? { metadata: { attachments: attachmentRefs } }
-              : {}),
-          },
-        ]);
-        userMessageAdded = true;
+        if (!isCurrentRun()) return;
         if (generator) {
-          const result = await generator.generate(prompt, resolvedAttachments);
-          if (
-            isCurrentGeneratorRun(runConversationId) &&
-            !result.aborted &&
-            !result.maxIterationsReached
-          ) {
-            const completedMessages =
-              useConversationStore.getState().conversations[runConversationId]
-                ?.messages ?? result.messages;
-            void triggerSmartTitle({
-              conversationId: runConversationId,
-              completedMessages: [...completedMessages],
-              config: {
-                apiType: settings.apiType,
-                apiBaseUrl: settings.apiBaseUrl,
-                apiKey: settings.apiKey,
-                model: settings.model,
-              },
-            });
-          }
+          const result = await generator.generate(
+            modelPrompt,
+            resolvedAttachments,
+          );
           if (!options.skipAutoQa) {
-            await runAutomaticQa(generator, result);
+            await runAutomaticQa(
+              generator,
+              result,
+              runConversationId,
+              runEpoch,
+            );
           }
         }
       } catch (err: any) {
-        if (!isCurrentGeneratorRun(runConversationId)) return;
-        if (!userMessageAdded) {
-          setMessages((prev) => [
-            ...removeErrorMessages(prev),
-            {
-              role: "user",
-              content,
-              forcedSkillIds: options.forcedSkillIds,
-              ...(attachmentRefs.length > 0
-                ? { metadata: { attachments: attachmentRefs } }
-                : {}),
-            },
-          ]);
-        }
+        if (!isCurrentRun()) return;
         console.error("Error generating:", err);
         if (err?.name !== "AbortError") {
           appendGenerationError(err, { replaceExisting: true });
         }
       } finally {
-        if (isCurrentGeneratorRun(runConversationId)) {
+        if (isCurrentRun()) {
           setMessages((prev) => filterMemoryMessages(prev));
           setIsGenerating(false);
           setIsThinkingStreaming(false);
@@ -1410,6 +1695,7 @@ export function useGenerator({
   );
 
   const stop = useCallback(() => {
+    generationRunEpochRef.current += 1;
     setIsThinkingStreaming(false);
     flushOutputBuffers();
     generatorRef.current?.abort();
@@ -1509,6 +1795,178 @@ export function useGenerator({
     );
   }, [generate]);
 
+  const designReview = useCallback(
+    async (screenshots: readonly DesignReviewScreenshot[]) => {
+      if (runConversationIdRef.current !== null) {
+        useDesignReviewStore
+          .getState()
+          .fail("Wait for the active generation to finish before reviewing.");
+        return;
+      }
+      const runConversationId = useConversationStore.getState().activeId;
+      const conversation = runConversationId
+        ? useConversationStore.getState().conversations[runConversationId]
+        : undefined;
+      if (!runConversationId || !conversation) {
+        useDesignReviewStore.getState().fail("No active Design project.");
+        return;
+      }
+      if (conversation.workspaceMode !== "design") {
+        useDesignReviewStore
+          .getState()
+          .fail("Design Review is available only in Design mode.");
+        return;
+      }
+      try {
+        validateDesignReviewScreenshots(screenshots);
+      } catch (error) {
+        useDesignReviewStore
+          .getState()
+          .fail(error instanceof Error ? error.message : String(error));
+        return;
+      }
+
+      const beforeFiles = { ...conversation.files };
+      const beforeMessages = [...conversation.messages];
+      let reviewGenerator: GenerationBackend | null = null;
+      runConversationIdRef.current = runConversationId;
+      setRunState("preparing");
+      setLastError(null);
+      setIsThinkingStreaming(false);
+      setIsGenerating(true);
+      useDesignReviewStore.getState().setStatus("reviewing");
+      try {
+        const generator = await getGenerator();
+        if (!generator) {
+          throw new Error(
+            "Configure an AI model before running Design Review.",
+          );
+        }
+        reviewGenerator = generator;
+        if (!isCurrentGeneratorRun(runConversationId)) return;
+        // Review receives only its screenshots plus a bounded text-only
+        // requirements extract. Historical attachments, tool traffic, and
+        // resumable Local CLI sessions remain outside this isolated run.
+        generator.syncMessages([]);
+        await applyDynamicGeneratorState(generator, [], {
+          includeMcp: false,
+          mode: "chat",
+          workspaceMode: "auto",
+          profile: "design_review",
+          customSystemPromptSnapshot: "",
+        });
+        generator.setSystemPromptSuffix(
+          DESIGN_REVIEW_SYSTEM_SUFFIX +
+            buildDesignReviewRequirementsContext(conversation.messages) +
+            buildDesignReviewSemanticContext(screenshots),
+        );
+        if (!isCurrentGeneratorRun(runConversationId)) return;
+
+        setMessages((previous) => [
+          ...removeErrorMessages(previous),
+          {
+            role: "user",
+            content: DESIGN_REVIEW_REQUEST,
+            metadata: { origin: "design_review" },
+          },
+        ]);
+        const attachments: ResolvedAttachment[] = screenshots.map(
+          (screenshot, index) => ({
+            id: `design-review-${runConversationId}-${index}`,
+            type: "image",
+            name:
+              screenshot.name
+                ?.replace(/[\u0000-\u001f\u007f<>]/g, " ")
+                .replace(/\s+/g, " ")
+                .trim()
+                .slice(0, 160) || `screenshot-${index + 1}.png`,
+            mimeType: screenshot.mimeType ?? "image/png",
+            size: Math.max(
+              1,
+              getDesignReviewScreenshotByteLength(screenshot.dataUrl),
+            ),
+            content: screenshot.dataUrl,
+          }),
+        );
+        setRunState("streaming");
+        await generator.generate(DESIGN_REVIEW_REQUEST, attachments);
+
+        if (!sameProjectFiles(beforeFiles, generator.getFiles())) {
+          generator.setFiles(beforeFiles);
+          setFiles(beforeFiles);
+          throw new Error(
+            "Design Review attempted to change project files; all changes were discarded.",
+          );
+        }
+        if (useDesignReviewStore.getState().status !== "complete") {
+          throw new Error(
+            "The model did not submit a structured Design review.",
+          );
+        }
+      } catch (error) {
+        if (!isCurrentGeneratorRun(runConversationId)) return;
+        const message = error instanceof Error ? error.message : String(error);
+        useDesignReviewStore.getState().fail(message);
+        if ((error as { name?: string })?.name !== "AbortError") {
+          appendGenerationError(error);
+        }
+      } finally {
+        if (isCurrentGeneratorRun(runConversationId)) {
+          if (
+            reviewGenerator &&
+            !sameProjectFiles(beforeFiles, reviewGenerator.getFiles())
+          ) {
+            reviewGenerator.setFiles(beforeFiles);
+            setFiles(beforeFiles);
+          }
+          // The review result belongs to the dedicated review card. Keep its
+          // screenshots, tool traffic, and prose out of the normal chat.
+          setMessages(beforeMessages);
+          setIsGenerating(false);
+          setIsThinkingStreaming(false);
+          setRunState((state) =>
+            state === "error" || state === "aborted" ? state : "idle",
+          );
+          if (settings.runtime === "localCli") {
+            useConversationStore
+              .getState()
+              .setLocalAgentSessionForConversation(
+                runConversationId,
+                settings.localAgent.provider,
+                undefined,
+              );
+          }
+          // Discard the restricted review backend so the next Design turn is
+          // rebuilt with its normal tools and cannot resume screenshot context.
+          generatorConstructionEpochRef.current += 1;
+          generatorRef.current?.abort();
+          generatorRef.current = null;
+          generatorConfigRef.current = null;
+          baseCustomToolSetRef.current = {};
+          mcpRuntimeRef.current = null;
+          activeToolProfileRef.current = "default";
+          clearOutputBuffers();
+          forcedSkillsPromptRef.current = "";
+          customSystemPromptRef.current = "";
+          requestPromptContextRef.current = "";
+          runConversationIdRef.current = null;
+        }
+      }
+    },
+    [
+      appendGenerationError,
+      applyDynamicGeneratorState,
+      clearOutputBuffers,
+      getGenerator,
+      isCurrentGeneratorRun,
+      settings.localAgent.provider,
+      settings.runtime,
+      setFiles,
+      setIsGenerating,
+      setMessages,
+    ],
+  );
+
   const continueTask = useCallback(async () => {
     const runConversationId = useConversationStore.getState().activeId;
     if (!runConversationId) return;
@@ -1579,9 +2037,11 @@ export function useGenerator({
     compressContext,
     review,
     healthCheck,
+    designReview,
     invalidateGenerator,
     runState,
     lastError,
     isThinkingStreaming,
+    generateUtilityText,
   };
 }

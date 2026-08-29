@@ -90,10 +90,10 @@ export const useInteractiveStore = create<InteractiveState>((set, get) => ({
         p.kind === "question" && p.toolCallId === toolCallId,
     );
     if (!item) return;
-    item.resolve(answers);
     set((state) => ({
       pending: state.pending.filter((p) => p.toolCallId !== toolCallId),
     }));
+    item.resolve(answers);
   },
 
   resolvePlan: (toolCallId, decision) => {

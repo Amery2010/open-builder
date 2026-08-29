@@ -11,14 +11,15 @@ import { ChatInputToolbar } from "./ChatInputToolbar";
 const baseProps = {
   onPickImage: vi.fn(),
   onPickFile: vi.fn(),
+  onUploadProject: vi.fn(),
   onManageSkills: undefined,
   onManageMcp: undefined,
   skillsAvailable: false,
   skillsInitializing: false,
   forcedSkillIds: [],
   onForcedSkillIdsChange: vi.fn(),
-  planModeEnabled: false,
-  setPlanMode: vi.fn(),
+  workspaceMode: "auto" as const,
+  setWorkspaceMode: vi.fn(),
   isGenerating: false,
   hasContent: false,
   isHoveringStop: false,
@@ -49,6 +50,45 @@ describe("ChatInputToolbar project upload", () => {
     await user.click(screen.getByRole("button", { name: "Add attachment" }));
     await user.click(screen.getByRole("menuitem", { name: /upload project/i }));
     expect(onUploadProject).toHaveBeenCalledOnce();
+  });
+
+  it("offers Code, Plan, and Design while preserving the auto value", async () => {
+    const user = userEvent.setup();
+    const setWorkspaceMode = vi.fn();
+    render(
+      <TooltipProvider>
+        <ChatInputToolbar {...baseProps} setWorkspaceMode={setWorkspaceMode} />
+      </TooltipProvider>,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Mode" }));
+    expect(screen.getByRole("menuitem", { name: /Code/ })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /Plan/ })).toBeInTheDocument();
+    await user.click(screen.getByRole("menuitem", { name: /Design/ }));
+    expect(setWorkspaceMode).toHaveBeenCalledWith("design");
+  });
+
+  it("shows the selected design-system name with a full accessible AI label", () => {
+    render(
+      <TooltipProvider>
+        <ChatInputToolbar
+          {...baseProps}
+          workspaceMode="design"
+          onManageDesignSystems={vi.fn()}
+          designSystemName="Apple"
+          designSystemLabel="Design system: Apple, selected by AI. Premium launch fit."
+        />
+      </TooltipProvider>,
+    );
+
+    expect(
+      screen.getByRole("button", {
+        name: "Design system: Apple, selected by AI. Premium launch fit.",
+      }),
+    ).toHaveTextContent("Apple");
+    expect(
+      screen.getByRole("button", { name: "Mode" }).querySelector("svg"),
+    ).toHaveClass("lucide-pencil-ruler");
   });
 
   it("disables project upload while generation is active", async () => {
@@ -122,6 +162,9 @@ describe("ChatInputToolbar project upload", () => {
 
     const stop = screen.getByRole("button", { name: "Stop" });
     expect(stop).toHaveClass("size-7");
+    const square = stop.querySelector(".lucide-square");
+    expect(square).toHaveAttribute("width", "8");
+    expect(square).toHaveAttribute("height", "8");
     expect(
       stop.closest<HTMLElement>('[data-slot="tooltip-trigger"]'),
     ).not.toBeNull();

@@ -43,6 +43,18 @@ describe("Open Builder Sandpack template manifest", () => {
     },
   );
 
+  it("keeps every React-based Sandpack template on React 18", () => {
+    const reactProfiles = (
+      Object.values(OPEN_BUILDER_TEMPLATE_MANIFEST) as SandpackTemplateProfile[]
+    ).filter((profile) => "react" in profile.dependencies);
+
+    expect(reactProfiles).toHaveLength(5);
+    for (const profile of reactProfiles) {
+      expect(profile.dependencies.react).toMatch(/^\^?18\./);
+      expect(profile.dependencies["react-dom"]).toMatch(/^\^?18\./);
+    }
+  });
+
   it("applies refreshed dependencies and compatibility file overrides", () => {
     const files = {
       "package.json": JSON.stringify({
@@ -61,13 +73,13 @@ describe("Open Builder Sandpack template manifest", () => {
     expect(packageJson).toMatchObject({
       main: "/index.tsx",
       dependencies: {
-        react: "^19.2.8",
-        "react-dom": "^19.2.8",
+        react: "^18.3.1",
+        "react-dom": "^18.3.1",
         "react-scripts": "^4.0.0",
       },
       devDependencies: {
-        "@types/react": "^19.2.18",
-        "@types/react-dom": "^19.2.5",
+        "@types/react": "^18.3.12",
+        "@types/react-dom": "^18.3.1",
         typescript: "^4.9.5",
       },
     });
@@ -140,7 +152,7 @@ describe("template runtime dependency guard", () => {
 
   it("preserves a specific Vite framework profile while allowing app dependencies", () => {
     const current = JSON.stringify({
-      dependencies: { react: "^19.2.8" },
+      dependencies: { react: "^18.3.1" },
       devDependencies: {
         "@vitejs/plugin-react": "^4.3.4",
         typescript: "^5.9.3",

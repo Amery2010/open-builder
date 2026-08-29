@@ -1,6 +1,6 @@
 [package]
 name = "open-builder"
-version = "1.8.0"
+version = "2.0.0"
 description = "Open Builder is an open-source AI-powered app generator. Build web applications through natural language conversations."
 authors = ["Amery2010"]
 edition = "2021"

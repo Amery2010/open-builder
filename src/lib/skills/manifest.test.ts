@@ -6,14 +6,28 @@ import { resolvePublicSkillUrl } from "./manifest";
 import { FORCED_SKILLS_MAX_BYTES } from "./registry";
 
 const publicRoot = new URL("../../../public/skills/", import.meta.url);
+const EXPECTED_IDS = [
+  "debug-web-app",
+  "build-tailwind-ui",
+  "build-accessible-ui",
+  "write-safe-typescript",
+  "art-direct-web",
+  "design-product-ui",
+  "review-code",
+  "simplify-code",
+] as const;
 
 function readPublic(path: string): string {
   return readFileSync(new URL(path, publicRoot), "utf8");
 }
 
+function readManifest(): SkillManifest {
+  return JSON.parse(readPublic("manifest.json")) as SkillManifest;
+}
+
 describe("public skills manifest", () => {
   it("matches every shipped SKILL.md and declared file", () => {
-    const manifest = JSON.parse(readPublic("manifest.json")) as SkillManifest;
+    const manifest = readManifest();
     expect(manifest.schemaVersion).toBe(1);
     expect(new Set(manifest.skills.map((skill) => skill.id)).size).toBe(
       manifest.skills.length,
@@ -21,6 +35,7 @@ describe("public skills manifest", () => {
 
     for (const skill of manifest.skills) {
       expect(() => readPublic(skill.entry)).not.toThrow();
+      expect(skill.files).toEqual([skill.entry]);
       for (const file of skill.files) {
         expect(() => readPublic(file)).not.toThrow();
       }
@@ -36,80 +51,56 @@ describe("public skills manifest", () => {
   it("resolves public assets under nested Vite base paths", () => {
     expect(
       resolvePublicSkillUrl(
-        "react-patterns/SKILL.md",
+        "review-code/SKILL.md",
         "/open-builder/",
         "https://example.com/open-builder/index.html",
       ),
-    ).toBe("https://example.com/open-builder/skills/react-patterns/SKILL.md");
+    ).toBe("https://example.com/open-builder/skills/review-code/SKILL.md");
   });
 
-  it("ships the four adapted built-ins without standalone grill or Karpathy skills", () => {
-    const manifest = JSON.parse(readPublic("manifest.json")) as SkillManifest;
-    const ids = manifest.skills.map((skill) => skill.id);
-    const adaptedIds = [
-      "design-taste-frontend",
-      "frontend-design",
-      "code-review",
-      "code-simplifier",
-    ];
-
-    expect(ids).toEqual(expect.arrayContaining(adaptedIds));
-    expect(ids).not.toContain("grill-me");
-    expect(ids).not.toContain("karpathy-guidelines");
-    for (const id of adaptedIds) {
-      const entry = manifest.skills.find((skill) => skill.id === id);
-      expect(entry?.version).toBe("1.0.0");
-      expect(entry?.files).toEqual(
-        expect.arrayContaining([`${id}/SOURCE.md`, `${id}/LICENSE.txt`]),
+  it("ships exactly the eight renamed version-2 built-ins", () => {
+    const manifest = readManifest();
+    expect(manifest.skills.map((skill) => skill.id)).toEqual(EXPECTED_IDS);
+    for (const skill of manifest.skills) {
+      expect(skill.name).toBe(skill.id);
+      expect(skill.version).toBe("2.0.0");
+      expect(skill.description.length).toBeGreaterThan(80);
+      expect(skill.files).not.toEqual(
+        expect.arrayContaining([
+          `${skill.id}/SOURCE.md`,
+          `${skill.id}/LICENSE.txt`,
+        ]),
       );
-      expect(entry).not.toHaveProperty("defaultAutoEnabled");
     }
   });
 
-  it("keeps all four adapted bodies within the combined forced-prompt budget", () => {
-    const manifest = JSON.parse(readPublic("manifest.json")) as SkillManifest;
-    const adaptedIds = new Set([
-      "design-taste-frontend",
-      "frontend-design",
-      "code-review",
-      "code-simplifier",
-    ]);
-    const combined = manifest.skills
-      .filter((skill) => adaptedIds.has(skill.id))
-      .map((skill) => parseSkillMd(readPublic(skill.entry)).body)
-      .join("");
-
-    expect(new TextEncoder().encode(combined).byteLength).toBeLessThanOrEqual(
-      FORCED_SKILLS_MAX_BYTES,
+  it("keeps all detailed built-in bodies within the forced-prompt limit", () => {
+    const manifest = readManifest();
+    const bodies = manifest.skills.map(
+      (skill) => parseSkillMd(readPublic(skill.entry)).body,
     );
+
+    for (const body of bodies) {
+      expect(new TextEncoder().encode(body).byteLength).toBeGreaterThan(2_000);
+    }
+    expect(
+      new TextEncoder().encode(bodies.join("")).byteLength,
+    ).toBeLessThanOrEqual(FORCED_SKILLS_MAX_BYTES);
   });
 
-  it("keeps the Open Builder compatibility edits in each adapted body", () => {
-    const body = (id: string) =>
+  it("keeps routing and authorization boundaries in the rewritten manuals", () => {
+    const body = (id: (typeof EXPECTED_IDS)[number]) =>
       parseSkillMd(readPublic(`${id}/SKILL.md`)).body;
 
-    expect(body("design-taste-frontend")).toContain(
-      "existing stack and conventions",
+    expect(body("art-direct-web")).toContain("`design-product-ui`");
+    expect(body("design-product-ui")).toContain("`art-direct-web`");
+    expect(body("review-code")).toContain("default deliverable is findings");
+    expect(body("simplify-code")).toContain(
+      "without altering observable behavior",
     );
-    expect(body("design-taste-frontend")).toContain(
-      "Use `frontend-design` for routine product UI",
-    );
-
-    expect(body("frontend-design")).toContain(
-      "Use this skill for ordinary product UI",
-    );
-    expect(body("frontend-design")).not.toContain("Claude is capable");
-
-    expect(body("code-review")).not.toContain("/code-review");
-    expect(body("code-review")).not.toContain("@$1");
-    expect(body("code-review")).not.toContain("CONNECTORS.md");
-    expect(body("code-review")).toContain(
-      "Review and report; do not edit files",
-    );
-
-    expect(body("code-simplifier")).toContain("`AGENTS.md`, `CLAUDE.md`");
-    expect(body("code-simplifier")).toContain(
-      "code modified in the current request",
-    );
+    expect(body("debug-web-app")).toContain("one falsifiable hypothesis");
+    expect(body("build-accessible-ui")).toContain("radio buttons");
+    expect(body("write-safe-typescript")).toContain("runtime data");
+    expect(body("build-tailwind-ui")).toContain("Tailwind major version");
   });
 });

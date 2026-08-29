@@ -54,6 +54,7 @@ The Tauri desktop build (macOS / Windows / Linux) provides local runtime capabil
 - **Project Health Check** — Run `/health` to inspect structure, dependencies, runtime logs, accessibility, and responsive risks; isolated Automatic QA performs a restricted project check without MCP or preview-console access
 - **Context Compression** — Use `/compact` or the command palette to summarize long conversations and reduce token usage
 - **Plan Mode** — Explore the code and submit an implementation plan for approval before writing files; `ask_user_question` supports both independent clarification batches and one-question-at-a-time stress-test interviews
+- **Design Mode** — Generate runnable marketing sites and multi-screen product interfaces with per-project Code / Plan / Design modes, curated or custom design systems, responsive interactions, and explicit design self-checks
 - **Subagent Collaboration** — Built-in read-only subagents for code exploration, review, dependency advice, bug investigation, and UI critique
 - **Built-in Search** — Supports enabling the model's built-in search service
 - **Desktop API Proxy** — Tauri can forward approved HTTP/HTTPS provider requests that would otherwise be blocked by browser CORS; static Web deployments still depend on provider CORS support
@@ -68,7 +69,7 @@ The Tauri desktop build (macOS / Windows / Linux) provides local runtime capabil
 - **Slash Commands** — Input box supports `/new`, `/fork`, `/clear`, `/reset`, `/compact`, `/health`, `/review`, `/continue`, and `/retry`
 - **Command Palette & Shortcuts** — Open commands with `Cmd/Ctrl+K`, create sessions, open settings, focus input, or stop generation from the keyboard
 - **Image & File Input** — Upload screenshots, text files, or PDFs; PDF-capable models receive PDFs as native file input without local text extraction
-- **Skills System** — Enabled Skills expose metadata for automatic discovery; full instructions load only after `read_skill` or when a Skill is selected for the next message, which also applies to subagents and clears after sending. Built-ins include `design-taste-frontend`, `frontend-design`, `code-review`, and `code-simplifier`; imported Skills start with discovery disabled
+- **Skills System** — Enabled Skills expose metadata for automatic discovery; full instructions load only after `read_skill` or when a Skill is selected for the next message, which also applies to subagents and clears after sending. Skill loads in one Agent turn appear as one expandable list. The eight built-ins are `debug-web-app`, `build-tailwind-ui`, `build-accessible-ui`, `write-safe-typescript`, `art-direct-web`, `design-product-ui`, `review-code`, and `simplify-code`; legacy built-in IDs migrate automatically, while imported Skills start with discovery disabled
 - **Custom Instructions** — Advanced settings can safely append up to 32,000 characters to Chat, Plan, retry, and subagent requests without granting tools or changing mode restrictions; utility calls such as Automatic QA, titles, and compression exclude them
 - **Local Settings** — Provider configuration, API keys, and custom instructions persist in browser local storage
 - **Storage Governance** — Inspect local data usage and safely clean archived sessions, empty sessions, and old snapshots
@@ -76,6 +77,8 @@ The Tauri desktop build (macOS / Windows / Linux) provides local runtime capabil
 - **Extended Thinking** — Supports Extended Thinking / Reasoning mode (DeepSeek-R1, Claude 4.6, etc.)
 - **One-Click Download** — Export generated project as a ZIP file
 - **Workspace Tools** — Switch between code and preview, search and manage files, inspect the Sandpack console, and preview desktop/tablet/phone widths with fit and zoom controls
+- **Interactive Design Editing** — Point-select stable `data-ob-id` elements in supported Sandpack previews, pass a sanitized selection to the next request, and tune canonical semantic tokens with snapshot-backed saves
+- **Design Review & Desktop Export** — Upload up to three screenshots for an opt-in read-only review on Web or desktop, or export canonical project files from desktop to a new non-overwriting directory
 - **Adaptive Layout** — Desktop uses a horizontal resizable split, tablets use a vertical resizable workspace-over-chat split, and phones use a chat-first layout with inline preview
 - **Languages & Themes** — English and Simplified Chinese interfaces with system, light, and dark themes
 
@@ -100,6 +103,29 @@ The Tauri desktop build (macOS / Windows / Linux) provides local runtime capabil
 | `Cmd/Ctrl+,` | Open settings                                      |
 | `Cmd/Ctrl+/` | Focus the chat input                               |
 | `Esc`        | Close the palette first, otherwise stop generation |
+
+### Design Mode
+
+Design mode keeps its output in the current conversation's normal project file tree and Sandpack preview; it does not create a separate artifact store. The Code label retains the existing internal `"auto"` value for compatibility. The mode and its automatic decision, selected system, and applied system are remembered per project. Entering Plan from Design returns to Design after approval.
+
+- New visual projects default to `vite-react-ts`; explicitly requested lightweight static pages can use `static`.
+- The built-in catalog contains 12 curated, unofficial visual references with separate full-frame 640×480 WebP previews: Linear, Stripe, Claude, GitHub, IBM, Figma, Notion, Shopify, Apple, Spotify, The Verge, and WeChat. Choosing a different system for an initialized project immediately starts its AI application workflow; an empty project keeps the choice as the reference for its next Design request.
+- When the selector remains **Auto**, one isolated no-tool model decision runs before the next Design generation. It can choose a bundled, imported, or custom system, or explicitly choose **None**. A validated result remains with that project until it is manually replaced or re-evaluated; an invalid result is retried on the next request.
+- Custom systems require a name plus three visible rule groups. The current API or Local CLI model compiles them without project files or tools; strict JSON, CSS, semantic-token, and complete-package validation must pass before the system is saved and selected. Custom and imported systems share the generic full-frame WebP preview.
+- Imported systems use the minimal `manifest.json + DESIGN.md + tokens.css` contract. ZIP and directory imports are previewed before confirmation, validated as bounded text-only packages, and never silently overwrite an existing ID.
+- Point selection is available for `static`, `vite`, `vite-react`, and `vite-react-ts`. Unsupported or code-only projects can still use Design prompts and file tools, but the UI explains why selection or live token preview is unavailable.
+- Legacy root-only `DESIGN.md` files remain read-only visual references until the user explicitly upgrades them to a token-bearing system.
+
+| Capability                              | Web                                              | Desktop                                                              |
+| --------------------------------------- | ------------------------------------------------ | -------------------------------------------------------------------- |
+| Generation, live preview, point editing | Full core flow                                   | Full core flow                                                       |
+| Design-system import                    | ZIP or browser directory picker                  | ZIP or local directory                                               |
+| Project export                          | ZIP                                              | ZIP or a new, uniquely named directory; no two-way sync              |
+| Model runtime                           | API or remote endpoint that permits browser CORS | API, Tauri proxy, or supported local CLI runtime                     |
+| Visual review                           | User-uploaded screenshots                        | User-uploaded screenshots                                            |
+| Local processes / stdio / Skill scripts | Unavailable in a static Web deployment           | Subject to the existing desktop capability and approval restrictions |
+
+Design Review is deliberately separate from Automatic QA. Its restricted run can only list, read, and search project files and submit up to eight structured findings; it cannot write files, use MCP or network tools, load Skills, or run scripts. No fix runs until the user selects findings and clicks **Apply selected fixes**.
 
 ### MCP and Platform Capabilities (Optional)
 
@@ -249,11 +275,13 @@ Built-in tools:
 | `install_component`              | Install an approved shadcn registry component and its dependencies                                      |
 | `screenshot_to_code`             | Generate and write a component from a supplied UI image                                                 |
 | `apply_design_style`             | Add a selected design specification to the project                                                      |
+| `apply_design_system`            | Apply the explicitly selected Design-mode system contract to an initialized project                     |
+| `submit_design_review`           | Submit the bounded structured result from the read-only Design Review profile                           |
 | `list_skills` / `read_skill`     | Discover enabled Skill metadata, then load full instructions and resource listings                      |
 | `execute_skill_script`           | Run an active skill script in the desktop app only                                                      |
 | `read_env_schema` / `manage_env` | Safely inspect and manage env files                                                                     |
 
-Enabled MCP tools are injected dynamically after server discovery and approval, then filtered by the current platform and Chat, Plan, Automatic QA, or subagent run policy.
+Enabled MCP tools are injected dynamically after server discovery and approval, then filtered by the current platform and Chat, Plan, Design, Automatic QA, Design Review, or subagent run policy. `apply_design_style` remains the Auto-mode compatibility path; Design mode uses `apply_design_system`.
 
 ### Tech Stack
 

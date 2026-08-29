@@ -38,6 +38,7 @@ export function createOpenAIGenerator(
     | "conversationId"
     | "allowedMcpAliases"
     | "initialSkillContext"
+    | "prepareInitializedProject"
   >,
 ): WebAppGenerator {
   const apiType = config.apiType ?? "openai-compatible";

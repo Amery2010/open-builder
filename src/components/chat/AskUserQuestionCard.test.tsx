@@ -74,15 +74,14 @@ describe("AskUserQuestionCard", () => {
       ).violations,
     ).toEqual([]);
 
-    await user.click(screen.getByRole("button", { name: /Browser/ }));
+    await user.click(screen.getByRole("radio", { name: /Browser/ }));
     expect(screen.getByText("Question 2 of 2")).toBeVisible();
     await user.click(screen.getByRole("button", { name: "Previous question" }));
-    expect(screen.getByRole("button", { name: /Browser/ })).toHaveAttribute(
-      "aria-pressed",
-      "true",
-    );
+    expect(screen.getByRole("radio", { name: /Browser/ })).toBeChecked();
 
-    await user.click(screen.getByRole("button", { name: /Browser/ }));
+    await user.click(
+      screen.getByRole("button", { name: "Go to next question" }),
+    );
     await user.type(screen.getByLabelText("Custom answer"), "Offline mode");
     await user.keyboard("{Enter}");
 
@@ -122,8 +121,8 @@ describe("AskUserQuestionCard", () => {
       { wrapper: TooltipProvider },
     );
 
-    await user.click(screen.getByRole("button", { name: /Search/ }));
-    await user.click(screen.getByRole("button", { name: /Export/ }));
+    await user.click(screen.getByRole("checkbox", { name: /Search/ }));
+    await user.click(screen.getByRole("checkbox", { name: /Export/ }));
     expect(screen.getByText("Question 1 of 2")).toBeVisible();
     await user.click(screen.getByRole("button", { name: "Next question" }));
 
@@ -131,7 +130,7 @@ describe("AskUserQuestionCard", () => {
     if (pending.kind !== "question") throw new Error("Expected question");
     const resolveSpy = vi.fn(pending.resolve);
     pending.resolve = resolveSpy;
-    await user.dblClick(screen.getByRole("button", { name: /Desktop/ }));
+    await user.dblClick(screen.getByRole("radio", { name: /Desktop/ }));
 
     await expect(answerPromise).resolves.toEqual({
       answers: [
@@ -173,12 +172,9 @@ describe("AskUserQuestionCard", () => {
 
     await user.clear(customAnswer);
     await user.type(customAnswer, "Custom runtime");
-    await user.click(screen.getByRole("button", { name: /Search/ }));
+    await user.click(screen.getByRole("checkbox", { name: /Search/ }));
     expect(customAnswer).toHaveValue("");
-    expect(screen.getByRole("button", { name: /Search/ })).toHaveAttribute(
-      "aria-pressed",
-      "true",
-    );
+    expect(screen.getByRole("checkbox", { name: /Search/ })).toBeChecked();
     await user.click(submit);
 
     await expect(answerPromise).resolves.toMatchObject({
@@ -216,7 +212,7 @@ describe("AskUserQuestionCard", () => {
     expect(screen.queryByText("Browser (Recommended)")).not.toBeInTheDocument();
     expect(screen.queryAllByText("Recommended")).toHaveLength(1);
 
-    await user.click(screen.getByRole("button", { name: /Browser/ }));
+    await user.click(screen.getByRole("radio", { name: /Browser/ }));
 
     await expect(answerPromise).resolves.toMatchObject({
       answers: [{ selected: ["Browser (Recommended)"] }],
@@ -263,7 +259,7 @@ describe("AskUserQuestionCard", () => {
 
     expect(screen.getByText("推荐")).toBeVisible();
     expect(screen.queryByText("浏览器（推荐）")).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: /浏览器/ }));
+    await userEvent.click(screen.getByRole("radio", { name: /浏览器/ }));
     await expect(answerPromise).resolves.toMatchObject({
       answers: [{ selected: ["浏览器（推荐）"] }],
     });
@@ -287,7 +283,7 @@ describe("AskUserQuestionCard", () => {
     );
 
     expect(screen.queryByLabelText("Custom answer")).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /Browser/ }));
+    await user.click(screen.getByRole("radio", { name: /Browser/ }));
     await user.click(screen.getByRole("button", { name: "Submit" }));
 
     await expect(answerPromise).resolves.toMatchObject({

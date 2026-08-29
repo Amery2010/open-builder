@@ -9,6 +9,8 @@ import type {
   LocalAgentProvider,
   LocalAgentSessionRef,
   Message,
+  ConversationDesignState,
+  WorkspaceMode,
   ProjectPreviewMode,
   ProjectFiles,
 } from "../types";
@@ -16,7 +18,7 @@ import { validateProjectFiles } from "../lib/utils/project-files";
 import { deleteAttachmentsForMessages } from "../lib/attachments/store";
 import { normalizeCompressedSummary } from "../lib/utils/compress-context";
 
-const CONVERSATION_STORE_VERSION = 3;
+const CONVERSATION_STORE_VERSION = 4;
 const DEFAULT_PROJECT_TEMPLATE = "vite-react-ts";
 
 export function normalizeConversationProjectState<T extends Conversation>(
@@ -30,11 +32,46 @@ export function normalizeConversationProjectState<T extends Conversation>(
   const isProjectInitialized = paths.length > 0;
   const previewMode: ProjectPreviewMode =
     conversation.previewMode === "code-only" ? "code-only" : "sandpack";
+  const workspaceMode: WorkspaceMode =
+    conversation.workspaceMode === "plan" ||
+    conversation.workspaceMode === "design"
+      ? conversation.workspaceMode
+      : "auto";
+  const planReturnMode =
+    workspaceMode === "plan"
+      ? conversation.planReturnMode === "design"
+        ? "design"
+        : "auto"
+      : undefined;
+  const rootDesignPath = paths.find(
+    (path) => !path.includes("/") && path.toLowerCase() === "design.md",
+  );
+  const designState =
+    conversation.designState ??
+    (rootDesignPath
+      ? {
+          selectedSystem: {
+            id: "legacy-design-md",
+            name: rootDesignPath,
+            source: "legacy" as const,
+            version: "legacy",
+          },
+          appliedSystem: {
+            id: "legacy-design-md",
+            name: rootDesignPath,
+            source: "legacy" as const,
+            version: "legacy",
+          },
+        }
+      : undefined);
 
   if (
     conversation.activeFile === activeFile &&
     conversation.isProjectInitialized === isProjectInitialized &&
-    conversation.previewMode === previewMode
+    conversation.previewMode === previewMode &&
+    conversation.workspaceMode === workspaceMode &&
+    conversation.planReturnMode === planReturnMode &&
+    conversation.designState === designState
   ) {
     return conversation;
   }
@@ -44,6 +81,9 @@ export function normalizeConversationProjectState<T extends Conversation>(
     activeFile,
     previewMode,
     isProjectInitialized,
+    workspaceMode,
+    planReturnMode,
+    designState,
   } as T;
 }
 
@@ -65,6 +105,7 @@ export function normalizePersistedConversationProjects<T>(state: T): T {
 
 const conversationMigrations: MigrationStep[] = [
   (state) => state,
+  normalizePersistedConversationProjects,
   normalizePersistedConversationProjects,
   normalizePersistedConversationProjects,
 ];
@@ -128,11 +169,22 @@ interface ConversationState {
   conversations: Record<string, Conversation>;
   activeId: string | null;
   _hasHydrated: boolean;
+  legacyPlanModeMigrated: boolean;
 
   createConversation: () => string;
   addConversation: (conversation: Conversation) => string;
   deleteConversation: (id: string) => void;
   switchConversation: (id: string) => void;
+  setWorkspaceMode: (mode: WorkspaceMode) => void;
+  returnFromPlan: (id?: string) => Exclude<WorkspaceMode, "plan">;
+  setDesignState: (
+    updater: Updater<ConversationDesignState | undefined>,
+  ) => void;
+  setDesignStateForConversation: (
+    id: string,
+    updater: Updater<ConversationDesignState | undefined>,
+  ) => void;
+  migrateLegacyPlanMode: (enabled: boolean) => boolean;
 
   forkConversation: () => string;
   setMessages: (updater: Updater<Message[]>) => void;
@@ -173,6 +225,7 @@ export const useConversationStore = create<ConversationState>()(
       conversations: {},
       activeId: null,
       _hasHydrated: false,
+      legacyPlanModeMigrated: false,
 
       createConversation: () => {
         const id = crypto.randomUUID();
@@ -184,6 +237,7 @@ export const useConversationStore = create<ConversationState>()(
           template: DEFAULT_PROJECT_TEMPLATE,
           previewMode: "sandpack",
           isProjectInitialized: false,
+          workspaceMode: "auto",
           createdAt: Date.now(),
           updatedAt: Date.now(),
         };
@@ -233,6 +287,22 @@ export const useConversationStore = create<ConversationState>()(
           template: src?.template ?? DEFAULT_PROJECT_TEMPLATE,
           previewMode: src?.previewMode ?? "sandpack",
           isProjectInitialized: src?.isProjectInitialized ?? false,
+          workspaceMode: src?.workspaceMode ?? "auto",
+          planReturnMode: src?.planReturnMode,
+          designState: src?.designState
+            ? {
+                ...src.designState,
+                selectedSystem: src.designState.selectedSystem
+                  ? { ...src.designState.selectedSystem }
+                  : undefined,
+                appliedSystem: src.designState.appliedSystem
+                  ? { ...src.designState.appliedSystem }
+                  : undefined,
+                recommendation: src.designState.recommendation
+                  ? { ...src.designState.recommendation }
+                  : undefined,
+              }
+            : undefined,
           compressedContext: normalizeStoredCompressedContext(
             src?.compressedContext,
           ),
@@ -274,6 +344,102 @@ export const useConversationStore = create<ConversationState>()(
 
       switchConversation: (id) => {
         set({ activeId: id });
+      },
+
+      setWorkspaceMode: (mode) => {
+        set((state) => {
+          const id = state.activeId;
+          const conversation = id ? state.conversations[id] : undefined;
+          if (!id || !conversation || conversation.workspaceMode === mode) {
+            return state;
+          }
+          const currentMode = conversation.workspaceMode ?? "auto";
+          return {
+            conversations: {
+              ...state.conversations,
+              [id]: {
+                ...conversation,
+                workspaceMode: mode,
+                planReturnMode:
+                  mode === "plan"
+                    ? currentMode === "design"
+                      ? "design"
+                      : "auto"
+                    : undefined,
+                updatedAt: Date.now(),
+              },
+            },
+          };
+        });
+      },
+
+      returnFromPlan: (requestedId) => {
+        const state = get();
+        const id = requestedId ?? state.activeId;
+        const conversation = id ? state.conversations[id] : undefined;
+        const returnMode =
+          conversation?.planReturnMode === "design" ? "design" : "auto";
+        if (!id || !conversation) return returnMode;
+        set((current) => ({
+          conversations: {
+            ...current.conversations,
+            [id]: {
+              ...current.conversations[id],
+              workspaceMode: returnMode,
+              planReturnMode: undefined,
+              updatedAt: Date.now(),
+            },
+          },
+        }));
+        return returnMode;
+      },
+
+      setDesignState: (updater) => {
+        const id = get().activeId;
+        if (id) get().setDesignStateForConversation(id, updater);
+      },
+
+      setDesignStateForConversation: (id, updater) => {
+        set((state) => {
+          const conversation = state.conversations[id];
+          if (!conversation) return state;
+          return {
+            conversations: {
+              ...state.conversations,
+              [id]: {
+                ...conversation,
+                designState: applyUpdater(updater, conversation.designState),
+                updatedAt: Date.now(),
+              },
+            },
+          };
+        });
+      },
+
+      migrateLegacyPlanMode: (enabled) => {
+        const state = get();
+        if (state.legacyPlanModeMigrated) return false;
+        const id = state.activeId;
+        set((current) => {
+          const conversation = id ? current.conversations[id] : undefined;
+          return {
+            legacyPlanModeMigrated: true,
+            ...(enabled && id && conversation
+              ? {
+                  conversations: {
+                    ...current.conversations,
+                    [id]: {
+                      ...conversation,
+                      workspaceMode: "plan" as const,
+                      planReturnMode: "auto" as const,
+                      updatedAt: Date.now(),
+                    },
+                  },
+                }
+              : {}),
+          };
+        });
+        return enabled && !!id;
       },
 
       setMessages: (updater) => {
@@ -353,6 +519,7 @@ export const useConversationStore = create<ConversationState>()(
                 activeFile: nextActiveFile,
                 isProjectInitialized: paths.length > 0,
                 localAgentSessions: undefined,
+                designState: undefined,
                 updatedAt: Date.now(),
               },
             },
@@ -416,6 +583,7 @@ export const useConversationStore = create<ConversationState>()(
                 compressedContext: undefined,
                 localAgentSessions: undefined,
                 activeFile: undefined,
+                designState: undefined,
                 updatedAt: Date.now(),
               },
             },
@@ -574,6 +742,7 @@ export const useConversationStore = create<ConversationState>()(
       partialize: (state) => ({
         conversations: state.conversations,
         activeId: state.activeId,
+        legacyPlanModeMigrated: state.legacyPlanModeMigrated,
       }),
       migrate: (persisted, version) =>
         migrateConversationState(persisted, version),

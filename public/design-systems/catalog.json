@@ -1,0 +1,266 @@
+[
+  {
+    "id": "linear",
+    "name": "Linear",
+    "previewPath": "/design-systems/previews/linear.webp",
+    "category": "product",
+    "tags": ["focused", "dark", "productivity", "precise"],
+    "bestFor": {
+      "en": "Developer tools, productivity apps, focused SaaS",
+      "zh": "开发者工具、效率产品、专注型 SaaS"
+    },
+    "avoidFor": {
+      "en": "Playful consumer campaigns or warm editorial stories",
+      "zh": "活泼消费活动或温暖叙事型编辑内容"
+    },
+    "digest": "8b15d1d7b7a0145bd5988655dc57a8b449063b5eddd32ba32696a4c41946f6e9",
+    "version": "2.0.0",
+    "files": {
+      "manifest": "linear/manifest.json",
+      "design": "linear/DESIGN.md",
+      "tokens": "linear/tokens.css"
+    }
+  },
+  {
+    "id": "stripe",
+    "name": "Stripe",
+    "previewPath": "/design-systems/previews/stripe.webp",
+    "category": "marketing",
+    "tags": ["fintech", "gradient", "technical", "premium"],
+    "bestFor": {
+      "en": "Fintech, infrastructure, API and conversion pages",
+      "zh": "金融科技、基础设施、API 与转化页面"
+    },
+    "avoidFor": {
+      "en": "Quiet editorial layouts or low-tech community products",
+      "zh": "安静编辑布局或低技术感社区产品"
+    },
+    "digest": "67ef6760a75ce868b496e6b2b2fa6520ddd2ea4cffd880e3338f387fde6cc94e",
+    "version": "2.0.0",
+    "files": {
+      "manifest": "stripe/manifest.json",
+      "design": "stripe/DESIGN.md",
+      "tokens": "stripe/tokens.css"
+    }
+  },
+  {
+    "id": "claude",
+    "name": "Claude",
+    "previewPath": "/design-systems/previews/claude.webp",
+    "category": "mixed",
+    "tags": ["warm", "editorial", "thoughtful", "ai"],
+    "bestFor": {
+      "en": "AI products, writing tools, calm editorial experiences",
+      "zh": "AI 产品、写作工具、克制的编辑体验"
+    },
+    "avoidFor": {
+      "en": "High-energy entertainment or neon gaming interfaces",
+      "zh": "高能娱乐或霓虹游戏界面"
+    },
+    "digest": "9bb5287881baa20c66604a97b850ac91091fabea75fb27c00d1c50ca62a2f5e3",
+    "version": "2.0.0",
+    "files": {
+      "manifest": "claude/manifest.json",
+      "design": "claude/DESIGN.md",
+      "tokens": "claude/tokens.css"
+    }
+  },
+  {
+    "id": "github",
+    "name": "GitHub",
+    "previewPath": "/design-systems/previews/github.webp",
+    "category": "product",
+    "tags": ["developer", "dense", "neutral", "reliable"],
+    "bestFor": {
+      "en": "Developer platforms, repositories, technical dashboards",
+      "zh": "开发者平台、代码仓库、技术型仪表盘"
+    },
+    "avoidFor": {
+      "en": "Luxury storytelling or image-led campaigns",
+      "zh": "奢华叙事或图片主导的活动页"
+    },
+    "digest": "294a107ade908223056a51f97a75b76cdd68761449a5820b60681809af3f40b7",
+    "version": "2.0.0",
+    "files": {
+      "manifest": "github/manifest.json",
+      "design": "github/DESIGN.md",
+      "tokens": "github/tokens.css"
+    }
+  },
+  {
+    "id": "ibm",
+    "name": "IBM",
+    "previewPath": "/design-systems/previews/ibm.webp",
+    "category": "mixed",
+    "tags": ["enterprise", "structured", "accessible", "technical"],
+    "bestFor": {
+      "en": "Enterprise software, data systems, regulated workflows",
+      "zh": "企业软件、数据系统、受监管流程"
+    },
+    "avoidFor": {
+      "en": "Soft lifestyle brands or whimsical portfolios",
+      "zh": "柔和生活方式品牌或奇趣作品集"
+    },
+    "digest": "dd623d275f10efb62c14ea30ed4e25c7e402c9aff7d3ca5e2371911ac1b9288c",
+    "version": "2.0.0",
+    "files": {
+      "manifest": "ibm/manifest.json",
+      "design": "ibm/DESIGN.md",
+      "tokens": "ibm/tokens.css"
+    }
+  },
+  {
+    "id": "figma",
+    "name": "Figma",
+    "previewPath": "/design-systems/previews/figma.webp",
+    "category": "product",
+    "tags": ["creative", "collaborative", "colorful", "tooling"],
+    "bestFor": {
+      "en": "Creative tools, collaboration, visual editors",
+      "zh": "创意工具、协作产品、可视化编辑器"
+    },
+    "avoidFor": {
+      "en": "Conservative finance or formal government services",
+      "zh": "保守金融或正式政务服务"
+    },
+    "digest": "2f84b516f90cc9a2b724546b40e5bbb09f0984a772ed448db517e0665afaab2f",
+    "version": "2.0.0",
+    "files": {
+      "manifest": "figma/manifest.json",
+      "design": "figma/DESIGN.md",
+      "tokens": "figma/tokens.css"
+    }
+  },
+  {
+    "id": "notion",
+    "name": "Notion",
+    "previewPath": "/design-systems/previews/notion.webp",
+    "category": "mixed",
+    "tags": ["minimal", "editorial", "modular", "friendly"],
+    "bestFor": {
+      "en": "Knowledge tools, docs, modular productivity products",
+      "zh": "知识工具、文档、模块化效率产品"
+    },
+    "avoidFor": {
+      "en": "Cinematic launches or highly expressive retail",
+      "zh": "电影感发布页或高度表现型零售页面"
+    },
+    "digest": "0cb024d30defdb5a00dcec82ac569ad1d918980c315ea699a1da362a82f1b36a",
+    "version": "2.0.0",
+    "files": {
+      "manifest": "notion/manifest.json",
+      "design": "notion/DESIGN.md",
+      "tokens": "notion/tokens.css"
+    }
+  },
+  {
+    "id": "shopify",
+    "name": "Shopify",
+    "previewPath": "/design-systems/previews/shopify.webp",
+    "category": "mixed",
+    "tags": ["commerce", "friendly", "practical", "growth"],
+    "bestFor": {
+      "en": "Commerce, merchant tools, approachable B2B products",
+      "zh": "电商、商家工具、亲和型 B2B 产品"
+    },
+    "avoidFor": {
+      "en": "Experimental art sites or austere developer consoles",
+      "zh": "实验艺术网站或冷峻开发者控制台"
+    },
+    "digest": "6cfa3d0b719dc580f76ecef43639a9fee59a8e7710380c35bad5573e07e617fd",
+    "version": "2.0.0",
+    "files": {
+      "manifest": "shopify/manifest.json",
+      "design": "shopify/DESIGN.md",
+      "tokens": "shopify/tokens.css"
+    }
+  },
+  {
+    "id": "apple",
+    "name": "Apple",
+    "previewPath": "/design-systems/previews/apple.webp",
+    "category": "marketing",
+    "tags": ["minimal", "premium", "cinematic", "product-led"],
+    "bestFor": {
+      "en": "Premium hardware, product launches, focused storytelling",
+      "zh": "高端硬件、产品发布、聚焦式叙事"
+    },
+    "avoidFor": {
+      "en": "Dense admin tools or information-heavy portals",
+      "zh": "密集后台工具或信息量大的门户"
+    },
+    "digest": "722c4ca539cd6c64d2356782ecc230a50511228222f518f1ec99d2ac7b04d8fb",
+    "version": "2.0.0",
+    "files": {
+      "manifest": "apple/manifest.json",
+      "design": "apple/DESIGN.md",
+      "tokens": "apple/tokens.css"
+    }
+  },
+  {
+    "id": "spotify",
+    "name": "Spotify",
+    "previewPath": "/design-systems/previews/spotify.webp",
+    "category": "mixed",
+    "tags": ["music", "bold", "dark", "energetic"],
+    "bestFor": {
+      "en": "Media, music, entertainment and bold consumer products",
+      "zh": "媒体、音乐、娱乐与大胆的消费产品"
+    },
+    "avoidFor": {
+      "en": "Formal enterprise workflows or restrained finance",
+      "zh": "正式企业流程或克制金融产品"
+    },
+    "digest": "94fa07d02837b6d188acd766224f71850ccc4af19806d20c80ae8cf8c566943a",
+    "version": "2.0.0",
+    "files": {
+      "manifest": "spotify/manifest.json",
+      "design": "spotify/DESIGN.md",
+      "tokens": "spotify/tokens.css"
+    }
+  },
+  {
+    "id": "the-verge",
+    "name": "The Verge",
+    "previewPath": "/design-systems/previews/the-verge.webp",
+    "category": "editorial",
+    "tags": ["editorial", "bold", "tech", "expressive"],
+    "bestFor": {
+      "en": "Technology media, magazines, opinionated editorial pages",
+      "zh": "科技媒体、杂志、观点鲜明的编辑页面"
+    },
+    "avoidFor": {
+      "en": "Quiet productivity tools or compliance-heavy software",
+      "zh": "安静效率工具或重合规软件"
+    },
+    "digest": "0e378d3807f448044e3c678a5082b0058d3c388a72d17564d9d97a2bed77833f",
+    "version": "2.0.0",
+    "files": {
+      "manifest": "the-verge/manifest.json",
+      "design": "the-verge/DESIGN.md",
+      "tokens": "the-verge/tokens.css"
+    }
+  },
+  {
+    "id": "wechat",
+    "name": "WeChat",
+    "previewPath": "/design-systems/previews/wechat.webp",
+    "category": "product",
+    "tags": ["social", "familiar", "mobile", "practical"],
+    "bestFor": {
+      "en": "Messaging, social utilities, familiar mobile-first services",
+      "zh": "即时通信、社交工具、熟悉的移动优先服务"
+    },
+    "avoidFor": {
+      "en": "Luxury campaigns or experimental typography",
+      "zh": "奢华活动页或实验性字体设计"
+    },
+    "digest": "fdd89c8ec0005700fd45d8c67f6c4e80671b37160fd1d3ced9761c6e4b95543d",
+    "version": "2.0.0",
+    "files": {
+      "manifest": "wechat/manifest.json",
+      "design": "wechat/DESIGN.md",
+      "tokens": "wechat/tokens.css"
+    }
+  }
+]

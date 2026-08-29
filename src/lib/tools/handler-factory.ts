@@ -34,6 +34,10 @@ import {
   createApplyDesignStyleHandler,
 } from "./design-styles";
 import {
+  APPLY_DESIGN_SYSTEM_TOOL,
+  createApplyDesignSystemHandler,
+} from "../design-systems/apply";
+import {
   PROJECT_HEALTH_CHECK_TOOL,
   createProjectHealthCheckHandler,
 } from "./project-health";
@@ -41,6 +45,7 @@ import { formatConsoleLogs, type ConsoleLog } from "./console-log-format";
 import { getBuiltinSearchConfig } from "../ai/provider";
 import type { ApiType } from "../ai/provider";
 import type {
+  DesignSystemRef,
   WebSearchSettings,
   AssetSearchSettings,
   ProjectFiles,
@@ -53,6 +58,11 @@ import type {
 import { validateProjectFiles } from "../utils/project-files";
 import { detectRuntimePlatform } from "../runtime/platform";
 import type { RuntimePlatform } from "../ai/tools-schema";
+import {
+  createSubmitDesignReviewHandler,
+  type DesignReviewReport,
+} from "../design/review";
+import { SUBMIT_DESIGN_REVIEW_TOOL } from "../design/review-tool";
 
 export interface ToolFeatures {
   builtinSearch: boolean;
@@ -87,6 +97,9 @@ export interface BuildToolHandlersArgs {
     origin: string,
     context: ToolExecutionContext,
   ) => Promise<boolean>;
+  onDesignSystemApplied?: (reference: DesignSystemRef) => void;
+  getSelectedDesignSystemId?: () => string | undefined;
+  onDesignReviewSubmitted?: (report: DesignReviewReport) => void;
 }
 
 export interface BuiltToolHandlers {
@@ -109,6 +122,9 @@ export async function buildToolHandlers(
     filesBridge,
     developerSkillScriptsEnabled,
     requestRegistryOriginApproval,
+    onDesignSystemApplied,
+    getSelectedDesignSystemId,
+    onDesignReviewSubmitted,
   } = args;
   const runtimePlatform = await detectRuntimePlatform();
 
@@ -158,11 +174,21 @@ export async function buildToolHandlers(
   const applyDesignStyleHandler = guardedFilesBridge
     ? createApplyDesignStyleHandler(guardedFilesBridge)
     : null;
+  const applyDesignSystemHandler = guardedFilesBridge
+    ? createApplyDesignSystemHandler({
+        ...guardedFilesBridge,
+        getSelectedSystemId: getSelectedDesignSystemId,
+        onApplied: onDesignSystemApplied,
+      })
+    : null;
   const projectHealthCheckHandler = filesBridge
     ? createProjectHealthCheckHandler({
         getFiles: filesBridge.getFiles,
         getConsoleLogs,
       })
+    : null;
+  const submitDesignReviewHandler = onDesignReviewSubmitted
+    ? createSubmitDesignReviewHandler(onDesignReviewSubmitted)
     : null;
   const skillsAvailable = isSkillsAvailable();
   const scriptExecutionEnabled =
@@ -210,8 +236,14 @@ export async function buildToolHandlers(
     if (name === "apply_design_style" && applyDesignStyleHandler) {
       return applyDesignStyleHandler(name, handlerArgs);
     }
+    if (name === "apply_design_system" && applyDesignSystemHandler) {
+      return applyDesignSystemHandler(name, handlerArgs);
+    }
     if (name === "project_health_check" && projectHealthCheckHandler) {
       return projectHealthCheckHandler(name, handlerArgs, context);
+    }
+    if (name === "submit_design_review" && submitDesignReviewHandler) {
+      return submitDesignReviewHandler(name, handlerArgs);
     }
     if (name === "image_search" && assetSearchHandler) {
       return assetSearchHandler(name, handlerArgs);
@@ -231,11 +263,13 @@ export async function buildToolHandlers(
     ...NPM_SEARCH_TOOLS,
     ...MEMORY_TOOLS,
     ...DISPATCH_SUBAGENT_TOOL,
+    ...(onDesignReviewSubmitted ? SUBMIT_DESIGN_REVIEW_TOOL : {}),
     ...(filesBridge
       ? {
           ...INSTALL_COMPONENT_TOOL,
           ...(features.localAgent ? {} : SCREENSHOT_TO_CODE_TOOL),
           ...APPLY_DESIGN_STYLE_TOOL,
+          ...APPLY_DESIGN_SYSTEM_TOOL,
           ...PROJECT_HEALTH_CHECK_TOOL,
         }
       : {}),

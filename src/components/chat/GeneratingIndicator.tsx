@@ -3,7 +3,7 @@ import { Loader2 } from "lucide-react";
 import { useT } from "../../i18n";
 
 const TYPE_DELAY_MS = 85;
-const HOLD_DELAY_MS = 1_000;
+const HOLD_DELAY_MS = 3_000;
 const DELETE_DELAY_MS = 50;
 const GAP_DELAY_MS = 200;
 
@@ -71,7 +71,7 @@ export function GeneratingIndicator() {
 
   return (
     <div
-      className="flex items-center gap-2 py-1 text-sm text-muted-foreground"
+      className="flex h-7 shrink-0 items-center gap-2 py-1 text-sm text-muted-foreground"
       role="status"
       aria-live="polite"
     >

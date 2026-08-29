@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Message } from "../ai/generator-types";
 import { en } from "../../i18n/en";
 import { zh } from "../../i18n/zh";
+import type { ThinkingBlock } from "../../types";
 import { TOOL_CAPABILITY_REGISTRY } from "../ai/tools-schema";
 
 function createStorageStub(): Storage {
@@ -100,6 +101,57 @@ describe("mergeMessages", () => {
         (block) => block.type === "tool" && block.toolName === "patch_file",
       ),
     ).toBe(true);
+  });
+
+  it("keeps each assistant thinking phase in its original tool-loop position", async () => {
+    const { mergeMessages } = await import("./merge-messages");
+    const messages: Message[] = [
+      {
+        role: "assistant",
+        content: null,
+        thinking: "Inspect the current implementation.",
+        tool_calls: [
+          {
+            id: "read-current",
+            type: "function",
+            function: {
+              name: "read_file",
+              arguments: '{"path":"src/App.tsx"}',
+            },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        tool_call_id: "read-current",
+        content: "export default function App() {}",
+      },
+      {
+        role: "assistant",
+        content: "The implementation is ready.",
+        thinking: "Verify the focused change.",
+      },
+    ];
+
+    const blocks = mergeMessages(messages, en)[0].blocks;
+
+    expect(blocks.map((block) => block.type)).toEqual([
+      "thinking",
+      "tool",
+      "thinking",
+      "text",
+    ]);
+    expect(
+      blocks
+        .filter((block): block is ThinkingBlock => block.type === "thinking")
+        .map((block) => ({ id: block.id, content: block.content })),
+    ).toEqual([
+      {
+        id: "thinking-0",
+        content: "Inspect the current implementation.",
+      },
+      { id: "thinking-2", content: "Verify the focused change." },
+    ]);
   });
 
   it("covers every registered visible tool and local-provider tool with both locales", () => {
@@ -211,5 +263,129 @@ describe("mergeMessages", () => {
       (candidate) => candidate.type === "tool",
     );
     expect(block).toMatchObject({ title: "Demo Server · Lookup Records" });
+  });
+
+  it("summarizes read_skill without exposing the loaded instructions", async () => {
+    const { mergeMessages } = await import("./merge-messages");
+    const fullResult =
+      "# Skill: Code review\n\nFull instructions sent back to the model.";
+    const messages: Message[] = [
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "read-skill-main",
+            type: "function",
+            function: {
+              name: "read_skill",
+              arguments: JSON.stringify({ name: "Code review" }),
+            },
+          },
+          {
+            id: "read-skill",
+            type: "function",
+            function: {
+              name: "read_skill",
+              arguments: JSON.stringify({
+                name: "Code review",
+                reference_path: "references/security.md",
+              }),
+            },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        tool_call_id: "read-skill-main",
+        content: "# Skill: Code review\n\nPrivate main instructions",
+      },
+      {
+        role: "tool",
+        tool_call_id: "read-skill",
+        content: fullResult,
+      },
+    ];
+
+    const block = mergeMessages(messages, zh)[0].blocks.find(
+      (candidate) => candidate.type === "tool",
+    );
+    expect(block).toMatchObject({
+      title: "加载技能",
+      result: "",
+      skillLoads: [
+        {
+          name: "Code review",
+          referencePaths: ["references/security.md"],
+          status: "completed",
+        },
+      ],
+    });
+    expect(JSON.stringify(block)).not.toContain("Private main instructions");
+  });
+
+  it("merges list_skills and multiple reads at the first Skill-call position", async () => {
+    const { mergeMessages } = await import("./merge-messages");
+    const messages: Message[] = [
+      {
+        role: "assistant",
+        content: "Preparing guidance.",
+        tool_calls: [
+          {
+            id: "list-skills",
+            type: "function",
+            function: { name: "list_skills", arguments: "{}" },
+          },
+          {
+            id: "read-review",
+            type: "function",
+            function: {
+              name: "read_skill",
+              arguments: JSON.stringify({ name: "review-code" }),
+            },
+          },
+          {
+            id: "read-design",
+            type: "function",
+            function: {
+              name: "read_skill",
+              arguments: JSON.stringify({ name: "design-product-ui" }),
+            },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        tool_call_id: "list-skills",
+        content: "Enabled skills",
+      },
+      {
+        role: "tool",
+        tool_call_id: "read-review",
+        content: "# Skill: review-code\n\nPrivate review instructions",
+      },
+      {
+        role: "tool",
+        tool_call_id: "read-design",
+        content: 'Error: skill "design-product-ui" not found.',
+      },
+    ];
+
+    const blocks = mergeMessages(messages, en)[0].blocks;
+    expect(blocks.map((block) => block.type)).toEqual(["text", "tool"]);
+    expect(blocks[1]).toMatchObject({
+      type: "tool",
+      toolName: "read_skill",
+      title: "Load Skills",
+      skillLoads: [
+        { name: "review-code", status: "completed" },
+        {
+          name: "design-product-ui",
+          status: "failed",
+          error: 'Error: skill "design-product-ui" not found.',
+        },
+      ],
+    });
+    expect(JSON.stringify(blocks)).not.toContain("Private review instructions");
   });
 });

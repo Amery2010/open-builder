@@ -31,6 +31,7 @@ const baseProps = {
   template: "vite-react-ts",
   previewMode: "sandpack" as const,
   sandpackKey: 0,
+  onReloadPreview: vi.fn(),
   isProjectInitialized: false,
   showInlinePreview: false,
   onCompressContext: vi.fn(async () => undefined),
@@ -63,8 +64,16 @@ describe("ChatInterface generation loading", () => {
   });
 
   it("hides loading while any interactive tool is waiting for the user", () => {
-    render(<ChatInterface {...baseProps} />);
+    const { container } = render(<ChatInterface {...baseProps} />);
     expect(screen.getByRole("status")).toHaveTextContent("Thinking…");
+    expect(container.firstElementChild).toHaveClass(
+      "min-h-0",
+      "overflow-hidden",
+    );
+    expect(screen.getByRole("status").parentElement).toHaveClass(
+      "min-h-0",
+      "overflow-y-auto",
+    );
 
     act(() => {
       void useInteractiveStore.getState().askPlanApproval({

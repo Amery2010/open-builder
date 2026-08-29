@@ -39,4 +39,29 @@ describe("appendBufferedAssistantOutput", () => {
       },
     ]);
   });
+
+  it("starts a new assistant thinking phase after a tool result", () => {
+    const messages: Message[] = [
+      {
+        role: "assistant",
+        content: null,
+        thinking: "Inspect",
+        tool_calls: [
+          {
+            id: "read-1",
+            type: "function",
+            function: { name: "read_file", arguments: "{}" },
+          },
+        ],
+      },
+      { role: "tool", tool_call_id: "read-1", content: "file contents" },
+    ];
+
+    expect(
+      appendBufferedAssistantOutput(messages, { thinking: "Verify" }),
+    ).toEqual([
+      ...messages,
+      { role: "assistant", content: null, thinking: "Verify" },
+    ]);
+  });
 });

@@ -83,7 +83,7 @@ Visit `http://localhost:5173` and enter your API Key in settings to start debugg
 ```bash
 pnpm dev               # Start the Vite dev server
 pnpm build             # Build for production
-pnpm build:check       # Verify production artifact budgets
+pnpm build:check       # Verify production artifact integrity
 pnpm preview           # Preview the production build
 pnpm typecheck         # TypeScript type checking
 pnpm lint              # ESLint with zero warnings

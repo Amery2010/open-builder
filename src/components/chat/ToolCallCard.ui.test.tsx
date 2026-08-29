@@ -3,7 +3,9 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it } from "vitest";
+import { ScrollText } from "lucide-react";
 import { useSettingsStore } from "../../store/settings";
+import { TOOL_METADATA } from "../../lib/ai/tool-metadata";
 import { ToolCallCard } from "./ToolCallCard";
 
 const originalSystem = useSettingsStore.getState().system;
@@ -77,5 +79,88 @@ describe("ToolCallCard UI", () => {
     expect(
       screen.getByRole("img", { name: "MCP 工具结果" }),
     ).toBeInTheDocument();
+  });
+
+  it("keeps successful Skill loads expandable without exposing instructions", async () => {
+    const user = userEvent.setup();
+    render(
+      <ToolCallCard
+        toolName="read_skill"
+        title="Code review"
+        path=""
+        result="# Skill: Code review\n\nPrivate full instructions"
+        rawArgs={{ name: "Code review" }}
+        toolCallId="read-skill"
+      />,
+    );
+
+    expect(screen.getByText("Code review")).toBeInTheDocument();
+    expect(screen.queryByText(/Private full instructions/)).toBeNull();
+    const trigger = screen.getByRole("button", {
+      name: /Code review.*Completed/,
+    });
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+    await user.click(trigger);
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getAllByText("Code review")).toHaveLength(2);
+    expect(screen.queryByText(/Private full instructions/)).toBeNull();
+  });
+
+  it("keeps failed read_skill results expandable for diagnosis", async () => {
+    const user = userEvent.setup();
+    render(
+      <ToolCallCard
+        toolName="read_skill"
+        title="Code review"
+        path=""
+        result='Error: skill "Code review" not found or not enabled.'
+        rawArgs={{ name: "Code review" }}
+        toolCallId="read-skill-failed"
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: /Code review.*Failed/ }),
+    );
+    expect(screen.getByText(/not found or not enabled/)).toBeInTheDocument();
+  });
+
+  it("renders one expandable partial Skill-load summary", async () => {
+    const user = userEvent.setup();
+    render(
+      <ToolCallCard
+        toolName="read_skill"
+        title="Load Skills"
+        path=""
+        result=""
+        toolCallId="skills"
+        skillLoads={[
+          {
+            name: "review-code",
+            referencePaths: ["security.md"],
+            status: "completed",
+          },
+          {
+            name: "design-product-ui",
+            status: "failed",
+            error: "Error: unavailable",
+          },
+        ]}
+      />,
+    );
+
+    const trigger = screen.getByRole("button", {
+      name: /Load Skills.*Needs attention/,
+    });
+    await user.click(trigger);
+    expect(screen.getByText("review-code")).toBeInTheDocument();
+    expect(screen.getByText("security.md")).toBeInTheDocument();
+    expect(screen.getByText("design-product-ui")).toBeInTheDocument();
+    expect(screen.getByText("Error: unavailable")).toBeInTheDocument();
+  });
+
+  it("uses the same ScrollText icon for listing and loading Skills", () => {
+    expect(TOOL_METADATA.list_skills.iconComponent).toBe(ScrollText);
+    expect(TOOL_METADATA.read_skill.iconComponent).toBe(ScrollText);
   });
 });

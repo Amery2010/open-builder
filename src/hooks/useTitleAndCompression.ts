@@ -3,6 +3,7 @@ import type { Dispatch, SetStateAction } from "react";
 import { useConversationStore, DEFAULT_TITLE } from "../store/conversation";
 import type { ProviderConfig } from "../lib/ai/provider-config";
 import type { Message } from "../types";
+import { deriveFallbackTitle } from "../lib/utils/title-fallback";
 
 interface UseTitleAndCompressionArgs {
   /** Returns the current local provider configuration. */
@@ -12,12 +13,13 @@ interface UseTitleAndCompressionArgs {
   generateTextOverride?: (
     instructions: string,
     prompt: string,
+    options?: { timeoutMs?: number; signal?: AbortSignal },
   ) => Promise<string>;
 }
 
 interface SmartTitleRequest {
   conversationId: string;
-  completedMessages: Message[];
+  firstRequest: Message;
   config: ProviderConfig;
 }
 
@@ -32,7 +34,7 @@ export function useTitleAndCompression({
   const triggerSmartTitle = useCallback(
     async ({
       conversationId,
-      completedMessages,
+      firstRequest,
       config,
     }: SmartTitleRequest): Promise<void> => {
       const conversation =
@@ -45,19 +47,25 @@ export function useTitleAndCompression({
         return;
       }
 
+      const provisionalTitle = deriveFallbackTitle([firstRequest]);
+      if (!provisionalTitle) return;
+
       titleTasksRef.current.add(conversationId);
+      useConversationStore
+        .getState()
+        .renameConversation(conversationId, provisionalTitle);
       try {
         const { generateSmartTitle } = await import("../lib/utils/smart-title");
         const title = await generateSmartTitle(
-          completedMessages,
+          [firstRequest],
           config,
           generateTextOverride,
         );
-        if (!title) return;
+        if (!title || title === provisionalTitle) return;
 
         const currentConversation =
           useConversationStore.getState().conversations[conversationId];
-        if (currentConversation?.title === DEFAULT_TITLE) {
+        if (currentConversation?.title === provisionalTitle) {
           useConversationStore
             .getState()
             .renameConversation(conversationId, title);

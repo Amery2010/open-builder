@@ -5,6 +5,7 @@ import type {
   TextBlock,
   ThinkingBlock,
   ToolBlock,
+  SkillLoadItem,
 } from "../../types";
 import { getT, type Translations } from "../../i18n";
 import { truncate } from "./truncate";
@@ -68,6 +69,99 @@ function getFileAttachments(
     );
 }
 
+function aggregateSkillLoads(blocks: Block[], t: Translations): Block[] {
+  const skillIndexes = blocks.flatMap((block, index) =>
+    block.type === "tool" &&
+    (block.toolName === "list_skills" || block.toolName === "read_skill")
+      ? [index]
+      : [],
+  );
+  const readBlocks = blocks.filter(
+    (block): block is ToolBlock =>
+      block.type === "tool" && block.toolName === "read_skill",
+  );
+  if (readBlocks.length === 0) return blocks;
+
+  const byName = new Map<string, SkillLoadItem>();
+  for (const block of readBlocks) {
+    const rawName = block.rawArgs?.name;
+    const name =
+      typeof rawName === "string" && rawName.trim()
+        ? rawName.trim()
+        : block.title;
+    const rawReference = block.rawArgs?.reference_path;
+    const referencePath =
+      typeof rawReference === "string" && rawReference.trim()
+        ? rawReference.trim()
+        : undefined;
+    const failed =
+      block.toolOutput?.isError === true || block.result.startsWith("Error");
+    const nextStatus: SkillLoadItem["status"] = failed
+      ? "failed"
+      : block.result || block.toolOutput
+        ? "completed"
+        : "running";
+    const existing = byName.get(name);
+    if (!existing) {
+      byName.set(name, {
+        name,
+        ...(referencePath ? { referencePaths: [referencePath] } : {}),
+        status: nextStatus,
+        ...(failed && block.result ? { error: block.result } : {}),
+      });
+      continue;
+    }
+
+    if (existing.status === "failed" || nextStatus === "failed") {
+      existing.status =
+        existing.status === "failed" && nextStatus === "failed"
+          ? "failed"
+          : "attention";
+    } else if (existing.status === "attention") {
+      existing.status = "attention";
+    } else if (existing.status === "running" || nextStatus === "running") {
+      existing.status = "running";
+    } else {
+      existing.status = "completed";
+    }
+    if (referencePath && !existing.referencePaths?.includes(referencePath)) {
+      existing.referencePaths = [
+        ...(existing.referencePaths ?? []),
+        referencePath,
+      ];
+    }
+    if (!existing.error && failed && block.result) {
+      existing.error = block.result;
+    }
+  }
+
+  const firstIndex = skillIndexes[0];
+  const firstRead = readBlocks[0];
+  const aggregate: ToolBlock = {
+    type: "tool",
+    toolName: "read_skill",
+    title: t.tool.names.read_skill,
+    path: "",
+    result: "",
+    toolCallId: firstRead.toolCallId,
+    skillLoads: Array.from(byName.values()),
+    id: `tool-skill-loads-${firstRead.toolCallId}`,
+  };
+
+  const next: Block[] = [];
+  blocks.forEach((block, index) => {
+    if (index === firstIndex) next.push(aggregate);
+    if (
+      block.type === "tool" &&
+      (block.toolName === "list_skills" || block.toolName === "read_skill")
+    ) {
+      return;
+    }
+    next.push(block);
+  });
+  return next;
+}
+
 export function mergeMessages(
   messages: Message[],
   t: Translations = getT(),
@@ -129,7 +223,6 @@ export function mergeMessages(
       }
       i = j - 1;
     } else if (msg.role === "assistant") {
-      const thinkingParts: string[] = [];
       const otherBlocks: Block[] = [];
       let isError = false;
       let errorKind: MergedMessage["errorKind"] | undefined;
@@ -150,9 +243,12 @@ export function mergeMessages(
             errorRetryable = errorRetryable ?? cur.errorRetryable;
             errorStatus = errorStatus ?? cur.errorStatus;
           }
-          // Collect thinking from all assistant messages to merge later
           if (cur.thinking) {
-            thinkingParts.push(cur.thinking);
+            otherBlocks.push({
+              type: "thinking",
+              content: cur.thinking,
+              id: `thinking-${j}`,
+            } as ThinkingBlock);
           }
           const text = getTextContent(cur.content);
           if (text) {
@@ -244,16 +340,7 @@ export function mergeMessages(
         j++;
       }
 
-      // Merge all thinking into a single block at the front
-      const blocks: Block[] = [];
-      if (thinkingParts.length > 0) {
-        blocks.push({
-          type: "thinking",
-          content: thinkingParts.join(""),
-          id: `thinking-${i}`,
-        } as ThinkingBlock);
-      }
-      blocks.push(...otherBlocks);
+      const blocks = aggregateSkillLoads(otherBlocks, t);
 
       if (blocks.length > 0) {
         merged.push({

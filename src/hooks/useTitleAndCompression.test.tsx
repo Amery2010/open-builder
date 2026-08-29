@@ -27,10 +27,10 @@ function conversation(id: string, title = DEFAULT_TITLE): Conversation {
   };
 }
 
-const completedMessages: Message[] = [
-  { role: "user", content: "Fix automatic titles" },
-  { role: "assistant", content: "Done" },
-];
+const firstRequest: Message = {
+  role: "user",
+  content: "Fix automatic titles",
+};
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -69,12 +69,12 @@ describe("useTitleAndCompression smart titles", () => {
     act(() => {
       first = result.current.triggerSmartTitle({
         conversationId: "target",
-        completedMessages,
+        firstRequest,
         config,
       });
       duplicate = result.current.triggerSmartTitle({
         conversationId: "target",
-        completedMessages,
+        firstRequest,
         config,
       });
     });
@@ -82,6 +82,9 @@ describe("useTitleAndCompression smart titles", () => {
     await duplicate;
     await vi.waitFor(() =>
       expect(generateTextOverride).toHaveBeenCalledTimes(1),
+    );
+    expect(useConversationStore.getState().conversations.target.title).toBe(
+      "Fix automatic titles",
     );
     pending.resolve('"Automatic title fix"');
     await first;
@@ -108,7 +111,7 @@ describe("useTitleAndCompression smart titles", () => {
     act(() => {
       task = result.current.triggerSmartTitle({
         conversationId: "target",
-        completedMessages,
+        firstRequest,
         config,
       });
     });
@@ -123,6 +126,32 @@ describe("useTitleAndCompression smart titles", () => {
 
     expect(useConversationStore.getState().conversations.target.title).toBe(
       "My chosen title",
+    );
+  });
+
+  it("keeps the provisional fallback when title generation fails", async () => {
+    const generateTextOverride = vi.fn(async () => {
+      throw new Error("offline");
+    });
+    const { result } = renderHook(() =>
+      useTitleAndCompression({
+        resolveConfig: vi.fn(async () => config),
+        setIsGenerating: vi.fn(),
+        setMessages: vi.fn(),
+        generateTextOverride,
+      }),
+    );
+
+    await act(async () => {
+      await result.current.triggerSmartTitle({
+        conversationId: "target",
+        firstRequest,
+        config,
+      });
+    });
+
+    expect(useConversationStore.getState().conversations.target.title).toBe(
+      "Fix automatic titles",
     );
   });
 
@@ -142,7 +171,7 @@ describe("useTitleAndCompression smart titles", () => {
     act(() => {
       task = result.current.triggerSmartTitle({
         conversationId: "target",
-        completedMessages,
+        firstRequest,
         config,
       });
     });

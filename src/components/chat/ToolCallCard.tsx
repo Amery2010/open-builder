@@ -155,7 +155,21 @@ export function classifyToolCardStatus(
   toolName: string,
   result: string,
   toolOutput?: ToolBlock["toolOutput"],
+  skillLoads?: ToolBlock["skillLoads"],
 ): ToolCardStatus {
+  if (skillLoads && skillLoads.length > 0) {
+    if (skillLoads.every((skill) => skill.status === "failed")) return "failed";
+    if (
+      skillLoads.some(
+        (skill) => skill.status === "failed" || skill.status === "attention",
+      )
+    ) {
+      return "attention";
+    }
+    if (skillLoads.some((skill) => skill.status === "running"))
+      return "running";
+    return "completed";
+  }
   if (!result && !toolOutput) return "running";
   if (toolOutput?.isError || result.startsWith("Error")) return "failed";
 
@@ -192,6 +206,8 @@ export const ToolCallCard = memo(function ToolCallCard({
   paths,
   result,
   toolOutput,
+  rawArgs,
+  skillLoads,
 }: ToolCallCardProps) {
   const t = useT();
   const [expanded, setExpanded] = useState(false);
@@ -202,7 +218,37 @@ export const ToolCallCard = memo(function ToolCallCard({
   const displayResult = result
     ? truncateToolCardText(result, truncatedMessage)
     : result;
-  const status = classifyToolCardStatus(toolName, result, toolOutput);
+  const directSkillStatus = classifyToolCardStatus(
+    toolName,
+    result,
+    toolOutput,
+  );
+  const visibleSkillLoads =
+    skillLoads ??
+    (toolName === "read_skill"
+      ? [
+          {
+            name:
+              typeof rawArgs?.name === "string" && rawArgs.name.trim()
+                ? rawArgs.name.trim()
+                : title,
+            ...(typeof rawArgs?.reference_path === "string" &&
+            rawArgs.reference_path.trim()
+              ? { referencePaths: [rawArgs.reference_path.trim()] }
+              : {}),
+            status: directSkillStatus,
+            ...(directSkillStatus === "failed" && result
+              ? { error: result }
+              : {}),
+          },
+        ]
+      : undefined);
+  const status = classifyToolCardStatus(
+    toolName,
+    result,
+    toolOutput,
+    visibleSkillLoads,
+  );
   const statusLabel = t.tool.status[status];
 
   const searchSummary =
@@ -239,8 +285,10 @@ export const ToolCallCard = memo(function ToolCallCard({
   return (
     <div className="border border-border/60 rounded-lg overflow-hidden bg-muted/30">
       <button
-        className="w-full flex items-center gap-2 px-3 py-2 hover:bg-muted/50 transition-colors text-left"
-        onClick={() => setExpanded(!expanded)}
+        type="button"
+        aria-expanded={expanded}
+        onClick={() => setExpanded((current) => !current)}
+        className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-muted/50 transition-colors cursor-pointer"
       >
         <span className="flex items-center shrink-0">
           {TOOL_ICONS[toolName] ?? (
@@ -250,7 +298,11 @@ export const ToolCallCard = memo(function ToolCallCard({
         <span className="text-xs font-medium flex-1 text-foreground">
           {title}
         </span>
-        {toolName === "web_search" && result ? (
+        {visibleSkillLoads && visibleSkillLoads.length > 0 ? (
+          <Badge variant="secondary" className="text-xs font-mono h-5">
+            {visibleSkillLoads.length} {t.tool.skills}
+          </Badge>
+        ) : toolName === "web_search" && result ? (
           <Badge variant="secondary" className="text-xs font-mono h-5">
             {searchResultCount} {t.tool.results}
           </Badge>
@@ -321,9 +373,62 @@ export const ToolCallCard = memo(function ToolCallCard({
         />
       </button>
 
-      {expanded && (result || toolOutput) && (
+      {expanded && (result || toolOutput || visibleSkillLoads?.length) && (
         <div className="px-3 py-2 border-t border-border/60 bg-muted/20">
-          {toolOutput?.source?.kind === "mcp" ? (
+          {visibleSkillLoads && visibleSkillLoads.length > 0 ? (
+            <div className="space-y-1.5">
+              {visibleSkillLoads.map((skill) => (
+                <div
+                  key={skill.name}
+                  className="flex items-start gap-2 text-xs text-muted-foreground"
+                >
+                  {skill.status === "completed" ? (
+                    <Check
+                      size={13}
+                      className="mt-0.5 shrink-0 text-green-500"
+                      aria-hidden="true"
+                    />
+                  ) : skill.status === "failed" ? (
+                    <X
+                      size={13}
+                      className="mt-0.5 shrink-0 text-red-500"
+                      aria-hidden="true"
+                    />
+                  ) : skill.status === "attention" ? (
+                    <AlertTriangle
+                      size={13}
+                      className="mt-0.5 shrink-0 text-yellow-500"
+                      aria-hidden="true"
+                    />
+                  ) : (
+                    <span
+                      aria-hidden="true"
+                      className="mt-1.5 size-1.5 shrink-0 animate-pulse rounded-full bg-yellow-400"
+                    />
+                  )}
+                  <span className="min-w-0 flex-1">
+                    <span className="block font-medium text-foreground">
+                      {skill.name}
+                    </span>
+                    {skill.referencePaths &&
+                      skill.referencePaths.length > 0 && (
+                        <span className="block truncate font-mono text-[11px]">
+                          {skill.referencePaths.join(", ")}
+                        </span>
+                      )}
+                    {skill.error && (
+                      <span className="block whitespace-pre-wrap text-red-500">
+                        {truncateToolCardText(skill.error, truncatedMessage)}
+                      </span>
+                    )}
+                    <span className="sr-only">
+                      {t.tool.status[skill.status]}
+                    </span>
+                  </span>
+                </div>
+              ))}
+            </div>
+          ) : toolOutput?.source?.kind === "mcp" ? (
             <RichToolResult
               output={toolOutput}
               fallback={displayResult ?? ""}

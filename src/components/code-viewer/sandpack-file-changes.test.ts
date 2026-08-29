@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createSandpackFileChangeScheduler,
   discardPendingSandpackFileChanges,
+  flushPendingSandpackFileChanges,
 } from "./sandpack-file-changes";
 
 describe("Sandpack file change scheduler", () => {
@@ -84,5 +85,26 @@ describe("Sandpack file change scheduler", () => {
     scheduler.dispose();
 
     expect(commit).not.toHaveBeenCalled();
+  });
+
+  it("flushes a pending edit before a hard preview reload", () => {
+    vi.useFakeTimers();
+    const commit = vi.fn();
+    const scheduler = createSandpackFileChangeScheduler();
+    scheduler.schedule({
+      conversationId: "conversation-a",
+      path: "src/App.tsx",
+      content: "latest edit",
+      commit,
+    });
+
+    flushPendingSandpackFileChanges("conversation-a");
+
+    expect(commit).toHaveBeenCalledWith(
+      "conversation-a",
+      "src/App.tsx",
+      "latest edit",
+    );
+    scheduler.dispose();
   });
 });

@@ -32,6 +32,7 @@ describe("conversation store", () => {
       conversations: {},
       activeId: null,
       _hasHydrated: true,
+      legacyPlanModeMigrated: false,
     });
     useSnapshotStore.setState({ snapshots: {}, _hasHydrated: true });
   });
@@ -324,6 +325,85 @@ describe("conversation store", () => {
     });
   });
 
+  it("keeps workspace mode per conversation and returns approved plans to Design", () => {
+    const designConversation = useConversationStore
+      .getState()
+      .createConversation();
+    useConversationStore.getState().setWorkspaceMode("design");
+    useConversationStore.getState().setWorkspaceMode("plan");
+
+    expect(
+      useConversationStore.getState().conversations[designConversation],
+    ).toMatchObject({ workspaceMode: "plan", planReturnMode: "design" });
+
+    expect(
+      useConversationStore.getState().returnFromPlan(designConversation),
+    ).toBe("design");
+    expect(
+      useConversationStore.getState().conversations[designConversation],
+    ).toMatchObject({ workspaceMode: "design" });
+    expect(
+      useConversationStore.getState().conversations[designConversation]
+        .planReturnMode,
+    ).toBeUndefined();
+
+    const autoConversation = useConversationStore
+      .getState()
+      .createConversation();
+    expect(
+      useConversationStore.getState().conversations[autoConversation]
+        .workspaceMode,
+    ).toBe("auto");
+    expect(
+      useConversationStore.getState().conversations[designConversation]
+        .workspaceMode,
+    ).toBe("design");
+  });
+
+  it("migrates the old global Plan flag once into the active conversation", () => {
+    const id = useConversationStore.getState().createConversation();
+
+    expect(useConversationStore.getState().migrateLegacyPlanMode(true)).toBe(
+      true,
+    );
+    expect(useConversationStore.getState().conversations[id]).toMatchObject({
+      workspaceMode: "plan",
+      planReturnMode: "auto",
+    });
+    expect(useConversationStore.getState().migrateLegacyPlanMode(false)).toBe(
+      false,
+    );
+    expect(
+      useConversationStore.getState().conversations[id].workspaceMode,
+    ).toBe("plan");
+  });
+
+  it("upgrades root-level legacy DESIGN.md as a read-only reference", () => {
+    const persisted = {
+      activeId: "legacy",
+      conversations: {
+        legacy: {
+          id: "legacy",
+          title: "Legacy",
+          messages: [],
+          files: { "DESIGN.md": "# Existing visual direction" },
+          template: "static",
+          isProjectInitialized: true,
+          createdAt: 1,
+          updatedAt: 2,
+        },
+      },
+    };
+
+    const migrated = migrateConversationState(persisted, 3);
+    expect(migrated.conversations.legacy).toMatchObject({
+      workspaceMode: "auto",
+      designState: {
+        appliedSystem: { id: "legacy-design-md", source: "legacy" },
+      },
+    });
+  });
+
   it("repairs stale v1 project flags without changing other persisted fields", () => {
     const persisted = {
       activeId: "with-files",
@@ -492,6 +572,28 @@ describe("conversation store", () => {
     useConversationStore.getState().resetProject();
     expect(
       useConversationStore.getState().conversations[id].localAgentSessions,
+    ).toBeUndefined();
+  });
+
+  it("writes asynchronous design decisions to their originating conversation", () => {
+    const first = useConversationStore.getState().createConversation();
+    const second = useConversationStore.getState().createConversation();
+    expect(useConversationStore.getState().activeId).toBe(second);
+
+    useConversationStore.getState().setDesignStateForConversation(first, {
+      recommendation: {
+        systemId: null,
+        reason: "No system is needed.",
+        createdAt: 1,
+      },
+    });
+
+    expect(
+      useConversationStore.getState().conversations[first].designState
+        ?.recommendation?.systemId,
+    ).toBeNull();
+    expect(
+      useConversationStore.getState().conversations[second].designState,
     ).toBeUndefined();
   });
 });

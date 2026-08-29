@@ -1,12 +1,5 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
-import {
-  ArrowRight,
-  Check,
-  ChevronLeft,
-  ChevronRight,
-  HelpCircle,
-  Pencil,
-} from "lucide-react";
+import { ChevronLeft, ChevronRight, HelpCircle, Pencil } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { TooltipIconButton } from "@/components/ui/tooltip-icon-button";
@@ -67,6 +60,59 @@ function collectAnswers(
       selected: selectedAnswers(drafts[index]),
     })),
   };
+}
+
+function QuestionOption({
+  option,
+  type,
+  name,
+  checked,
+  onChange,
+}: {
+  option: AskUserQuestion["options"][number];
+  type: "radio" | "checkbox";
+  name?: string;
+  checked: boolean;
+  onChange: () => void;
+}) {
+  const t = useT();
+  const display = getOptionDisplay(option.label);
+
+  return (
+    <label
+      className={cn(
+        "flex min-h-11 cursor-pointer items-start gap-2.5 rounded-lg border px-2.5 py-2 text-left transition-colors",
+        "hover:bg-accent/50 focus-within:ring-2 focus-within:ring-ring/50",
+        checked ? "border-border bg-muted/70" : "border-transparent",
+      )}
+    >
+      <input
+        type={type}
+        name={name}
+        value={option.label}
+        checked={checked}
+        onChange={onChange}
+        className="mt-0.5 size-4 shrink-0 cursor-pointer accent-primary"
+      />
+      <span className="min-w-0 flex-1">
+        <span className="flex flex-wrap items-center gap-1.5">
+          <span className="text-sm font-medium leading-snug">
+            {display.label}
+          </span>
+          {display.recommended && (
+            <span className="rounded bg-muted px-1.5 py-0.5 text-[11px] font-medium leading-none text-muted-foreground">
+              {t.chat.askQuestion.recommended}
+            </span>
+          )}
+        </span>
+        {option.description && (
+          <span className="mt-0.5 block text-xs leading-snug text-muted-foreground">
+            {option.description}
+          </span>
+        )}
+      </span>
+    </label>
+  );
 }
 
 export function AskUserQuestionCard({
@@ -258,110 +304,55 @@ function QuestionnaireCard({
       </header>
 
       <div className="flex min-h-0 flex-1 flex-col px-2 pb-2">
-        <div
-          className="grid min-h-0 gap-1 overflow-y-auto"
-          role="group"
-          aria-label={question.question}
-        >
-          {question.options.map((option, optionIndex) => {
+        <fieldset className="grid min-h-0 gap-1 overflow-y-auto">
+          <legend className="sr-only">{question.question}</legend>
+          {question.options.map((option) => {
             const active =
               draft.customText.length === 0 &&
               draft.selected.includes(option.label);
-            const display = getOptionDisplay(option.label);
             return (
-              <button
+              <QuestionOption
                 key={option.label}
-                type="button"
-                aria-pressed={active}
-                onClick={() => selectOption(option.label)}
-                style={{
-                  gridTemplateColumns: "2.25rem minmax(0, 1fr) 1.5rem",
-                }}
-                className={cn(
-                  "grid min-h-16 cursor-pointer items-center gap-3 rounded-xl border px-3 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
-                  active
-                    ? "border-border bg-muted shadow-sm"
-                    : "border-transparent hover:bg-accent/50",
-                )}
-              >
-                <span
-                  aria-hidden="true"
-                  className={cn(
-                    "flex size-9 items-center justify-center rounded-full border text-sm tabular-nums text-muted-foreground transition-colors",
-                    active && "text-foreground",
-                  )}
-                >
-                  {optionIndex + 1}
-                </span>
-
-                <span className="min-w-0">
-                  <span className="flex flex-wrap items-center gap-2">
-                    <span className="text-sm font-semibold leading-snug">
-                      {display.label}
-                    </span>
-                    {display.recommended && (
-                      <span className="rounded-md bg-muted px-1.5 py-0.5 text-xs font-medium text-muted-foreground">
-                        {t.chat.askQuestion.recommended}
-                      </span>
-                    )}
-                  </span>
-                  {option.description && (
-                    <span className="mt-1 block text-xs leading-relaxed text-muted-foreground">
-                      {option.description}
-                    </span>
-                  )}
-                </span>
-
-                <span className="flex justify-end text-muted-foreground">
-                  {active &&
-                    (question.multiSelect ? (
-                      <Check className="size-4" aria-hidden="true" />
-                    ) : (
-                      <ArrowRight className="size-4" aria-hidden="true" />
-                    ))}
-                </span>
-              </button>
+                option={option}
+                type={question.multiSelect ? "checkbox" : "radio"}
+                name={question.multiSelect ? undefined : `${headingId}-choice`}
+                checked={active}
+                onChange={() => selectOption(option.label)}
+              />
             );
           })}
-        </div>
+        </fieldset>
 
         <div
           data-active={draft.customText.trim().length > 0}
-          className="ask-question-custom-row mt-2 flex min-h-14 shrink-0 items-center gap-2 rounded-xl border border-border bg-background p-2 transition-colors"
+          className="ask-question-custom-row mt-2 flex h-10 shrink-0 items-center gap-2 rounded-lg border border-border bg-background px-2 transition-colors"
         >
-          <span
+          <Pencil
             aria-hidden="true"
-            className="flex size-9 shrink-0 items-center justify-center rounded-full border border-border text-muted-foreground"
-          >
-            <Pencil className="size-4" />
-          </span>
-          <div className="min-w-0 flex-1">
-            <label
-              htmlFor={customInputId}
-              className="block text-xs font-medium leading-none text-muted-foreground"
-            >
-              {t.chat.askQuestion.customLabel}
-            </label>
-            <Input
-              id={customInputId}
-              value={draft.customText}
-              onChange={(event) => updateCustomAnswer(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key !== "Enter" || event.nativeEvent.isComposing)
-                  return;
-                event.preventDefault();
-                continueFlow();
-              }}
-              placeholder={t.chat.askQuestion.otherPlaceholder}
-              className="h-7 border-0 bg-transparent p-0 text-sm shadow-none focus-visible:border-0 focus-visible:ring-0 dark:bg-transparent"
-            />
-          </div>
+            className="size-3.5 shrink-0 text-muted-foreground"
+          />
+          <label htmlFor={customInputId} className="sr-only">
+            {t.chat.askQuestion.customLabel}
+          </label>
+          <Input
+            id={customInputId}
+            value={draft.customText}
+            onChange={(event) => updateCustomAnswer(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key !== "Enter" || event.nativeEvent.isComposing)
+                return;
+              event.preventDefault();
+              continueFlow();
+            }}
+            placeholder={t.chat.askQuestion.otherPlaceholder}
+            className="h-8 min-w-0 flex-1 border-0 bg-transparent px-0 text-sm shadow-none focus-visible:border-0 focus-visible:ring-0 dark:bg-transparent"
+          />
           <Button
             type="button"
             size="sm"
             disabled={!canContinue}
             onClick={continueFlow}
-            className="h-9 rounded-full px-3"
+            className="h-8 rounded-md px-2.5"
           >
             {isLast ? t.chat.askQuestion.submit : t.chat.askQuestion.next}
           </Button>
@@ -387,6 +378,7 @@ function ApprovalQuestionCard({
   const [drafts, setDrafts] = useState<QuestionDraft[]>(() =>
     createDrafts(questions),
   );
+  const submittedRef = useRef(false);
   const allAnswered = drafts.length > 0 && drafts.every(isQuestionAnswered);
 
   if (!pending || questions.length === 0) return null;
@@ -416,47 +408,39 @@ function ApprovalQuestionCard({
       </div>
       <div className="space-y-3 px-3 py-2">
         {questions.map((question, questionIndex) => (
-          <div
+          <fieldset
             key={`${question.header}-${questionIndex}`}
             className="space-y-2"
           >
-            <p className="text-sm">{question.question}</p>
-            <div
-              className="grid grid-cols-1 gap-1.5"
-              role="group"
-              aria-label={question.question}
-            >
+            <legend className="text-sm">{question.question}</legend>
+            <div className="grid grid-cols-1 gap-1">
               {question.options.map((option) => {
                 const active = drafts[questionIndex].selected.includes(
                   option.label,
                 );
                 return (
-                  <button
+                  <QuestionOption
                     key={option.label}
-                    type="button"
-                    aria-pressed={active}
-                    onClick={() =>
+                    option={option}
+                    type={question.multiSelect ? "checkbox" : "radio"}
+                    name={
+                      question.multiSelect
+                        ? undefined
+                        : `${toolCallId}-${questionIndex}-choice`
+                    }
+                    checked={active}
+                    onChange={() =>
                       toggleOption(
                         questionIndex,
                         option.label,
                         question.multiSelect,
                       )
                     }
-                    className={`cursor-pointer rounded-md border px-3 py-2 text-left text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
-                      active
-                        ? "border-primary bg-primary/10"
-                        : "border-border bg-background hover:bg-accent/50"
-                    }`}
-                  >
-                    <span className="font-medium">{option.label}</span>
-                    <span className="mt-0.5 block text-muted-foreground">
-                      {option.description}
-                    </span>
-                  </button>
+                  />
                 );
               })}
             </div>
-          </div>
+          </fieldset>
         ))}
       </div>
       <div className="flex justify-end border-t border-border bg-muted/20 px-3 py-2">
@@ -464,11 +448,13 @@ function ApprovalQuestionCard({
           type="button"
           size="sm"
           disabled={!allAnswered}
-          onClick={() =>
+          onClick={() => {
+            if (submittedRef.current) return;
+            submittedRef.current = true;
             useInteractiveStore
               .getState()
-              .resolveQuestion(toolCallId, collectAnswers(questions, drafts))
-          }
+              .resolveQuestion(toolCallId, collectAnswers(questions, drafts));
+          }}
         >
           {t.chat.askQuestion.submit}
         </Button>

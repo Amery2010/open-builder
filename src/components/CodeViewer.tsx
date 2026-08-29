@@ -20,7 +20,75 @@ import {
   hasSensitiveProjectFileContent,
   projectFilesForPreview,
 } from "../lib/utils/project-file-policy";
-import { TooltipIconButton } from "@/components/ui/tooltip-icon-button";
+import { useConversationStore } from "../store/conversation";
+import { DesignSystemPanel } from "./design/DesignSystemPanel";
+import { DesignTokenPanel } from "./design/DesignTokenPanel";
+import { DesignReviewDialog } from "./design/DesignReviewDialog";
+import { useDesignSelectionStore } from "../store/design-selection";
+import {
+  createDesignBridgeNonce,
+  DESIGN_BRIDGE_CAPTURE_TIMEOUT_MS,
+  DESIGN_BRIDGE_MARKER,
+  DESIGN_BRIDGE_PAYLOAD_MAX_BYTES,
+  DESIGN_BRIDGE_PROTOCOL_VERSION,
+  DESIGN_BRIDGE_VIRTUAL_PATH,
+  DESIGN_CAPTURE_RUNTIME_VIRTUAL_PATH,
+  getDesignBridgeTargetOrigin,
+  injectDesignBridge,
+  isDesignBridgeOriginAllowed,
+  parseDesignBridgeCaptureResponse,
+  sanitizeDesignSelectionPayload,
+  stripDesignBridge,
+  type DesignBridgeCaptureExpectation,
+  type DesignBridgeCaptureResult,
+  type DesignBridgeParentMessage,
+} from "../lib/design/preview-bridge";
+import {
+  collectDesignReviewCaptures,
+  DESIGN_REVIEW_VIEWPORTS,
+  isDesignReviewViewportReady,
+  loadDesignCaptureRuntimeSource,
+  type DesignReviewViewport,
+} from "../lib/design/preview-capture";
+import { createDesignTokenSnapshot } from "../lib/design/tokens";
+import {
+  exportProjectToUniqueDirectory,
+  supportsDesktopDesignTools,
+} from "../lib/design/desktop";
+import type {
+  DesignReviewFinding,
+  DesignReviewScreenshot,
+} from "../lib/design/review";
+import { useDesignReviewStore } from "../store/design-review";
+import { DEFAULT_TITLE } from "../store/conversation";
+import { flushPendingSandpackFileChanges } from "./code-viewer/sandpack-file-changes";
+import {
+  SandpackActionButton,
+  SandpackRefreshAction,
+  SandpackRefreshRegistration,
+} from "./code-viewer/SandpackPreviewActions";
+
+interface PendingDesignCapture {
+  expectation: DesignBridgeCaptureExpectation;
+  resolve: (result: DesignBridgeCaptureResult) => void;
+  reject: (error: Error) => void;
+  timeout: number;
+  removeAbortListener: () => void;
+}
+
+function afterPreviewPaint(): Promise<void> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(fallback);
+      resolve();
+    };
+    const fallback = window.setTimeout(finish, 100);
+    requestAnimationFrame(() => requestAnimationFrame(finish));
+  });
+}
 
 interface CodeViewerProps {
   conversationId: string;
@@ -34,6 +102,15 @@ interface CodeViewerProps {
   template: string;
   previewMode?: ProjectPreviewMode;
   sandpackKey: number;
+  onReloadPreview: () => void;
+  onApplyDesignSystem?: (id: string) => Promise<void> | void;
+  isGenerating?: boolean;
+  onDesignReview?: (
+    screenshots: readonly DesignReviewScreenshot[],
+  ) => Promise<void> | void;
+  onApplyDesignReviewFixes?: (
+    findings: readonly DesignReviewFinding[],
+  ) => Promise<void> | void;
 }
 
 export function CodeViewer({
@@ -48,6 +125,10 @@ export function CodeViewer({
   template,
   previewMode = "sandpack",
   sandpackKey,
+  onApplyDesignSystem,
+  isGenerating = false,
+  onDesignReview,
+  onApplyDesignReviewFixes,
 }: CodeViewerProps) {
   const t = useT();
   const previewEnabled = previewMode !== "code-only";
@@ -58,23 +139,66 @@ export function CodeViewer({
   const [showConsole, setShowConsole] = useState(false);
   const [requestedScale, setRequestedScale] = useState<number | null>(null);
   const [fitScale, setFitScale] = useState(1);
+  const [designSystemsOpen, setDesignSystemsOpen] = useState(false);
+  const [designTokensOpen, setDesignTokensOpen] = useState(false);
+  const [designTokenDraft, setDesignTokenDraft] = useState<{
+    path: string;
+    content: string;
+  } | null>(null);
+  const [designSelectionActive, setDesignSelectionActive] = useState(false);
+  const [designReviewOpen, setDesignReviewOpen] = useState(false);
+  const [captureRuntimeSource, setCaptureRuntimeSource] = useState<
+    string | null
+  >(null);
+  const [captureViewport, setCaptureViewport] =
+    useState<DesignReviewViewport | null>(null);
+  const [desktopActionMessage, setDesktopActionMessage] = useState<
+    string | null
+  >(null);
+  const [designBridgeReady, setDesignBridgeReady] = useState(false);
+  const designBridgeReadyRef = useRef(false);
+  const captureRuntimeReadyRef = useRef(false);
+  const bridgeNonceRef = useRef<string | null>(null);
+  const bridgeRetryTimersRef = useRef<number[]>([]);
+  const pendingCaptureRef = useRef<PendingDesignCapture | null>(null);
+  const captureAbortRef = useRef<AbortController | null>(null);
+  const captureTaskRef = useRef<Promise<void> | null>(null);
+  const softRefreshRef = useRef<(() => void) | null>(null);
   const previewHostRef = useRef<HTMLDivElement>(null);
   const isDark = useTheme();
   const effectiveViewMode = previewEnabled ? viewMode : "code";
+  const workspaceMode = useConversationStore(
+    (state) => state.conversations[conversationId]?.workspaceMode ?? "auto",
+  );
+  const designState = useConversationStore(
+    (state) => state.conversations[conversationId]?.designState,
+  );
+  const conversationTitle = useConversationStore(
+    (state) => state.conversations[conversationId]?.title ?? DEFAULT_TITLE,
+  );
+  const desktopMode = supportsDesktopDesignTools();
+  const setDesignSelection = useDesignSelectionStore(
+    (state) => state.setSelection,
+  );
 
-  const deviceDimensions =
-    deviceSize === "tablet"
+  const deviceDimensions = captureViewport
+    ? { width: captureViewport.width, height: captureViewport.height }
+    : deviceSize === "tablet"
       ? { width: 768, height: 1024 }
       : { width: 375, height: 667 };
-  const previewScale =
-    deviceSize === "desktop" ? 1 : (requestedScale ?? fitScale);
+  const fixedPreview = captureViewport !== null || deviceSize !== "desktop";
+  const previewScale = fixedPreview
+    ? captureViewport
+      ? fitScale
+      : (requestedScale ?? fitScale)
+    : 1;
 
   useEffect(() => {
     if (!previewEnabled) setViewMode("code");
   }, [previewEnabled]);
 
   useEffect(() => {
-    if (deviceSize === "desktop") return;
+    if (!fixedPreview) return;
     const host = previewHostRef.current;
     if (!host) return;
     const update = () => {
@@ -97,7 +221,7 @@ export function CodeViewer({
     const observer = new ResizeObserver(update);
     observer.observe(host);
     return () => observer.disconnect();
-  }, [deviceDimensions.height, deviceDimensions.width, deviceSize, viewMode]);
+  }, [deviceDimensions.height, deviceDimensions.width, fixedPreview, viewMode]);
 
   const handleDeviceSizeChange = (next: DeviceSize) => {
     setDeviceSize(next);
@@ -112,8 +236,54 @@ export function CodeViewer({
       ),
     [files, previewMode],
   );
+  const runtimePreviewFiles = useMemo(
+    () =>
+      designTokenDraft
+        ? { ...previewFiles, [designTokenDraft.path]: designTokenDraft.content }
+        : previewFiles,
+    [designTokenDraft, previewFiles],
+  );
+  const bridgeInjection = useMemo(
+    () =>
+      workspaceMode === "design"
+        ? injectDesignBridge(
+            runtimePreviewFiles,
+            template,
+            previewEnabled,
+            captureRuntimeSource ?? undefined,
+          )
+        : { supported: false as const, files: runtimePreviewFiles },
+    [
+      captureRuntimeSource,
+      previewEnabled,
+      runtimePreviewFiles,
+      template,
+      workspaceMode,
+    ],
+  );
+  const sandpackSourceFiles =
+    workspaceMode === "design" &&
+    effectiveViewMode === "preview" &&
+    bridgeInjection.supported
+      ? bridgeInjection.files
+      : effectiveViewMode === "preview"
+        ? runtimePreviewFiles
+        : previewFiles;
   const handleSandpackFileChange = useCallback(
     (targetConversationId: string, path: string, content: string) => {
+      if (
+        path === DESIGN_BRIDGE_VIRTUAL_PATH ||
+        path === DESIGN_CAPTURE_RUNTIME_VIRTUAL_PATH
+      ) {
+        return;
+      }
+      if (
+        bridgeInjection.supported &&
+        path === bridgeInjection.indexPath &&
+        content.includes(DESIGN_BRIDGE_MARKER)
+      ) {
+        return;
+      }
       const canonical = files[path];
       if (
         canonical !== undefined &&
@@ -121,19 +291,502 @@ export function CodeViewer({
       ) {
         return;
       }
-      onFileChange(targetConversationId, path, content);
+      onFileChange(targetConversationId, path, stripDesignBridge(content));
     },
-    [files, onFileChange],
+    [bridgeInjection, files, onFileChange],
   );
   const sandpackFiles = useMemo(
     () =>
       Object.fromEntries(
-        Object.entries(previewFiles).map(([path, content]) => [
+        Object.entries(sandpackSourceFiles).map(([path, content]) => [
           path.startsWith("/") ? path : `/${path}`,
           { code: content },
         ]),
       ),
-    [previewFiles],
+    [sandpackSourceFiles],
+  );
+
+  const clearBridgeRetryTimers = useCallback(() => {
+    for (const timer of bridgeRetryTimersRef.current)
+      window.clearTimeout(timer);
+    bridgeRetryTimersRef.current = [];
+  }, []);
+
+  const getPreviewIframe = useCallback(
+    () =>
+      previewHostRef.current?.querySelector<HTMLIFrameElement>("iframe") ??
+      null,
+    [],
+  );
+
+  const clearPendingCapture = useCallback((pending: PendingDesignCapture) => {
+    window.clearTimeout(pending.timeout);
+    pending.removeAbortListener();
+    if (pendingCaptureRef.current === pending) pendingCaptureRef.current = null;
+  }, []);
+
+  const postBridgeControl = useCallback(
+    (active: boolean, nonce: string) => {
+      const iframe = getPreviewIframe();
+      if (!iframe?.contentWindow) return false;
+      const targetOrigin = getDesignBridgeTargetOrigin(
+        iframe.src,
+        window.location.href,
+      );
+      if (!targetOrigin) return false;
+      iframe.contentWindow.postMessage(
+        {
+          type: "open-builder:design-bridge-control",
+          version: DESIGN_BRIDGE_PROTOCOL_VERSION,
+          nonce,
+          active,
+        },
+        targetOrigin,
+      );
+      return true;
+    },
+    [getPreviewIframe],
+  );
+
+  const deactivateDesignSelection = useCallback(() => {
+    clearBridgeRetryTimers();
+    const nonce = bridgeNonceRef.current;
+    if (nonce) postBridgeControl(false, nonce);
+    bridgeNonceRef.current = null;
+    setDesignSelectionActive(false);
+  }, [clearBridgeRetryTimers, postBridgeControl]);
+
+  const activateDesignSelection = useCallback(() => {
+    if (!bridgeInjection.supported) return;
+    clearBridgeRetryTimers();
+    const nonce = createDesignBridgeNonce();
+    bridgeNonceRef.current = nonce;
+    setDesignSelectionActive(true);
+    postBridgeControl(true, nonce);
+    for (const delay of designBridgeReady ? [] : [250, 750]) {
+      bridgeRetryTimersRef.current.push(
+        window.setTimeout(() => {
+          if (bridgeNonceRef.current === nonce) postBridgeControl(true, nonce);
+        }, delay),
+      );
+    }
+  }, [
+    bridgeInjection.supported,
+    clearBridgeRetryTimers,
+    designBridgeReady,
+    postBridgeControl,
+  ]);
+
+  const requestPreviewCapture = useCallback(
+    (viewport: DesignReviewViewport, signal: AbortSignal) => {
+      const iframe = getPreviewIframe();
+      if (!iframe?.contentWindow) {
+        return Promise.reject(new Error("Preview iframe is not available."));
+      }
+      const targetOrigin = getDesignBridgeTargetOrigin(
+        iframe.src,
+        window.location.href,
+      );
+      if (!targetOrigin) {
+        return Promise.reject(new Error("Preview iframe origin is invalid."));
+      }
+      if (pendingCaptureRef.current) {
+        return Promise.reject(
+          new Error("A preview capture request is already running."),
+        );
+      }
+      const expectation: DesignBridgeCaptureExpectation = {
+        nonce: createDesignBridgeNonce(),
+        requestId: createDesignBridgeNonce(),
+        viewportName: viewport.name,
+        viewportWidth: viewport.width,
+        viewportHeight: viewport.height,
+      };
+      return new Promise<DesignBridgeCaptureResult>((resolve, reject) => {
+        const abort = () => {
+          const pending = pendingCaptureRef.current;
+          if (!pending || pending.expectation !== expectation) return;
+          clearPendingCapture(pending);
+          reject(
+            new DOMException("Preview capture was cancelled.", "AbortError"),
+          );
+        };
+        const timeout = window.setTimeout(() => {
+          const pending = pendingCaptureRef.current;
+          if (!pending || pending.expectation !== expectation) return;
+          clearPendingCapture(pending);
+          reject(new Error("Preview capture timed out."));
+        }, DESIGN_BRIDGE_CAPTURE_TIMEOUT_MS);
+        const pending: PendingDesignCapture = {
+          expectation,
+          resolve,
+          reject,
+          timeout,
+          removeAbortListener: () => signal.removeEventListener("abort", abort),
+        };
+        pendingCaptureRef.current = pending;
+        signal.addEventListener("abort", abort, { once: true });
+        if (signal.aborted) {
+          abort();
+          return;
+        }
+        try {
+          iframe.contentWindow?.postMessage(
+            {
+              type: "open-builder:design-bridge-capture",
+              version: DESIGN_BRIDGE_PROTOCOL_VERSION,
+              nonce: expectation.nonce,
+              requestId: expectation.requestId,
+              viewport: {
+                name: viewport.name,
+                width: viewport.width,
+                height: viewport.height,
+              },
+            },
+            targetOrigin,
+          );
+        } catch (error) {
+          clearPendingCapture(pending);
+          reject(error instanceof Error ? error : new Error(String(error)));
+        }
+      });
+    },
+    [clearPendingCapture, getPreviewIframe],
+  );
+
+  useEffect(() => {
+    const handleBridgeMessage = (event: MessageEvent) => {
+      const iframe = getPreviewIframe();
+      if (!iframe?.contentWindow || event.source !== iframe.contentWindow)
+        return;
+      if (
+        !isDesignBridgeOriginAllowed(
+          iframe.src,
+          window.location.href,
+          event.origin,
+        )
+      ) {
+        return;
+      }
+      const message = event.data as DesignBridgeParentMessage | undefined;
+      const pending = pendingCaptureRef.current;
+      if (
+        pending &&
+        (message?.type === "open-builder:design-bridge-capture-result" ||
+          message?.type === "open-builder:design-bridge-capture-error")
+      ) {
+        const response = parseDesignBridgeCaptureResponse(
+          message,
+          pending.expectation,
+        );
+        if (!response) return;
+        clearPendingCapture(pending);
+        if (response.ok) pending.resolve(response.result);
+        else pending.reject(new Error(response.error));
+        return;
+      }
+      let serialized: string;
+      try {
+        serialized = JSON.stringify(event.data);
+      } catch {
+        return;
+      }
+      if (
+        new TextEncoder().encode(serialized).byteLength >
+        DESIGN_BRIDGE_PAYLOAD_MAX_BYTES
+      ) {
+        return;
+      }
+      if (!message || message.version !== DESIGN_BRIDGE_PROTOCOL_VERSION)
+        return;
+      if (message.type === "open-builder:design-bridge-ready") {
+        designBridgeReadyRef.current = true;
+        captureRuntimeReadyRef.current =
+          message.captureRuntimeAvailable === true;
+        setDesignBridgeReady(true);
+        const nonce = bridgeNonceRef.current;
+        if (nonce && designSelectionActive) postBridgeControl(true, nonce);
+        return;
+      }
+      const nonce = bridgeNonceRef.current;
+      if (!nonce || message.nonce !== nonce) return;
+      if (message.type === "open-builder:design-bridge-exit") {
+        deactivateDesignSelection();
+        return;
+      }
+      if (message.type === "open-builder:design-bridge-selection") {
+        const selection = sanitizeDesignSelectionPayload(message.payload);
+        if (!selection) return;
+        setDesignSelection(conversationId, selection);
+        deactivateDesignSelection();
+      }
+    };
+    window.addEventListener("message", handleBridgeMessage);
+    return () => window.removeEventListener("message", handleBridgeMessage);
+  }, [
+    conversationId,
+    clearPendingCapture,
+    deactivateDesignSelection,
+    designSelectionActive,
+    getPreviewIframe,
+    postBridgeControl,
+    setDesignSelection,
+  ]);
+
+  useEffect(() => {
+    designBridgeReadyRef.current = false;
+    captureRuntimeReadyRef.current = false;
+    setDesignBridgeReady(false);
+    deactivateDesignSelection();
+  }, [conversationId, deactivateDesignSelection, sandpackKey, workspaceMode]);
+
+  useEffect(
+    () => () => {
+      clearBridgeRetryTimers();
+      captureAbortRef.current?.abort();
+      const pending = pendingCaptureRef.current;
+      if (pending) {
+        clearPendingCapture(pending);
+        pending.reject(
+          new DOMException("Preview capture was cancelled.", "AbortError"),
+        );
+      }
+    },
+    [clearBridgeRetryTimers, clearPendingCapture],
+  );
+
+  const bridgeUnavailableReason =
+    bridgeInjection.reason === "code-only"
+      ? t.toolbar.selectionCodeOnly
+      : bridgeInjection.reason === "unsupported-template"
+        ? t.toolbar.selectionUnsupportedTemplate.replace("{template}", template)
+        : bridgeInjection.reason === "missing-index"
+          ? t.toolbar.selectionMissingIndex
+          : bridgeInjection.reason === "reserved-path"
+            ? t.toolbar.selectionReservedPath
+            : undefined;
+
+  const handleDesignTokenDraftChange = useCallback(
+    (path: string | undefined, content: string | undefined) => {
+      setDesignTokenDraft(
+        path && content !== undefined ? { path, content } : null,
+      );
+    },
+    [],
+  );
+
+  const handleDesignTokenCommit = useCallback(
+    (path: string, content: string) => {
+      if (files[path] === content) return;
+      const nextFiles = { ...files, [path]: content };
+      onFileChange(conversationId, path, content);
+      createDesignTokenSnapshot(
+        conversationId,
+        nextFiles,
+        t.designTokens.snapshotLabel,
+      );
+      setDesignTokenDraft(null);
+    },
+    [conversationId, files, onFileChange, t.designTokens.snapshotLabel],
+  );
+
+  const handleDesignTokenUpgrade = useCallback(() => {
+    setDesignTokensOpen(false);
+    setDesignSystemsOpen(true);
+  }, []);
+
+  const handleExportDirectory = useCallback(async () => {
+    if (isGenerating) return;
+    setDesktopActionMessage(null);
+    try {
+      const result = await exportProjectToUniqueDirectory(
+        files,
+        conversationTitle === DEFAULT_TITLE
+          ? "open-builder-project"
+          : conversationTitle,
+      );
+      if (result) {
+        setDesktopActionMessage(
+          t.toolbar.exportedDirectory.replace("{path}", result.path),
+        );
+      }
+    } catch (error) {
+      setDesktopActionMessage(
+        t.toolbar.exportDirectoryFailed.replace(
+          "{message}",
+          error instanceof Error ? error.message : String(error),
+        ),
+      );
+    }
+  }, [conversationTitle, files, isGenerating, t.toolbar]);
+
+  const waitForPreviewViewport = useCallback(
+    async (viewport: DesignReviewViewport, signal: AbortSignal) => {
+      const deadline = performance.now() + 5_000;
+      while (performance.now() < deadline) {
+        signal.throwIfAborted();
+        const iframe = getPreviewIframe();
+        if (
+          iframe?.contentWindow &&
+          isDesignReviewViewportReady(
+            {
+              bridgeReady: designBridgeReadyRef.current,
+              captureRuntimeReady: captureRuntimeReadyRef.current,
+              width: iframe.clientWidth,
+              height: iframe.clientHeight,
+            },
+            viewport,
+          )
+        ) {
+          await afterPreviewPaint();
+          return;
+        }
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 50));
+      }
+      throw new Error(
+        `Preview did not become ready at ${viewport.width}px width.`,
+      );
+    },
+    [getPreviewIframe],
+  );
+
+  const captureDesignReviewScreenshots = useCallback(() => {
+    if (captureTaskRef.current) return captureTaskRef.current;
+    const controller = new AbortController();
+    captureAbortRef.current = controller;
+    const task = (async () => {
+      const reviewStore = useDesignReviewStore.getState();
+      reviewStore.beginCapture(DESIGN_REVIEW_VIEWPORTS.length);
+      if (!bridgeInjection.supported) {
+        reviewStore.fail(
+          bridgeUnavailableReason ??
+            "Automatic preview capture is unavailable for this project.",
+        );
+        return;
+      }
+      const previousConsole = showConsole;
+      const previousSelection = designSelectionActive;
+      try {
+        const runtimeSource = await loadDesignCaptureRuntimeSource();
+        controller.signal.throwIfAborted();
+        if (captureRuntimeSource !== runtimeSource) {
+          captureRuntimeReadyRef.current = false;
+          setCaptureRuntimeSource(runtimeSource);
+        }
+        setShowConsole(false);
+        if (previousSelection) deactivateDesignSelection();
+        const collection = await collectDesignReviewCaptures({
+          signal: controller.signal,
+          prepareViewport: async (viewport) => {
+            setCaptureViewport(viewport);
+            await waitForPreviewViewport(viewport, controller.signal);
+          },
+          captureViewport: (viewport) =>
+            requestPreviewCapture(viewport, controller.signal),
+          onProgress: (completed, total, viewport) => {
+            useDesignReviewStore.getState().updateCaptureProgress({
+              completed,
+              total,
+              viewport: viewport.name,
+            });
+          },
+          restore: async () => {
+            setCaptureViewport(null);
+            setShowConsole(previousConsole);
+            await afterPreviewPaint();
+            if (previousSelection) activateDesignSelection();
+          },
+        });
+        controller.signal.throwIfAborted();
+        const screenshots: DesignReviewScreenshot[] = collection.captures.map(
+          (capture) => ({
+            dataUrl: capture.dataUrl,
+            mimeType: capture.mimeType,
+            name: `preview-${capture.viewport.name}-${capture.viewport.width}x${capture.viewport.height}.webp`,
+            source: "automatic",
+            viewport: capture.viewport,
+            semanticSnapshot: capture.semanticSnapshot,
+          }),
+        );
+        if (screenshots.length === 0) {
+          useDesignReviewStore
+            .getState()
+            .fail(
+              collection.errors.join(" ") ||
+                "Automatic preview capture did not return an image.",
+            );
+          return;
+        }
+        useDesignReviewStore
+          .getState()
+          .setScreenshots(screenshots, collection.errors);
+        await onDesignReview?.(screenshots);
+      } catch (error) {
+        if ((error as { name?: string })?.name !== "AbortError") {
+          useDesignReviewStore
+            .getState()
+            .fail(error instanceof Error ? error.message : String(error));
+        }
+      }
+    })();
+    captureTaskRef.current = task;
+    void task.then(
+      () => {
+        if (captureTaskRef.current === task) captureTaskRef.current = null;
+        if (captureAbortRef.current === controller)
+          captureAbortRef.current = null;
+      },
+      () => {
+        if (captureTaskRef.current === task) captureTaskRef.current = null;
+        if (captureAbortRef.current === controller)
+          captureAbortRef.current = null;
+      },
+    );
+    return task;
+  }, [
+    activateDesignSelection,
+    bridgeInjection.supported,
+    bridgeUnavailableReason,
+    captureRuntimeSource,
+    deactivateDesignSelection,
+    designSelectionActive,
+    onDesignReview,
+    requestPreviewCapture,
+    showConsole,
+    waitForPreviewViewport,
+  ]);
+
+  const openDesignReview = useCallback(() => {
+    useDesignReviewStore.getState().reset();
+    setDesignReviewOpen(true);
+  }, []);
+
+  const handleDesignReviewOpenChange = useCallback((open: boolean) => {
+    if (!open) {
+      captureAbortRef.current?.abort();
+      if (useDesignReviewStore.getState().status === "capturing") {
+        useDesignReviewStore.getState().reset();
+      }
+    }
+    setDesignReviewOpen(open);
+  }, []);
+
+  const handleReloadPreview = useCallback(() => {
+    flushPendingSandpackFileChanges(conversationId);
+    softRefreshRef.current?.();
+  }, [conversationId]);
+
+  const registerSoftRefresh = useCallback((refresh: (() => void) | null) => {
+    softRefreshRef.current = refresh;
+  }, []);
+
+  const applySelectedReviewFixes = useCallback(
+    async (findings: readonly DesignReviewFinding[]) => {
+      setDesignReviewOpen(false);
+      await onApplyDesignReviewFixes?.(findings);
+      useDesignReviewStore.getState().reset();
+    },
+    [onApplyDesignReviewFixes],
   );
 
   const requestedCurrentFile = currentFile.replace(/^\/+/, "");
@@ -174,9 +827,63 @@ export function CodeViewer({
           setRequestedScale(Math.max(0.25, previewScale - 0.1))
         }
         onPreviewFit={() => setRequestedScale(null)}
+        onReloadPreview={handleReloadPreview}
+        designMode={workspaceMode === "design"}
+        onOpenDesignTokens={() => setDesignTokensOpen(true)}
+        desktopMode={desktopMode}
+        onExportDirectory={() => void handleExportDirectory()}
+        onOpenDesignReview={onDesignReview ? openDesignReview : undefined}
+        isGenerating={isGenerating}
+        designSelectionSupported={bridgeInjection.supported}
+        designSelectionActive={designSelectionActive}
+        onToggleDesignSelection={() =>
+          designSelectionActive
+            ? deactivateDesignSelection()
+            : activateDesignSelection()
+        }
+        designSelectionUnavailableReason={bridgeUnavailableReason}
       />
 
+      {workspaceMode === "design" && onApplyDesignSystem && (
+        <DesignSystemPanel
+          open={designSystemsOpen}
+          onOpenChange={setDesignSystemsOpen}
+          onApply={onApplyDesignSystem}
+          isGenerating={isGenerating}
+        />
+      )}
+      {workspaceMode === "design" && (
+        <DesignTokenPanel
+          open={designTokensOpen}
+          onOpenChange={setDesignTokensOpen}
+          files={files}
+          designState={designState}
+          onDraftChange={handleDesignTokenDraftChange}
+          onCommit={handleDesignTokenCommit}
+          onUpgrade={handleDesignTokenUpgrade}
+          isGenerating={isGenerating}
+        />
+      )}
+      {workspaceMode === "design" && onDesignReview && (
+        <DesignReviewDialog
+          open={designReviewOpen}
+          onOpenChange={handleDesignReviewOpenChange}
+          onRunReview={onDesignReview}
+          onApplyFixes={applySelectedReviewFixes}
+          onCaptureScreenshots={captureDesignReviewScreenshots}
+          isGenerating={isGenerating}
+        />
+      )}
+
       <div className="flex-1 overflow-hidden relative bg-muted/50">
+        {desktopActionMessage && (
+          <div
+            role="status"
+            className="absolute right-3 top-3 z-40 max-w-md rounded-lg border bg-background/95 px-3 py-2 text-xs shadow-lg backdrop-blur"
+          >
+            {desktopActionMessage}
+          </div>
+        )}
         <SandpackProvider
           key={sandpackKey}
           template={
@@ -187,6 +894,7 @@ export function CodeViewer({
           options={{ activeFile: sandpackCurrentFile }}
           style={{ height: "100%" }}
         >
+          <SandpackRefreshRegistration onChange={registerSoftRefresh} />
           <SandpackListener
             conversationId={conversationId}
             onFileChange={handleSandpackFileChange}
@@ -199,40 +907,37 @@ export function CodeViewer({
                 className={cn(
                   "h-full w-full",
                   effectiveViewMode === "preview" ? "block" : "hidden",
-                  deviceSize === "desktop"
-                    ? "overflow-hidden"
-                    : "overflow-auto p-4",
+                  fixedPreview ? "overflow-auto p-4" : "overflow-hidden",
                 )}
               >
                 <div
-                  className={cn(
-                    "mx-auto",
-                    deviceSize !== "desktop" && "relative",
-                  )}
+                  className={cn("mx-auto", fixedPreview && "relative")}
                   style={
-                    deviceSize === "desktop"
-                      ? { width: "100%", height: "100%" }
-                      : {
+                    fixedPreview
+                      ? {
                           width: deviceDimensions.width * previewScale,
                           height: deviceDimensions.height * previewScale,
                         }
+                      : { width: "100%", height: "100%" }
                   }
                 >
                   <div
                     className={cn(
                       "grid grid-rows-3 h-full",
-                      deviceSize !== "desktop" &&
+                      fixedPreview &&
                         "absolute left-0 top-0 overflow-hidden rounded-lg border bg-background shadow-lg",
+                      captureViewport &&
+                        "rounded-none border-0 shadow-none transition-none",
                     )}
                     style={
-                      deviceSize === "desktop"
-                        ? undefined
-                        : {
+                      fixedPreview
+                        ? {
                             width: deviceDimensions.width,
                             height: deviceDimensions.height,
                             transform: `scale(${previewScale})`,
                             transformOrigin: "top left",
                           }
+                        : undefined
                     }
                   >
                     <div
@@ -242,21 +947,30 @@ export function CodeViewer({
                       )}
                     >
                       <SandpackPreview
-                        showNavigator
+                        showNavigator={!captureViewport}
                         showOpenInCodeSandbox={false}
-                        showRefreshButton
+                        showRefreshButton={false}
+                        showRestartButton={false}
                         actionsChildren={
-                          <TooltipIconButton
-                            label={
-                              showConsole ? t.console.hide : t.console.show
-                            }
-                            type="button"
-                            size="icon-sm"
-                            variant="ghost"
-                            onClick={() => setShowConsole(!showConsole)}
-                          >
-                            <Terminal size={16} />
-                          </TooltipIconButton>
+                          <>
+                            <SandpackActionButton
+                              label={
+                                showConsole ? t.console.hide : t.console.show
+                              }
+                              pressed={showConsole}
+                              onClick={() =>
+                                setShowConsole((visible) => !visible)
+                              }
+                            >
+                              <Terminal size={16} />
+                            </SandpackActionButton>
+                            <SandpackRefreshAction
+                              label={t.toolbar.reloadPreview}
+                              onBeforeRefresh={() =>
+                                flushPendingSandpackFileChanges(conversationId)
+                              }
+                            />
+                          </>
                         }
                       />
                     </div>
@@ -266,7 +980,10 @@ export function CodeViewer({
                         showConsole ? "row-span-1" : "max-h-0 border-t-0",
                       )}
                     >
-                      <SandpackConsole showSyntaxError={true} />
+                      <SandpackConsole
+                        showSyntaxError={true}
+                        showRestartButton={false}
+                      />
                     </div>
                   </div>
                 </div>

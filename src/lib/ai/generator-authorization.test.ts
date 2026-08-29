@@ -51,6 +51,7 @@ function createGenerator(
       plan: string,
     ) => Promise<{ approved: boolean; feedback?: string }>;
     onPlanApproved?: () => ToolSet | void | Promise<ToolSet | void>;
+    prepareInitializedProject?: GeneratorOptions["prepareInitializedProject"];
   } = {},
   events: GeneratorEvents = {},
 ) {
@@ -118,6 +119,95 @@ describe("generator execution authorization", () => {
 
     expect(outcome.result.isError).not.toBe(true);
     expect(outcome.result.text).toContain("empty project");
+  });
+
+  it("prepares an initialized project before publishing its file tree", async () => {
+    const onCommitted = vi.fn();
+    const prepareInitializedProject = vi.fn(
+      async (
+        files: Record<string, string>,
+        _context: Parameters<
+          NonNullable<GeneratorOptions["prepareInitializedProject"]>
+        >[1],
+      ) => ({
+        files: { ...files, "DESIGN.md": "canonical design" },
+        changes: [{ path: "DESIGN.md", action: "created" as const }],
+        resultNote: "applied selected design system stripe",
+        onCommitted,
+      }),
+    );
+    const onTemplateChange = vi.fn();
+    const { generator } = createGenerator(
+      { init_project: BUILTIN_TOOLS.init_project },
+      vi.fn(),
+      { prepareInitializedProject, conversationId: "conversation-a" },
+      { onTemplateChange },
+    );
+
+    const outcome = await (generator as unknown as ToolInvoker).executeTool(
+      call("init_project", { template: "vite-react-ts" }),
+    );
+
+    expect(prepareInitializedProject).toHaveBeenCalledOnce();
+    expect(prepareInitializedProject.mock.calls[0][1]).toMatchObject({
+      conversationId: "conversation-a",
+      template: "vite-react-ts",
+    });
+    expect(generator.getFiles()["DESIGN.md"]).toBe("canonical design");
+    expect(onTemplateChange.mock.calls[0][1]["DESIGN.md"]).toBe(
+      "canonical design",
+    );
+    expect(outcome.changes).toContainEqual({
+      path: "DESIGN.md",
+      action: "created",
+    });
+    expect(outcome.result.text).toContain("applied selected design system");
+    expect(onCommitted).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the project empty when initialization preparation fails", async () => {
+    const { generator } = createGenerator(
+      { init_project: BUILTIN_TOOLS.init_project },
+      vi.fn(),
+      {
+        prepareInitializedProject: async () => {
+          throw new Error("selected design system is unavailable");
+        },
+      },
+    );
+
+    const outcome = await (generator as unknown as ToolInvoker).executeTool(
+      call("init_project", { template: "vite-react-ts" }),
+    );
+
+    expect(outcome.result.isError).toBe(true);
+    expect(outcome.result.text).toContain(
+      "selected design system is unavailable",
+    );
+    expect(generator.getFiles()).toEqual({});
+    expect(outcome.changes).toEqual([]);
+  });
+
+  it("does not publish or commit an invalid prepared project", async () => {
+    const onCommitted = vi.fn();
+    const { generator } = createGenerator(
+      { init_project: BUILTIN_TOOLS.init_project },
+      vi.fn(),
+      {
+        prepareInitializedProject: async (files) => ({
+          files: { ...files, "../outside.txt": "invalid path" },
+          onCommitted,
+        }),
+      },
+    );
+
+    const outcome = await (generator as unknown as ToolInvoker).executeTool(
+      call("init_project", { template: "vite-react-ts" }),
+    );
+
+    expect(outcome.result.isError).toBe(true);
+    expect(generator.getFiles()).toEqual({});
+    expect(onCommitted).not.toHaveBeenCalled();
   });
 
   it("denies an advertised custom tool with no registered capability", async () => {

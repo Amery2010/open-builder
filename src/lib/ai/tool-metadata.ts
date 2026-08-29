@@ -13,8 +13,7 @@ import {
   Image,
   Package,
   Package2,
-  Blocks,
-  BookOpen,
+  ScrollText,
   Play,
   ScanLine,
   FileKey,
@@ -53,8 +52,11 @@ export const TOOL_METADATA: Record<string, ToolMeta> = {
     iconClass: "text-blue-500",
   },
   get_console_logs: { iconComponent: Terminal, iconClass: "text-sky-500" },
-  list_skills: { iconComponent: Blocks, iconClass: "text-indigo-500" },
-  read_skill: { iconComponent: BookOpen, iconClass: "text-indigo-500" },
+  list_skills: { iconComponent: ScrollText, iconClass: "text-indigo-500" },
+  read_skill: {
+    iconComponent: ScrollText,
+    iconClass: "text-indigo-500",
+  },
   execute_skill_script: { iconComponent: Play, iconClass: "text-indigo-500" },
 
   rename_file: {
@@ -101,6 +103,18 @@ export const TOOL_METADATA: Record<string, ToolMeta> = {
       typeof args.style === "string"
         ? `${t.tool.names.apply_design_style}: ${args.style}`
         : undefined,
+  },
+  apply_design_system: {
+    iconComponent: Palette,
+    iconClass: "text-violet-500",
+    titleBuilder: (args, t) =>
+      typeof args.system_id === "string"
+        ? `${t.tool.names.apply_design_system}: ${args.system_id}`
+        : undefined,
+  },
+  submit_design_review: {
+    iconComponent: Palette,
+    iconClass: "text-violet-500",
   },
   read_env_schema: { iconComponent: FileKey, iconClass: "text-amber-500" },
   manage_env: {

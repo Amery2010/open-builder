@@ -27,6 +27,7 @@ export type {
   AttachmentRef,
   ResolvedAttachment,
   MessageMetadata,
+  DesignSelectionContext,
 } from "../lib/ai/generator-types";
 
 export type {
@@ -102,6 +103,13 @@ export interface ThinkingBlock {
   id: string;
 }
 
+export interface SkillLoadItem {
+  name: string;
+  referencePaths?: string[];
+  status: "running" | "completed" | "failed" | "attention";
+  error?: string;
+}
+
 export interface ToolBlock {
   type: "tool";
   toolName: string;
@@ -116,6 +124,9 @@ export interface ToolBlock {
   /** Raw parsed arguments the AI passed to the tool. Used by interactive tools
    *  (ask_user_question, exit_plan_mode) that render full args in the UI. */
   rawArgs?: Record<string, unknown>;
+  /** Presentation-only summary used when list_skills/read_skill calls from one
+   * assistant turn are rendered as a single expandable loading card. */
+  skillLoads?: SkillLoadItem[];
   id: string;
 }
 
@@ -126,7 +137,7 @@ export interface MergedMessage {
   role: "user" | "assistant";
   blocks: Block[];
   id: string;
-  origin?: "auto_qa";
+  origin?: "auto_qa" | "design_review";
   /** True when this assistant message was synthesized to report a local error
    *  (network failure, aborted retry, etc.). Drives the retry affordance in the
    *  UI without relying on string-prefix sniffing. */
@@ -207,6 +218,41 @@ export interface LocalAgentSessionRef {
 
 export type ProjectPreviewMode = "sandpack" | "code-only";
 
+/** User-facing workflow mode. It is intentionally separate from the lower-level
+ * execution modes used by the generator and local-agent protocol. */
+export type WorkspaceMode = "auto" | "plan" | "design";
+
+export type PlanReturnMode = Exclude<WorkspaceMode, "plan">;
+
+export type DesignSystemSource = "builtin" | "imported" | "custom" | "legacy";
+
+export interface DesignSystemRef {
+  id: string;
+  name: string;
+  source: DesignSystemSource;
+  version: string;
+  /** SHA-256 of the normalized package. Legacy DESIGN.md references may not
+   * have a digest until the user explicitly upgrades them. */
+  digest?: string;
+}
+
+export interface DesignRecommendation {
+  systemId: string | null;
+  reason: string;
+  createdAt: number;
+}
+
+export interface ConversationDesignState {
+  /** The current choice. Empty projects retain it until initialization; an
+   * initialized project applies it through the canonical package writer. */
+  selectedSystem?: DesignSystemRef;
+  /** The package whose canonical DESIGN.md and tokens.css are in the project. */
+  appliedSystem?: DesignSystemRef;
+  recommendation?: DesignRecommendation;
+  /** A failed automatic decision remains retryable on the next request. */
+  autoSelectionError?: boolean;
+}
+
 export interface Conversation {
   id: string;
   title: string;
@@ -215,6 +261,10 @@ export interface Conversation {
   template: string;
   previewMode?: ProjectPreviewMode;
   isProjectInitialized: boolean;
+  workspaceMode?: WorkspaceMode;
+  /** Where approval should return when Plan was entered from another mode. */
+  planReturnMode?: PlanReturnMode;
+  designState?: ConversationDesignState;
   compressedContext?: CompressedContext;
   localAgentSessions?: Partial<
     Record<LocalAgentProvider, LocalAgentSessionRef>

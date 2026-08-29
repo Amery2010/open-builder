@@ -1,0 +1,12 @@
+{
+  "schemaVersion": "open-builder-design-system/v1",
+  "id": "notion",
+  "name": "Notion",
+  "category": "Productivity & SaaS",
+  "description": "Bundled visual reference for Notion with curated design guidance and semantic tokens.",
+  "files": {
+    "design": "DESIGN.md",
+    "tokens": "tokens.css"
+  },
+  "notice": "Unofficial visual reference; no trademark endorsement is implied."
+}

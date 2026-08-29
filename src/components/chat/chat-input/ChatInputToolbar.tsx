@@ -8,7 +8,9 @@ import {
   Image,
   ListTodo,
   Loader2,
+  Palette,
   Paperclip,
+  PencilRuler,
   SendHorizonal,
   Square,
 } from "lucide-react";
@@ -29,6 +31,7 @@ import {
 } from "@/components/ui/tooltip";
 import { useT } from "../../../i18n";
 import { SkillsMenu } from "./SkillsMenu";
+import type { WorkspaceMode } from "../../../types";
 
 const McpMenu = lazy(() =>
   import("./McpMenu").then((module) => ({ default: module.McpMenu })),
@@ -40,13 +43,16 @@ interface ChatInputToolbarProps {
   onUploadProject: () => void;
   onManageSkills?: () => void;
   onManageMcp?: () => void;
+  onManageDesignSystems?: () => void;
+  designSystemName?: string;
+  designSystemLabel?: string;
   onReconnectMcp?: () => Promise<void> | void;
   skillsAvailable: boolean;
   skillsInitializing: boolean;
   forcedSkillIds: readonly string[];
   onForcedSkillIdsChange: (ids: string[]) => void;
-  planModeEnabled: boolean;
-  setPlanMode: (enabled: boolean) => void;
+  workspaceMode: WorkspaceMode;
+  setWorkspaceMode: (mode: WorkspaceMode) => void;
   isGenerating: boolean;
   hasContent: boolean;
   isHoveringStop: boolean;
@@ -103,13 +109,16 @@ export function ChatInputToolbar({
   onUploadProject,
   onManageSkills,
   onManageMcp,
+  onManageDesignSystems,
+  designSystemName,
+  designSystemLabel,
   onReconnectMcp,
   skillsAvailable,
   skillsInitializing,
   forcedSkillIds,
   onForcedSkillIdsChange,
-  planModeEnabled,
-  setPlanMode,
+  workspaceMode,
+  setWorkspaceMode,
   isGenerating,
   hasContent,
   isHoveringStop,
@@ -175,6 +184,28 @@ export function ChatInputToolbar({
       </div>
 
       <div className="flex items-center gap-1">
+        {workspaceMode === "design" && onManageDesignSystems && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                className="h-7 max-w-28 gap-1 px-1.5 text-xs text-violet-600 hover:text-violet-700 sm:max-w-36 dark:text-violet-300 dark:hover:text-violet-200"
+                aria-label={designSystemLabel ?? t.toolbar.designSystem}
+                onClick={onManageDesignSystems}
+              >
+                <Palette size={14} className="shrink-0" aria-hidden="true" />
+                <span className="truncate">
+                  {designSystemName ?? t.designSystems.automatic}
+                </span>
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              {designSystemLabel ?? t.toolbar.designSystem}
+            </TooltipContent>
+          </Tooltip>
+        )}
         <DropdownMenu>
           <Tooltip>
             <TooltipTrigger asChild>
@@ -187,14 +218,18 @@ export function ChatInputToolbar({
                     className="h-7 gap-1 px-2 text-xs text-muted-foreground hover:text-foreground"
                     aria-label={t.chat.planMode.modeMenuLabel}
                   >
-                    {planModeEnabled ? (
+                    {workspaceMode === "plan" ? (
                       <ListTodo size={14} />
+                    ) : workspaceMode === "design" ? (
+                      <PencilRuler size={14} />
                     ) : (
                       <CodeXml size={14} />
                     )}
-                    {planModeEnabled
+                    {workspaceMode === "plan"
                       ? t.chat.planMode.planLabel
-                      : t.chat.planMode.autoLabel}
+                      : workspaceMode === "design"
+                        ? t.chat.planMode.designLabel
+                        : t.chat.planMode.autoLabel}
                   </Button>
                 </DropdownMenuTrigger>
               </span>
@@ -209,25 +244,31 @@ export function ChatInputToolbar({
             {(
               [
                 {
-                  value: false,
+                  value: "auto",
                   icon: CodeXml,
                   label: t.chat.planMode.autoLabel,
                   description: t.chat.planMode.autoDescription,
                 },
                 {
-                  value: true,
+                  value: "plan",
                   icon: ListTodo,
                   label: t.chat.planMode.planLabel,
                   description: t.chat.planMode.planDescription,
                 },
+                {
+                  value: "design",
+                  icon: PencilRuler,
+                  label: t.chat.planMode.designLabel,
+                  description: t.chat.planMode.designDescription,
+                },
               ] as const
             ).map((mode) => {
               const Icon = mode.icon;
-              const selected = mode.value === planModeEnabled;
+              const selected = mode.value === workspaceMode;
               return (
                 <DropdownMenuItem
                   key={String(mode.value)}
-                  onSelect={() => setPlanMode(mode.value)}
+                  onSelect={() => setWorkspaceMode(mode.value)}
                   className="items-start gap-2.5 py-2"
                 >
                   <Icon size={16} className="mt-0.5" />
@@ -267,7 +308,7 @@ export function ChatInputToolbar({
             <span
               className={`absolute inset-0 flex items-center justify-center transition-[opacity,transform,color,background-color,border-color] duration-200 ${isHoveringStop ? "opacity-100 scale-100" : "opacity-0 scale-50"}`}
             >
-              <Square size={14} fill="currentColor" />
+              <Square size={8} fill="currentColor" />
             </span>
           </TooltipIconButton>
         ) : (

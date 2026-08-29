@@ -7,7 +7,7 @@ export interface PendingSandpackFileChange {
 
 export interface SandpackFileChangeScheduler {
   schedule: (change: PendingSandpackFileChange) => void;
-  flush: () => void;
+  flush: (conversationId?: string) => void;
   discard: (conversationId?: string) => void;
   dispose: () => void;
 }
@@ -32,7 +32,13 @@ export function createSandpackFileChangeScheduler(
     }
   };
 
-  const flush = () => {
+  const flush = (conversationId?: string) => {
+    if (
+      conversationId !== undefined &&
+      pending?.conversationId !== conversationId
+    ) {
+      return;
+    }
     clearTimer();
     const change = pending;
     pending = null;
@@ -85,5 +91,12 @@ export function discardPendingSandpackFileChanges(
 ): void {
   for (const scheduler of activeSchedulers) {
     scheduler.discard(conversationId);
+  }
+}
+
+/** Preserve pending editor content before intentionally remounting Sandpack. */
+export function flushPendingSandpackFileChanges(conversationId: string): void {
+  for (const scheduler of [...activeSchedulers]) {
+    scheduler.flush(conversationId);
   }
 }

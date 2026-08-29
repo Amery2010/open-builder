@@ -1,7 +1,7 @@
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import path from "path";
-import { defineConfig } from "vitest/config";
+import { configDefaults, defineConfig } from "vitest/config";
 
 const host = process.env.TAURI_DEV_HOST;
 
@@ -124,6 +124,7 @@ export default defineConfig(() => {
       environment: "node",
       setupFiles: ["./src/test/setup.ts"],
       execArgv: ["--no-experimental-webstorage"],
+      exclude: [...configDefaults.exclude, "e2e/**"],
     },
     envPrefix: ["VITE_", "TAURI_ENV_*"],
   };

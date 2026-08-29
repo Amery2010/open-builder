@@ -47,8 +47,33 @@ export interface ResolvedAttachment extends AttachmentRef {
 }
 
 export interface MessageMetadata {
-  origin?: "auto_qa";
+  origin?: "auto_qa" | "design_review";
   attachments?: AttachmentRef[];
+  designSelection?: DesignSelectionContext;
+}
+
+export interface DesignSelectionContext {
+  protocolVersion: 1;
+  elementId: string;
+  label: string;
+  tagName: string;
+  text?: string;
+  aria?: Partial<
+    Record<
+      | "label"
+      | "labelledby"
+      | "describedby"
+      | "pressed"
+      | "expanded"
+      | "selected"
+      | "current",
+      string
+    >
+  >;
+  route: string;
+  attributes?: Partial<
+    Record<"role" | "type" | "name" | "placeholder", string>
+  >;
 }
 
 /** Rich, persistable tool-result blocks. MCP is the first consumer, but the
@@ -190,6 +215,21 @@ export interface StructuredGenerationError {
   retryable: boolean;
 }
 
+export interface InitializedProjectPreparation {
+  files: ProjectFiles;
+  changes?: FileChange[];
+  /** Compact trusted note appended to the init_project tool result. */
+  resultNote?: string;
+  /** Runs only after the prepared file tree passes validation and is committed. */
+  onCommitted?: () => void;
+}
+
+export interface InitializedProjectContext {
+  conversationId?: string;
+  template: string;
+  signal: AbortSignal;
+}
+
 export interface GeneratorEvent {
   state: GeneratorRunState;
   at: number;
@@ -253,6 +293,15 @@ export interface GeneratorOptions {
     toolCallId: string,
     conversationId?: string,
   ) => Promise<DispatchSubagentResult>;
+  /** Run-scoped, trusted transformation applied after init_project creates a
+   * template and before that file tree becomes authoritative. */
+  prepareInitializedProject?: (
+    files: ProjectFiles,
+    context: InitializedProjectContext,
+  ) =>
+    | InitializedProjectPreparation
+    | void
+    | Promise<InitializedProjectPreparation | void>;
 }
 
 /** Result of a subagent dispatch.
@@ -298,6 +347,12 @@ export interface GenerationBackend {
   setTools(tools: ToolSet): void;
   setReadOnlyMode(readOnly: boolean): void;
   setExecutionMode(mode: ExecutionMode): void;
+  /** Restrict provider-native search for isolated utility profiles whose
+   * shared execution mode is still chat. */
+  setNativeSearchAllowed?(allowed: boolean): void;
+  /** Prevent an isolated utility profile from bootstrapping or resuming the
+   * normal conversation when it supplies its own bounded context. */
+  setConversationContextAllowed?(allowed: boolean): void;
   setAllowedMcpAliases(aliases: ReadonlySet<string>): void;
   getSkillContext(): SkillActiveContextController;
   getRunContext(): ToolRunContext;

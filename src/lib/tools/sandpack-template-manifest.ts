@@ -21,11 +21,11 @@ export interface SandpackTemplateProfile {
   runtimeLock?: TemplateRuntimeLock;
 }
 
-export const OPEN_BUILDER_TEMPLATE_MANIFEST_VERSION = 1;
+export const OPEN_BUILDER_TEMPLATE_MANIFEST_VERSION = 2;
 
-const REACT_VERSION = "^19.2.8";
-const REACT_TYPES_VERSION = "^19.2.18";
-const REACT_DOM_TYPES_VERSION = "^19.2.5";
+const REACT_VERSION = "^18.3.1";
+const REACT_TYPES_VERSION = "^18.3.12";
+const REACT_DOM_TYPES_VERSION = "^18.3.1";
 const TYPESCRIPT_REFRESH_VERSION = "^5.9.3";
 const PREACT_VERSION = "^10.29.8";
 const VUE_VERSION = "^3.5.42";

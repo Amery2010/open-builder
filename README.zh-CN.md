@@ -54,6 +54,7 @@ Tauri 桌面版（macOS / Windows / Linux）提供 stdio MCP 等本机运行能�
 - **项目健康检查** — `/health` 可检查结构、依赖、运行日志、可访问性与响应式风险；隔离的自动 QA 只执行受限项目检查，不访问 MCP 或预览控制台
 - **上下文压缩** — 通过 `/compact` 或命令面板总结长对话，降低 Token 消耗
 - **Plan Mode** — 支持先探索代码并提交方案，用户批准后再写入文件；`ask_user_question` 既可批量确认独立问题，也可逐题进行依赖式压力访谈
+- **Design 模式** — 以项目为单位在编程 / 计划 / 设计间切换，生成可运行的营销网站和多屏产品界面，并提供精选或自定义设计系统、响应式交互与显式设计自检
 - **子代理协作** — 内置代码浏览、代码审查、依赖建议、Bug 调查、UI 审查等只读子代理
 - **内置搜索** — 支持启用模型内置的搜索服务
 - **桌面 API 代理** — Tauri 可转发经允许的 HTTP/HTTPS 模型请求，处理浏览器 CORS 限制；静态 Web 部署仍依赖服务商允许跨域访问
@@ -68,7 +69,7 @@ Tauri 桌面版（macOS / Windows / Linux）提供 stdio MCP 等本机运行能�
 - **Slash 指令** — 输入框支持 `/new`、`/fork`、`/clear`、`/reset`、`/compact`、`/health`、`/review`、`/continue`、`/retry`
 - **命令面板与快捷键** — 可通过 `Cmd/Ctrl+K` 打开命令面板，并使用键盘新建会话、打开设置、聚焦输入框或停止生成
 - **图片与文件输入** — 支持上传截图、文本文件或 PDF；支持 PDF 的模型会收到原生 PDF 文件输入，本地不抽取 PDF 文本
-- **技能系统** — 开启的 Skill 只提供 metadata 供 AI 自动发现；仅在调用 `read_skill` 或为下一条消息选择 Skill 时加载全文，选择结果会传给子代理并在发送后清空。内置 `design-taste-frontend`、`frontend-design`、`code-review` 与 `code-simplifier`，导入 Skill 默认关闭自动发现
+- **技能系统** — 开启的 Skill 只提供 metadata 供 AI 自动发现；仅在调用 `read_skill` 或为下一条消息选择 Skill 时加载全文，选择结果会传给子代理并在发送后清空。同一轮 Agent 加载的 Skill 会合并为一张可展开列表。8 个内置 Skill 为 `debug-web-app`、`build-tailwind-ui`、`build-accessible-ui`、`write-safe-typescript`、`art-direct-web`、`design-product-ui`、`review-code` 与 `simplify-code`；旧内置 ID 会自动迁移，导入 Skill 默认关闭自动发现
 - **自定义指令** — 高级设置可安全追加最多 32,000 个字符，覆盖 Chat、Plan、重试与子代理，但不能授予工具或改变模式限制；自动 QA、智能标题与上下文压缩不会携带它
 - **本地设置** — 服务商配置、API Key 与自定义指令会持久化到浏览器本地存储
 - **存储治理** — 可查看本地数据占用，并安全清理归档会话、空会话和旧快照
@@ -76,6 +77,8 @@ Tauri 桌面版（macOS / Windows / Linux）提供 stdio MCP 等本机运行能�
 - **扩展思考** — 支持 Extended Thinking / Reasoning 模式（DeepSeek-R1、Claude 4.6 等）
 - **一键下载** — 将生成的项目打包为 ZIP 文件下载到本地
 - **工作区工具** — 支持代码/预览切换、文件搜索与管理、Sandpack 控制台，以及桌面/平板/手机预览宽度、自适应和缩放
+- **交互式设计修改** — 在受支持的 Sandpack 预览中点选带稳定 `data-ob-id` 的元素，将清洗后的选择上下文交给下一条请求，并通过带快照的保存修改规范语义 Token
+- **设计审查与桌面导出** — 在 Web 或桌面端上传最多三张截图进行按需只读审查，或在桌面端将规范项目文件导出到全新的不覆盖目录
 - **自适应布局** — 桌面端使用横向可调分栏，平板端使用工作区在上、对话在下的纵向可调分栏，手机端使用对话优先并内嵌预览的布局
 - **语言与主题** — 提供英文、简体中文界面，以及跟随系统、浅色和深色主题
 
@@ -100,6 +103,29 @@ Tauri 桌面版（macOS / Windows / Linux）提供 stdio MCP 等本机运行能�
 | `Cmd/Ctrl+,` | 打开设置                       |
 | `Cmd/Ctrl+/` | 聚焦对话输入框                 |
 | `Esc`        | 优先关闭命令面板，否则停止生成 |
+
+### Design 模式
+
+Design 模式的产物仍位于当前会话的普通项目文件树和 Sandpack 预览中，不创建独立 Artifact 存储。“编程”只调整界面文案，内部继续使用 `"auto"` 兼容值。模式、自动判断结果、待选设计系统与已应用设计系统均按项目记忆；从 Design 进入 Plan 后，批准方案会返回 Design。
+
+- 新视觉项目默认使用 `vite-react-ts`；只有明确要求轻量静态页面时才使用 `static`。
+- 内置目录包含 12 套精选的非官方视觉参考，并为每套提供独立的满幅 640×480 WebP 预览：Linear、Stripe、Claude、GitHub、IBM、Figma、Notion、Shopify、Apple、Spotify、The Verge 与 WeChat。已有项目选择不同系统后会立即启动 AI 应用流程；空项目则把该选择作为下一次 Design 请求的视觉参考。
+- 选择器保持**自动**时，会在下一次 Design 生成前执行一次隔离、无工具的模型判断；候选包括内置、导入、自定义系统以及明确的**不采用**。通过校验的结果会按项目保持，直到用户手动改选或重新判断；无效结果会在下一次请求时重试。
+- 自定义系统需要名称和三类始终可见的规则输入。当前 API 或本地 CLI 模型在没有项目文件和工具的环境中编译规则；只有严格 JSON、CSS、语义 Token 与完整包校验全部通过后才会保存并选中。自定义和导入系统共用满幅通用 WebP 占位图。
+- 导入系统采用最小 `manifest.json + DESIGN.md + tokens.css` 契约。ZIP 与目录导入在确认前展示摘要，并以有界、纯文本规则进行校验；同 ID 内容不会静默覆盖。
+- 点选能力首版支持 `static`、`vite`、`vite-react` 和 `vite-react-ts`。不受支持或 `code-only` 的项目仍可使用 Design 提示词与文件工具，但界面会明确说明点选或 Token 实时预览为何不可用。
+- 只有根级 `DESIGN.md` 的旧项目继续作为只读视觉参考，除非用户显式升级为带 Token 的设计系统。
+
+| 能力                          | Web                              | 桌面端                                   |
+| ----------------------------- | -------------------------------- | ---------------------------------------- |
+| 生成、实时预览、点选修改      | 完整核心闭环                     | 完整核心闭环                             |
+| 设计系统导入                  | ZIP 或浏览器目录选择器           | ZIP 或本地目录                           |
+| 项目导出                      | ZIP                              | ZIP 或全新唯一命名目录；不提供双向同步   |
+| 模型运行                      | API 或允许浏览器 CORS 的远程端点 | API、Tauri 代理或受支持的本地 CLI 运行时 |
+| 视觉审查                      | 用户手动上传截图                 | 用户手动上传截图                         |
+| 本地进程 / stdio / Skill 脚本 | 静态 Web 部署不支持              | 遵循现有桌面能力检测与批准限制           |
+
+Design Review 与自动 QA 明确分离。受限审查运行只能列出、读取和搜索项目文件，并提交最多 8 条结构化问题；它不能写文件、调用 MCP 或联网工具、加载 Skill 或执行脚本。只有用户勾选问题并点击**应用所选修复**后，才会进入正常 Design 修改流程。
 
 ### MCP 与平台能力（可选）
 
@@ -249,11 +275,13 @@ MCP 服务与 Skills 可从对话工具栏管理。Skills 管理页开关只控�
 | `install_component`              | 安装经允许的 shadcn registry 组件及其依赖                          |
 | `screenshot_to_code`             | 根据提供的 UI 图片生成并写入组件                                   |
 | `apply_design_style`             | 为项目写入选定的设计规范                                           |
+| `apply_design_system`            | 将显式选择的 Design 模式系统契约应用到已初始化项目                 |
+| `submit_design_review`           | 提交只读 Design Review 配置产生的有界结构化结果                    |
 | `list_skills` / `read_skill`     | 发现已启用的 Skill metadata，并按需加载全文与资源清单              |
 | `execute_skill_script`           | 仅在桌面端运行已激活技能的脚本                                     |
 | `read_env_schema` / `manage_env` | 安全读取与管理环境变量文件                                         |
 
-启用的 MCP 工具会在服务发现并获批后动态注入，并根据当前平台以及 Chat、Plan、自动 QA 或子代理运行策略进行过滤。
+启用的 MCP 工具会在服务发现并获批后动态注入，并根据当前平台以及 Chat、Plan、Design、自动 QA、Design Review 或子代理运行策略进行过滤。`apply_design_style` 继续作为 Auto 模式的兼容路径；Design 模式使用 `apply_design_system`。
 
 ### 技术栈
 

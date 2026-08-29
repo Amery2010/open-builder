@@ -57,7 +57,7 @@ export function AppLayout({ layout, chat, workspace }: AppLayoutProps) {
     <ResizablePanelGroup className="h-full w-full bg-background">
       <ResizablePanel
         id="chat-interface"
-        className="h-full w-full shrink-0 overflow-hidden md:w-100 md:flex-1"
+        className="h-full min-h-0 w-full shrink-0 overflow-hidden md:w-100 md:flex-1"
         defaultSize="30%"
         minSize={360}
         maxSize="50%"

@@ -45,6 +45,7 @@ import {
 } from "../skills/active-context";
 import type { SkillActiveContextController } from "../skills/active-context";
 import { recordPermissionActivity } from "../security/activity-log";
+import { isRetryableGenerationError } from "./generation-error";
 import type {
   Message,
   ToolCall,
@@ -82,6 +83,8 @@ export type {
   McpToolExecutionIdentity,
   GenerationBackend,
   AgentToolExecutor,
+  InitializedProjectContext,
+  InitializedProjectPreparation,
 } from "./generator-types";
 
 export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
@@ -111,6 +114,7 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
   private readonly requestPlanApproval?: GeneratorOptions["requestPlanApproval"];
   private readonly onPlanApproved?: GeneratorOptions["onPlanApproved"];
   private readonly dispatchSubagent?: GeneratorOptions["dispatchSubagent"];
+  private readonly prepareInitializedProject?: GeneratorOptions["prepareInitializedProject"];
   private readonly conversationId?: string;
   private systemPromptSuffix: string = "";
   private untrustedReferenceContext: string = "";
@@ -143,6 +147,7 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
     this.requestPlanApproval = options.requestPlanApproval;
     this.onPlanApproved = options.onPlanApproved;
     this.dispatchSubagent = options.dispatchSubagent;
+    this.prepareInitializedProject = options.prepareInitializedProject;
     this.conversationId = options.conversationId;
     this.executionMode = options.executionMode ?? "chat";
     this.runtimePlatform = options.runtimePlatform ?? "web";
@@ -526,10 +531,7 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
   }
 
   private isRetryableError(err: any): boolean {
-    if (err.name === "AbortError") return false;
-    if (err.status) return err.status === 429 || err.status >= 500;
-    // No HTTP status -> likely a network error, retryable
-    return true;
+    return isRetryableGenerationError(err);
   }
 
   private sleep(ms: number): Promise<void> {
@@ -630,6 +632,51 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
     let thinkingAccum = "";
     const toolCallsAccum: ToolCall[] = [];
 
+    const normalizeStreamError = (error: unknown, fallback: string): Error => {
+      if (error instanceof Error) return error;
+      if (typeof error === "string" && error.trim()) {
+        return new Error(error);
+      }
+      if (error && typeof error === "object") {
+        const source = error as {
+          message?: unknown;
+          name?: unknown;
+          statusCode?: unknown;
+          status?: unknown;
+          isRetryable?: unknown;
+          retryable?: unknown;
+          cause?: unknown;
+        };
+        const normalized = new Error(
+          typeof source.message === "string" && source.message.trim()
+            ? source.message
+            : fallback,
+          { cause: source.cause },
+        ) as Error & {
+          statusCode?: number;
+          status?: number;
+          isRetryable?: boolean;
+          retryable?: boolean;
+        };
+        if (typeof source.name === "string" && source.name) {
+          normalized.name = source.name;
+        }
+        if (typeof source.statusCode === "number") {
+          normalized.statusCode = source.statusCode;
+        }
+        if (typeof source.status === "number")
+          normalized.status = source.status;
+        if (typeof source.isRetryable === "boolean") {
+          normalized.isRetryable = source.isRetryable;
+        }
+        if (typeof source.retryable === "boolean") {
+          normalized.retryable = source.retryable;
+        }
+        return normalized;
+      }
+      return new Error(fallback);
+    };
+
     for await (const part of result.stream) {
       switch (part.type) {
         case "text-delta":
@@ -658,6 +705,28 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
                 arguments: JSON.stringify(part.input),
               },
             });
+          }
+          break;
+
+        case "error":
+          throw normalizeStreamError(part.error, "The model stream failed.");
+
+        case "tool-error":
+          throw normalizeStreamError(
+            part.error,
+            `Tool "${part.toolName}" failed while streaming.`,
+          );
+
+        case "abort":
+          throw new DOMException(part.reason ?? "Aborted", "AbortError");
+
+        case "finish-step":
+        case "finish":
+          if (part.finishReason === "error") {
+            throw Object.assign(
+              new Error("The model stream ended with an error."),
+              { isRetryable: true },
+            );
           }
           break;
       }
@@ -831,8 +900,50 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
     // File-system tools go through the shared dispatcher.
     const fsOutcome = await dispatchFsTool(name, args, this.files);
     if (fsOutcome) {
-      if (fsOutcome.newFiles) {
-        const validation = validateProjectFiles(fsOutcome.newFiles);
+      let nextFiles = fsOutcome.newFiles;
+      let changes = fsOutcome.changes;
+      let resultText = fsOutcome.result;
+      let onPreparedProjectCommitted: (() => void) | undefined;
+      if (
+        name === "init_project" &&
+        nextFiles &&
+        this.prepareInitializedProject
+      ) {
+        try {
+          const prepared = await this.prepareInitializedProject(nextFiles, {
+            conversationId: this.conversationId,
+            template: String(args.template ?? ""),
+            signal: this.ctrl?.signal ?? new AbortController().signal,
+          });
+          if (prepared) {
+            nextFiles = prepared.files;
+            changes = [...changes, ...(prepared.changes ?? [])];
+            if (prepared.resultNote) {
+              resultText = `${resultText}; ${prepared.resultNote}`;
+            }
+            onPreparedProjectCommitted = prepared.onCommitted;
+          }
+        } catch (error) {
+          if (error instanceof DOMException && error.name === "AbortError") {
+            throw error;
+          }
+          const errMsg = `Error: ${error instanceof Error ? error.message : String(error)}`;
+          const output = normalizeToolExecutionOutput({
+            text: errMsg,
+            isError: true,
+          });
+          this.events.onToolResult?.(
+            name,
+            args,
+            output.text,
+            toolCall.id,
+            output,
+          );
+          return { result: output, changes: [] };
+        }
+      }
+      if (nextFiles) {
+        const validation = validateProjectFiles(nextFiles);
         if (!validation.ok) {
           const errMsg = `Error: ${validation.error}`;
           const output = normalizeToolExecutionOutput({
@@ -848,7 +959,8 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
           );
           return { result: output, changes: [] };
         }
-        this.files = fsOutcome.newFiles;
+        this.files = nextFiles;
+        onPreparedProjectCommitted?.();
       }
       if (fsOutcome.templateChange) {
         this.events.onTemplateChange?.(
@@ -859,10 +971,10 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
       if (fsOutcome.dependenciesChanged) {
         this.events.onDependenciesChange?.(this.getFiles());
       }
-      const normalized = normalizeToolResultForModel(fsOutcome.result);
+      const normalized = normalizeToolResultForModel(resultText);
       const output = normalizeToolExecutionOutput(normalized.result);
       this.events.onToolResult?.(name, args, output.text, toolCall.id, output);
-      return { result: output, changes: fsOutcome.changes };
+      return { result: output, changes };
     }
 
     let result: string | ToolExecutionOutput;

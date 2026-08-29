@@ -285,6 +285,7 @@ export const BUILTIN_TOOLS = {
 
 export type RuntimePlatform = "web" | "desktop" | "mobile";
 export type ExecutionMode = "chat" | "plan" | "auto_qa" | "subagent";
+export type ToolProfile = "default" | "design" | "design_review";
 export type ToolSource =
   "builtin" | "project" | "network" | "mcp" | "skill" | "registry";
 export type ToolEffect =
@@ -344,6 +345,7 @@ export const WRITE_TOOL_NAMES: ReadonlySet<string> = new Set([
   "install_component",
   "screenshot_to_code",
   "apply_design_style",
+  "apply_design_system",
   "execute_skill_script",
 ]);
 
@@ -368,6 +370,7 @@ export const READONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
   "read_skill",
   "memory",
   "project_health_check",
+  "submit_design_review",
 ]);
 
 const ALL_PLATFORMS = ["web", "desktop", "mobile"] as const;
@@ -454,7 +457,30 @@ const STATIC_CAPABILITIES: ToolCapability[] = [
     ["network", "write_project"],
     CHAT_ONLY,
   ),
+  capability("apply_design_system", "registry", ["write_project"], CHAT_ONLY),
+  capability("submit_design_review", "builtin", ["conversation"], CHAT_ONLY),
 ];
+
+const DESIGN_REVIEW_TOOL_NAMES: ReadonlySet<string> = new Set([
+  "list_files",
+  "read_files",
+  "search_in_files",
+  "submit_design_review",
+]);
+
+function isToolAllowedInProfile(
+  name: string,
+  profile: ToolProfile,
+  allowDesignSystemApply: boolean,
+): boolean {
+  if (profile === "design_review") return DESIGN_REVIEW_TOOL_NAMES.has(name);
+  if (name === "submit_design_review") return false;
+  if (name === "apply_design_system") {
+    return profile === "design" && allowDesignSystemApply;
+  }
+  if (name === "apply_design_style") return profile !== "design";
+  return true;
+}
 
 export const TOOL_CAPABILITY_REGISTRY: Readonly<
   Record<string, ToolCapability>
@@ -485,15 +511,22 @@ export function buildToolSetForRun({
   mode,
   platform,
   allowedDynamicNames = new Set(),
+  profile = "default",
+  allowDesignSystemApply = false,
 }: {
   custom: ToolSet;
   mode: ExecutionMode;
   platform: RuntimePlatform;
   allowedDynamicNames?: ReadonlySet<string>;
+  profile?: ToolProfile;
+  allowDesignSystemApply?: boolean;
 }): ToolSet {
   const isAllowed = (name: string) =>
-    isToolAllowedInMode(name, mode, platform) ||
-    (!getToolCapability(name) && allowedDynamicNames.has(name));
+    isToolAllowedInProfile(name, profile, allowDesignSystemApply) &&
+    (isToolAllowedInMode(name, mode, platform) ||
+      (!getToolCapability(name) &&
+        profile !== "design_review" &&
+        allowedDynamicNames.has(name)));
 
   return Object.fromEntries(
     Object.entries({ ...BUILTIN_TOOLS, ...custom }).filter(([name]) =>

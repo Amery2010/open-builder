@@ -14,6 +14,7 @@ describe("tool policies", () => {
     expect(isWriteToolName("install_component")).toBe(true);
     expect(isWriteToolName("screenshot_to_code")).toBe(true);
     expect(isWriteToolName("apply_design_style")).toBe(true);
+    expect(isWriteToolName("apply_design_system")).toBe(true);
     expect(isWriteToolName("execute_skill_script")).toBe(true);
     expect(isWriteToolName("read_files")).toBe(false);
   });
@@ -123,5 +124,73 @@ describe("tool policies", () => {
         allowedDynamicNames: new Set([alias]),
       })[alias],
     ).toBeDefined();
+  });
+
+  it("exposes Design system application only for the explicit apply run", () => {
+    const custom = {
+      apply_design_style: {} as ToolSet[string],
+      apply_design_system: {} as ToolSet[string],
+      submit_design_review: {} as ToolSet[string],
+      web_search: {} as ToolSet[string],
+    };
+
+    const automatic = buildToolSetForRun({
+      custom,
+      mode: "chat",
+      platform: "web",
+      profile: "default",
+    });
+    expect(automatic.apply_design_style).toBeDefined();
+    expect(automatic.apply_design_system).toBeUndefined();
+
+    const design = buildToolSetForRun({
+      custom,
+      mode: "chat",
+      platform: "web",
+      profile: "design",
+    });
+    expect(design.apply_design_style).toBeUndefined();
+    expect(design.apply_design_system).toBeUndefined();
+
+    const explicitApply = buildToolSetForRun({
+      custom,
+      mode: "chat",
+      platform: "web",
+      profile: "design",
+      allowDesignSystemApply: true,
+    });
+    expect(explicitApply.apply_design_style).toBeUndefined();
+    expect(explicitApply.apply_design_system).toBeDefined();
+  });
+
+  it("keeps Design Review strictly read-only and offline", () => {
+    const custom = {
+      project_health_check: {} as ToolSet[string],
+      web_search: {} as ToolSet[string],
+      apply_design_system: {} as ToolSet[string],
+      submit_design_review: {} as ToolSet[string],
+      mcp_review_escape: {} as ToolSet[string],
+    };
+    const review = buildToolSetForRun({
+      custom,
+      mode: "chat",
+      platform: "desktop",
+      profile: "design_review",
+      allowedDynamicNames: new Set(["mcp_review_escape"]),
+    });
+
+    expect(review.read_files).toBeDefined();
+    expect(review.project_health_check).toBeUndefined();
+    expect(review.submit_design_review).toBeDefined();
+    expect(review.write_file).toBeUndefined();
+    expect(review.web_search).toBeUndefined();
+    expect(review.apply_design_system).toBeUndefined();
+    expect(review.mcp_review_escape).toBeUndefined();
+    expect(Object.keys(review).sort()).toEqual([
+      "list_files",
+      "read_files",
+      "search_in_files",
+      "submit_design_review",
+    ]);
   });
 });

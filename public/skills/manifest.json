@@ -2,101 +2,76 @@
   "schemaVersion": 1,
   "skills": [
     {
-      "id": "react-patterns",
-      "name": "react-patterns",
-      "description": "Modern React 19 patterns for building maintainable components. Use when writing or refactoring React code (JSX/TSX), choosing between hooks, designing component APIs, or wiring state management.",
-      "version": "1.0.1",
-      "tags": ["react", "frontend", "best-practices"],
-      "entry": "react-patterns/SKILL.md",
-      "files": ["react-patterns/SKILL.md", "react-patterns/scripts/hello.js"]
+      "id": "debug-web-app",
+      "name": "debug-web-app",
+      "description": "Diagnose reproducible web-app failures with evidence, isolate the smallest cause, apply a scoped fix, and verify the original symptom. Use for runtime errors, broken interactions, incorrect data flow, rendering failures, or regressions; do not use for speculative cleanup.",
+      "version": "2.0.0",
+      "tags": ["debugging", "web", "reliability"],
+      "entry": "debug-web-app/SKILL.md",
+      "files": ["debug-web-app/SKILL.md"]
     },
     {
-      "id": "debugging",
-      "name": "debugging",
-      "description": "Systematic debugging workflow for runtime errors, white screens, and unexpected behavior in web apps. Use when the preview breaks or behaves wrongly.",
-      "version": "1.0.0",
-      "tags": ["process", "debugging"],
-      "entry": "debugging/SKILL.md",
-      "files": ["debugging/SKILL.md"]
+      "id": "build-tailwind-ui",
+      "name": "build-tailwind-ui",
+      "description": "Build and refine interfaces in projects that already use Tailwind CSS. Use for responsive layout, project tokens, state variants, dark mode, shadcn-style components, and maintainable class composition; do not use to choose the product's overall art direction.",
+      "version": "2.0.0",
+      "tags": ["tailwind", "css", "ui", "responsive"],
+      "entry": "build-tailwind-ui/SKILL.md",
+      "files": ["build-tailwind-ui/SKILL.md"]
     },
     {
-      "id": "tailwind-helpers",
-      "name": "tailwind-helpers",
-      "description": "Production-grade Tailwind CSS patterns for responsive layouts, dark mode, spacing scales, shadcn integration, and accessible color usage. Load before writing any styled UI.",
-      "version": "1.0.0",
-      "tags": ["tailwind", "css", "ui"],
-      "entry": "tailwind-helpers/SKILL.md",
-      "files": ["tailwind-helpers/SKILL.md"]
+      "id": "build-accessible-ui",
+      "name": "build-accessible-ui",
+      "description": "Build or repair accessible web interfaces using native semantics, keyboard and focus behavior, clear forms, perceivable states, and appropriate ARIA. Use when implementing or reviewing interactive UI; pair it with the project's existing accessibility and browser requirements.",
+      "version": "2.0.0",
+      "tags": ["accessibility", "a11y", "ui", "forms"],
+      "entry": "build-accessible-ui/SKILL.md",
+      "files": ["build-accessible-ui/SKILL.md"]
     },
     {
-      "id": "accessibility",
-      "name": "accessibility",
-      "description": "Web accessibility essentials covering semantic HTML, keyboard navigation, ARIA usage, focus management, contrast, and accessible forms. Load before building any interactive component.",
-      "version": "1.0.0",
-      "tags": ["a11y", "wcag", "ui"],
-      "entry": "accessibility/SKILL.md",
-      "files": ["accessibility/SKILL.md"]
+      "id": "write-safe-typescript",
+      "name": "write-safe-typescript",
+      "description": "Write and refactor TypeScript with trustworthy boundary validation, narrowing, discriminated unions, useful inference, safe async flows, and readable public types. Use when type design or unsafe data handling materially affects correctness; avoid type-level machinery without a concrete payoff.",
+      "version": "2.0.0",
+      "tags": ["typescript", "types", "correctness"],
+      "entry": "write-safe-typescript/SKILL.md",
+      "files": ["write-safe-typescript/SKILL.md"]
     },
     {
-      "id": "typescript-patterns",
-      "name": "typescript-patterns",
-      "description": "TypeScript patterns and conventions for safer, more maintainable code. Covers narrowing, discriminated unions, satisfies, unknown vs any, type guards, and when to keep types simple.",
-      "version": "1.0.0",
-      "tags": ["typescript", "patterns"],
-      "entry": "typescript-patterns/SKILL.md",
-      "files": ["typescript-patterns/SKILL.md"]
+      "id": "art-direct-web",
+      "name": "art-direct-web",
+      "description": "Art-direct marketing sites, landing pages, portfolios, editorial pages, and campaign experiences from a concrete brief. Use when visual narrative, composition, typography, imagery, and motion are central; use design-product-ui instead for routine application workflows.",
+      "version": "2.0.0",
+      "tags": ["frontend", "art-direction", "marketing", "editorial"],
+      "entry": "art-direct-web/SKILL.md",
+      "files": ["art-direct-web/SKILL.md"]
     },
     {
-      "id": "design-taste-frontend",
-      "name": "design-taste-frontend",
-      "description": "Anti-slop frontend direction for landing pages, portfolios, editorial pages, and design-forward redesigns. Use after reading the brief to infer a fitting visual system, preserve existing product constraints, and run a strict pre-flight audit.",
-      "version": "1.0.0",
-      "tags": ["frontend", "design", "landing-page", "portfolio", "redesign"],
-      "entry": "design-taste-frontend/SKILL.md",
-      "files": [
-        "design-taste-frontend/SKILL.md",
-        "design-taste-frontend/SOURCE.md",
-        "design-taste-frontend/LICENSE.txt"
-      ]
+      "id": "design-product-ui",
+      "name": "design-product-ui",
+      "description": "Design and implement product interfaces such as dashboards, settings, forms, data views, and multi-step workflows. Use for hierarchy, density, navigation, interaction states, responsive behavior, and accessible product UI; use art-direct-web for marketing-led experiences.",
+      "version": "2.0.0",
+      "tags": ["frontend", "product-ui", "interaction", "accessibility"],
+      "entry": "design-product-ui/SKILL.md",
+      "files": ["design-product-ui/SKILL.md"]
     },
     {
-      "id": "frontend-design",
-      "name": "frontend-design",
-      "description": "Create distinctive, production-grade product interfaces and web components with strong hierarchy, accessibility, and a coherent visual direction. Use for dashboards, settings, forms, application flows, and general frontend styling.",
-      "version": "1.0.0",
-      "tags": ["frontend", "product-ui", "design", "accessibility"],
-      "entry": "frontend-design/SKILL.md",
-      "files": [
-        "frontend-design/SKILL.md",
-        "frontend-design/SOURCE.md",
-        "frontend-design/LICENSE.txt"
-      ]
-    },
-    {
-      "id": "code-review",
-      "name": "code-review",
-      "description": "Review a diff, file set, or current project changes for correctness, security, performance, reliability, and maintainability. Use project evidence, prioritize actionable findings, and report only unless the user explicitly asks for fixes.",
-      "version": "1.0.0",
+      "id": "review-code",
+      "name": "review-code",
+      "description": "Review a requested diff, file set, or repository scope for concrete correctness, security, performance, reliability, and maintainability problems. Use when the user wants findings or merge confidence; report only unless fixes or external actions are explicitly requested.",
+      "version": "2.0.0",
       "tags": ["review", "correctness", "security", "performance"],
-      "entry": "code-review/SKILL.md",
-      "files": [
-        "code-review/SKILL.md",
-        "code-review/SOURCE.md",
-        "code-review/LICENSE.txt"
-      ]
+      "entry": "review-code/SKILL.md",
+      "files": ["review-code/SKILL.md"]
     },
     {
-      "id": "code-simplifier",
-      "name": "code-simplifier",
-      "description": "Simplify user-specified or newly modified code for clarity, consistency, and maintainability while preserving exact behavior. Follow AGENTS.md, CLAUDE.md, and established project conventions; avoid broad cleanup.",
-      "version": "1.0.0",
-      "tags": ["refactoring", "maintainability", "clarity"],
-      "entry": "code-simplifier/SKILL.md",
-      "files": [
-        "code-simplifier/SKILL.md",
-        "code-simplifier/SOURCE.md",
-        "code-simplifier/LICENSE.txt"
-      ]
+      "id": "simplify-code",
+      "name": "simplify-code",
+      "description": "Simplify user-selected or newly changed code while preserving observable behavior and established contracts. Use to reduce unnecessary nesting, duplication, indirection, or cleverness in a bounded area; do not turn a focused cleanup into a broad refactor.",
+      "version": "2.0.0",
+      "tags": ["refactoring", "clarity", "maintainability"],
+      "entry": "simplify-code/SKILL.md",
+      "files": ["simplify-code/SKILL.md"]
     }
   ]
 }

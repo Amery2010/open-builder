@@ -78,6 +78,7 @@ const baseProps = {
   template: "vite-react-ts",
   previewMode: "sandpack" as const,
   sandpackKey: 0,
+  onReloadPreview: vi.fn(),
   isProjectInitialized: false,
   showInlinePreview: false,
   onCompressContext: vi.fn(async () => undefined),

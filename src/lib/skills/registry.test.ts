@@ -157,6 +157,7 @@ describe("SkillRegistry public catalog", () => {
     await fs.writeFile("legacy/scripts/run.js", "legacy script");
     await fs.writeFile("orphan/SKILL.md", skillMd("1.0.0"));
     await fs.writeFile("orphan/assets/icon.txt", "legacy asset");
+    await fs.writeFile("code-review/SKILL.md", skillMd("1.0.0"));
     const store = createStore([
       {
         id: "legacy",
@@ -186,6 +187,7 @@ describe("SkillRegistry public catalog", () => {
     expect(fs.files.has("legacy/scripts/run.js")).toBe(false);
     expect(fs.files.has("orphan/SKILL.md")).toBe(true);
     expect(fs.files.has("orphan/assets/icon.txt")).toBe(false);
+    expect(fs.files.has("code-review/SKILL.md")).toBe(false);
   });
 
   it("downloads the complete built-in package on desktop", async () => {
@@ -254,6 +256,30 @@ describe("SkillRegistry public catalog", () => {
     await expect(registry.prepareForcedSkills(["demo"])).resolves.toMatchObject(
       [{ entry: { id: "demo", autoEnabled: false } }],
     );
+  });
+
+  it("resolves legacy forced built-in ids without rewriting imported ids", async () => {
+    const fs = new MemorySkillFs();
+    const store = createStore();
+    const registry = new SkillRegistry(fs, store, { platform: "web" });
+    await fs.writeFile(
+      "review-code/SKILL.md",
+      skillMd("2.0.0", "Review guidance"),
+    );
+    await registry.registerSkillFromDir("review-code", "builtin");
+
+    await expect(
+      registry.prepareForcedSkills(["code-review"]),
+    ).resolves.toMatchObject([{ entry: { id: "review-code" } }]);
+
+    await fs.writeFile(
+      "code-review/SKILL.md",
+      skillMd("1.0.0", "Imported guidance"),
+    );
+    await registry.registerSkillFromDir("code-review", "imported");
+    await expect(
+      registry.prepareForcedSkills(["code-review"]),
+    ).resolves.toMatchObject([{ entry: { id: "code-review" } }]);
   });
 
   it("omits a built-in skill whose first download fails", async () => {

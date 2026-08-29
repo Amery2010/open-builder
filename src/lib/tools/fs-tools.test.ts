@@ -72,14 +72,14 @@ describe("fsInitProject", () => {
     const result = await fsInitProject("vite-react-ts");
     const packageJson = JSON.parse(result.newFiles?.["package.json"] ?? "{}");
 
-    expect(result.result).toContain("stable dependency profile v1");
+    expect(result.result).toContain("stable dependency profile v2");
     expect(packageJson.dependencies).toMatchObject({
-      react: "^19.2.8",
-      "react-dom": "^19.2.8",
+      react: "^18.3.1",
+      "react-dom": "^18.3.1",
     });
     expect(packageJson.devDependencies).toMatchObject({
-      "@types/react": "^19.2.18",
-      "@types/react-dom": "^19.2.5",
+      "@types/react": "^18.3.12",
+      "@types/react-dom": "^18.3.1",
       typescript: "^5.9.3",
       vite: "4.2.0",
       "esbuild-wasm": "^0.17.12",

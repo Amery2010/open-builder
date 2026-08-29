@@ -45,12 +45,16 @@ import type {
   ProjectSnapshot,
   Attachment,
   ProjectPreviewMode,
+  DesignSelectionContext,
 } from "../types";
+import { useDesignSelectionStore } from "../store/design-selection";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type {
   ProjectImportCommitResult,
   StagedProjectImport,
 } from "../lib/utils/project-import";
+import type { CustomDesignSystemDraft } from "../lib/design-systems/ai";
+import type { StagedDesignSystemImport } from "../lib/design-systems/importer";
 
 const EMPTY_SNAPSHOTS: ProjectSnapshot[] = [];
 const MobilePreview = lazy(() =>
@@ -80,7 +84,10 @@ interface ChatInterfaceProps {
   onGenerate: (
     prompt: string,
     attachments?: Attachment[],
-    options?: { forcedSkillIds?: string[] },
+    options?: {
+      forcedSkillIds?: string[];
+      designSelection?: DesignSelectionContext;
+    },
   ) => Promise<void>;
   onStop: () => void;
   onOpenSettings: () => void;
@@ -92,6 +99,7 @@ interface ChatInterfaceProps {
   template: string;
   previewMode: ProjectPreviewMode;
   sandpackKey: number;
+  onReloadPreview: () => void;
   isProjectInitialized: boolean;
   showInlinePreview: boolean;
   onCompressContext: () => Promise<void>;
@@ -99,6 +107,10 @@ interface ChatInterfaceProps {
   onContinue: () => Promise<void>;
   onReview: () => Promise<void>;
   onHealthCheck: () => Promise<void>;
+  onApplyDesignSystem?: (id: string) => Promise<void> | void;
+  onCompileDesignSystem?: (
+    draft: CustomDesignSystemDraft,
+  ) => Promise<StagedDesignSystemImport>;
   onProjectReset?: () => void;
 }
 
@@ -116,6 +128,7 @@ export function ChatInterface({
   template,
   previewMode,
   sandpackKey,
+  onReloadPreview,
   isProjectInitialized,
   showInlinePreview,
   onCompressContext,
@@ -123,6 +136,8 @@ export function ChatInterface({
   onContinue,
   onReview,
   onHealthCheck,
+  onApplyDesignSystem = () => {},
+  onCompileDesignSystem,
   onProjectReset,
 }: ChatInterfaceProps) {
   const t = useT();
@@ -383,9 +398,23 @@ export function ChatInterface({
       setRollbackInfo(null);
     }
 
-    await onGenerate(prompt, atts.length > 0 ? atts : undefined, {
-      forcedSkillIds: forced.length > 0 ? forced : undefined,
-    });
+    const activeConversation = activeId
+      ? useConversationStore.getState().conversations[activeId]
+      : undefined;
+    const designSelection =
+      activeId && activeConversation?.workspaceMode === "design"
+        ? useDesignSelectionStore.getState().selections[activeId]
+        : undefined;
+    try {
+      await onGenerate(prompt, atts.length > 0 ? atts : undefined, {
+        forcedSkillIds: forced.length > 0 ? forced : undefined,
+        ...(designSelection ? { designSelection } : {}),
+      });
+    } finally {
+      if (activeId) {
+        useDesignSelectionStore.getState().clearSelection(activeId);
+      }
+    }
   };
 
   const renderMergedMessage = (
@@ -430,7 +459,7 @@ export function ChatInterface({
   };
 
   return (
-    <div className="relative flex flex-col h-full bg-background">
+    <div className="relative flex h-full min-h-0 flex-col overflow-hidden bg-background">
       <ChatHeader
         isGenerating={isGenerating}
         onOpenSettings={onOpenSettings}
@@ -450,7 +479,7 @@ export function ChatInterface({
 
       <div
         ref={messagesViewportRef}
-        className="flex flex-col flex-1 p-4 pb-0 overflow-y-auto space-y-4"
+        className="flex min-h-0 flex-1 flex-col space-y-4 overflow-y-auto p-4 pb-0"
         onScroll={updateAutoScrollIntent}
         style={{ scrollbarGutter: "stable" }}
       >
@@ -508,6 +537,7 @@ export function ChatInterface({
                 files={files}
                 template={template}
                 sandpackKey={sandpackKey}
+                onReloadPreview={onReloadPreview}
               />
             </Suspense>
           )}
@@ -571,6 +601,8 @@ export function ChatInterface({
           onSlashCommand={handleSlashCommand}
           forcedSkillIds={forcedSkillIds}
           onForcedSkillIdsChange={setForcedSkillIds}
+          onApplyDesignSystem={onApplyDesignSystem}
+          onCompileDesignSystem={onCompileDesignSystem}
         />
       </div>
 

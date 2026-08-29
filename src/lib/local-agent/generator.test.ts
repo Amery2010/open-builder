@@ -6,7 +6,7 @@ import type { Conversation } from "../../types";
 import { BUILTIN_TOOLS } from "../ai/tools-schema";
 import { DISPATCH_SUBAGENT_TOOL } from "../tools/subagent-tool";
 import { computeConversationFingerprint } from "./context";
-import { createLocalAgentGenerator } from "./generator";
+import { createLocalAgentGenerator, runLocalUtilityText } from "./generator";
 import type { LocalAgentEvent, LocalAgentStartRequest } from "./types";
 import { buildCustomSystemPromptSection } from "../ai/custom-system-prompt";
 
@@ -183,6 +183,41 @@ describe("LocalAgentGenerator", () => {
     await instance.generate("Build it");
 
     expect(request?.systemPrompt).toContain("[custom-local-cli]");
+  });
+
+  it("aborts a local utility title call when its timeout expires", async () => {
+    localAgentMocks.start.mockResolvedValue("utility-timeout-run");
+
+    await expect(
+      runLocalUtilityText(
+        { provider: "codex", model: "", effort: "" },
+        "Create a title",
+        "Original request",
+        { timeoutMs: 50 },
+      ),
+    ).rejects.toMatchObject({ name: "TimeoutError" });
+    expect(localAgentMocks.cancel).toHaveBeenCalledWith("utility-timeout-run");
+  });
+
+  it("aborts a running local utility call from an external signal", async () => {
+    localAgentMocks.start.mockResolvedValue("utility-abort-run");
+    const controller = new AbortController();
+    const pending = runLocalUtilityText(
+      { provider: "codex", model: "", effort: "" },
+      "Create a title",
+      "Original request",
+      { signal: controller.signal },
+    );
+    await vi.waitFor(() =>
+      expect(localAgentMocks.start).toHaveBeenCalledOnce(),
+    );
+
+    controller.abort();
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    await vi.waitFor(() =>
+      expect(localAgentMocks.cancel).toHaveBeenCalledWith("utility-abort-run"),
+    );
   });
 
   it("resumes only when the authoritative transcript fingerprint matches", async () => {
@@ -611,6 +646,55 @@ describe("LocalAgentGenerator", () => {
     await instance.generate("Run automatic QA");
 
     expect(request).toMatchObject({ mode: "auto_qa", nativeSearch: false });
+  });
+
+  it("disables provider-native search for a restricted chat profile", async () => {
+    let request: LocalAgentStartRequest | undefined;
+    localAgentMocks.start.mockImplementation(
+      async (
+        currentRequest: LocalAgentStartRequest,
+        onEvent: (event: LocalAgentEvent) => void,
+      ) => {
+        request = currentRequest;
+        queueMicrotask(() => completeRun(onEvent, "run-review"));
+        return "run-review";
+      },
+    );
+    const { instance } = generator(baseConversation(), vi.fn(), vi.fn(), {
+      nativeSearch: true,
+    });
+    instance.setNativeSearchAllowed(false);
+
+    await instance.generate("Run read-only Design Review");
+
+    expect(request).toMatchObject({ mode: "chat", nativeSearch: false });
+  });
+
+  it("isolates a restricted profile from normal conversation bootstrap", async () => {
+    let request: LocalAgentStartRequest | undefined;
+    localAgentMocks.start.mockImplementation(
+      async (
+        currentRequest: LocalAgentStartRequest,
+        onEvent: (event: LocalAgentEvent) => void,
+      ) => {
+        request = currentRequest;
+        queueMicrotask(() => completeRun(onEvent, "run-isolated"));
+        return "run-isolated";
+      },
+    );
+    const conversation = baseConversation({
+      messages: [{ role: "user", content: "private historical attachment" }],
+    });
+    const { instance } = generator(conversation);
+    instance.syncMessages([]);
+    instance.setConversationContextAllowed(false);
+
+    await instance.generate("Run isolated review");
+
+    expect(request?.sessionId).toBeUndefined();
+    expect(request?.bootstrapContext).not.toContain(
+      "private historical attachment",
+    );
   });
 
   it("drops queued tool requests after the user aborts the run", async () => {

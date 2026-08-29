@@ -1,4 +1,6 @@
 #[cfg(desktop)]
+mod design;
+#[cfg(desktop)]
 mod local_agent;
 #[cfg(desktop)]
 mod local_agent_bridge;
@@ -75,6 +77,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             greet,
             mcp_platform_capabilities,
+            design::design_export_project,
             proxy::set_proxy_policy,
             skills::run_skill_script,
             skills::cancel_skill_script,

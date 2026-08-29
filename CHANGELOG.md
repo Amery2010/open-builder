@@ -8,6 +8,40 @@ Tagged versions use their Git tag date. Versions 1.4.0 through 1.7.0 were not ta
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- Added per-project Code, Plan, and Design workspace modes while retaining the persisted `"auto"` compatibility value. Design mode generates runnable marketing sites and multi-screen product interfaces, returns from approved plans to Design, defaults new visual projects to `vite-react-ts`, and skips Automatic QA in favor of an explicit review flow.
+- Added a curated catalog of 12 bundled unofficial visual-reference systems with independent full-frame 640×480 WebP preview images, plus bounded ZIP/browser-directory/local-directory imports, one isolated project-level AI selection including an explicit None result, separate selected/applied state, and card selection that starts explicit `apply_design_system` application for initialized projects.
+- Added isolated custom design-system compilation from a name and three rule groups. Successful JSON, CSS, semantic-token, and package validation registers and selects a local custom system with a generic preview without applying it to project files.
+- Added preview-only point selection for supported Sandpack templates with stable `data-ob-id` context, a semantic Token panel with live drafts and snapshot-backed canonical saves, and explicit legacy `DESIGN.md` upgrade behavior.
+- Added upload-based visual review on Web and desktop, plus desktop unique-directory export, followed by a structured Design Review card and user-selected fix application.
+- Added focused Vitest, component, Rust, and authorized Playwright coverage for mode migration, prompts, tool profiles, design-system validation, Bridge isolation, tokens, review gating, responsive previews, and non-overwriting export.
+
+### Changed
+
+- User messages and the generating state now appear immediately after submission, before Design-system selection, attachment hydration, generator setup, or the first provider response completes.
+- Skill discovery and loading now use the shared `ScrollText` icon. Multiple `list_skills` and `read_skill` calls in one Agent turn render as one expandable status list without exposing loaded instruction bodies.
+- Ask Question now uses compact native radio and checkbox controls, retains option descriptions and recommendations, keeps single-choice auto-advance, and presents custom answers as one-line input rows.
+- Replaced the built-in Skill catalog with eight detailed English version-2 manuals: `debug-web-app`, `build-tailwind-ui`, `build-accessible-ui`, `write-safe-typescript`, `art-direct-web`, `design-product-ui`, `review-code`, and `simplify-code`. The Skills Store migrates legacy built-in IDs and preserves their discovery preferences; `react-patterns` has been removed.
+- Conversation persistence now stores workspace mode, Plan return mode, AI design-system decisions, and versioned Design state per project while preserving existing conversations as Code through the `"auto"` compatibility value and migrating an active legacy global Plan selection once.
+- The composer now uses neutral, blue, and violet mode borders for Code, Plan, and Design; Design uses `PencilRuler`, while its Palette selector exposes the full Auto, AI, None, or manual system name through text, tooltip, and ARIA.
+- The design-system dialog now keeps its header and custom-creation action footer visible around a bounded vertical scroll region, applies catalog choices without a redundant footer confirmation, uses responsive preview grids, and switches to custom creation in the same dialog while preserving the catalog selection and scroll position.
+- Design-system project contracts share the same `manifest.json + DESIGN.md + tokens.css` format on Web and desktop; Web stores imports in OPFS and desktop stores them in AppData.
+- Removed entry, JavaScript chunk, and CSS size budgets. The production artifact check still verifies lazy-loading boundaries and chunk initialization.
+- Updated the English and Chinese documentation, tool tables, and platform capability matrix for Design mode.
+
+### Fixed
+
+- Provider `error`, `tool-error`, `abort`, and error finish events from streamed responses now reach the shared retry and error-classification path. Ask Question can therefore resume the same Agent loop after a transient post-answer failure instead of ending on an empty assistant response.
+
+### Security
+
+- Design-system imports and custom compilation now enforce safe app-owned IDs and paths, text-only files, strict JSON/schema checks, semantic-token CSS validation, digest verification, strict input and package limits, no symlinks, serialized ID allocation, one bounded repair attempt, and no silent overwrite. Automatic selection accepts only the current candidate pool and runs without tools or project writes.
+- The preview Bridge validates iframe source, origin when available, protocol version, per-activation nonce, and an 8 KB payload ceiling; Bridge files never enter canonical project files, snapshots, or exports.
+- Design Review exposes exactly four read-only tools, disables MCP, networking, Skills, scripts, and native writes, bounds screenshot input and findings, discards its isolated backend/session after use, and cannot trigger fixes without an explicit user selection.
+
 ## [v1.9.0]
 
 ### Added

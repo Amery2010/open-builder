@@ -5,6 +5,7 @@ import type { SkillEntry } from "../lib/skills/types";
 import { createLocalforageStorage } from "./utils/localforage-storage";
 import { runMigrations, type MigrationStep } from "./utils/migrate";
 import {
+  migrateBuiltinSkillIds,
   migrateSkillsState,
   SKILLS_STORE_VERSION,
 } from "./skills-migrations";
@@ -12,6 +13,7 @@ import {
 const skillsMigrations: MigrationStep[] = [
   (state) => state,
   migrateSkillsState,
+  migrateBuiltinSkillIds,
 ];
 
 const skillsStorage = createLocalforageStorage(

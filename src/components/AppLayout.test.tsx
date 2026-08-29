@@ -13,6 +13,7 @@ interface GroupProps {
 interface PanelProps {
   children: ReactNode;
   id: string;
+  className?: string;
   defaultSize?: number | string;
   minSize?: number | string;
   maxSize?: number | string;
@@ -30,12 +31,14 @@ vi.mock("@/components/ui/resizable", () => ({
   ResizablePanel: ({
     children,
     id,
+    className,
     defaultSize,
     minSize,
     maxSize,
   }: PanelProps) => (
     <section
       data-testid={id}
+      className={className}
       data-default-size={defaultSize}
       data-min-size={minSize}
       data-max-size={maxSize}
@@ -100,6 +103,10 @@ describe("AppLayout", () => {
     expect(screen.getByTestId("chat-interface")).toHaveAttribute(
       "data-min-size",
       "360",
+    );
+    expect(screen.getByTestId("chat-interface")).toHaveClass(
+      "min-h-0",
+      "overflow-hidden",
     );
   });
 

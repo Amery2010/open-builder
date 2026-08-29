@@ -7,10 +7,12 @@ import {
   useEffect,
   useMemo,
 } from "react";
-import { X } from "lucide-react";
+import { MousePointer2, X } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
+import { cn } from "@/lib/utils";
 import { useT } from "../../i18n";
-import { useSettingsStore } from "../../store/settings";
+import { useConversationStore } from "../../store/conversation";
+import { useDesignSelectionStore } from "../../store/design-selection";
 import { useSkillsStore } from "../../store/skills";
 import type { Attachment } from "../../types";
 import type { Message } from "../../lib/ai/generator-types";
@@ -38,6 +40,8 @@ import type {
   ProjectImportCommitResult,
   StagedProjectImport,
 } from "../../lib/utils/project-import";
+import type { CustomDesignSystemDraft } from "../../lib/design-systems/ai";
+import type { StagedDesignSystemImport } from "../../lib/design-systems/importer";
 
 const SkillsPanel = lazy(() =>
   import("../skills/SkillsPanel").then((module) => ({
@@ -50,6 +54,11 @@ const McpPanel = lazy(() =>
 const ProjectImportDialog = lazy(() =>
   import("./ProjectImportDialog").then((module) => ({
     default: module.ProjectImportDialog,
+  })),
+);
+const DesignSystemPanel = lazy(() =>
+  import("../design/DesignSystemPanel").then((module) => ({
+    default: module.DesignSystemPanel,
   })),
 );
 
@@ -81,6 +90,10 @@ interface ChatInputProps {
   onSlashCommand: (cmd: string) => void;
   forcedSkillIds: readonly string[];
   onForcedSkillIdsChange: (ids: string[]) => void;
+  onApplyDesignSystem: (id: string) => Promise<void> | void;
+  onCompileDesignSystem?: (
+    draft: CustomDesignSystemDraft,
+  ) => Promise<StagedDesignSystemImport>;
 }
 
 function formatAttachmentError(
@@ -132,10 +145,34 @@ export function ChatInput({
   onSlashCommand,
   forcedSkillIds,
   onForcedSkillIdsChange,
+  onApplyDesignSystem,
+  onCompileDesignSystem,
 }: ChatInputProps) {
   const t = useT();
-  const planModeEnabled = useSettingsStore((s) => s.system.planModeEnabled);
-  const setPlanMode = useSettingsStore((s) => s.setPlanMode);
+  const workspaceMode = useConversationStore((state) =>
+    state.activeId
+      ? (state.conversations[state.activeId]?.workspaceMode ?? "auto")
+      : "auto",
+  );
+  const setWorkspaceMode = useConversationStore(
+    (state) => state.setWorkspaceMode,
+  );
+  const activeId = useConversationStore((state) => state.activeId);
+  const designState = useConversationStore((state) =>
+    state.activeId
+      ? state.conversations[state.activeId]?.designState
+      : undefined,
+  );
+  const designSelection = useDesignSelectionStore((state) =>
+    activeId ? state.selections[activeId] : undefined,
+  );
+  const clearDesignSelection = useDesignSelectionStore(
+    (state) => state.clearSelection,
+  );
+  const clearAllDesignSelections = useDesignSelectionStore(
+    (state) => state.clearAll,
+  );
+  const previousConversationRef = useRef<string | null | undefined>(undefined);
   const [isHoveringStop, setIsHoveringStop] = useState(false);
   const [selectedIdx, setSelectedIdx] = useState(0);
   const [isDragOver, setIsDragOver] = useState(false);
@@ -144,8 +181,22 @@ export function ChatInput({
   const [skillsInitializing, setSkillsInitializing] = useState(false);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [projectImportOpen, setProjectImportOpen] = useState(false);
+  const [designSystemsOpen, setDesignSystemsOpen] = useState(false);
   const skillsAvailable = isSkillsAvailable();
   const skills = useSkillsStore((state) => state.skills);
+
+  useEffect(() => {
+    if (previousConversationRef.current !== activeId) {
+      clearAllDesignSelections();
+      previousConversationRef.current = activeId;
+    }
+  }, [activeId, clearAllDesignSelections]);
+
+  useEffect(() => {
+    if (workspaceMode !== "design" && activeId) {
+      clearDesignSelection(activeId);
+    }
+  }, [activeId, clearDesignSelection, workspaceMode]);
 
   useEffect(() => {
     if (!skillsAvailable) return;
@@ -377,6 +428,25 @@ export function ChatInput({
   };
 
   const hasContent = input.trim() || attachments.length > 0;
+  const designSystemName = designState?.selectedSystem
+    ? designState.selectedSystem.name
+    : designState?.recommendation?.systemId === null
+      ? t.designSystems.none
+      : t.designSystems.automatic;
+  const designSystemLabel = designState?.selectedSystem
+    ? designState.recommendation?.systemId === designState.selectedSystem.id
+      ? t.designSystems.aiSelectionLabel
+          .replace("{name}", designState.selectedSystem.name)
+          .replace("{reason}", designState.recommendation.reason)
+      : t.designSystems.manualSelectionLabel.replace(
+          "{name}",
+          designState.selectedSystem.name,
+        )
+    : designState?.recommendation?.systemId === null
+      ? t.designSystems.aiSelectionLabel
+          .replace("{name}", t.designSystems.none)
+          .replace("{reason}", designState.recommendation.reason)
+      : t.designSystems.automaticLabel;
 
   return (
     <div
@@ -387,19 +457,45 @@ export function ChatInput({
       onDrop={handleDrop}
     >
       <form onSubmit={onSubmit}>
+        {designSelection && activeId && (
+          <div
+            className="mb-2 flex items-center gap-2 rounded-lg border border-violet-500/25 bg-violet-500/5 px-2.5 py-2 text-xs"
+            aria-label={t.designSelection.contextLabel}
+          >
+            <MousePointer2
+              size={14}
+              className="shrink-0 text-violet-500"
+              aria-hidden="true"
+            />
+            <span className="min-w-0 flex-1 truncate">
+              {t.designSelection.context.replace(
+                "{label}",
+                designSelection.label,
+              )}
+            </span>
+            <code className="max-w-32 truncate rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+              {designSelection.elementId}
+            </code>
+            <button
+              type="button"
+              className="inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              aria-label={t.designSelection.clear}
+              onClick={() => clearDesignSelection(activeId)}
+            >
+              <X size={13} aria-hidden="true" />
+            </button>
+          </div>
+        )}
         {forcedSkills.length > 0 && (
           <div
             className="mb-2 flex flex-wrap items-center gap-1.5"
             aria-label={t.skills.forcedSelection}
           >
-            <span className="mr-0.5 text-[11px] font-medium text-muted-foreground">
-              {t.skills.forcedLabel}
-            </span>
             {forcedSkills.map((skill) => (
               <button
                 key={skill.id}
                 type="button"
-                className="inline-flex h-6 items-center gap-1 rounded-md border border-primary/20 bg-primary/10 px-2 text-[11px] font-medium text-foreground transition-colors hover:bg-primary/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                className="inline-flex h-6 items-center gap-1 rounded-md border border-border/70 bg-transparent px-2 text-[11px] font-medium text-foreground transition-colors hover:border-foreground/25 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 aria-label={t.skills.removeForced.replace("{name}", skill.name)}
                 onClick={() =>
                   onForcedSkillIdsChange(
@@ -453,7 +549,17 @@ export function ChatInput({
             onChange={handleFileSelect}
           />
 
-          <div className="border border-input rounded-lg bg-background focus-within:ring-1 focus-within:ring-ring overflow-hidden">
+          <div
+            data-workspace-mode={workspaceMode}
+            className={cn(
+              "overflow-hidden rounded-lg border bg-background focus-within:ring-1",
+              workspaceMode === "plan"
+                ? "border-blue-500/60 focus-within:border-blue-500 focus-within:ring-blue-500/25 dark:border-blue-400/60 dark:focus-within:border-blue-400"
+                : workspaceMode === "design"
+                  ? "border-violet-500/60 focus-within:border-violet-500 focus-within:ring-violet-500/25 dark:border-violet-400/60 dark:focus-within:border-violet-400"
+                  : "border-input focus-within:ring-ring",
+            )}
+          >
             <Textarea
               ref={textareaRef}
               value={input}
@@ -477,6 +583,9 @@ export function ChatInput({
                 skillsAvailable ? () => setSkillsOpen(true) : undefined
               }
               onManageMcp={() => setMcpOpen(true)}
+              onManageDesignSystems={() => setDesignSystemsOpen(true)}
+              designSystemName={designSystemName}
+              designSystemLabel={designSystemLabel}
               onReconnectMcp={async () => {
                 const { getMcpConnectionManager } =
                   await import("../../lib/mcp/connection-manager");
@@ -486,8 +595,8 @@ export function ChatInput({
               skillsInitializing={skillsInitializing}
               forcedSkillIds={forcedSkillIds}
               onForcedSkillIdsChange={onForcedSkillIdsChange}
-              planModeEnabled={planModeEnabled}
-              setPlanMode={setPlanMode}
+              workspaceMode={workspaceMode}
+              setWorkspaceMode={setWorkspaceMode}
               isGenerating={isGenerating}
               hasContent={Boolean(hasContent)}
               isHoveringStop={isHoveringStop}
@@ -538,6 +647,18 @@ export function ChatInput({
             isGenerating={isGenerating}
             onClose={() => setProjectImportOpen(false)}
             onImport={onImportProject}
+          />
+        </Suspense>
+      )}
+      {workspaceMode === "design" && designSystemsOpen && (
+        <Suspense fallback={null}>
+          <DesignSystemPanel
+            open
+            onOpenChange={setDesignSystemsOpen}
+            onApply={onApplyDesignSystem}
+            onCompileCustom={onCompileDesignSystem}
+            isGenerating={isGenerating}
+            canApplyProject={hasExistingProject}
           />
         </Suspense>
       )}

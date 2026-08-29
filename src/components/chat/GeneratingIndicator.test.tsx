@@ -38,22 +38,27 @@ describe("GeneratingIndicator", () => {
   it("types, holds, deletes and randomly selects the next progressive verb", () => {
     const random = vi.spyOn(Math, "random").mockReturnValue(0);
     const { container } = render(<GeneratingIndicator />);
+    const indicator = container.querySelector<HTMLElement>("[role='status']");
     const visibleText = () =>
       container.querySelector("span[aria-hidden='true']")?.textContent;
     const target = "Thinking…";
 
+    expect(indicator).toHaveClass("h-7", "shrink-0");
     expect(visibleText()).toBe("");
     for (let index = 0; index < target.length; index += 1) {
       act(() => vi.advanceTimersByTime(85));
     }
     expect(visibleText()).toBe(target);
 
-    act(() => vi.advanceTimersByTime(1_000));
+    act(() => vi.advanceTimersByTime(2_999));
+    expect(visibleText()).toBe(target);
+    act(() => vi.advanceTimersByTime(1));
     expect(visibleText()).toBe(target);
     for (let index = 0; index < target.length; index += 1) {
       act(() => vi.advanceTimersByTime(50));
     }
     expect(visibleText()).toBe("");
+    expect(indicator).toHaveClass("h-7", "shrink-0");
 
     act(() => vi.advanceTimersByTime(200));
     expect(random).toHaveBeenCalledOnce();

@@ -256,7 +256,11 @@ export function SessionList({ onClose }: SessionListProps) {
                 ({ runLocalUtilityText }) => {
                   const provider = ai.localAgent.provider;
                   const preferences = ai.localAgent[provider];
-                  return (instructions: string, prompt: string) =>
+                  return (
+                    instructions: string,
+                    prompt: string,
+                    options?: { timeoutMs?: number; signal?: AbortSignal },
+                  ) =>
                     runLocalUtilityText(
                       {
                         provider,
@@ -265,6 +269,7 @@ export function SessionList({ onClose }: SessionListProps) {
                       },
                       instructions,
                       prompt,
+                      options,
                     );
                 },
               )

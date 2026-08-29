@@ -8,6 +8,10 @@ import {
 import { parseSkillMd } from "./parser";
 import { SKILL_IMPORT_LIMITS, assertSafePath, textBytes } from "./paths";
 import type { PreparedSkill, SkillEntry, SkillManifestEntry } from "./types";
+import {
+  BUILTIN_SKILL_ID_ALIASES,
+  resolveBuiltinSkillId,
+} from "./builtin-aliases";
 
 export const FORCED_SKILLS_MAX_BYTES = 128 * 1024;
 
@@ -53,6 +57,7 @@ export class SkillRegistry {
       const manifest = await loadSkillManifest(this.fetcher);
       manifestLoaded = true;
       await this.reconcileManifest(manifest.skills);
+      await this.cleanupLegacyBuiltinDirectories();
       this.issues.delete("manifest");
     } catch (error) {
       this.issues.set("manifest", this.errorMessage(error));
@@ -120,7 +125,11 @@ export class SkillRegistry {
   async prepareForcedSkills(ids: readonly string[]): Promise<PreparedSkill[]> {
     const prepared: PreparedSkill[] = [];
     let totalBytes = 0;
-    for (const id of Array.from(new Set(ids))) {
+    const normalizedIds = ids.map((id) => {
+      const existing = this.store.getSkill(id);
+      return existing?.source === "imported" ? id : resolveBuiltinSkillId(id);
+    });
+    for (const id of Array.from(new Set(normalizedIds))) {
       const skill = this.requireSkill(id);
       if (!this.readyIds.has(id)) {
         if (skill.source !== "builtin") {
@@ -265,6 +274,15 @@ export class SkillRegistry {
       if (existing) {
         this.store.registerSkill({
           ...existing,
+          ...(existing.cachedVersion === undefined
+            ? {
+                name: manifest.name,
+                description: manifest.description,
+                version: manifest.version,
+                allowedTools: manifest.allowedTools,
+                tags: manifest.tags,
+              }
+            : {}),
           availableVersion: manifest.version,
         });
         continue;
@@ -322,6 +340,16 @@ export class SkillRegistry {
           recursive: entry.isDirectory,
         });
       }
+    }
+  }
+
+  private async cleanupLegacyBuiltinDirectories(): Promise<void> {
+    for (const legacyId of Object.keys(BUILTIN_SKILL_ID_ALIASES)) {
+      if (this.store.getSkill(legacyId)?.source === "imported") continue;
+      if (await this.fs.exists(legacyId)) {
+        await this.fs.remove(legacyId, { recursive: true });
+      }
+      this.readyIds.delete(legacyId);
     }
   }
 

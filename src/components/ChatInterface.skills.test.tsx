@@ -5,6 +5,8 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useInteractiveStore } from "../store/interactive";
 import { useSettingsStore } from "../store/settings";
+import { useConversationStore } from "../store/conversation";
+import { useDesignSelectionStore } from "../store/design-selection";
 import { ChatInterface } from "./ChatInterface";
 
 vi.mock("@tanstack/react-virtual", () => ({
@@ -33,7 +35,7 @@ vi.mock("./chat/ChatInput", () => ({
         type="button"
         onClick={() => {
           props.onChange("Build it");
-          props.onForcedSkillIdsChange(["code-review"]);
+          props.onForcedSkillIdsChange(["review-code"]);
         }}
       >
         Prepare request
@@ -57,6 +59,7 @@ const baseProps = {
   template: "vite-react-ts",
   previewMode: "sandpack" as const,
   sandpackKey: 0,
+  onReloadPreview: vi.fn(),
   isProjectInitialized: false,
   showInlinePreview: false,
   onCompressContext: vi.fn(async () => undefined),
@@ -73,6 +76,42 @@ describe("ChatInterface forced Skills", () => {
     useSettingsStore.setState((state) => ({
       system: { ...state.system, language: "en" },
     }));
+    useConversationStore.setState({
+      conversations: {},
+      activeId: null,
+      _hasHydrated: true,
+      legacyPlanModeMigrated: true,
+    });
+    useDesignSelectionStore.setState({ selections: {} });
+  });
+
+  it("attaches a preview selection to one request and then clears it", async () => {
+    const user = userEvent.setup();
+    const conversationId = useConversationStore.getState().createConversation();
+    useConversationStore.getState().setWorkspaceMode("design");
+    const selection = {
+      protocolVersion: 1 as const,
+      elementId: "hero-title",
+      label: "Hero title",
+      tagName: "h1",
+      route: "/",
+    };
+    useDesignSelectionStore.getState().setSelection(conversationId, selection);
+    const onGenerate = vi.fn(async () => undefined);
+    render(<ChatInterface {...baseProps} onGenerate={onGenerate} />);
+
+    await user.click(screen.getByRole("button", { name: "Prepare request" }));
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() =>
+      expect(onGenerate).toHaveBeenCalledWith("Build it", undefined, {
+        forcedSkillIds: ["review-code"],
+        designSelection: selection,
+      }),
+    );
+    expect(
+      useDesignSelectionStore.getState().selections[conversationId],
+    ).toBeUndefined();
   });
 
   it("passes the one-request selection to generation and clears it immediately after send", async () => {
@@ -82,13 +121,13 @@ describe("ChatInterface forced Skills", () => {
 
     await user.click(screen.getByRole("button", { name: "Prepare request" }));
     expect(screen.getByLabelText("selected skills")).toHaveTextContent(
-      "code-review",
+      "review-code",
     );
     await user.click(screen.getByRole("button", { name: "Send" }));
 
     await waitFor(() =>
       expect(onGenerate).toHaveBeenCalledWith("Build it", undefined, {
-        forcedSkillIds: ["code-review"],
+        forcedSkillIds: ["review-code"],
       }),
     );
     expect(screen.getByLabelText("selected skills")).toBeEmptyDOMElement();

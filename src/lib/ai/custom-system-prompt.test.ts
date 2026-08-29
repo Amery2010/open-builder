@@ -40,6 +40,8 @@ describe("custom system prompt", () => {
       mandatorySkills: "[mandatory-skills]",
       customSystemPrompt: "[custom]",
       planMode: "[plan-mode]",
+      designMode: "[design-mode]",
+      designSystem: "[design-system]",
     };
     const chat = buildRunSystemPromptSuffix({ ...common, mode: "chat" });
     expect(chat.indexOf("[memory]")).toBeLessThan(
@@ -52,6 +54,17 @@ describe("custom system prompt", () => {
       chat.indexOf("[mandatory-skills]"),
     );
     expect(chat).not.toContain("[plan-mode]");
+    expect(chat).not.toContain("[design-mode]");
+
+    const design = buildRunSystemPromptSuffix({
+      ...common,
+      mode: "chat",
+      workspaceMode: "design",
+    });
+    expect(design).toContain("[design-mode][design-system]");
+    expect(design.indexOf("[mandatory-skills]")).toBeLessThan(
+      design.indexOf("[design-mode]"),
+    );
 
     const plan = buildRunSystemPromptSuffix({ ...common, mode: "plan" });
     expect(plan).not.toContain("[memory]");
@@ -111,6 +124,21 @@ describe("custom system prompt", () => {
     );
     expect(DEFAULT_SYSTEM_PROMPT).toContain(
       "read_skill is designated for enabled Skill content",
+    );
+  });
+
+  it("anchors continuation work to the existing rendered entry chain", () => {
+    expect(DEFAULT_SYSTEM_PROMPT).toContain(
+      "current file tree and live entry/import chain are authoritative",
+    );
+    expect(DEFAULT_SYSTEM_PROMPT).toContain(
+      'if a root index.tsx imports "./App", edit the root App.tsx',
+    );
+    expect(DEFAULT_SYSTEM_PROMPT).toContain(
+      "Every new or moved runtime file must be reachable from the active entry",
+    );
+    expect(DEFAULT_SYSTEM_PROMPT).toContain(
+      "the requested result must be mounted and visible in the preview/runtime",
     );
   });
 });
