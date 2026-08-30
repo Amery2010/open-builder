@@ -10,6 +10,28 @@ import type {
 import { getT, type Translations } from "../../i18n";
 import { truncate } from "./truncate";
 import { TOOL_METADATA } from "../ai/tool-metadata";
+import { agnesToolNameFromAlias } from "../mcp/agnes/aliases";
+import {
+  AGNES_MCP_SERVER_ID,
+  isAgnesMediaToolContent,
+  type AgnesToolName,
+} from "../mcp/agnes/types";
+
+function getAgnesToolName(
+  toolName: string,
+  toolOutput?: Message["toolOutput"],
+): AgnesToolName | undefined {
+  const source = toolOutput?.source;
+  if (source) {
+    if (source.serverId !== AGNES_MCP_SERVER_ID) return undefined;
+    return source.toolName === "generate_image" ||
+      source.toolName === "create_video" ||
+      source.toolName === "get_video_status"
+      ? source.toolName
+      : undefined;
+  }
+  return agnesToolNameFromAlias(toolName);
+}
 
 /** Extract plain text from message content (string or multi-part array),
  *  excluding file attachment parts (prefixed with [File: ...]) */
@@ -167,6 +189,25 @@ export function mergeMessages(
   t: Translations = getT(),
 ): MergedMessage[] {
   const merged: MergedMessage[] = [];
+  const agnesVideoOrigins = new Map<string, string>();
+
+  for (const message of messages) {
+    if (
+      message.role !== "tool" ||
+      !message.tool_call_id ||
+      getAgnesToolName(
+        message.toolOutput?.source?.alias ?? "",
+        message.toolOutput,
+      ) !== "create_video" ||
+      !isAgnesMediaToolContent(message.toolOutput?.structuredContent)
+    ) {
+      continue;
+    }
+    const content = message.toolOutput.structuredContent;
+    if (content.operation === "create_video" && content.videoId) {
+      agnesVideoOrigins.set(content.videoId, message.tool_call_id);
+    }
+  }
 
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
@@ -279,6 +320,28 @@ export function mergeMessages(
                   result = getTextContent(messages[k].content) || "";
                   toolOutput = messages[k].toolOutput;
                   break;
+                }
+              }
+              const agnesToolName = getAgnesToolName(
+                tc.function.name,
+                toolOutput,
+              );
+              if (agnesToolName === "get_video_status") {
+                const structured = isAgnesMediaToolContent(
+                  toolOutput?.structuredContent,
+                )
+                  ? toolOutput.structuredContent
+                  : undefined;
+                const videoId =
+                  structured?.videoId ??
+                  (typeof args.video_id === "string"
+                    ? args.video_id
+                    : undefined);
+                const originCallId = videoId
+                  ? agnesVideoOrigins.get(videoId)
+                  : undefined;
+                if (originCallId && originCallId !== tc.id) {
+                  continue;
                 }
               }
               const isReadFiles = tc.function.name === "read_files";

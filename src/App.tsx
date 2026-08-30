@@ -15,10 +15,17 @@ import { useSettingsStore } from "./store/settings";
 import { useT } from "./i18n";
 import { discardPendingSandpackFileChanges } from "./components/code-viewer/sandpack-file-changes";
 import type { StagedProjectImport } from "./lib/utils/project-import";
-import type { Attachment, DesignSelectionContext } from "./types";
+import type {
+  Attachment,
+  ConversationDesignState,
+  DesignRecommendation,
+  DesignSelectionContext,
+  DesignSystemRef,
+} from "./types";
 import {
   compileCustomDesignSystem,
   decideDesignSystem,
+  hasExplicitDesignSystemReplacementIntent,
   type CustomDesignSystemDraft,
 } from "./lib/design-systems/ai";
 import type { StagedDesignSystemImport } from "./lib/design-systems/importer";
@@ -175,6 +182,8 @@ export default function App() {
     review,
     healthCheck,
     designReview,
+    automaticDesignReview,
+    automaticDesignReviewUnavailable,
     invalidateGenerator,
     isThinkingStreaming,
     generateUtilityText,
@@ -260,6 +269,119 @@ export default function App() {
     messagesEmpty: messages.length === 0,
   });
 
+  const commitDesignSystemForConversation = useCallback(
+    async (input: {
+      conversationId: string;
+      expectedReference: DesignSystemRef;
+      recommendation?: DesignRecommendation;
+      requireSelected?: boolean;
+    }): Promise<{ changed: boolean; reference: DesignSystemRef }> => {
+      const [applyModule, tokensModule, projectFilesModule] = await Promise.all(
+        [
+          import("./lib/design-systems/apply"),
+          import("./lib/design/tokens"),
+          import("./lib/utils/project-files"),
+        ],
+      );
+      const pkg = await applyModule.loadDesignSystemPackage(
+        input.expectedReference.id,
+      );
+      if (
+        input.expectedReference.digest &&
+        pkg.reference.digest !== input.expectedReference.digest
+      ) {
+        throw new Error(
+          "The selected Design system package changed. Select it again before retrying.",
+        );
+      }
+
+      const state = useConversationStore.getState();
+      const current = state.conversations[input.conversationId];
+      if (state.activeId !== input.conversationId || !current) {
+        throw new DOMException("conversation switched", "AbortError");
+      }
+      if (
+        input.requireSelected &&
+        !tokensModule.sameDesignSystemReference(
+          current.designState?.selectedSystem,
+          pkg.reference,
+        )
+      ) {
+        throw new Error(
+          "The selected Design system changed before it could be applied.",
+        );
+      }
+
+      const nextDesignState: ConversationDesignState = {
+        ...current.designState,
+        selectedSystem: pkg.reference,
+        appliedSystem: pkg.reference,
+        ...(input.recommendation
+          ? { recommendation: input.recommendation }
+          : {}),
+        autoSelectionError: false,
+      };
+      if (
+        tokensModule.sameDesignSystemReference(
+          current.designState?.appliedSystem,
+          pkg.reference,
+        ) &&
+        tokensModule.inspectDesignTokenContract(current.files, nextDesignState)
+          .status === "ready"
+      ) {
+        useConversationStore
+          .getState()
+          .setDesignStateForConversation(input.conversationId, nextDesignState);
+        return { changed: false, reference: pkg.reference };
+      }
+
+      const beforeFiles = current.files;
+      const beforeDesignState = current.designState;
+      const applied = applyModule.applyDesignSystemPackage(beforeFiles, pkg);
+      const validation = projectFilesModule.validateProjectFiles(applied.files);
+      if (!validation.ok) throw new Error(validation.error);
+      if (
+        tokensModule.inspectDesignTokenContract(applied.files, nextDesignState)
+          .status !== "ready"
+      ) {
+        throw new Error(
+          "Applied Design system did not produce a ready token contract.",
+        );
+      }
+
+      try {
+        setFilesForConversation(input.conversationId, applied.files);
+        useConversationStore
+          .getState()
+          .setDesignStateForConversation(input.conversationId, nextDesignState);
+        const committed =
+          useConversationStore.getState().conversations[input.conversationId];
+        if (
+          !committed ||
+          tokensModule.inspectDesignTokenContract(
+            committed.files,
+            committed.designState,
+          ).status !== "ready"
+        ) {
+          throw new Error(
+            "Applied Design system token contract was not saved to the project.",
+          );
+        }
+      } catch (error) {
+        setFilesForConversation(input.conversationId, beforeFiles);
+        useConversationStore
+          .getState()
+          .setDesignStateForConversation(
+            input.conversationId,
+            beforeDesignState,
+          );
+        throw error;
+      }
+      return { changed: true, reference: pkg.reference };
+    },
+    [setFilesForConversation],
+  );
+
   const handleGenerate = useCallback(
     async (
       prompt: string,
@@ -274,11 +396,24 @@ export default function App() {
         ? state.conversations[state.activeId]
         : undefined;
       const conversationId = conversation?.id;
-      const prepareRun =
+      const explicitReplacementIntent =
+        hasExplicitDesignSystemReplacementIntent(prompt);
+      const shouldResolveDesignSystem =
         conversation?.workspaceMode === "design" &&
-        !conversation.designState?.selectedSystem &&
-        !conversation.designState?.recommendation
+        ((!conversation.designState?.selectedSystem &&
+          !conversation.designState?.appliedSystem) ||
+          (explicitReplacementIntent &&
+            (!!conversation.designState?.appliedSystem ||
+              conversation.designState?.recommendation?.systemId === null)));
+      const runOptions = { ...options } as NonNullable<
+        Parameters<typeof generate>[2]
+      >;
+      const selectionConversation = conversation;
+      const prepareRun =
+        shouldResolveDesignSystem && selectionConversation
           ? async () => {
+              const designStateBeforeSelection =
+                selectionConversation.designState;
               try {
                 const systemLanguage =
                   useSettingsStore.getState().system.language;
@@ -288,8 +423,9 @@ export default function App() {
                     attachmentNames: (attachments ?? []).map(
                       (attachment) => attachment.name,
                     ),
-                    projectPaths: Object.keys(conversation.files),
-                    appliedSystem: conversation.designState?.appliedSystem,
+                    projectFiles: selectionConversation.files,
+                    appliedSystem:
+                      selectionConversation.designState?.appliedSystem,
                     language:
                       systemLanguage === "en" ||
                       (systemLanguage === "system" &&
@@ -305,6 +441,39 @@ export default function App() {
                 ) {
                   return;
                 }
+                const latest =
+                  useConversationStore.getState().conversations[conversationId];
+                if (!latest) return;
+                if (result.action === "keep") {
+                  useConversationStore
+                    .getState()
+                    .setDesignStateForConversation(
+                      conversationId,
+                      (current) => ({
+                        ...current,
+                        selectedSystem:
+                          current?.appliedSystem ?? result.selectedSystem,
+                        recommendation: result.recommendation,
+                        autoSelectionError: false,
+                      }),
+                    );
+                  return;
+                }
+                if (result.action === "none" || !result.selectedSystem) {
+                  useConversationStore
+                    .getState()
+                    .setDesignStateForConversation(
+                      conversationId,
+                      (current) => ({
+                        ...current,
+                        selectedSystem: undefined,
+                        recommendation: result.recommendation,
+                        autoSelectionError: false,
+                      }),
+                    );
+                  return;
+                }
+
                 useConversationStore
                   .getState()
                   .setDesignStateForConversation(conversationId, (current) => ({
@@ -313,6 +482,15 @@ export default function App() {
                     recommendation: result.recommendation,
                     autoSelectionError: false,
                   }));
+                if (latest.isProjectInitialized) {
+                  await commitDesignSystemForConversation({
+                    conversationId,
+                    expectedReference: result.selectedSystem,
+                    recommendation: result.recommendation,
+                    requireSelected: true,
+                  });
+                  runOptions.designExpectedChangeModes = ["migrate"];
+                }
               } catch (error) {
                 console.warn(
                   "Unable to resolve an automatic Design system:",
@@ -324,26 +502,19 @@ export default function App() {
                 ) {
                   useConversationStore
                     .getState()
-                    .setDesignStateForConversation(
-                      conversationId,
-                      (current) => ({
-                        ...current,
-                        selectedSystem: undefined,
-                        recommendation: undefined,
-                        autoSelectionError: true,
-                      }),
-                    );
+                    .setDesignStateForConversation(conversationId, {
+                      ...designStateBeforeSelection,
+                      autoSelectionError: true,
+                    });
                 }
               }
             }
           : undefined;
 
-      await generate(prompt, attachments, {
-        ...options,
-        ...(prepareRun ? { prepareRun } : {}),
-      });
+      if (prepareRun) runOptions.prepareRun = prepareRun;
+      await generate(prompt, attachments, runOptions);
     },
-    [generate, generateUtilityText],
+    [commitDesignSystemForConversation, generate, generateUtilityText],
   );
 
   const handleCompileDesignSystem = useCallback(
@@ -369,83 +540,26 @@ export default function App() {
       ) {
         return;
       }
-      const [applyModule, tokensModule] = await Promise.all([
-        import("./lib/design-systems/apply"),
-        import("./lib/design/tokens"),
-      ]);
-      const { applyDesignSystemPackage, loadDesignSystemPackage } = applyModule;
-      const { inspectDesignTokenContract, sameDesignSystemReference } =
-        tokensModule;
-      const pkg = await loadDesignSystemPackage(systemId);
-      const current = useConversationStore.getState();
-      const currentConversation = current.conversations[conversationId];
-      if (
-        current.activeId !== conversationId ||
-        !currentConversation ||
-        !sameDesignSystemReference(
-          currentConversation.designState?.selectedSystem,
-          pkg.reference,
-        )
-      ) {
-        return;
-      }
-      const applied = applyDesignSystemPackage(currentConversation.files, pkg);
-      const nextDesignState = {
-        ...currentConversation.designState,
-        selectedSystem: pkg.reference,
-        appliedSystem: pkg.reference,
-      };
-      if (
-        inspectDesignTokenContract(applied.files, nextDesignState).status !==
-        "ready"
-      ) {
-        throw new Error(
-          "Applied Design system did not produce a ready token contract.",
-        );
-      }
-      setFilesForConversation(conversationId, applied.files);
-      const committedConversation =
-        useConversationStore.getState().conversations[conversationId];
-      if (
-        !committedConversation ||
-        inspectDesignTokenContract(committedConversation.files, nextDesignState)
-          .status !== "ready"
-      ) {
-        throw new Error(
-          "Applied Design system token contract was not saved to the project.",
-        );
-      }
-      useConversationStore
-        .getState()
-        .setDesignStateForConversation(conversationId, nextDesignState);
-      const appliedConversation =
-        useConversationStore.getState().conversations[conversationId];
-      if (
-        !appliedConversation ||
-        inspectDesignTokenContract(
-          appliedConversation.files,
-          appliedConversation.designState,
-        ).status !== "ready"
-      ) {
-        useConversationStore
-          .getState()
-          .setDesignStateForConversation(conversationId, (designState) => ({
-            ...designState,
-            appliedSystem: undefined,
-          }));
-        throw new Error(
-          "Applied Design system token contract did not become ready.",
-        );
-      }
+      const application = await commitDesignSystemForConversation({
+        conversationId,
+        expectedReference: selectedSystem,
+        requireSelected: true,
+      });
+      if (!application.changed) return;
       if (useConversationStore.getState().activeId !== conversationId) return;
       invalidateGenerator();
       void generate(
         `The explicitly selected Design system "${systemId}" is already applied to the current project. Read the root DESIGN.md and tokens.css, then reshape the existing UI to follow that contract. Preserve working behavior and report any shared or responsive elements changed beyond the selected system application.`,
         undefined,
-        { skipAutoQa: true },
+        { skipAutoQa: true, designExpectedChangeModes: ["migrate"] },
       );
     },
-    [generate, invalidateGenerator, isGenerating, setFilesForConversation],
+    [
+      commitDesignSystemForConversation,
+      generate,
+      invalidateGenerator,
+      isGenerating,
+    ],
   );
 
   const handleApplyDesignReviewFixes = useCallback(
@@ -534,7 +648,11 @@ export default function App() {
         sandpackKey={sandpackKey}
         onReloadPreview={restartSandpack}
         onApplyDesignSystem={handleApplyDesignSystem}
-        onDesignReview={designReview}
+        onDesignReview={async (screenshots) => {
+          await designReview(screenshots);
+        }}
+        onAutomaticDesignReview={automaticDesignReview}
+        onAutomaticDesignReviewUnavailable={automaticDesignReviewUnavailable}
         onApplyDesignReviewFixes={handleApplyDesignReviewFixes}
         isGenerating={isGenerating}
       />

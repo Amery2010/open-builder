@@ -45,10 +45,12 @@ export function McpMenu({
 }: McpMenuProps) {
   const t = useT();
   const servers = useMcpStore((state) => state.servers);
+  const agnes = useMcpStore((state) => state.agnes);
   const runtime = useMcpStore((state) => state.runtime);
   const globalEnabled = useMcpStore((state) => state.globalEnabled);
   const hydrated = useMcpStore((state) => state._hasHydrated);
   const setGlobalEnabled = useMcpStore((state) => state.setGlobalEnabled);
+  const setAgnesEnabled = useMcpStore((state) => state.setAgnesEnabled);
   const setServerEnabled = useMcpStore((state) => state.setServerEnabled);
   const [reconnecting, setReconnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -57,24 +59,31 @@ export function McpMenu({
     [servers],
   );
   const enabledEntries = entries.filter((server) => server.enabled);
-  const readyCount = enabledEntries.filter(
-    (server) =>
-      runtime[server.id]?.status === "ready" &&
-      (!runtime[server.id]?.drift ||
-        runtime[server.id]?.drift?.status === "clean"),
-  ).length;
+  const agnesReady =
+    agnes.enabled &&
+    Boolean(agnes.apiKey.trim()) &&
+    Object.values(agnes.tools).some((tool) => tool.enabled);
+  const enabledCount = enabledEntries.length + (agnes.enabled ? 1 : 0);
+  const readyCount =
+    enabledEntries.filter(
+      (server) =>
+        runtime[server.id]?.status === "ready" &&
+        (!runtime[server.id]?.drift ||
+          runtime[server.id]?.drift?.status === "clean"),
+    ).length + (agnesReady ? 1 : 0);
   const connecting = enabledEntries.some(
     (server) => runtime[server.id]?.status === "connecting",
   );
-  const attentionCount = enabledEntries.filter((server) => {
-    const status = runtime[server.id]?.status;
-    return (
-      status === "needs_auth" || status === "error" || status === "drifted"
-    );
-  }).length;
+  const attentionCount =
+    enabledEntries.filter((server) => {
+      const status = runtime[server.id]?.status;
+      return (
+        status === "needs_auth" || status === "error" || status === "drifted"
+      );
+    }).length + (agnes.enabled && !agnesReady ? 1 : 0);
   const statusSummary = t.mcp.readySummary
     .replace("{ready}", String(readyCount))
-    .replace("{enabled}", String(enabledEntries.length));
+    .replace("{enabled}", String(enabledCount));
   const accessibleSummary = attentionCount
     ? `${statusSummary}; ${t.mcp.attentionSummary.replace("{count}", String(attentionCount))}`
     : statusSummary;
@@ -171,10 +180,30 @@ export function McpMenu({
           </span>
         </DropdownMenuCheckboxItem>
         <DropdownMenuSeparator />
+        <DropdownMenuCheckboxItem
+          checked={agnes.enabled}
+          disabled={!agnes.apiKey.trim()}
+          onCheckedChange={(checked) => {
+            setError(null);
+            try {
+              setAgnesEnabled(Boolean(checked));
+            } catch (reason: unknown) {
+              setError(
+                reason instanceof Error ? reason.message : String(reason),
+              );
+            }
+          }}
+          onSelect={(event) => event.preventDefault()}
+        >
+          <span className="flex min-w-0 flex-1 items-center justify-between gap-3">
+            <span className="truncate">{t.mcp.agnes.name}</span>
+            <span className="shrink-0 text-[10px] text-muted-foreground">
+              {agnesReady ? t.mcp.status.ready : t.mcp.status.idle}
+            </span>
+          </span>
+        </DropdownMenuCheckboxItem>
         {!hydrated ? (
           <DropdownMenuItem disabled>{t.mcp.loading}</DropdownMenuItem>
-        ) : entries.length === 0 ? (
-          <DropdownMenuItem disabled>{t.mcp.empty}</DropdownMenuItem>
         ) : (
           entries.map((server) => {
             const serverRuntime = runtime[server.id];

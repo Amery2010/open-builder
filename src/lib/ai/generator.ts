@@ -105,6 +105,7 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
   private tools: ToolSet;
   private customToolSet: ToolSet;
   private readonly customToolHandler?: GeneratorOptions["customToolHandler"];
+  private readonly authorizeToolCall?: GeneratorOptions["authorizeToolCall"];
   private readonly useThinking: boolean;
   private readonly thinkingBudget: number;
   private readonly maxRetries: number;
@@ -138,6 +139,7 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
       ? options.tools
       : { ...BUILTIN_TOOLS, ...this.customToolSet };
     this.customToolHandler = options.customToolHandler;
+    this.authorizeToolCall = options.authorizeToolCall;
     this.useThinking = options.thinking ?? true;
     this.thinkingBudget = options.thinkingBudget ?? 10000;
     this.maxRetries = options.maxRetries ?? 3;
@@ -866,6 +868,30 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
       logDecision("denied", "write tool blocked by Plan Mode");
       this.events.onToolResult?.(name, args, output.text, toolCall.id, output);
       return { result: output, changes: [] };
+    }
+
+    if (this.authorizeToolCall) {
+      const denial = await this.authorizeToolCall(name, args, {
+        signal: this.ctrl?.signal ?? new AbortController().signal,
+        toolCallId: toolCall.id,
+        run: this.getRunContext(),
+        skillContext: this.skillContext,
+      });
+      if (denial) {
+        const output = normalizeToolExecutionOutput({
+          text: `Error: ${denial}`,
+          isError: true,
+        });
+        logDecision("denied", denial);
+        this.events.onToolResult?.(
+          name,
+          args,
+          output.text,
+          toolCall.id,
+          output,
+        );
+        return { result: output, changes: [] };
+      }
     }
 
     if (

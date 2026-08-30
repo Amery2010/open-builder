@@ -16,6 +16,7 @@ import {
   Activity,
 } from "lucide-react";
 import { ToolCallCard } from "./ToolCallCard";
+import { AgnesMediaResult, agnesToolNameForBlock } from "./AgnesMediaResult";
 import { PlanApprovalCard } from "./PlanApprovalCard";
 import {
   AskUserAnswerSummary,
@@ -111,7 +112,7 @@ export const MessageBubble = memo(function MessageBubble({
       (b): b is FileBlock => b.type === "file",
     );
 
-    if (message.origin === "auto_qa") {
+    if (message.origin === "auto_qa" || message.origin === "design_auto_fix") {
       return (
         <div
           role="status"
@@ -120,7 +121,9 @@ export const MessageBubble = memo(function MessageBubble({
           <Activity size={14} className="mt-0.5 shrink-0" aria-hidden="true" />
           <div>
             <p className="font-medium text-foreground">
-              {t.chat.autoQaActivity}
+              {message.origin === "design_auto_fix"
+                ? t.chat.autoDesignFixActivity
+                : t.chat.autoQaActivity}
             </p>
             {textBlocks.length > 0 && (
               <p className="mt-0.5 line-clamp-2">
@@ -224,6 +227,9 @@ export const MessageBubble = memo(function MessageBubble({
           );
         }
         if (block.type === "tool") {
+          if (agnesToolNameForBlock(block)) {
+            return <AgnesMediaResult key={block.id} block={block} />;
+          }
           const pending = pendingInteractions.find(
             (item) =>
               item.toolCallId === block.toolCallId && item.kind === "question",

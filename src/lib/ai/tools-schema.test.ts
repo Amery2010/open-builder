@@ -131,6 +131,7 @@ describe("tool policies", () => {
       apply_design_style: {} as ToolSet[string],
       apply_design_system: {} as ToolSet[string],
       submit_design_review: {} as ToolSet[string],
+      submit_design_contract: {} as ToolSet[string],
       web_search: {} as ToolSet[string],
     };
 
@@ -151,6 +152,8 @@ describe("tool policies", () => {
     });
     expect(design.apply_design_style).toBeUndefined();
     expect(design.apply_design_system).toBeUndefined();
+    expect(design.submit_design_contract).toBeDefined();
+    expect(automatic.submit_design_contract).toBeUndefined();
 
     const explicitApply = buildToolSetForRun({
       custom,
@@ -169,6 +172,7 @@ describe("tool policies", () => {
       web_search: {} as ToolSet[string],
       apply_design_system: {} as ToolSet[string],
       submit_design_review: {} as ToolSet[string],
+      submit_design_contract: {} as ToolSet[string],
       mcp_review_escape: {} as ToolSet[string],
     };
     const review = buildToolSetForRun({

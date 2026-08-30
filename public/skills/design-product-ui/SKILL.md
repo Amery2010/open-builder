@@ -11,7 +11,11 @@ tags:
 
 # Design product UI
 
-Build application interfaces that help people complete real tasks with low ambiguity. This skill covers dashboards, editors, settings, forms, search, data views, administration, navigation, and multi-step workflows. Use `art-direct-web` when visual narrative and campaign expression are the primary problem. Preserve the user's requirements, existing architecture, design system, behavior, and accessibility contracts.
+Build application interfaces that help people complete real tasks with low ambiguity. This skill covers dashboards, editors, settings, forms, search, data views, administration, navigation, and multi-step workflows. Their page-level task mode is `operate`. Use `art-direct-web` for `persuade`, `read`, or `experience` surfaces; load both for a genuinely mixed target.
+
+Before the first UI write in Design mode, inspect the active project and submit the run-local Design contract. Distinguish `create` (a new product surface), `extend` (a bounded addition within the current visual language), and `migrate` (the applied Design system replaces conflicting visual Tokens, styles, component grammar, and layout expression inside the named target). An applied Design system is visually authoritative in that target. A selected-but-unapplied system is reference only and cannot authorize a restyle.
+
+In every change mode, preserve product truth: routes, data and state ownership, information architecture, content contracts, permissions, analytics hooks, integration selectors, accessibility semantics, and working behavior unless the user's request independently changes them. Migration is visual-system work, not permission to rebuild the product model.
 
 ## Ground the design in the product
 
@@ -72,7 +76,9 @@ Tables and lists need meaningful headers, alignment, sorting or filtering semant
 
 ## Visual system
 
-Reuse semantic tokens and shared components. Give color roles rather than page-specific meanings. Keep radii, shadows, borders, icons, and typography consistent with the product. Third-party brand marks remain branded assets; do not replace them with generic symbols when identity matters.
+Read root `DESIGN.md` and `tokens.css` when present, then trace the runtime style entry that must import the Tokens. Reuse semantic variables and shared components. Give color roles rather than page-specific meanings. Keep radii, shadows, borders, icons, and typography consistent with the applied system. For `create` and `migrate`, prove that color, typography, shape, and layout semantics are consumed by runtime UI; for `extend`, prove global Token wiring and changed-scope consumption without cleaning unrelated historical debt.
+
+Do not bypass an available semantic variable with new literal colors, font families, radii, Tailwind palette classes, fixed radius classes, or transition durations. When interaction or animation is present, use the system's motion and easing roles and preserve reduced-motion behavior.
 
 Icons supplement meaning. High-frequency icon-only controls need accessible names and the project's shared tooltip behavior. Avoid native `title` when a consistent tooltip primitive exists.
 
@@ -94,4 +100,4 @@ Implement real interactions and data flow. Do not ship inert controls, fake char
 
 Add or update tests for the state and interaction contract, especially selection, submission, cancellation, duplicate prevention, and error recovery. Run relevant static, component, type, and build checks. Browser or device evidence must be explicitly authorized and accurately reported.
 
-Before finishing, confirm the primary task is obvious, density fits usage, controls use familiar semantics, every async state has feedback, responsive layouts protect the work, accessibility behavior is preserved, and the diff contains no unrelated redesign.
+Before finishing, run the project health check and fix every `design_system` error. Confirm the primary task is obvious, density fits usage, controls use familiar semantics, every async state has feedback, responsive layouts protect the work, accessibility behavior is preserved, the changed runtime consumes the applied semantic Tokens, and the diff contains no unrelated redesign. The host may follow with one automatic visual review and one bounded repair; reuse the accepted contract instead of inventing a new direction.

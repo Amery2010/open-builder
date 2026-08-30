@@ -6,6 +6,10 @@ import {
   beginMcpLifecycleRevocation,
   finishMcpLifecycleRevocation,
 } from "../lib/mcp/revocation";
+import {
+  AGNES_MCP_DEFINITION_VERSION,
+  createDefaultAgnesMcpSettings,
+} from "../lib/mcp/agnes/types";
 
 const records = vi.hoisted(() => new Map<string, string>());
 
@@ -28,6 +32,7 @@ describe("MCP store", () => {
     records.clear();
     useMcpStore.setState({
       globalEnabled: true,
+      agnes: createDefaultAgnesMcpSettings(),
       servers: {},
       runtime: {},
       _hasHydrated: true,
@@ -183,6 +188,28 @@ describe("MCP store", () => {
     ).toBeUndefined();
   });
 
+  it("normalizes Agnes definition grants after same-version hydration", () => {
+    const stale = createDefaultAgnesMcpSettings(1);
+    stale.enabled = true;
+    stale.apiKey = "agnes-secret";
+    stale.definitionVersion = AGNES_MCP_DEFINITION_VERSION - 1;
+    stale.tools.generate_image = {
+      enabled: true,
+      allowForSubagents: true,
+      subagentPolicyVersion: TOOL_POLICY_VERSION,
+    };
+    const finishHydration = useMcpStore.persist
+      .getOptions()
+      .onRehydrateStorage?.(useMcpStore.getState());
+    useMcpStore.setState({ agnes: stale });
+    finishHydration?.(useMcpStore.getState(), undefined);
+
+    expect(useMcpStore.getState().agnes.tools.generate_image).toMatchObject({
+      enabled: false,
+      allowForSubagents: false,
+    });
+  });
+
   it("does not let hydration that predates full clear restore MCP servers", () => {
     const finishHydration = useMcpStore.persist
       .getOptions()
@@ -207,5 +234,67 @@ describe("MCP store", () => {
     } finally {
       finishMcpLifecycleRevocation(revocation);
     }
+  });
+
+  it("persists Agnes configuration, keeps its key out of runtime, and removes it on reset", () => {
+    const agnes = createDefaultAgnesMcpSettings(1);
+    agnes.apiKey = "agnes-secret";
+    agnes.enabled = true;
+    agnes.tools.generate_image.enabled = true;
+    useMcpStore.setState({ agnes });
+
+    const partialize = useMcpStore.persist.getOptions().partialize;
+    const persisted = partialize?.(useMcpStore.getState()) as Record<
+      string,
+      unknown
+    >;
+    expect(persisted).toHaveProperty("agnes.apiKey", "agnes-secret");
+    expect(persisted).not.toHaveProperty("runtime");
+
+    useMcpStore.getState().setAgnesApiKey("");
+    expect(useMcpStore.getState().agnes).toMatchObject({
+      apiKey: "",
+      enabled: false,
+    });
+  });
+
+  it("requires fresh approval after an Agnes definition change", async () => {
+    const stale = createDefaultAgnesMcpSettings(1);
+    stale.enabled = true;
+    stale.apiKey = "agnes-secret";
+    stale.definitionVersion = AGNES_MCP_DEFINITION_VERSION - 1;
+    stale.tools.generate_image = {
+      enabled: true,
+      allowForSubagents: true,
+      subagentPolicyVersion: TOOL_POLICY_VERSION,
+    };
+    const migrate = useMcpStore.persist.getOptions().migrate;
+    const migrated = (await migrate?.(
+      { globalEnabled: true, agnes: stale, servers: {} },
+      MCP_STORE_VERSION - 1,
+    )) as Pick<ReturnType<typeof useMcpStore.getState>, "agnes">;
+
+    expect(migrated.agnes.enabled).toBe(true);
+    expect(migrated.agnes.tools.generate_image).toMatchObject({
+      enabled: false,
+      allowForSubagents: false,
+    });
+  });
+
+  it("never grants video tools to subagents", () => {
+    const agnes = createDefaultAgnesMcpSettings(1);
+    agnes.apiKey = "agnes-secret";
+    agnes.updatedAt = Date.now() + 1_000;
+    useMcpStore.setState({ agnes });
+
+    useMcpStore.getState().setAgnesToolApproval("create_video", {
+      enabled: true,
+      allowForSubagents: true,
+    });
+    expect(useMcpStore.getState().agnes.tools.create_video).toEqual({
+      enabled: true,
+      allowForSubagents: false,
+    });
+    expect(useMcpStore.getState().agnes.updatedAt).toBe(agnes.updatedAt + 1);
   });
 });

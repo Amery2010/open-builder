@@ -59,6 +59,7 @@ function generator(
     ) => Promise<{ text: string }>;
     requestPlanApproval?: () => Promise<{ approved: boolean }>;
     onPlanApproved?: () => ToolSet;
+    authorizeToolCall?: (name: string) => string | undefined;
     executionMode?: "chat" | "plan";
     nativeSearch?: boolean;
   } = {},
@@ -89,6 +90,7 @@ function generator(
         ? async () => options.requestPlanApproval!()
         : undefined,
       onPlanApproved: options.onPlanApproved,
+      authorizeToolCall: options.authorizeToolCall,
     },
   );
   instance.syncMessages(conversation.messages);
@@ -161,6 +163,54 @@ describe("LocalAgentGenerator", () => {
 
     instance.abort();
     expect(localAgentMocks.cancel).not.toHaveBeenCalled();
+  });
+
+  it("enforces host write authorization for local CLI tool requests", async () => {
+    const authorizeToolCall = vi.fn((name: string) =>
+      name === "write_file" ? "Design contract required." : undefined,
+    );
+    localAgentMocks.start.mockImplementation(
+      async (
+        _request: LocalAgentStartRequest,
+        onEvent: (event: LocalAgentEvent) => void,
+      ) => {
+        queueMicrotask(() => {
+          onEvent({
+            type: "toolRequest",
+            runId: "run-authorization",
+            callId: "write-before-contract",
+            name: "write_file",
+            arguments: {
+              path: "src/App.tsx",
+              content: "export default function App() { return null; }",
+            },
+          });
+          onEvent({ type: "done", aborted: false });
+        });
+        return "run-authorization";
+      },
+    );
+    const { instance } = generator(baseConversation(), vi.fn(), vi.fn(), {
+      tools: { write_file: BUILTIN_TOOLS.write_file },
+      authorizeToolCall,
+    });
+
+    await instance.generate("Write before submitting a Design contract");
+
+    expect(instance.getFiles()).toEqual({});
+    expect(authorizeToolCall).toHaveBeenCalledWith(
+      "write_file",
+      expect.objectContaining({ path: "src/App.tsx" }),
+      expect.anything(),
+    );
+    expect(localAgentMocks.resolve).toHaveBeenCalledWith(
+      "run-authorization",
+      "write-before-contract",
+      expect.objectContaining({
+        isError: true,
+        text: expect.stringContaining("Design contract required"),
+      }),
+    );
   });
 
   it("includes the shared custom prompt suffix in Local CLI requests", async () => {

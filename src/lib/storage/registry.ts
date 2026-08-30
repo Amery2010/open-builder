@@ -20,6 +20,8 @@ import {
   finishMcpLifecycleRevocation,
 } from "../mcp/revocation";
 import { redactStorageExport } from "./export-redaction";
+import { createDefaultAgnesMcpSettings } from "../mcp/agnes/types";
+import { stopAgnesVideoTasks } from "../mcp/agnes/video-task-manager";
 
 export interface StorageEstimate {
   bytes: number;
@@ -147,17 +149,26 @@ export const STORAGE_DOMAINS: readonly StorageDomain[] = [
   {
     id: "mcp",
     estimate: async () => {
-      const servers = useMcpStore.getState().servers;
-      return jsonEstimate(servers, Object.keys(servers).length);
+      const { servers, agnes } = useMcpStore.getState();
+      return jsonEstimate({ servers, agnes }, Object.keys(servers).length + 1);
     },
     clear: async () => {
       const { getMcpConnectionManager } =
         await import("../mcp/connection-manager");
       await getMcpConnectionManager().closeAll();
+      stopAgnesVideoTasks();
       await clearPersistedStore(() => useMcpStore.persist.clearStorage());
-      useMcpStore.setState({ globalEnabled: true, servers: {}, runtime: {} });
+      useMcpStore.setState({
+        globalEnabled: true,
+        agnes: createDefaultAgnesMcpSettings(),
+        servers: {},
+        runtime: {},
+      });
     },
-    export: async () => redactStorageExport(useMcpStore.getState().servers),
+    export: async () => {
+      const { servers, agnes } = useMcpStore.getState();
+      return redactStorageExport({ servers, agnes });
+    },
   },
   {
     id: "skills",

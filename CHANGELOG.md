@@ -12,6 +12,8 @@ Tagged versions use their Git tag date. Versions 1.4.0 through 1.7.0 were not ta
 
 ### Added
 
+- Added a managed Agnes AI MCP adapter for image generation, text-to-video tasks, and manual video-status queries across Web, desktop, and experimental mobile, using a fixed official endpoint, local masked API-key configuration, per-tool approval, and an image-only opt-in subagent grant.
+- Agnes image and video calls now render as direct conversation placeholders instead of generic tool cards. Image URLs replace their placeholder immediately; active source conversations poll video tasks on a bounded in-memory schedule and replace the original placeholder without adding messages or notifications.
 - Added per-project Code, Plan, and Design workspace modes while retaining the persisted `"auto"` compatibility value. Design mode generates runnable marketing sites and multi-screen product interfaces, returns from approved plans to Design, defaults new visual projects to `vite-react-ts`, and skips Automatic QA in favor of an explicit review flow.
 - Added a curated catalog of 12 bundled unofficial visual-reference systems with independent full-frame 640×480 WebP preview images, plus bounded ZIP/browser-directory/local-directory imports, one isolated project-level AI selection including an explicit None result, separate selected/applied state, and card selection that starts explicit `apply_design_system` application for initialized projects.
 - Added isolated custom design-system compilation from a name and three rule groups. Successful JSON, CSS, semantic-token, and package validation registers and selects a local custom system with a generic preview without applying it to project files.
@@ -38,6 +40,7 @@ Tagged versions use their Git tag date. Versions 1.4.0 through 1.7.0 were not ta
 
 ### Security
 
+- Agnes credentials are excluded from history, logs, diagnostics, and storage exports; current-message image IDs are run-scoped, public references require HTTPS, attachment counts and decoded bytes are bounded, response bodies are size-limited, and permission changes abort in-flight work. Plan, Automatic QA, Design Review, and video-capable subagent paths remain fail-closed.
 - Design-system imports and custom compilation now enforce safe app-owned IDs and paths, text-only files, strict JSON/schema checks, semantic-token CSS validation, digest verification, strict input and package limits, no symlinks, serialized ID allocation, one bounded repair attempt, and no silent overwrite. Automatic selection accepts only the current candidate pool and runs without tools or project writes.
 - The preview Bridge validates iframe source, origin when available, protocol version, per-activation nonce, and an 8 KB payload ceiling; Bridge files never enter canonical project files, snapshots, or exports.
 - Design Review exposes exactly four read-only tools, disables MCP, networking, Skills, scripts, and native writes, bounds screenshot input and findings, discards its isolated backend/session after use, and cannot trigger fixes without an explicit user selection.

@@ -4,6 +4,8 @@ import { en } from "../../i18n/en";
 import { zh } from "../../i18n/zh";
 import type { ThinkingBlock } from "../../types";
 import { TOOL_CAPABILITY_REGISTRY } from "../ai/tools-schema";
+import { AGNES_TOOL_ALIASES } from "../mcp/agnes/aliases";
+import { AGNES_MCP_SERVER_ID, AGNES_MCP_SERVER_NAME } from "../mcp/agnes/types";
 
 function createStorageStub(): Storage {
   const data = new Map<string, string>();
@@ -387,5 +389,93 @@ describe("mergeMessages", () => {
       ],
     });
     expect(JSON.stringify(blocks)).not.toContain("Private review instructions");
+  });
+
+  it("keeps one Agnes video block when a manual status call updates its origin", async () => {
+    const { mergeMessages } = await import("./merge-messages");
+    const source = (toolName: "create_video" | "get_video_status") => ({
+      kind: "mcp" as const,
+      serverId: AGNES_MCP_SERVER_ID,
+      serverName: AGNES_MCP_SERVER_NAME,
+      toolName,
+      toolTitle:
+        toolName === "create_video" ? "Create video" : "Get video status",
+      alias: AGNES_TOOL_ALIASES[toolName],
+    });
+    const messages: Message[] = [
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "create-call",
+            type: "function",
+            function: {
+              name: AGNES_TOOL_ALIASES.create_video,
+              arguments: '{"prompt":"A lake"}',
+            },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        tool_call_id: "create-call",
+        content: "completed",
+        toolOutput: {
+          text: "completed",
+          structuredContent: {
+            kind: "agnes_media_v1",
+            operation: "create_video",
+            mediaType: "video",
+            status: "completed",
+            videoId: "video_1",
+            progress: 100,
+            urls: ["https://cdn.example.com/video.mp4"],
+          },
+          source: source("create_video"),
+        },
+      },
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "status-call",
+            type: "function",
+            function: {
+              name: AGNES_TOOL_ALIASES.get_video_status,
+              arguments: '{"video_id":"video_1"}',
+            },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        tool_call_id: "status-call",
+        content: "completed",
+        toolOutput: {
+          text: "completed",
+          structuredContent: {
+            kind: "agnes_media_v1",
+            operation: "get_video_status",
+            mediaType: "video",
+            status: "completed",
+            videoId: "video_1",
+            progress: 100,
+            urls: ["https://cdn.example.com/video.mp4"],
+          },
+          source: source("get_video_status"),
+        },
+      },
+    ];
+
+    const toolBlocks = mergeMessages(messages, en).flatMap((message) =>
+      message.blocks.filter((block) => block.type === "tool"),
+    );
+    expect(toolBlocks).toHaveLength(1);
+    expect(toolBlocks[0]).toMatchObject({
+      toolCallId: "create-call",
+      toolName: AGNES_TOOL_ALIASES.create_video,
+    });
   });
 });

@@ -246,6 +246,7 @@ export const en: typeof zh = {
   chat: {
     placeholder: "Describe the app you want...",
     autoQaActivity: "Automatic QA activity",
+    autoDesignFixActivity: "Automatic Design repair",
     uploadImage: "Upload image",
     uploadFile: "Upload file",
     uploadProject: "Upload project",
@@ -653,6 +654,65 @@ export const en: typeof zh = {
       lastConnected: "Last connected: {time}",
       neverConnected: "Never connected successfully",
     },
+    agnes: {
+      name: "Agnes AI",
+      builtIn: "Built-in",
+      enableService: "Enable Agnes AI",
+      disableService: "Disable Agnes AI",
+      apiKey: "Agnes API key",
+      apiKeyPlaceholder: "Paste your Agnes API key",
+      showApiKey: "Show API key",
+      hideApiKey: "Hide API key",
+      removeKey: "Remove",
+      localStorageHint:
+        "The key is saved in local app data, masked by default, and removed from exports and diagnostic output.",
+      webCorsHint:
+        "In the web app, a blocked cross-origin request is reported directly. The official endpoint cannot be changed.",
+      chatDesignOnly:
+        "Chat and Design only; unavailable in Plan, Auto QA, and Design Review.",
+      imageSubagent: "Allow image generation for subagents",
+      imageDocs: "Image API docs",
+      videoDocs: "Video API docs",
+      checkConfiguration: "Check configuration",
+      configReady:
+        "Local configuration is complete. No network request was sent.",
+      configMissingKey: "Save an Agnes API key first.",
+      configMissingTool: "Enable at least one Agnes tool.",
+      tools: {
+        generateImage: {
+          title: "Generate image",
+          description:
+            "Text-to-image, image-to-image, and multi-image generation with up to five current-message images or public HTTPS image URLs.",
+        },
+        createVideo: {
+          title: "Create video",
+          description:
+            "Create a text-to-video task and update its original conversation placeholder while that conversation is active.",
+        },
+        getVideoStatus: {
+          title: "Get video status",
+          description:
+            "Query a video task once by ID and update its original placeholder when available.",
+        },
+      },
+      media: {
+        generatingImage: "Generating image...",
+        queuedVideo: "Video queued...",
+        generatingVideo: "Generating video...",
+        pollingStopped: "Automatic status checks stopped",
+        pollingNotResumed:
+          "Automatic status checks do not resume after restart",
+        manualRefreshNeeded:
+          "The video is still processing; query its status again",
+        statusUnavailable: "Video status is temporarily unavailable",
+        pollingPaused:
+          "Status checks paused while this conversation is inactive",
+        imageAlt: "Generated image {index}",
+        openVideo: "Open video link",
+        imageFailed: "Image generation failed",
+        videoFailed: "Video generation failed",
+      },
+    },
     tool: {
       enable: "Allow the model to call {name}",
       plan: "Allow in Plan Mode",
@@ -955,6 +1015,14 @@ export const en: typeof zh = {
     reviewing: "Reviewing design",
     reviewingDescription:
       "This run can read project files but cannot write, search the web, use MCP, or run scripts.",
+    automaticStages: {
+      capturing: "Automatic Design review: capturing responsive evidence…",
+      reviewing: "Automatic Design review: checking the implementation…",
+      fixing: "Automatic Design review: applying the single repair pass…",
+      verifying: "Automatic Design review: capturing the verification pass…",
+      complete: "Automatic Design review complete — no remaining findings.",
+      warning: "Automatic Design review needs attention; the report is open.",
+    },
     reviewUnavailable: "Design review unavailable",
     screenshotAlt: "Design review screenshot {name}",
     runReview: "Run read-only review",
@@ -1044,6 +1112,7 @@ export const en: typeof zh = {
       apply_design_style: "Apply Design Style",
       apply_design_system: "Apply Design System",
       submit_design_review: "Submit Design Review",
+      submit_design_contract: "Submit Design Contract",
       read_env_schema: "Read Env Schema",
       manage_env: "Manage Env",
       project_health_check: "Check Project Health",

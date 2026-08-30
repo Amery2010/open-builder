@@ -11,6 +11,8 @@ import type {
   ToolExecutionContext,
 } from "./generator-types";
 import type { SkillEntry } from "../skills/types";
+import { SUBMIT_DESIGN_CONTRACT_TOOL } from "../design/run-contract";
+import { createDesignContractController } from "../design/run-contract";
 
 type ToolInvoker = {
   executeTool(toolCall: ToolCall): Promise<{
@@ -52,6 +54,7 @@ function createGenerator(
     ) => Promise<{ approved: boolean; feedback?: string }>;
     onPlanApproved?: () => ToolSet | void | Promise<ToolSet | void>;
     prepareInitializedProject?: GeneratorOptions["prepareInitializedProject"];
+    authorizeToolCall?: GeneratorOptions["authorizeToolCall"];
   } = {},
   events: GeneratorEvents = {},
 ) {
@@ -119,6 +122,95 @@ describe("generator execution authorization", () => {
 
     expect(outcome.result.isError).not.toBe(true);
     expect(outcome.result.text).toContain("empty project");
+  });
+
+  it("enforces a run-local write authorization hook before mutation", async () => {
+    const authorizeToolCall = vi.fn((name: string) =>
+      name === "write_file" ? "Design contract required." : undefined,
+    );
+    const { generator } = createGenerator(
+      { write_file: BUILTIN_TOOLS.write_file },
+      vi.fn(),
+      { authorizeToolCall },
+    );
+
+    const outcome = await (generator as unknown as ToolInvoker).executeTool(
+      call("write_file", { path: "src/App.tsx", content: "changed" }),
+    );
+
+    expect(outcome.result.isError).toBe(true);
+    expect(outcome.result.text).toContain("Design contract required");
+    expect(generator.getFiles()).toEqual({});
+    expect(authorizeToolCall).toHaveBeenCalledOnce();
+  });
+
+  it("unlocks Design writes only after the structured contract tool succeeds", async () => {
+    const controller = createDesignContractController();
+    controller.reset({ enabled: true, expectedSystemId: "graphite" });
+    const handler = vi.fn(
+      async (name: string, args: unknown, context?: ToolExecutionContext) => {
+        if (name !== "submit_design_contract" || !context) return "unknown";
+        controller.submit(args, {
+          expectedSystemId: "graphite",
+          skillContext: context.skillContext,
+        });
+        return JSON.stringify({ accepted: true });
+      },
+    );
+    const { generator } = createGenerator(
+      {
+        write_file: BUILTIN_TOOLS.write_file,
+        ...SUBMIT_DESIGN_CONTRACT_TOOL,
+      },
+      handler,
+      {
+        authorizeToolCall: (name) => controller.authorizeProjectWrite(name),
+      },
+    );
+    generator.getSkillContext().activate({
+      id: "design-product-ui",
+      name: "design-product-ui",
+      description: "Product UI",
+      version: "1.0.0",
+      autoEnabled: true,
+      source: "builtin",
+      installedAt: 0,
+    });
+    const harness = generator as unknown as ToolInvoker;
+
+    expect(
+      (
+        await harness.executeTool(
+          call("write_file", { path: "src/App.tsx", content: "blocked" }),
+        )
+      ).result.text,
+    ).toContain("Design contract required");
+
+    const submitted = await harness.executeTool(
+      call("submit_design_contract", {
+        surface_mode: "operate",
+        change_mode: "extend",
+        target: "Settings workspace",
+        audience: "Administrators",
+        primary_goal: "Configure safely",
+        concept: "A precise operations bench",
+        system_id: "graphite",
+        translation: {
+          foundations: "Semantic roles",
+          composition: "Clear hierarchy",
+          components: "Shared controls",
+        },
+        preserve: ["Routes and behavior"],
+        acceptance: ["Runtime Token consumption"],
+      }),
+    );
+    expect(submitted.result.isError).not.toBe(true);
+
+    const written = await harness.executeTool(
+      call("write_file", { path: "src/App.tsx", content: "allowed" }),
+    );
+    expect(written.result.isError).not.toBe(true);
+    expect(generator.getFiles()["src/App.tsx"]).toBe("allowed");
   });
 
   it("prepares an initialized project before publishing its file tree", async () => {

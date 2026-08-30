@@ -50,7 +50,7 @@ import {
   loadDesignCaptureRuntimeSource,
   type DesignReviewViewport,
 } from "../lib/design/preview-capture";
-import { createDesignTokenSnapshot } from "../lib/design/tokens";
+import { createDesignTokenSnapshot } from "../lib/design/token-snapshot";
 import {
   exportProjectToUniqueDirectory,
   supportsDesktopDesignTools,
@@ -60,6 +60,7 @@ import type {
   DesignReviewScreenshot,
 } from "../lib/design/review";
 import { useDesignReviewStore } from "../store/design-review";
+import type { AutomaticDesignReviewEvidence } from "../lib/design/automatic-review";
 import { DEFAULT_TITLE } from "../store/conversation";
 import { flushPendingSandpackFileChanges } from "./code-viewer/sandpack-file-changes";
 import {
@@ -108,6 +109,15 @@ interface CodeViewerProps {
   onDesignReview?: (
     screenshots: readonly DesignReviewScreenshot[],
   ) => Promise<void> | void;
+  onAutomaticDesignReview?: (
+    screenshots: readonly DesignReviewScreenshot[],
+    evidence: AutomaticDesignReviewEvidence,
+    captureErrors: readonly string[],
+  ) => Promise<void> | void;
+  onAutomaticDesignReviewUnavailable?: (
+    evidence: AutomaticDesignReviewEvidence,
+    message: string,
+  ) => Promise<void> | void;
   onApplyDesignReviewFixes?: (
     findings: readonly DesignReviewFinding[],
   ) => Promise<void> | void;
@@ -128,6 +138,8 @@ export function CodeViewer({
   onApplyDesignSystem,
   isGenerating = false,
   onDesignReview,
+  onAutomaticDesignReview,
+  onAutomaticDesignReviewUnavailable,
   onApplyDesignReviewFixes,
 }: CodeViewerProps) {
   const t = useT();
@@ -180,6 +192,17 @@ export function CodeViewer({
   const setDesignSelection = useDesignSelectionStore(
     (state) => state.setSelection,
   );
+  const automaticCaptureRequestId = useDesignReviewStore(
+    (state) => state.automatic?.captureRequestId,
+  );
+  const automaticStage = useDesignReviewStore(
+    (state) => state.automatic?.stage,
+  );
+  const dialogRequestId = useDesignReviewStore(
+    (state) => state.dialogRequestId,
+  );
+  const handledAutomaticCaptureRef = useRef<number | undefined>(undefined);
+  const handledDialogRequestRef = useRef(0);
 
   const deviceDimensions = captureViewport
     ? { width: captureViewport.width, height: captureViewport.height }
@@ -269,6 +292,10 @@ export function CodeViewer({
       : effectiveViewMode === "preview"
         ? runtimePreviewFiles
         : previewFiles;
+  const invalidateAutomaticReview = useCallback(() => {
+    const review = useDesignReviewStore.getState();
+    if (review.automatic) review.reset();
+  }, []);
   const handleSandpackFileChange = useCallback(
     (targetConversationId: string, path: string, content: string) => {
       if (
@@ -291,9 +318,10 @@ export function CodeViewer({
       ) {
         return;
       }
+      invalidateAutomaticReview();
       onFileChange(targetConversationId, path, stripDesignBridge(content));
     },
-    [bridgeInjection, files, onFileChange],
+    [bridgeInjection, files, invalidateAutomaticReview, onFileChange],
   );
   const sandpackFiles = useMemo(
     () =>
@@ -538,7 +566,18 @@ export function CodeViewer({
     captureRuntimeReadyRef.current = false;
     setDesignBridgeReady(false);
     deactivateDesignSelection();
+    if (workspaceMode !== "design") {
+      captureAbortRef.current?.abort();
+      useDesignReviewStore.getState().reset();
+    }
   }, [conversationId, deactivateDesignSelection, sandpackKey, workspaceMode]);
+
+  useEffect(
+    () => () => {
+      captureAbortRef.current?.abort();
+    },
+    [conversationId],
+  );
 
   useEffect(
     () => () => {
@@ -579,6 +618,7 @@ export function CodeViewer({
     (path: string, content: string) => {
       if (files[path] === content) return;
       const nextFiles = { ...files, [path]: content };
+      invalidateAutomaticReview();
       onFileChange(conversationId, path, content);
       createDesignTokenSnapshot(
         conversationId,
@@ -587,7 +627,13 @@ export function CodeViewer({
       );
       setDesignTokenDraft(null);
     },
-    [conversationId, files, onFileChange, t.designTokens.snapshotLabel],
+    [
+      conversationId,
+      files,
+      invalidateAutomaticReview,
+      onFileChange,
+      t.designTokens.snapshotLabel,
+    ],
   );
 
   const handleDesignTokenUpgrade = useCallback(() => {
@@ -650,114 +696,248 @@ export function CodeViewer({
     [getPreviewIframe],
   );
 
-  const captureDesignReviewScreenshots = useCallback(() => {
-    if (captureTaskRef.current) return captureTaskRef.current;
-    const controller = new AbortController();
-    captureAbortRef.current = controller;
-    const task = (async () => {
-      const reviewStore = useDesignReviewStore.getState();
-      reviewStore.beginCapture(DESIGN_REVIEW_VIEWPORTS.length);
-      if (!bridgeInjection.supported) {
-        reviewStore.fail(
-          bridgeUnavailableReason ??
-            "Automatic preview capture is unavailable for this project.",
-        );
-        return;
-      }
-      const previousConsole = showConsole;
-      const previousSelection = designSelectionActive;
-      try {
-        const runtimeSource = await loadDesignCaptureRuntimeSource();
-        controller.signal.throwIfAborted();
-        if (captureRuntimeSource !== runtimeSource) {
-          captureRuntimeReadyRef.current = false;
-          setCaptureRuntimeSource(runtimeSource);
-        }
-        setShowConsole(false);
-        if (previousSelection) deactivateDesignSelection();
-        const collection = await collectDesignReviewCaptures({
-          signal: controller.signal,
-          prepareViewport: async (viewport) => {
-            setCaptureViewport(viewport);
-            await waitForPreviewViewport(viewport, controller.signal);
-          },
-          captureViewport: (viewport) =>
-            requestPreviewCapture(viewport, controller.signal),
-          onProgress: (completed, total, viewport) => {
-            useDesignReviewStore.getState().updateCaptureProgress({
-              completed,
-              total,
-              viewport: viewport.name,
-            });
-          },
-          restore: async () => {
-            setCaptureViewport(null);
-            setShowConsole(previousConsole);
-            await afterPreviewPaint();
-            if (previousSelection) activateDesignSelection();
-          },
-        });
-        controller.signal.throwIfAborted();
-        const screenshots: DesignReviewScreenshot[] = collection.captures.map(
-          (capture) => ({
-            dataUrl: capture.dataUrl,
-            mimeType: capture.mimeType,
-            name: `preview-${capture.viewport.name}-${capture.viewport.width}x${capture.viewport.height}.webp`,
-            source: "automatic",
-            viewport: capture.viewport,
-            semanticSnapshot: capture.semanticSnapshot,
-          }),
-        );
-        if (screenshots.length === 0) {
-          useDesignReviewStore
-            .getState()
-            .fail(
-              collection.errors.join(" ") ||
-                "Automatic preview capture did not return an image.",
+  const captureDesignReviewScreenshots = useCallback(
+    (options: { automatic?: boolean } = {}) => {
+      if (captureTaskRef.current) return captureTaskRef.current;
+      const controller = new AbortController();
+      captureAbortRef.current = controller;
+      const task = (async () => {
+        const reviewStore = useDesignReviewStore.getState();
+        const automaticEvidence = options.automatic
+          ? reviewStore.automatic?.evidence
+          : undefined;
+        if (!options.automatic) reviewStore.clearAutomatic();
+        reviewStore.beginCapture(DESIGN_REVIEW_VIEWPORTS.length);
+        if (!bridgeInjection.supported) {
+          const message =
+            (bridgeUnavailableReason ??
+              "Automatic preview capture is unavailable for this project.") +
+            (automaticEvidence
+              ? " Static Design-system checks completed; visual evidence is unavailable."
+              : "");
+          if (automaticEvidence && onAutomaticDesignReviewUnavailable) {
+            void Promise.resolve(
+              onAutomaticDesignReviewUnavailable(automaticEvidence, message),
+            ).catch((error) =>
+              useDesignReviewStore
+                .getState()
+                .failAutomatic(
+                  error instanceof Error ? error.message : String(error),
+                ),
             );
+          } else if (automaticEvidence) {
+            reviewStore.failAutomatic(message);
+          } else {
+            reviewStore.fail(message);
+          }
           return;
         }
-        useDesignReviewStore
-          .getState()
-          .setScreenshots(screenshots, collection.errors);
-        await onDesignReview?.(screenshots);
-      } catch (error) {
-        if ((error as { name?: string })?.name !== "AbortError") {
+        const previousConsole = showConsole;
+        const previousSelection = designSelectionActive;
+        const previousViewMode = viewMode;
+        let restored = false;
+        const restorePreview = async () => {
+          if (restored) return;
+          restored = true;
+          setCaptureViewport(null);
+          setShowConsole(previousConsole);
+          setViewMode(previousViewMode);
+          await afterPreviewPaint();
+          if (previousSelection) activateDesignSelection();
+        };
+        try {
+          const runtimeSource = await loadDesignCaptureRuntimeSource();
+          controller.signal.throwIfAborted();
+          if (captureRuntimeSource !== runtimeSource) {
+            captureRuntimeReadyRef.current = false;
+            setCaptureRuntimeSource(runtimeSource);
+          }
+          setViewMode("preview");
+          setShowConsole(false);
+          if (previousSelection) deactivateDesignSelection();
+          const collection = await collectDesignReviewCaptures({
+            signal: controller.signal,
+            prepareViewport: async (viewport) => {
+              setCaptureViewport(viewport);
+              await waitForPreviewViewport(viewport, controller.signal);
+            },
+            captureViewport: (viewport) =>
+              requestPreviewCapture(viewport, controller.signal),
+            onProgress: (completed, total, viewport) => {
+              useDesignReviewStore.getState().updateCaptureProgress({
+                completed,
+                total,
+                viewport: viewport.name,
+              });
+            },
+            restore: restorePreview,
+          });
+          controller.signal.throwIfAborted();
+          const screenshots: DesignReviewScreenshot[] = collection.captures.map(
+            (capture) => ({
+              dataUrl: capture.dataUrl,
+              mimeType: capture.mimeType,
+              name: `preview-${capture.viewport.name}-${capture.viewport.width}x${capture.viewport.height}.webp`,
+              source: "automatic",
+              viewport: capture.viewport,
+              semanticSnapshot: capture.semanticSnapshot,
+            }),
+          );
+          if (
+            automaticEvidence &&
+            useDesignReviewStore.getState().automatic?.evidence.requestId !==
+              automaticEvidence.requestId
+          ) {
+            return;
+          }
+          if (screenshots.length === 0) {
+            const message =
+              collection.errors.join(" ") ||
+              "Automatic preview capture did not return an image.";
+            if (automaticEvidence) {
+              if (onAutomaticDesignReviewUnavailable) {
+                void Promise.resolve(
+                  onAutomaticDesignReviewUnavailable(
+                    automaticEvidence,
+                    message,
+                  ),
+                ).catch((error) =>
+                  useDesignReviewStore
+                    .getState()
+                    .failAutomatic(
+                      error instanceof Error ? error.message : String(error),
+                    ),
+                );
+              } else {
+                useDesignReviewStore.getState().failAutomatic(message);
+              }
+            } else {
+              useDesignReviewStore.getState().fail(message);
+            }
+            return;
+          }
           useDesignReviewStore
             .getState()
-            .fail(error instanceof Error ? error.message : String(error));
+            .setScreenshots(screenshots, collection.errors);
+          if (automaticEvidence && onAutomaticDesignReview) {
+            void Promise.resolve(
+              onAutomaticDesignReview(
+                screenshots,
+                automaticEvidence,
+                collection.errors,
+              ),
+            ).catch((error) => {
+              useDesignReviewStore
+                .getState()
+                .failAutomatic(
+                  error instanceof Error ? error.message : String(error),
+                );
+            });
+          } else {
+            await onDesignReview?.(screenshots);
+          }
+        } catch (error) {
+          if ((error as { name?: string })?.name !== "AbortError") {
+            const message =
+              error instanceof Error ? error.message : String(error);
+            if (automaticEvidence) {
+              if (onAutomaticDesignReviewUnavailable) {
+                void Promise.resolve(
+                  onAutomaticDesignReviewUnavailable(
+                    automaticEvidence,
+                    message,
+                  ),
+                ).catch((reason) =>
+                  useDesignReviewStore
+                    .getState()
+                    .failAutomatic(
+                      reason instanceof Error ? reason.message : String(reason),
+                    ),
+                );
+              } else {
+                useDesignReviewStore.getState().failAutomatic(message);
+              }
+            } else {
+              useDesignReviewStore.getState().fail(message);
+            }
+          }
+        } finally {
+          await restorePreview();
         }
-      }
-    })();
-    captureTaskRef.current = task;
-    void task.then(
-      () => {
-        if (captureTaskRef.current === task) captureTaskRef.current = null;
-        if (captureAbortRef.current === controller)
-          captureAbortRef.current = null;
-      },
-      () => {
-        if (captureTaskRef.current === task) captureTaskRef.current = null;
-        if (captureAbortRef.current === controller)
-          captureAbortRef.current = null;
-      },
-    );
-    return task;
+      })();
+      captureTaskRef.current = task;
+      void task.then(
+        () => {
+          if (captureTaskRef.current === task) captureTaskRef.current = null;
+          if (captureAbortRef.current === controller)
+            captureAbortRef.current = null;
+        },
+        () => {
+          if (captureTaskRef.current === task) captureTaskRef.current = null;
+          if (captureAbortRef.current === controller)
+            captureAbortRef.current = null;
+        },
+      );
+      return task;
+    },
+    [
+      activateDesignSelection,
+      bridgeInjection.supported,
+      bridgeUnavailableReason,
+      captureRuntimeSource,
+      deactivateDesignSelection,
+      designSelectionActive,
+      onDesignReview,
+      onAutomaticDesignReview,
+      onAutomaticDesignReviewUnavailable,
+      requestPreviewCapture,
+      showConsole,
+      viewMode,
+      waitForPreviewViewport,
+    ],
+  );
+
+  useEffect(() => {
+    if (
+      !automaticCaptureRequestId ||
+      handledAutomaticCaptureRef.current === automaticCaptureRequestId ||
+      isGenerating ||
+      workspaceMode !== "design"
+    ) {
+      return;
+    }
+    handledAutomaticCaptureRef.current = automaticCaptureRequestId;
+    void captureDesignReviewScreenshots({ automatic: true });
   }, [
-    activateDesignSelection,
-    bridgeInjection.supported,
-    bridgeUnavailableReason,
-    captureRuntimeSource,
-    deactivateDesignSelection,
-    designSelectionActive,
-    onDesignReview,
-    requestPreviewCapture,
-    showConsole,
-    waitForPreviewViewport,
+    automaticCaptureRequestId,
+    captureDesignReviewScreenshots,
+    isGenerating,
+    workspaceMode,
   ]);
 
+  useEffect(() => {
+    if (
+      !dialogRequestId ||
+      handledDialogRequestRef.current === dialogRequestId
+    ) {
+      return;
+    }
+    handledDialogRequestRef.current = dialogRequestId;
+    setDesignReviewOpen(true);
+  }, [dialogRequestId]);
+
   const openDesignReview = useCallback(() => {
-    useDesignReviewStore.getState().reset();
+    const review = useDesignReviewStore.getState();
+    if (
+      review.automatic &&
+      review.status !== "complete" &&
+      review.status !== "error"
+    ) {
+      return;
+    }
+    if (!review.automatic) {
+      review.reset();
+    }
     setDesignReviewOpen(true);
   }, []);
 
@@ -799,6 +979,7 @@ export function CodeViewer({
   const handleCreateFile = (path: string) => {
     const p = path.startsWith("/") ? path.slice(1) : path;
     if (!(p in files)) {
+      invalidateAutomaticReview();
       onFileChange(conversationId, p, "// New file\n");
       onFileSelect(p);
     }
@@ -807,7 +988,10 @@ export function CodeViewer({
   const handleCreateFolder = (path: string) => {
     const p = path.startsWith("/") ? path.slice(1) : path;
     // Use trailing "/" to represent empty folder, no .gitkeep needed
-    if (!(`${p}/` in files)) onFileChange(conversationId, `${p}/`, "");
+    if (!(`${p}/` in files)) {
+      invalidateAutomaticReview();
+      onFileChange(conversationId, `${p}/`, "");
+    }
   };
 
   return (
@@ -870,12 +1054,20 @@ export function CodeViewer({
           onOpenChange={handleDesignReviewOpenChange}
           onRunReview={onDesignReview}
           onApplyFixes={applySelectedReviewFixes}
-          onCaptureScreenshots={captureDesignReviewScreenshots}
+          onCaptureScreenshots={() => captureDesignReviewScreenshots()}
           isGenerating={isGenerating}
         />
       )}
 
       <div className="flex-1 overflow-hidden relative bg-muted/50">
+        {workspaceMode === "design" && automaticStage && !designReviewOpen && (
+          <div
+            role="status"
+            className="absolute right-3 top-3 z-40 max-w-md rounded-lg border bg-background/95 px-3 py-2 text-xs shadow-lg backdrop-blur"
+          >
+            {t.designReview.automaticStages[automaticStage]}
+          </div>
+        )}
         {desktopActionMessage && (
           <div
             role="status"
@@ -1004,9 +1196,18 @@ export function CodeViewer({
                   onFileSelect={onFileSelect}
                   onCreateFile={handleCreateFile}
                   onCreateFolder={handleCreateFolder}
-                  onRenameFile={onRenameFile}
-                  onDeleteFile={onDeleteFile}
-                  onMoveFile={onMoveFile}
+                  onRenameFile={(oldPath, newPath) => {
+                    invalidateAutomaticReview();
+                    onRenameFile(oldPath, newPath);
+                  }}
+                  onDeleteFile={(path) => {
+                    invalidateAutomaticReview();
+                    onDeleteFile(path);
+                  }}
+                  onMoveFile={(sourcePath, targetFolder) => {
+                    invalidateAutomaticReview();
+                    onMoveFile(sourcePath, targetFolder);
+                  }}
                 />
               </div>
               <div className="flex flex-col flex-1 h-full overflow-x-auto min-w-0">

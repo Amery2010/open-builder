@@ -63,6 +63,8 @@ import {
   type DesignReviewReport,
 } from "../design/review";
 import { SUBMIT_DESIGN_REVIEW_TOOL } from "../design/review-tool";
+import { SUBMIT_DESIGN_CONTRACT_TOOL } from "../design/run-contract";
+import type { DesignAdherenceInput } from "../design/adherence";
 
 export interface ToolFeatures {
   builtinSearch: boolean;
@@ -100,6 +102,12 @@ export interface BuildToolHandlersArgs {
   onDesignSystemApplied?: (reference: DesignSystemRef) => void;
   getSelectedDesignSystemId?: () => string | undefined;
   onDesignReviewSubmitted?: (report: DesignReviewReport) => void;
+  submitDesignContract?: (
+    args: unknown,
+    context: ToolExecutionContext,
+  ) => string;
+  getDesignHealthContext?: () =>
+    Omit<DesignAdherenceInput, "files"> | undefined;
 }
 
 export interface BuiltToolHandlers {
@@ -125,6 +133,8 @@ export async function buildToolHandlers(
     onDesignSystemApplied,
     getSelectedDesignSystemId,
     onDesignReviewSubmitted,
+    submitDesignContract,
+    getDesignHealthContext,
   } = args;
   const runtimePlatform = await detectRuntimePlatform();
 
@@ -185,6 +195,7 @@ export async function buildToolHandlers(
     ? createProjectHealthCheckHandler({
         getFiles: filesBridge.getFiles,
         getConsoleLogs,
+        getDesignContext: getDesignHealthContext,
       })
     : null;
   const submitDesignReviewHandler = onDesignReviewSubmitted
@@ -245,6 +256,9 @@ export async function buildToolHandlers(
     if (name === "submit_design_review" && submitDesignReviewHandler) {
       return submitDesignReviewHandler(name, handlerArgs);
     }
+    if (name === "submit_design_contract" && submitDesignContract && context) {
+      return submitDesignContract(handlerArgs, context);
+    }
     if (name === "image_search" && assetSearchHandler) {
       return assetSearchHandler(name, handlerArgs);
     }
@@ -264,6 +278,7 @@ export async function buildToolHandlers(
     ...MEMORY_TOOLS,
     ...DISPATCH_SUBAGENT_TOOL,
     ...(onDesignReviewSubmitted ? SUBMIT_DESIGN_REVIEW_TOOL : {}),
+    ...(submitDesignContract ? SUBMIT_DESIGN_CONTRACT_TOOL : {}),
     ...(filesBridge
       ? {
           ...INSTALL_COMPONENT_TOOL,

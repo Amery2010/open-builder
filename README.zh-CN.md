@@ -132,6 +132,9 @@ Design Review 与自动 QA 明确分离。受限审查运行只能列出、读�
 - 可配置使用 Streamable HTTP 或 SSE 的远程 HTTPS MCP 服务，并支持静态 Header、OAuth 授权码与 OAuth 客户端凭据；桌面版还支持 stdio 服务。
 - 支持从 JSON 导入服务定义、分别启停服务与工具，并在工具定义发生漂移后重新审查能力。
 - Plan Mode 与子代理只能使用显式批准可在对应模式运行的只读 MCP 工具。
+- 内置托管的 **Agnes AI** 项在 Web、桌面端和实验性移动端均使用固定官方地址。填写本地 API Key 后，可分别批准 `generate_image`、`create_video` 与 `get_video_status`；Web 请求仍受浏览器 CORS 限制。
+- Agnes 图片生成支持纯文本、当前消息单图，以及合计最多五张当前消息图片/公开 HTTPS 参考图。文生视频会在来源对话激活时更新同一个对话占位符；生成媒体仅保留远程 HTTPS URL，不写入项目文件。自动轮询仅存在于当前会话，应用重启后不会恢复；仍可使用 `get_video_status` 手动刷新。
+- Agnes 工具可用于 Chat 与 Design，不用于 Plan、自动 QA 或 Design Review。只有 `generate_image` 可另行授权给子代理；视频创建和状态查询始终不向子代理开放。
 
 | 运行环境     | 远程 HTTPS MCP | stdio MCP | Skill 脚本                |
 | ------------ | -------------- | --------- | ------------------------- |
@@ -226,6 +229,8 @@ pnpm tauri:android:build
 
 MCP 服务与 Skills 可从对话工具栏管理。Skills 管理页开关只控制 metadata 自动发现；在工具栏选择 Skill 会为下一次请求加载完整正文，并在发送后清空。只有原生运行时报告具备对应能力时，界面才会显示桌面专属选项。
 
+Agnes API Key 在 MCP 面板中默认以掩码显示，只保存在本地应用数据中，可通过面板移除，并会从导出内容和诊断输出中清除。“检查配置”只验证本地完整性，不会请求 Agnes。
+
 ---
 
 ## 技术架构
@@ -282,6 +287,8 @@ MCP 服务与 Skills 可从对话工具栏管理。Skills 管理页开关只控�
 | `read_env_schema` / `manage_env` | 安全读取与管理环境变量文件                                         |
 
 启用的 MCP 工具会在服务发现并获批后动态注入，并根据当前平台以及 Chat、Plan、Design、自动 QA、Design Review 或子代理运行策略进行过滤。`apply_design_style` 继续作为 Auto 模式的兼容路径；Design 模式使用 `apply_design_system`。
+
+内置 Agnes MCP 适配器直接提供 `generate_image`、`create_video` 和 `get_video_status`，不会创建远程 MCP 传输会话。图片与视频结果会在对话中直接显示为媒体占位符，并在远程 URL 可用后原位替换。
 
 ### 技术栈
 

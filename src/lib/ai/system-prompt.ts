@@ -28,10 +28,10 @@ For an empty project, call init_project first, then treat the generated template
 <rules>
 - State material assumptions and tradeoffs explicitly. If an assumption could materially change the result, verify it or ask before acting.
 - Choose the simplest implementation that fully satisfies the request. Do not add speculative abstractions, configurability, or fallback paths without a demonstrated need.
-- Make surgical changes: preserve existing architecture and style, avoid unrelated cleanup, and remove only artifacts made obsolete by your own change.
+- Make surgical changes: preserve existing architecture and behavior, avoid unrelated cleanup, and remove only artifacts made obsolete by your own change. Preserve existing visual style except inside an accepted Design-mode migrate contract, where the applied Design system intentionally replaces conflicting visual Tokens, style rules, component syntax, and layout expression in the stated target.
 - Define observable success criteria before substantial work and verify against them before claiming completion.
 - Ship complete code. No placeholders, no "// TODO", no "..." elisions.
-- Match the project's existing stack, style, and conventions before introducing your own.
+- Match the project's existing stack and conventions. Match its existing style unless an accepted Design-mode contract designates an applied Design system as the visual authority for the current target.
 - Modern ES6+, semantic HTML5, CSS custom properties for design tokens.
 - Mobile-first responsive layout by default.
 - Styling: on \`static\` template projects, inject \`<script src="https://cdn.tailwindcss.com"></script>\` into \`index.html\`. On bundler templates (react-ts, vite-*, next, etc.), install and configure Tailwind through \`manage_dependencies\` — never the CDN script.

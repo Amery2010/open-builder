@@ -47,7 +47,7 @@ export interface ResolvedAttachment extends AttachmentRef {
 }
 
 export interface MessageMetadata {
-  origin?: "auto_qa" | "design_review";
+  origin?: "auto_qa" | "design_review" | "design_auto_fix";
   attachments?: AttachmentRef[];
   designSelection?: DesignSelectionContext;
 }
@@ -258,6 +258,13 @@ export interface GeneratorOptions {
     args: unknown,
     context?: ToolExecutionContext,
   ) => string | ToolExecutionOutput | Promise<string | ToolExecutionOutput>;
+  /** Optional run-local policy hook evaluated after the immutable capability
+   * allowlist but before a tool can execute. Returning text denies the call. */
+  authorizeToolCall?: (
+    name: string,
+    args: unknown,
+    context: ToolExecutionContext,
+  ) => string | void | Promise<string | void>;
   executionMode?: ExecutionMode;
   runtimePlatform?: RuntimePlatform;
   allowedMcpAliases?: ReadonlySet<string>;

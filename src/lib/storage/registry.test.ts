@@ -6,6 +6,7 @@ describe("storage export redaction", () => {
     const sentinel = "storage-export-secret";
     const exported = redactStorageExport({
       apiKey: sentinel,
+      agnes: { apiKey: sentinel, enabled: true },
       url: `https://example.com/v1?token=${sentinel}`,
       headers: { Authorization: `Bearer ${sentinel}` },
       oauth: { accessToken: sentinel, clientSecret: sentinel },

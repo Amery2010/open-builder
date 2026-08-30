@@ -480,12 +480,24 @@ export class McpConnectionManager {
   ): Promise<McpRuntimeBundle> {
     if (options.includeMcp !== false) await this.ensureEnabledServers();
     const state = useMcpStore.getState();
-    return buildMcpRuntimeBundle({
+    const external = await buildMcpRuntimeBundle({
       globalEnabled: options.includeMcp !== false && state.globalEnabled,
       servers: state.servers,
       runtime: state.runtime,
       caller: this,
     });
+    if (
+      options.includeMcp === false ||
+      !state.globalEnabled ||
+      !state.agnes?.enabled ||
+      !state.agnes.apiKey.trim()
+    ) {
+      return external;
+    }
+    const { buildAgnesMcpRuntimeBundle, mergeMcpRuntimeBundles } =
+      await import("./agnes/runtime");
+    const managed = await buildAgnesMcpRuntimeBundle(true);
+    return mergeMcpRuntimeBundles(external, managed);
   }
 
   async callTool(
@@ -665,6 +677,15 @@ export class McpConnectionManager {
   }
 
   async closeAll(): Promise<void> {
+    const agnes = useMcpStore.getState().agnes;
+    if (agnes?.enabled || agnes?.apiKey) {
+      const [tasks, service] = await Promise.all([
+        import("./agnes/video-task-manager"),
+        import("./agnes/service"),
+      ]);
+      tasks.stopAgnesVideoTasks();
+      service.abortAgnesMcpRequests();
+    }
     const serverIds = new Set([
       ...this.connections.keys(),
       ...Object.keys(useMcpStore.getState().servers),

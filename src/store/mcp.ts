@@ -26,8 +26,16 @@ import {
   captureMcpLifecycleEpoch,
   isMcpLifecycleCurrent,
 } from "../lib/mcp/revocation";
+import {
+  AGNES_TOOL_NAMES,
+  createDefaultAgnesMcpSettings,
+  normalizeAgnesMcpSettings,
+  type AgnesMcpSettings,
+  type AgnesToolApproval,
+  type AgnesToolName,
+} from "../lib/mcp/agnes/types";
 
-export const MCP_STORE_VERSION = 2;
+export const MCP_STORE_VERSION = 3;
 
 type McpServerPatch = Partial<
   Omit<McpServerEntry, "id" | "createdAt" | "tools">
@@ -44,6 +52,8 @@ type McpRuntimePatch = Partial<Omit<McpServerRuntimeState, "updatedAt">> & {
 export interface McpState {
   /** Optional master switch. Per-server `enabled` remains the primary UI control. */
   globalEnabled: boolean;
+  /** Managed Agnes adapter. Kept separate from user-importable MCP servers. */
+  agnes: AgnesMcpSettings;
   servers: Record<string, McpServerEntry>;
   /** Session-only connection state; excluded from persisted storage. */
   runtime: Record<string, McpServerRuntimeState>;
@@ -54,6 +64,12 @@ export interface McpState {
   deleteServer: (id: string) => void;
   replaceServers: (servers: Record<string, McpServerEntry>) => void;
   setGlobalEnabled: (enabled: boolean) => void;
+  setAgnesApiKey: (apiKey: string) => void;
+  setAgnesEnabled: (enabled: boolean) => void;
+  setAgnesToolApproval: (
+    toolName: AgnesToolName,
+    patch: Partial<AgnesToolApproval>,
+  ) => void;
   setServerEnabled: (id: string, enabled: boolean) => void;
   setToolApproval: (
     serverId: string,
@@ -134,14 +150,61 @@ function assertServerSet(servers: Record<string, McpServerEntry>): void {
   assertMcpToolLimit(servers);
 }
 
+function assertCombinedToolLimit(
+  servers: Record<string, McpServerEntry>,
+  agnes: AgnesMcpSettings,
+): void {
+  const external = Object.values(servers).reduce(
+    (count, server) =>
+      count +
+      (server.enabled
+        ? Object.values(server.tools).filter((tool) => tool.enabled).length
+        : 0),
+    0,
+  );
+  const managed =
+    agnes.enabled && agnes.apiKey.trim()
+      ? AGNES_TOOL_NAMES.filter((name) => agnes.tools[name].enabled).length
+      : 0;
+  if (external + managed > MCP_LIMITS.maxEnabledTools) {
+    throw new McpValidationError([
+      {
+        path: "tools",
+        code: "too_many_enabled",
+        message: `At most ${MCP_LIMITS.maxEnabledTools} MCP tools may be enabled; received ${external + managed}.`,
+      },
+    ]);
+  }
+}
+
 const mcpStorage = createLocalforageStorage(
   localforage.createInstance({ name: "open-builder-mcp" }),
 );
+
+function revokeAgnesRuntime(): void {
+  void Promise.all([
+    import("../lib/mcp/agnes/video-task-manager"),
+    import("../lib/mcp/agnes/service"),
+  ])
+    .then(([tasks, service]) => {
+      tasks.stopAgnesVideoTasks();
+      service.abortAgnesMcpRequests();
+    })
+    .catch(() => {
+      // State checks still prevent stale results from publishing if lazy loading
+      // the revocation helpers fails during shutdown.
+    });
+}
+
+function nextAgnesRevision(settings: AgnesMcpSettings): number {
+  return Math.max(Date.now(), settings.updatedAt + 1);
+}
 
 export const useMcpStore = create<McpState>()(
   persist(
     (set, get) => ({
       globalEnabled: true,
+      agnes: createDefaultAgnesMcpSettings(),
       servers: {},
       runtime: {},
       _hasHydrated: false,
@@ -162,6 +225,7 @@ export const useMcpStore = create<McpState>()(
         assertUniqueName(current, entry.name);
         const servers = { ...current, [entry.id]: entry };
         assertServerSet(servers);
+        assertCombinedToolLimit(servers, get().agnes);
         set({ servers });
       },
 
@@ -181,6 +245,7 @@ export const useMcpStore = create<McpState>()(
         assertUniqueName(get().servers, updated.name, id);
         const servers = { ...get().servers, [id]: updated };
         assertMcpToolLimit(servers);
+        assertCombinedToolLimit(servers, get().agnes);
         set((state) => {
           const { [id]: _removed, ...remainingRuntime } = state.runtime;
           return { servers, runtime: remainingRuntime };
@@ -197,12 +262,75 @@ export const useMcpStore = create<McpState>()(
 
       replaceServers: (servers) => {
         assertServerSet(servers);
+        assertCombinedToolLimit(servers, get().agnes);
         set({ servers, runtime: {} });
       },
 
       setGlobalEnabled: (globalEnabled) => {
-        if (globalEnabled) assertMcpToolLimit(get().servers);
+        if (globalEnabled) {
+          assertMcpToolLimit(get().servers);
+          assertCombinedToolLimit(get().servers, get().agnes);
+        }
+        if (!globalEnabled) revokeAgnesRuntime();
         set({ globalEnabled });
+      },
+
+      setAgnesApiKey: (apiKey) => {
+        const existing = get().agnes;
+        if (apiKey !== existing.apiKey) revokeAgnesRuntime();
+        const agnes = {
+          ...existing,
+          apiKey,
+          ...(apiKey.trim() ? {} : { enabled: false }),
+          updatedAt: nextAgnesRevision(existing),
+        };
+        assertCombinedToolLimit(get().servers, agnes);
+        set({ agnes });
+      },
+
+      setAgnesEnabled: (enabled) => {
+        const existing = get().agnes;
+        if (enabled && !existing.apiKey.trim()) {
+          throw new Error("Configure the Agnes API key before enabling it.");
+        }
+        const agnes = {
+          ...existing,
+          enabled,
+          updatedAt: nextAgnesRevision(existing),
+        };
+        assertCombinedToolLimit(get().servers, agnes);
+        if (!enabled) revokeAgnesRuntime();
+        set({ agnes });
+      },
+
+      setAgnesToolApproval: (toolName, patch) => {
+        const existing = get().agnes;
+        const current = existing.tools[toolName];
+        if (!current) throw new Error(`Unknown Agnes tool "${toolName}".`);
+        const enabled = patch.enabled ?? current.enabled;
+        const updated: AgnesToolApproval = {
+          enabled,
+          allowForSubagents:
+            toolName === "generate_image" &&
+            enabled &&
+            (patch.allowForSubagents ?? current.allowForSubagents),
+          ...(toolName === "generate_image" &&
+          enabled &&
+          (patch.allowForSubagents ?? current.allowForSubagents)
+            ? { subagentPolicyVersion: TOOL_POLICY_VERSION }
+            : {}),
+        };
+        const agnes = {
+          ...existing,
+          tools: { ...existing.tools, [toolName]: updated },
+          updatedAt: nextAgnesRevision(existing),
+        };
+        assertCombinedToolLimit(get().servers, agnes);
+        const permissionRevoked =
+          (current.enabled && !updated.enabled) ||
+          (current.allowForSubagents && !updated.allowForSubagents);
+        if (permissionRevoked) revokeAgnesRuntime();
+        set({ agnes });
       },
 
       setServerEnabled: (id, enabled) => {
@@ -213,6 +341,7 @@ export const useMcpStore = create<McpState>()(
           [id]: { ...existing, enabled, updatedAt: Date.now() },
         };
         assertMcpToolLimit(servers);
+        assertCombinedToolLimit(servers, get().agnes);
         set((state) => ({
           servers,
           ...(!enabled
@@ -261,6 +390,7 @@ export const useMcpStore = create<McpState>()(
         };
         const servers = { ...get().servers, [serverId]: updatedServer };
         assertMcpToolLimit(servers);
+        assertCombinedToolLimit(servers, get().agnes);
         set({ servers });
       },
 
@@ -289,6 +419,7 @@ export const useMcpStore = create<McpState>()(
         };
         const servers = { ...get().servers, [serverId]: merged };
         assertMcpToolLimit(servers);
+        assertCombinedToolLimit(servers, get().agnes);
         const drift = await compareMcpDiscovery(merged, discovery);
         set({
           servers,
@@ -341,6 +472,7 @@ export const useMcpStore = create<McpState>()(
       storage: createJSONStorage(() => mcpStorage),
       partialize: (state) => ({
         globalEnabled: state.globalEnabled,
+        agnes: state.agnes,
         servers: state.servers,
       }),
       migrate: (persisted) => {
@@ -368,6 +500,7 @@ export const useMcpStore = create<McpState>()(
         );
         return {
           globalEnabled: value?.globalEnabled ?? true,
+          agnes: normalizeAgnesMcpSettings(value?.agnes),
           servers,
         };
       },
@@ -386,11 +519,18 @@ export const useMcpStore = create<McpState>()(
             stale
               ? {
                   globalEnabled: true,
+                  agnes: createDefaultAgnesMcpSettings(),
                   servers: {},
                   runtime: {},
                   _hasHydrated: true,
                 }
-              : { runtime: {}, _hasHydrated: true },
+              : {
+                  agnes: normalizeAgnesMcpSettings(
+                    useMcpStore.getState().agnes,
+                  ),
+                  runtime: {},
+                  _hasHydrated: true,
+                },
           );
         };
       },

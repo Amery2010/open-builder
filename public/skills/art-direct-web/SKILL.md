@@ -11,7 +11,11 @@ tags:
 
 # Art-direct the web
 
-Create a coherent visual experience for marketing, portfolio, editorial, cultural, or campaign work. Start from the user's content, audience, brand, conversion goal, and existing project—not from a generic visual trend. This skill does not govern routine dashboards, settings, forms, or multi-step product workflows; use `design-product-ui` for those surfaces. When a project contains both, share one brand system while giving each surface the appropriate interaction density.
+Create a coherent visual experience for `persuade`, `read`, and `experience` surfaces: marketing, portfolio, editorial, cultural, or campaign work. Start from the user's content, audience, brand, conversion goal, and existing project—not from a generic visual trend. Use `design-product-ui` for `operate` surfaces such as dashboards, settings, forms, and multi-step workflows; load both for a genuinely mixed target.
+
+Before the first UI write in Design mode, inspect the active project and submit the run-local Design contract. Distinguish `create` (a new surface), `extend` (a bounded addition within the current visual language), and `migrate` (the applied Design system replaces conflicting visual Tokens, styles, component grammar, and layout expression inside the named target). An applied Design system is visually authoritative in that target. A selected-but-unapplied system is reference only and cannot authorize a restyle.
+
+In every change mode, preserve product truth: routes, data and state ownership, information architecture, content, permissions, analytics hooks, integration selectors, accessibility semantics, and working interactions unless the user's request independently changes them. Migration replaces the visual world, not the product contract.
 
 ## Read before directing
 
@@ -83,7 +87,7 @@ Keep the hero visible and comprehensible without requiring an initial scroll on 
 
 ## Existing-project redesigns
 
-Audit before changing. Preserve working behavior, routes, analytics hooks, selectors, content contracts, and brand recognition. Identify the smallest system-level changes that create the desired improvement: type scale, spacing rhythm, palette roles, media treatment, section composition, or motion language.
+Audit before changing. For `extend`, preserve the established visual language outside changed UI and avoid cleaning unrelated historical debt. For `migrate`, preserve working behavior, routes, analytics hooks, selectors, content contracts, and accessibility while replacing conflicting visual Tokens, styling, component grammar, and layout expression throughout the accepted target. Identify the smallest system-level changes that make the applied Design system coherent: type scale, spacing rhythm, palette roles, shape, media treatment, section composition, or motion language.
 
 Do not restyle every surface merely because one page is being redesigned. Reuse shared primitives where the new direction genuinely applies, and isolate campaign-specific expression where product UI must remain stable.
 
@@ -101,4 +105,4 @@ Before finishing, verify:
 8. no asset, dependency, or external action was invented or added without need;
 9. checks and preview evidence reported were actually run.
 
-Run the project's relevant static and component checks. Use browser or screenshot validation only when it is available and authorized, and distinguish it from source-based review.
+Run the project health check and fix every `design_system` error. Trace root `tokens.css` into the active runtime style entry and prove that changed UI consumes semantic color, typography, shape, and layout roles; use motion and easing roles when interaction or animation is present. Use browser or screenshot validation only when it is available and authorized, and distinguish it from source-based review. The host may follow with one automatic visual review and one bounded repair; reuse the accepted contract instead of inventing a new direction.

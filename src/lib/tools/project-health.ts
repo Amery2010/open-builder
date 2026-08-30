@@ -9,6 +9,10 @@ import {
   stringifyConsoleItem,
   type ConsoleLog,
 } from "./console-log-format";
+import {
+  runDesignSystemAdherenceCheck,
+  type DesignAdherenceInput,
+} from "../design/adherence";
 
 export const PROJECT_HEALTH_LIMITS = {
   maxIssues: 20,
@@ -25,7 +29,8 @@ export interface ProjectHealthIssue {
     | "runtime"
     | "html"
     | "accessibility"
-    | "responsive";
+    | "responsive"
+    | "design_system";
   message: string;
   path?: string;
 }
@@ -48,7 +53,7 @@ export const PROJECT_HEALTH_CHECK_TOOL = {
   project_health_check: tool({
     description:
       "Run a structured project health check over the current files and preview console logs. " +
-      "Use after code changes to detect missing entry files, invalid package.json, env gaps, HTML basics, and runtime console errors.",
+      "Use after code changes to detect missing entry files, invalid package.json, env gaps, HTML basics, runtime console errors, and Design-system state, Token wiring, and changed-scope drift when Design context is active.",
     inputSchema: z.object({
       include_console: z
         .boolean()
@@ -61,7 +66,10 @@ export const PROJECT_HEALTH_CHECK_TOOL = {
 export function runProjectHealthCheck(
   files: ProjectFiles,
   consoleLogs: ConsoleLog[] = [],
-  options: { includeConsole?: boolean } = {},
+  options: {
+    includeConsole?: boolean;
+    design?: Omit<DesignAdherenceInput, "files">;
+  } = {},
 ): ProjectHealthReport {
   const includeConsole = options.includeConsole !== false;
   const issues: ProjectHealthIssue[] = [];
@@ -146,6 +154,21 @@ export function runProjectHealthCheck(
   inspectAccessibility(files, issues);
   inspectResponsive(files, issues);
 
+  if (options.design) {
+    const designReport = runDesignSystemAdherenceCheck({
+      files,
+      ...options.design,
+    });
+    issues.push(
+      ...designReport.issues.map(({ severity, category, message, path }) => ({
+        severity,
+        category,
+        message,
+        ...(path ? { path } : {}),
+      })),
+    );
+  }
+
   const envExample = files[".env.example"];
   if (envExample) {
     const exampleKeys = parseEnvKeys(envExample);
@@ -203,6 +226,7 @@ export function runProjectHealthCheck(
 export function createProjectHealthCheckHandler(deps: {
   getFiles: () => ProjectFiles;
   getConsoleLogs: () => ConsoleLog[];
+  getDesignContext?: () => Omit<DesignAdherenceInput, "files"> | undefined;
 }): (name: string, args: unknown, context?: ToolExecutionContext) => string {
   return (name, args, context) => {
     if (name !== "project_health_check") {
@@ -217,6 +241,7 @@ export function createProjectHealthCheckHandler(deps: {
     return JSON.stringify(
       runProjectHealthCheck(deps.getFiles(), deps.getConsoleLogs(), {
         includeConsole,
+        design: deps.getDesignContext?.(),
       }),
     );
   };

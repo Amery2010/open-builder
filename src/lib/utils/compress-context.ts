@@ -78,7 +78,7 @@ function formatMessageForSummary(
 ): string | null {
   const m = messages[index];
   if (m.role === "system") return null;
-  if (m.metadata?.origin === "auto_qa") return null;
+  if (m.metadata?.origin) return null;
 
   if (m.role === "tool") {
     const call = findToolCallForMessage(messages, index);
@@ -133,7 +133,7 @@ export async function compressContext(
   ) => Promise<string>,
 ): Promise<CompressResult | null> {
   const userIndices = messages.reduce<number[]>((acc, m, i) => {
-    if (m.role === "user" && m.metadata?.origin !== "auto_qa") acc.push(i);
+    if (m.role === "user" && !m.metadata?.origin) acc.push(i);
     return acc;
   }, []);
   if (userIndices.length < 2) return null;

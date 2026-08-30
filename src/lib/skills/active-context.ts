@@ -95,4 +95,5 @@ export const ALWAYS_ALLOWED_TOOL_NAMES: ReadonlySet<string> = new Set([
   "exit_plan_mode",
   "compact_context",
   "dispatch_subagent",
+  "submit_design_contract",
 ]);

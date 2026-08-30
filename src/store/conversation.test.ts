@@ -596,4 +596,24 @@ describe("conversation store", () => {
       useConversationStore.getState().conversations[second].designState,
     ).toBeUndefined();
   });
+
+  it("updates an originating conversation's messages after the user switches away", () => {
+    const origin = useConversationStore.getState().createConversation();
+    const active = useConversationStore.getState().createConversation();
+
+    useConversationStore
+      .getState()
+      .setMessagesForConversation(origin, (messages) => [
+        ...messages,
+        { role: "tool", tool_call_id: "video", content: "completed" },
+      ]);
+
+    expect(useConversationStore.getState().activeId).toBe(active);
+    expect(
+      useConversationStore.getState().conversations[origin].messages,
+    ).toEqual([{ role: "tool", tool_call_id: "video", content: "completed" }]);
+    expect(
+      useConversationStore.getState().conversations[active].messages,
+    ).toEqual([]);
+  });
 });

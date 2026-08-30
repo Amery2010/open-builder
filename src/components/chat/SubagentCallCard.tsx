@@ -4,6 +4,7 @@ import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { LazyMarkdownContent } from "./LazyMarkdownContent";
 import { ToolCallCard } from "./ToolCallCard";
+import { AgnesMediaResult } from "./AgnesMediaResult";
 import { useT } from "../../i18n";
 import { truncate } from "../../lib/utils/truncate";
 import { useSubagentStore } from "../../store/subagent";
@@ -19,6 +20,7 @@ import type {
   SubagentToolResult,
 } from "../../lib/ai/subagents/types";
 import type { ToolBlock } from "../../types";
+import { agnesToolNameFromAlias } from "../../lib/mcp/agnes/aliases";
 
 type SubagentCardData = {
   subagent: string;
@@ -235,19 +237,34 @@ export const SubagentCallCard = memo(function SubagentCallCard({
                 {t.subagent.toolCalls}
               </p>
               <div className="space-y-1.5">
-                {data.events.map((ev) => (
-                  <ToolCallCard
-                    key={ev.toolCallId}
-                    toolName={ev.name}
-                    title={
-                      t.tool.names[ev.name as keyof typeof t.tool.names] ??
-                      ev.name
-                    }
-                    path=""
-                    result={ev.resultPreview}
-                    toolCallId={ev.toolCallId}
-                  />
-                ))}
+                {data.events.map((ev) =>
+                  agnesToolNameFromAlias(ev.name) ? (
+                    <AgnesMediaResult
+                      key={ev.toolCallId}
+                      block={{
+                        type: "tool",
+                        id: `subagent-tool-${ev.toolCallId}`,
+                        toolName: ev.name,
+                        title: ev.name,
+                        path: "",
+                        result: ev.resultPreview,
+                        toolCallId: ev.toolCallId,
+                      }}
+                    />
+                  ) : (
+                    <ToolCallCard
+                      key={ev.toolCallId}
+                      toolName={ev.name}
+                      title={
+                        t.tool.names[ev.name as keyof typeof t.tool.names] ??
+                        ev.name
+                      }
+                      path=""
+                      result={ev.resultPreview}
+                      toolCallId={ev.toolCallId}
+                    />
+                  ),
+                )}
               </div>
             </div>
           )}

@@ -8,14 +8,25 @@ import { useConversationStore } from "./store/conversation";
 import type { DesignSystemPackage } from "./lib/design-systems/validation";
 import App from "./App";
 
+type MockGenerate = (
+  prompt: string,
+  attachments?: unknown,
+  options?: {
+    prepareRun?: () => Promise<void>;
+    designExpectedChangeModes?: readonly string[];
+  },
+) => Promise<void>;
+
 const runtime = vi.hoisted(() => ({
   events: [] as string[],
-  generate: vi.fn(async () => {}),
+  generate: vi.fn<MockGenerate>(async () => {}),
+  generateUtilityText: vi.fn(),
   invalidateGenerator: vi.fn(),
   loadPackage: vi.fn(),
 }));
 const fixtures = vi.hoisted(() => ({
-  projectFiles: { "src/App.tsx": "export default () => null" },
+  projectFiles: {} as Record<string, string>,
+  isProjectInitialized: true,
 }));
 
 vi.mock("./hooks/useAppLayout", () => ({ useAppLayout: () => "desktop" }));
@@ -52,7 +63,7 @@ vi.mock("./hooks/useAppState", () => ({
     setTemplate: vi.fn(),
     sandpackKey: 0,
     restartSandpack: vi.fn(),
-    isProjectInitialized: true,
+    isProjectInitialized: fixtures.isProjectInitialized,
   }),
 }));
 vi.mock("./hooks/useGenerator", () => ({
@@ -69,23 +80,34 @@ vi.mock("./hooks/useGenerator", () => ({
     review: vi.fn(),
     healthCheck: vi.fn(),
     designReview: vi.fn(),
+    automaticDesignReview: vi.fn(),
+    automaticDesignReviewUnavailable: vi.fn(),
     invalidateGenerator: runtime.invalidateGenerator,
     isThinkingStreaming: false,
-    generateUtilityText: vi.fn(),
+    generateUtilityText: runtime.generateUtilityText,
   }),
 }));
 vi.mock("./components/ChatInterface", () => ({
   ChatInterface: ({
     onApplyDesignSystem,
+    onGenerate,
   }: {
     onApplyDesignSystem: (id: string) => Promise<void>;
+    onGenerate: (prompt: string) => Promise<void>;
   }) => (
-    <button
-      type="button"
-      onClick={() => void onApplyDesignSystem("stripe").catch(() => undefined)}
-    >
-      Apply selected system
-    </button>
+    <>
+      <button
+        type="button"
+        onClick={() =>
+          void onApplyDesignSystem("stripe").catch(() => undefined)
+        }
+      >
+        Apply selected system
+      </button>
+      <button type="button" onClick={() => void onGenerate("Redesign it")}>
+        Generate design
+      </button>
+    </>
   ),
 }));
 vi.mock("./components/AppLayout", () => ({
@@ -95,7 +117,10 @@ vi.mock("./components/command-palette/CommandPalette", () => ({
   CommandPalette: () => null,
 }));
 vi.mock("./lib/design-systems/registry", () => ({
-  getDesignSystemRegistry: () => ({ load: runtime.loadPackage }),
+  getDesignSystemRegistry: () => ({
+    load: runtime.loadPackage,
+    listImported: vi.fn(async () => []),
+  }),
 }));
 vi.mock("./lib/mcp/connection-manager", () => ({
   getMcpConnectionManager: () => ({ closeAll: vi.fn() }),
@@ -146,13 +171,28 @@ describe("App Design system application", () => {
     runtime.generate.mockReset();
     runtime.invalidateGenerator.mockReset();
     runtime.loadPackage.mockReset();
-    runtime.generate.mockImplementation(async () => {
-      runtime.events.push("generate");
-    });
+    runtime.generateUtilityText.mockReset();
+    runtime.generateUtilityText.mockResolvedValue(
+      JSON.stringify({
+        action: "apply",
+        systemId: "stripe",
+        reason: "The redesign benefits from the Stripe system.",
+      }),
+    );
+    runtime.generate.mockImplementation(
+      async (_prompt, _attachments, options) => {
+        await options?.prepareRun?.();
+        runtime.events.push("generate");
+      },
+    );
     runtime.invalidateGenerator.mockImplementation(() => {
       runtime.events.push("invalidate");
     });
     runtime.loadPackage.mockResolvedValue(designPackage);
+    fixtures.projectFiles = {
+      "src/App.tsx": "export default () => null",
+    };
+    fixtures.isProjectInitialized = true;
     useConversationStore.setState({
       conversations: {},
       activeId: null,
@@ -186,8 +226,72 @@ describe("App Design system application", () => {
     expect(runtime.generate).toHaveBeenCalledWith(
       expect.stringContaining("already applied"),
       undefined,
-      { skipAutoQa: true },
+      { skipAutoQa: true, designExpectedChangeModes: ["migrate"] },
     );
+  });
+
+  it("auto-applies a selected package before an initialized Design run", async () => {
+    useConversationStore.getState().setDesignState(undefined);
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "Generate design" }));
+    await waitFor(() => expect(runtime.generate).toHaveBeenCalledOnce());
+
+    const state = useConversationStore.getState();
+    const conversation = state.conversations[state.activeId!];
+    expect(conversation.designState).toMatchObject({
+      selectedSystem: stripe,
+      appliedSystem: stripe,
+      recommendation: { systemId: "stripe" },
+    });
+    expect(conversation.files["DESIGN.md"]).toContain("# Stripe reference");
+    expect(conversation.files["tokens.css"]).toContain("--motion-base");
+    expect(runtime.generate.mock.calls[0][2]).toMatchObject({
+      designExpectedChangeModes: ["migrate"],
+      prepareRun: expect.any(Function),
+    });
+  });
+
+  it("keeps an automatic selection deferred for an empty project", async () => {
+    fixtures.projectFiles = {};
+    fixtures.isProjectInitialized = false;
+    useConversationStore.getState().setFiles({});
+    useConversationStore.getState().setDesignState(undefined);
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "Generate design" }));
+    await waitFor(() => expect(runtime.generate).toHaveBeenCalledOnce());
+
+    const state = useConversationStore.getState();
+    const conversation = state.conversations[state.activeId!];
+    expect(conversation.designState).toMatchObject({
+      selectedSystem: stripe,
+      recommendation: { systemId: "stripe" },
+    });
+    expect(conversation.designState?.appliedSystem).toBeUndefined();
+    expect(conversation.files).not.toHaveProperty("DESIGN.md");
+    expect(conversation.files).not.toHaveProperty("tokens.css");
+  });
+
+  it("keeps an applied system without rerouting an ordinary Design request", async () => {
+    useConversationStore.getState().setDesignState({
+      selectedSystem: stripe,
+      appliedSystem: stripe,
+    });
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "Generate design" }));
+    await waitFor(() => expect(runtime.generate).toHaveBeenCalledOnce());
+
+    expect(runtime.generateUtilityText).not.toHaveBeenCalled();
+    expect(
+      useConversationStore.getState().conversations[
+        useConversationStore.getState().activeId!
+      ].designState?.appliedSystem,
+    ).toEqual(stripe);
   });
 
   it("keeps an existing valid contract when loading the new package fails", async () => {

@@ -32,7 +32,9 @@ import type {
   McpServerEntry,
 } from "../../lib/mcp/types";
 import { createMcpServerEntry } from "../../lib/mcp/validation";
+import { AGNES_API_ORIGIN } from "../../lib/mcp/agnes/types";
 import { useMcpStore } from "../../store/mcp";
+import { AgnesMcpCard } from "./AgnesMcpCard";
 import { McpJsonImporter } from "./McpJsonImporter";
 import { McpServerCard } from "./McpServerCard";
 import { McpServerEditor } from "./McpServerEditor";
@@ -97,6 +99,7 @@ export function McpPanel({
   const platform = platformOverride ?? inferMcpPlatform();
   const desktop = platform === "desktop";
   const servers = useMcpStore((state) => state.servers);
+  const agnes = useMcpStore((state) => state.agnes);
   const runtime = useMcpStore((state) => state.runtime);
   const globalEnabled = useMcpStore((state) => state.globalEnabled);
   const hydrated = useMcpStore((state) => state._hasHydrated);
@@ -135,15 +138,41 @@ export function McpPanel({
     () => Object.values(servers).sort((a, b) => a.name.localeCompare(b.name)),
     [servers],
   );
-  const enabledCount = entries.filter((server) => server.enabled).length;
-  const readyCount = entries.filter(
-    (server) =>
-      server.enabled &&
-      runtime[server.id]?.status === "ready" &&
-      (!runtime[server.id]?.drift ||
-        runtime[server.id]?.drift?.status === "clean"),
+  const agnesEnabledToolCount = Object.values(agnes.tools).filter(
+    (tool) => tool.enabled,
   ).length;
+  const agnesReady =
+    agnes.enabled && Boolean(agnes.apiKey.trim()) && agnesEnabledToolCount > 0;
+  const enabledCount =
+    entries.filter((server) => server.enabled).length + (agnes.enabled ? 1 : 0);
+  const readyCount =
+    entries.filter(
+      (server) =>
+        server.enabled &&
+        runtime[server.id]?.status === "ready" &&
+        (!runtime[server.id]?.drift ||
+          runtime[server.id]?.drift?.status === "clean"),
+    ).length + (agnesReady ? 1 : 0);
   const normalizedQuery = query.trim().toLocaleLowerCase();
+  const agnesMatchesQuery =
+    !normalizedQuery ||
+    [
+      t.mcp.agnes.name,
+      t.mcp.agnes.builtIn,
+      AGNES_API_ORIGIN,
+      ...Object.values(t.mcp.agnes.tools).flatMap((tool) => [
+        tool.title,
+        tool.description,
+      ]),
+    ]
+      .join("\n")
+      .toLocaleLowerCase()
+      .includes(normalizedQuery);
+  const agnesMatchesFilter =
+    filter === "all" ||
+    (filter === "ready" && agnesReady) ||
+    (filter === "attention" && agnes.enabled && !agnesReady);
+  const agnesVisible = agnesMatchesFilter && agnesMatchesQuery;
   const visibleEntries = useMemo(
     () =>
       entries.filter((server) => {
@@ -474,7 +503,7 @@ export function McpPanel({
                     {t.mcp.loading}
                   </p>
                 </div>
-              ) : visibleEntries.length === 0 ? (
+              ) : visibleEntries.length === 0 && !agnesVisible ? (
                 <div className="flex flex-col items-center justify-center py-10 text-muted-foreground">
                   <Inbox
                     size={28}
@@ -486,42 +515,45 @@ export function McpPanel({
                   </p>
                 </div>
               ) : (
-                visibleEntries.map((server) => (
-                  <McpServerCard
-                    key={server.id}
-                    server={server}
-                    runtime={runtime[server.id]}
-                    pending={pendingIds.has(server.id)}
-                    onToggleServer={handleToggleServer}
-                    onSetToolApproval={handleToolApproval}
-                    onTest={
-                      onTestServer
-                        ? (id) => void runServerAction(id, onTestServer)
-                        : undefined
-                    }
-                    onReconnect={
-                      onReconnectServer
-                        ? (id) => void runServerAction(id, onReconnectServer)
-                        : undefined
-                    }
-                    onAuthorize={
-                      onAuthorizeServer
-                        ? (id) => void runServerAction(id, onAuthorizeServer)
-                        : undefined
-                    }
-                    onReview={
-                      onReviewServer
-                        ? (id) => void runServerAction(id, onReviewServer)
-                        : undefined
-                    }
-                    onEdit={(id) => {
-                      setEditingId(id);
-                      setEditorOpen(true);
-                      setImporterOpen(false);
-                    }}
-                    onDelete={setPendingDeleteId}
-                  />
-                ))
+                <>
+                  {agnesVisible && <AgnesMcpCard platform={platform} />}
+                  {visibleEntries.map((server) => (
+                    <McpServerCard
+                      key={server.id}
+                      server={server}
+                      runtime={runtime[server.id]}
+                      pending={pendingIds.has(server.id)}
+                      onToggleServer={handleToggleServer}
+                      onSetToolApproval={handleToolApproval}
+                      onTest={
+                        onTestServer
+                          ? (id) => void runServerAction(id, onTestServer)
+                          : undefined
+                      }
+                      onReconnect={
+                        onReconnectServer
+                          ? (id) => void runServerAction(id, onReconnectServer)
+                          : undefined
+                      }
+                      onAuthorize={
+                        onAuthorizeServer
+                          ? (id) => void runServerAction(id, onAuthorizeServer)
+                          : undefined
+                      }
+                      onReview={
+                        onReviewServer
+                          ? (id) => void runServerAction(id, onReviewServer)
+                          : undefined
+                      }
+                      onEdit={(id) => {
+                        setEditingId(id);
+                        setEditorOpen(true);
+                        setImporterOpen(false);
+                      }}
+                      onDelete={setPendingDeleteId}
+                    />
+                  ))}
+                </>
               )}
             </div>
           )}

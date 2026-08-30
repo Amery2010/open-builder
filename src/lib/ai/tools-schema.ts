@@ -371,6 +371,7 @@ export const READONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
   "memory",
   "project_health_check",
   "submit_design_review",
+  "submit_design_contract",
 ]);
 
 const ALL_PLATFORMS = ["web", "desktop", "mobile"] as const;
@@ -459,6 +460,7 @@ const STATIC_CAPABILITIES: ToolCapability[] = [
   ),
   capability("apply_design_system", "registry", ["write_project"], CHAT_ONLY),
   capability("submit_design_review", "builtin", ["conversation"], CHAT_ONLY),
+  capability("submit_design_contract", "builtin", ["conversation"], CHAT_ONLY),
 ];
 
 const DESIGN_REVIEW_TOOL_NAMES: ReadonlySet<string> = new Set([
@@ -475,6 +477,7 @@ function isToolAllowedInProfile(
 ): boolean {
   if (profile === "design_review") return DESIGN_REVIEW_TOOL_NAMES.has(name);
   if (name === "submit_design_review") return false;
+  if (name === "submit_design_contract") return profile === "design";
   if (name === "apply_design_system") {
     return profile === "design" && allowDesignSystemApply;
   }

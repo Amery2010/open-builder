@@ -116,6 +116,10 @@ export const TOOL_METADATA: Record<string, ToolMeta> = {
     iconComponent: Palette,
     iconClass: "text-violet-500",
   },
+  submit_design_contract: {
+    iconComponent: ScrollText,
+    iconClass: "text-violet-500",
+  },
   read_env_schema: { iconComponent: FileKey, iconClass: "text-amber-500" },
   manage_env: {
     iconComponent: KeyRound,

@@ -5,6 +5,7 @@ import {
   DESIGN_BRIDGE_PAYLOAD_MAX_BYTES,
   DESIGN_BRIDGE_VIRTUAL_PATH,
   DESIGN_CAPTURE_RUNTIME_VIRTUAL_PATH,
+  DESIGN_RUNTIME_TOKEN_NAMES,
   formatDesignSelectionForModel,
   getDesignBridgeTargetOrigin,
   injectDesignBridge,
@@ -228,6 +229,14 @@ describe("Design preview bridge", () => {
             horizontalOverflow: false,
             fonts: "ready",
           },
+          designTokens: {
+            computed: {
+              "--bg": "#ffffff",
+              "--font-body": "<unsafe> Inter",
+              "--unknown": "discard",
+            },
+            inline: { "--bg": "#000000" },
+          },
           elements: [
             {
               tagName: "button",
@@ -250,10 +259,18 @@ describe("Design preview bridge", () => {
         semanticSnapshot: {
           route: "/pricing",
           title: "[preview text withheld]",
+          designTokens: {
+            computed: {
+              "--bg": "#ffffff",
+              "--font-body": "unsafe Inter",
+            },
+            inline: { "--bg": "#000000" },
+          },
           elements: [{ text: "[preview text withheld]" }],
         },
       },
     });
+    expect(DESIGN_RUNTIME_TOKEN_NAMES).toContain("--motion-base");
     expect(
       parseDesignBridgeCaptureResponse(
         { ...message, nonce: "wrong-nonce" },

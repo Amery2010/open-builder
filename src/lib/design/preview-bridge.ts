@@ -1,4 +1,5 @@
 import type { DesignSelectionContext, ProjectFiles } from "../../types";
+import { EDITABLE_DESIGN_TOKENS } from "./tokens";
 export { formatDesignSelectionForModel } from "./selection-context";
 
 export const DESIGN_BRIDGE_PROTOCOL_VERSION = 1 as const;
@@ -16,6 +17,9 @@ export const DESIGN_BRIDGE_VIRTUAL_PATH = "__open_builder_design_bridge__.js";
 export const DESIGN_CAPTURE_RUNTIME_VIRTUAL_PATH =
   "__open_builder_html_to_image__.js";
 export const DESIGN_BRIDGE_MARKER = "open-builder-design-bridge";
+export const DESIGN_RUNTIME_TOKEN_NAMES = EDITABLE_DESIGN_TOKENS.map(
+  (token) => token.property,
+);
 
 export const SUPPORTED_DESIGN_BRIDGE_TEMPLATES = new Set([
   "static",
@@ -65,6 +69,10 @@ export interface DesignPreviewSemanticSnapshot {
     scrollHeight: number;
     horizontalOverflow: boolean;
     fonts: "ready" | "loading" | "unsupported";
+  };
+  designTokens?: {
+    computed: Record<string, string>;
+    inline: Record<string, string>;
   };
   elements: DesignPreviewSemanticElement[];
 }
@@ -138,6 +146,7 @@ function previewBridgeClientSource(captureRuntimeAvailable: boolean): string {
   var CAPTURE_MAX_HEIGHT = ${DESIGN_BRIDGE_CAPTURE_MAX_HEIGHT};
   var CAPTURE_MAX_PIXELS = ${DESIGN_BRIDGE_CAPTURE_MAX_PIXELS};
   var CAPTURE_PATH = ${JSON.stringify(DESIGN_CAPTURE_RUNTIME_VIRTUAL_PATH)};
+  var DESIGN_TOKEN_NAMES = ${JSON.stringify(DESIGN_RUNTIME_TOKEN_NAMES)};
   var CAPTURE_MESSAGE_MAX_BYTES = Math.ceil(IMAGE_MAX_BYTES * 4 / 3) + SEMANTIC_MAX_BYTES + 4096;
   var installedKey = "__OPEN_BUILDER_DESIGN_BRIDGE_V1__";
   if (window[installedKey]) return;
@@ -348,6 +357,14 @@ function previewBridgeClientSource(captureRuntimeAvailable: boolean): string {
   }
   function semanticSnapshot() {
     var root = document.documentElement;
+    var rootStyle = getComputedStyle(root);
+    var designTokens = { computed: {}, inline: {} };
+    DESIGN_TOKEN_NAMES.forEach(function (name) {
+      var computed = clean(rootStyle.getPropertyValue(name), 240);
+      var inline = clean(root.style.getPropertyValue(name), 240);
+      if (computed) designTokens.computed[name] = computed;
+      if (inline) designTokens.inline[name] = inline;
+    });
     var candidates = Array.prototype.slice.call(document.querySelectorAll(
       "main,header,nav,footer,section,h1,h2,h3,h4,h5,h6,button,a,input,select,textarea,[role],[data-ob-id]"
     ), 0, 120);
@@ -365,6 +382,7 @@ function previewBridgeClientSource(captureRuntimeAvailable: boolean): string {
         horizontalOverflow: root.scrollWidth > window.innerWidth + 1,
         fonts: document.fonts ? document.fonts.status === "loaded" ? "ready" : "loading" : "unsupported"
       },
+      designTokens: designTokens,
       elements: candidates.map(semanticElement).filter(Boolean)
     };
     while (snapshot.elements.length && byteLength(snapshot) > SEMANTIC_MAX_BYTES) snapshot.elements.pop();
@@ -806,6 +824,37 @@ function sanitizeSemanticSnapshot(
   }
 
   const routeValue = cleanText(raw.route, 256)?.split(/[?#]/, 1)[0] ?? "/";
+  let designTokens: DesignPreviewSemanticSnapshot["designTokens"];
+  if (raw.designTokens !== undefined) {
+    if (
+      !raw.designTokens ||
+      typeof raw.designTokens !== "object" ||
+      Array.isArray(raw.designTokens)
+    ) {
+      return null;
+    }
+    const rawTokens = raw.designTokens as Record<string, unknown>;
+    const sanitizeTokenMap = (
+      value: unknown,
+    ): Record<string, string> | null => {
+      if (!value || typeof value !== "object" || Array.isArray(value)) {
+        return null;
+      }
+      const result: Record<string, string> = {};
+      for (const token of DESIGN_RUNTIME_TOKEN_NAMES) {
+        const cleaned = cleanText(
+          (value as Record<string, unknown>)[token],
+          240,
+        );
+        if (cleaned) result[token] = cleaned;
+      }
+      return result;
+    };
+    const computed = sanitizeTokenMap(rawTokens.computed);
+    const inline = sanitizeTokenMap(rawTokens.inline);
+    if (!computed || !inline) return null;
+    designTokens = { computed, inline };
+  }
   const snapshot: DesignPreviewSemanticSnapshot = {
     route: routeValue.startsWith("/") ? routeValue : "/",
     ...(cleanText(raw.title, 200) ? { title: cleanText(raw.title, 200) } : {}),
@@ -822,6 +871,7 @@ function sanitizeSemanticSnapshot(
         documentState.fonts,
       ) as DesignPreviewSemanticSnapshot["document"]["fonts"],
     },
+    ...(designTokens ? { designTokens } : {}),
     elements,
   };
   return (jsonByteLength(snapshot) ?? Infinity) <=

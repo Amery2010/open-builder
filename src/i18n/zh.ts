@@ -229,6 +229,7 @@ export const zh = {
   chat: {
     placeholder: "一句话描述你想要的应用...",
     autoQaActivity: "自动 QA 活动",
+    autoDesignFixActivity: "自动设计修复",
     uploadImage: "上传图片",
     uploadFile: "上传文件",
     uploadProject: "上传项目",
@@ -624,6 +625,59 @@ export const zh = {
       lastConnected: "上次连接：{time}",
       neverConnected: "尚未成功连接",
     },
+    agnes: {
+      name: "Agnes AI",
+      builtIn: "内置服务",
+      enableService: "启用 Agnes AI",
+      disableService: "停用 Agnes AI",
+      apiKey: "Agnes API Key",
+      apiKeyPlaceholder: "粘贴 Agnes API Key",
+      showApiKey: "显示 API Key",
+      hideApiKey: "隐藏 API Key",
+      removeKey: "移除",
+      localStorageHint:
+        "Key 保存在本地应用数据中，默认以掩码显示，并会从导出内容和诊断输出中移除。",
+      webCorsHint: "Web 端如遇跨域拦截会直接报告错误；官方服务地址不可修改。",
+      chatDesignOnly:
+        "仅用于 Chat 与 Design；Plan、Auto QA 和 Design Review 中不可用。",
+      imageSubagent: "允许子代理生成图片",
+      imageDocs: "图片 API 文档",
+      videoDocs: "视频 API 文档",
+      checkConfiguration: "检查配置",
+      configReady: "本地配置完整，未发送网络请求。",
+      configMissingKey: "请先保存 Agnes API Key。",
+      configMissingTool: "请至少启用一个 Agnes 工具。",
+      tools: {
+        generateImage: {
+          title: "生成图片",
+          description:
+            "支持文生图、图生图和多图生成，可使用当前消息中最多五张图片或公开 HTTPS 图片链接。",
+        },
+        createVideo: {
+          title: "创建视频",
+          description:
+            "创建文生视频任务，并在来源对话处于活动状态时持续更新原占位符。",
+        },
+        getVideoStatus: {
+          title: "查询视频状态",
+          description: "按视频 ID 查询一次，并在可定位时更新原视频占位符。",
+        },
+      },
+      media: {
+        generatingImage: "正在生成图片…",
+        queuedVideo: "视频任务排队中…",
+        generatingVideo: "正在生成视频…",
+        pollingStopped: "自动状态查询已停止",
+        pollingNotResumed: "应用重启后不会自动恢复状态查询",
+        manualRefreshNeeded: "视频仍在处理中，请再次查询状态",
+        statusUnavailable: "暂时无法获取视频状态",
+        pollingPaused: "当前对话未激活，状态查询已暂停",
+        imageAlt: "生成图片 {index}",
+        openVideo: "打开视频链接",
+        imageFailed: "图片生成失败",
+        videoFailed: "视频生成失败",
+      },
+    },
     tool: {
       enable: "允许模型调用 {name}",
       plan: "允许在 Plan Mode 使用",
@@ -911,6 +965,14 @@ export const zh = {
     reviewing: "正在审查设计",
     reviewingDescription:
       "本次运行只能读取项目文件，不能写入、联网、使用 MCP 或执行脚本。",
+    automaticStages: {
+      capturing: "自动设计审查：正在捕获响应式证据…",
+      reviewing: "自动设计审查：正在检查实现…",
+      fixing: "自动设计审查：正在执行唯一一次修复…",
+      verifying: "自动设计审查：正在捕获复核证据…",
+      complete: "自动设计审查已完成，没有剩余发现。",
+      warning: "自动设计审查需要处理，报告已展开。",
+    },
     reviewUnavailable: "设计审查暂不可用",
     screenshotAlt: "设计审查截图 {name}",
     runReview: "运行只读审查",
@@ -1000,6 +1062,7 @@ export const zh = {
       apply_design_style: "应用设计风格",
       apply_design_system: "应用设计系统",
       submit_design_review: "提交设计审查",
+      submit_design_contract: "提交设计契约",
       read_env_schema: "读取环境变量",
       manage_env: "管理环境变量",
       project_health_check: "检查项目健康状态",

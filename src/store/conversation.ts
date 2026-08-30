@@ -188,6 +188,7 @@ interface ConversationState {
 
   forkConversation: () => string;
   setMessages: (updater: Updater<Message[]>) => void;
+  setMessagesForConversation: (id: string, updater: Updater<Message[]>) => void;
   setFiles: (updater: Updater<ProjectFiles>) => void;
   setFilesForConversation: (id: string, updater: Updater<ProjectFiles>) => void;
   replaceProject: (input: {
@@ -443,14 +444,19 @@ export const useConversationStore = create<ConversationState>()(
       },
 
       setMessages: (updater) => {
+        const activeId = get().activeId;
+        if (activeId) get().setMessagesForConversation(activeId, updater);
+      },
+
+      setMessagesForConversation: (id, updater) => {
         set((s) => {
-          if (!s.activeId || !s.conversations[s.activeId]) return s;
-          const conv = s.conversations[s.activeId];
+          if (!s.conversations[id]) return s;
+          const conv = s.conversations[id];
           const newMessages = applyUpdater(updater, conv.messages);
           return {
             conversations: {
               ...s.conversations,
-              [s.activeId]: {
+              [id]: {
                 ...conv,
                 messages: newMessages,
                 updatedAt: Date.now(),

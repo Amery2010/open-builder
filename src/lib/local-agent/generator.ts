@@ -870,6 +870,7 @@ export function createLocalAgentGenerator(
     | "systemPrompt"
     | "maxIterations"
     | "prepareInitializedProject"
+    | "authorizeToolCall"
   >,
 ): LocalAgentGenerator {
   const host = new WebAppGenerator(

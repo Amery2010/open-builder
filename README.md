@@ -132,6 +132,9 @@ Design Review is deliberately separate from Automatic QA. Its restricted run can
 - Configure remote HTTPS MCP servers with Streamable HTTP or SSE, static headers, OAuth authorization code, or OAuth client credentials; desktop builds also support stdio servers.
 - Import server definitions from JSON, enable servers and tools independently, and review tool-definition drift before changed capabilities can run.
 - Plan Mode and subagents receive only MCP tools explicitly approved as read-only for those modes.
+- The managed **Agnes AI** entry uses its fixed official endpoint on Web, desktop, and experimental mobile. Add a local API key and approve `generate_image`, `create_video`, or `get_video_status` independently; Web requests remain subject to browser CORS.
+- Agnes image generation supports text, one current-message image, or up to five combined current-message/public HTTPS references. Text-to-video results update one in-conversation placeholder while its source conversation is active; generated media stays at its remote HTTPS URL and is not written into project files. Automatic polling is session-only and does not resume after an app restart; `get_video_status` remains available for a manual refresh.
+- Agnes tools are available in Chat and Design, not Plan, Automatic QA, or Design Review. Only `generate_image` can be separately enabled for subagents; video creation and status polling remain unavailable to them.
 
 | Runtime             | Remote HTTPS MCP | stdio MCP | Skill scripts                        |
 | ------------------- | ---------------- | --------- | ------------------------------------ |
@@ -226,6 +229,8 @@ Click the settings button in the top-right corner and fill in:
 
 MCP servers and Skills are managed from the chat toolbar. A Skills management switch controls metadata auto-discovery only. Selecting a Skill in the toolbar loads its full instructions for the next request and then clears the selection. Desktop-only options are shown only when the native runtime reports the required capability.
 
+The managed Agnes API key is masked in the MCP panel, stored only in local app data, removed by the panel reset action, and redacted from exports and diagnostic output. The configuration check validates local completeness without contacting Agnes.
+
 ---
 
 ## Architecture
@@ -282,6 +287,8 @@ Built-in tools:
 | `read_env_schema` / `manage_env` | Safely inspect and manage env files                                                                     |
 
 Enabled MCP tools are injected dynamically after server discovery and approval, then filtered by the current platform and Chat, Plan, Design, Automatic QA, Design Review, or subagent run policy. `apply_design_style` remains the Auto-mode compatibility path; Design mode uses `apply_design_system`.
+
+The managed Agnes MCP adapter adds `generate_image`, `create_video`, and `get_video_status` without creating a remote MCP transport session. Its image and video results render directly in the conversation as media placeholders and replace those placeholders in place when a remote URL becomes available.
 
 ### Tech Stack
 

@@ -137,7 +137,7 @@ export interface MergedMessage {
   role: "user" | "assistant";
   blocks: Block[];
   id: string;
-  origin?: "auto_qa" | "design_review";
+  origin?: "auto_qa" | "design_review" | "design_auto_fix";
   /** True when this assistant message was synthesized to report a local error
    *  (network failure, aborted retry, etc.). Drives the retry affordance in the
    *  UI without relying on string-prefix sniffing. */

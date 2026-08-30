@@ -94,6 +94,10 @@ describe("public skills manifest", () => {
 
     expect(body("art-direct-web")).toContain("`design-product-ui`");
     expect(body("design-product-ui")).toContain("`art-direct-web`");
+    expect(body("art-direct-web")).toContain("`create`");
+    expect(body("art-direct-web")).toContain("selected-but-unapplied");
+    expect(body("design-product-ui")).toContain("run-local Design contract");
+    expect(body("design-product-ui")).toContain("`design_system` error");
     expect(body("review-code")).toContain("default deliverable is findings");
     expect(body("simplify-code")).toContain(
       "without altering observable behavior",

@@ -62,7 +62,7 @@ export async function generateSmartTitle(
   ) => Promise<string>,
 ): Promise<string | null> {
   const firstRequest = messages.find(
-    (m) => m.role === "user" && m.metadata?.origin !== "auto_qa",
+    (m) => m.role === "user" && !m.metadata?.origin,
   );
   if (!firstRequest) return null;
 

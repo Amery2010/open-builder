@@ -79,8 +79,7 @@ export function deriveFallbackTitle(
   messages: readonly Message[],
 ): string | null {
   const firstRequest = messages.find(
-    (message) =>
-      message.role === "user" && message.metadata?.origin !== "auto_qa",
+    (message) => message.role === "user" && !message.metadata?.origin,
   );
   if (!firstRequest) return null;
 

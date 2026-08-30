@@ -1,12 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useSnapshotStore } from "../../store/snapshot";
 import {
-  createDesignTokenSnapshot,
   inspectDesignTokenContract,
   readEditableTokenValues,
   sameDesignSystemReference,
   writeEditableTokenValues,
 } from "./tokens";
+import { createDesignTokenSnapshot } from "./token-snapshot";
 
 const localforageMock = vi.hoisted(() => {
   const values = new Map<string, string>();

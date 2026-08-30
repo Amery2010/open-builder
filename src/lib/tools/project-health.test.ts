@@ -107,6 +107,27 @@ describe("runProjectHealthCheck", () => {
     );
   });
 
+  it("merges Design-system adherence findings under its own category", () => {
+    const report = runProjectHealthCheck(
+      {
+        "DESIGN.md": "# Legacy contract",
+        "index.html":
+          '<html><head><title>App</title><meta name="viewport" content="width=device-width"></head></html>',
+      },
+      [],
+      { design: { beforeFiles: {} } },
+    );
+
+    expect(report.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          category: "design_system",
+          severity: "warning",
+        }),
+      ]),
+    );
+  });
+
   it("truncates large health reports while keeping full issue counts", () => {
     const report = runProjectHealthCheck(
       {
