@@ -64,7 +64,7 @@ Tauri 桌面版（macOS / Windows / Linux）提供 stdio MCP 等本机运行能�
 
 - **多会话管理** — 会话列表侧边栏支持创建、切换、删除，历史记录持久化保存
 - **会话整理** — 支持会话搜索、置顶、归档、复制与智能重命名
-- **项目模板** — 可将生成项目保存为本地模板，并从模板快速新建会话
+- **项目起始库** — 可搜索、编辑、更新并复用经过安全处理的本地项目副本；保存前会确定性分析技术栈、排除敏感路径、脱敏高置信明文凭据，并要求显式确认
 - **智能会话命名** — 根据对话内容自动生成会话标题，无需手动命名
 - **Slash 指令** — 输入框支持 `/new`、`/fork`、`/clear`、`/reset`、`/compact`、`/health`、`/review`、`/continue`、`/retry`
 - **命令面板与快捷键** — 可通过 `Cmd/Ctrl+K` 打开命令面板，并使用键盘新建会话、打开设置、聚焦输入框或停止生成
@@ -198,18 +198,25 @@ pnpm tauri:android:build
 
 ### 本地 CLI 运行时（桌面端）
 
-桌面版可以把已安装的 Codex CLI 作为完整代理运行时。API 仍是默认运行方式，Open Builder 不会在两种运行时之间静默降级。Claude 适配器已经包含在应用中，但当前 Claude CLI 无法在保留 Open Builder MCP 工具桥和订阅账号认证的同时，于接收用户内容前证明隔离，因此会明确显示为**版本不支持**。
+桌面版可以把已安装的 Codex 与 Pi CLI 作为完整代理运行时。API 仍是默认运行方式，Open Builder 不会在运行方式或服务商之间静默降级。Claude 适配器仍会显示用于能力诊断，但当前 Claude CLI 无法在保留 Open Builder 工具桥和订阅账号认证的同时，于接收用户内容前证明隔离，因此会明确显示为**版本不支持**。
 
-1. 安装官方 Codex CLI，并通过 `codex login` 登录。
-2. 启动桌面版，打开 **设置 → 模型 → 运行方式 → 本地 CLI**。
-3. 选择 Codex。Open Builder 会扫描 `PATH` 与常见安装位置；也可通过**选择程序**将验证过的可执行文件路径保存到原生 app data。Claude 仍会显示用于能力诊断，但在兼容协议可用前不会启动 turn。
-4. 确认状态为**已安装并登录**，再按需选择 CLI 实际报告的模型与推理强度。
+请安装并配置一个受支持的 CLI：
 
-本地 CLI 不等于离线模型。提示词、附件、联网搜索活动和工具结果通常仍会发送给所选服务商，并可能消耗账号订阅或用量额度。Open Builder 只检查登录状态，不读取、复制或持久化 CLI 凭据。
+- **Codex：**安装官方 Codex CLI，再运行 `codex login`。
+- **使用 Node.js 22.19 或更高版本安装 Pi：**Open Builder 当前支持 Pi `>=0.84.4 <0.85.0`；运行 `npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.84.4` 安装当前固定版本。Pi 也提供官方安装器 `curl -fsSL https://pi.dev/install.sh | sh`，但请确认其安装结果仍处于支持范围。启动 `pi` 后，在 Pi 内运行 `/login` 配置模型服务商。详见 [Pi 快速开始](https://pi.dev/docs/latest/quickstart)。
+- **Windows 上的 Pi 独立程序：**从 [Pi release](https://github.com/earendil-works/pi/releases/tag/v0.84.4) 下载官方 `pi-windows-x64.zip` 或 `pi-windows-arm64.zip` 及 `SHA256SUMS`，解压；若程序不在 `PATH`，可通过**选择程序**指定 `pi.exe`。
 
-项目仍保存在 Open Builder 的内存虚拟文件系统中。CLI 在隔离的空目录运行，只能通过每次运行独立的 loopback MCP 工具桥访问项目。附件使用不可猜测 ID，不暴露宿主文件路径；在发送用户内容前，应用会禁用或拒绝服务商配置、hooks、无关 MCP、shell 工具和 CLI 项目指令注入。
+启动桌面版，打开 **设置 → 模型 → 运行方式 → 本地 CLI**，选择 CLI 服务商，并确认状态为**已安装并可用**。Open Builder 会扫描 `PATH` 与常见安装位置；**选择程序**只会把验证过的可执行文件覆盖路径保存到原生 app data。模型和推理强度偏好按服务商分别保存，并由所选 CLI 提供；Codex 与 Pi 之间切换时绝不会复用对方的 session。
 
-联网搜索选择**模型内置**时，本地模式使用对应 CLI 的原生搜索；选择 Tavily、Firecrawl 或 Exa 时则只使用 Open Builder 现有工具，并关闭原生搜索。若状态显示未安装、未登录、版本不支持或隔离失败，可使用**重新检测**、**选择程序**、**恢复自动检测**或复制界面提供的登录命令。Web 与移动端会明确阻断本地 CLI，并要求切换回 API。
+本地 CLI 不等于离线模型。提示词、附件、联网搜索活动和工具结果通常仍会发送给该 CLI 配置的模型服务商，并可能消耗订阅或 API 额度。Open Builder 不读取、复制或持久化 CLI 凭据。Pi 将 OAuth 与 API Key 保存在 `~/.pi/agent/auth.json`，创建时仅当前用户可读；Open Builder 会从 Pi 子进程环境中剥离模型服务商 API Key，只依赖 OAuth／auth 文件。在发送用户内容前，应用还会拒绝 `models.json` 中的内联凭据、环境变量凭据和命令解析凭据；凭据来源探测不会解析或执行这些值。请改用 Pi 的 `/login` 流程保存该服务商凭据。普通 Pi 默认将按 cwd 组织的 JSONL session 保存到 `~/.pi/agent/sessions/`，但 Open Builder 会改用 app-private session 目录，并只在本地对话中保留按服务商隔离的 opaque session ID。详见官方[服务商](https://pi.dev/docs/latest/providers)与 [session](https://pi.dev/docs/latest/sessions)说明。
+
+项目仍保存在 Open Builder 的内存虚拟文件系统中。每个服务商使用稳定的 app-private 空白 scratch 目录，只能通过当次运行的带认证 loopback 工具桥访问项目。附件使用不可猜测 ID，不暴露宿主文件路径；Pi 自己上报的服务商／模型目录与 `auth.json` 认证仍可用，但在发送用户内容前，应用会禁用或拒绝项目级指令与资源、hooks、无关 MCP 或扩展、原生 shell／文件系统工具和 CLI 项目指令注入。
+
+Pi 工具结果可以携带文本和图片。带文本的 resource 与图片 resource 会无损转换；Pi 无法消费的 PDF、音频和其他二进制 resource 会返回明确的工具错误，不会再静默退化成文件名或摘要。需要 Pi 检查这类附件时，请先转换为文本或图片。
+
+联网搜索选择**模型内置**时，兼容的本地 CLI 使用自身原生搜索。Pi 没有原生联网搜索工具，因此 Open Builder 会在 turn 开始前阻断，并要求改选 Tavily、Firecrawl、Exa 或停用；绝不会静默改换搜索引擎。这些显式搜索服务使用 Open Builder broker 提供的工具，同时关闭 CLI 原生或扩展提供的搜索。若状态显示未安装、需要配置、版本不支持或隔离失败，可使用**重新检测**、**选择程序**、**恢复自动检测**或复制界面提供的配置命令。Web 与移动端会明确阻断本地 CLI，并要求切换回 API。
+
+DeepSeek Harness 支持目前明确延后，且未来只走 ACP。截至本文档快照，可安装的 [npm `latest`](https://www.npmjs.com/package/@deepseek-ai/dsh) 是 `0.1.1-rc.2`，与 Open Builder 接入相关的 CLI 界面只有一次性 headless runner；ACP 在固定版本的[官方 ACP adapter 源码](https://github.com/deepseek-ai/deepseek-harness/blob/cd5ef8148158c3a752a658978873241fdf8e2bbc/packages/acp/acp/README.md)中仍仅为 alpha／源码形态。只有官方 npm 发布不带 alpha、beta 或 RC 预发布后缀、并内含 `dsh --profile acp` 的稳定版本，才会将其加入服务商目录与设置界面；仅源码 profile、headless 输出与独立 SDK 协议都不满足接入门槛。
 
 ### 配置说明
 

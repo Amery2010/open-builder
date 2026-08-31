@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -8,11 +8,12 @@ use tauri::{AppHandle, Manager};
 use tauri_plugin_dialog::DialogExt;
 use tokio_util::sync::CancellationToken;
 
-use crate::local_agent_bridge::ToolBridge;
-use crate::local_agent_protocol::{
-    claude_isolation_error, command_output_capped, probe_codex_app_server, run as run_protocol,
-    ProtocolContext,
+use crate::local_agent_adapter::{
+    identity as adapter_identity, prepare_start as prepare_adapter_start, probe as probe_adapter,
+    run as run_adapter, validate_request as validate_adapter_request, AdapterProbe,
 };
+use crate::local_agent_bridge::ToolBridge;
+use crate::local_agent_protocol::ProtocolContext;
 
 const MAX_ACTIVE_RUNS: usize = 8;
 const MAX_START_REQUEST_BYTES: usize = 4 * 1024 * 1024;
@@ -21,31 +22,28 @@ const MAX_TOOL_CALLS_PER_RUN: usize = 512;
 const MAX_TOOL_NAME_BYTES: usize = 256;
 const MAX_TOOL_DESCRIPTION_BYTES: usize = 128 * 1024;
 const MAX_PATH_BYTES: usize = 4 * 1024;
-const MAX_PROBE_OUTPUT_BYTES: usize = 256 * 1024;
-const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_RUN_DURATION: Duration = Duration::from_secs(30 * 60);
 const RUN_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "camelCase")]
 pub enum LocalAgentProvider {
     Codex,
     Claude,
+    Pi,
 }
 
 impl LocalAgentProvider {
     fn command_name(self) -> &'static str {
-        match self {
-            Self::Codex => "codex",
-            Self::Claude => "claude",
-        }
+        adapter_identity(self).command_name
     }
 
-    fn login_command(self) -> &'static str {
-        match self {
-            Self::Codex => "codex login",
-            Self::Claude => "claude auth login",
-        }
+    fn setup_command(self) -> &'static str {
+        adapter_identity(self).setup_command
+    }
+
+    fn capabilities(self) -> LocalAgentCapabilities {
+        adapter_identity(self).capabilities
     }
 }
 
@@ -54,9 +52,18 @@ impl LocalAgentProvider {
 pub enum LocalAgentAvailability {
     NotFound,
     Unsupported,
-    SignedOut,
+    NeedsSetup,
     Ready,
     Error,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalAgentCapabilities {
+    pub(crate) sessions: bool,
+    pub(crate) reasoning: bool,
+    pub(crate) tools: bool,
+    pub(crate) native_search: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -77,11 +84,10 @@ pub struct LocalAgentProbe {
     path: Option<String>,
     path_source: Option<String>,
     version: Option<String>,
-    authenticated: bool,
-    login_command: String,
+    setup_command: String,
     models: Vec<LocalAgentModel>,
     efforts: Vec<String>,
-    capabilities: Vec<String>,
+    capabilities: LocalAgentCapabilities,
     message: Option<String>,
 }
 
@@ -97,11 +103,10 @@ impl LocalAgentProbe {
             path: None,
             path_source: None,
             version: None,
-            authenticated: false,
-            login_command: provider.login_command().to_string(),
+            setup_command: provider.setup_command().to_string(),
             models: Vec::new(),
             efforts: Vec::new(),
-            capabilities: Vec::new(),
+            capabilities: provider.capabilities(),
             message: Some(message),
         }
     }
@@ -235,6 +240,7 @@ struct ActiveRun {
 pub struct LocalAgentState {
     runs: Arc<Mutex<HashMap<String, ActiveRun>>>,
     bridge: Arc<ToolBridge>,
+    cleaned_run_roots: Mutex<HashSet<LocalAgentProvider>>,
 }
 
 impl Default for LocalAgentState {
@@ -242,11 +248,29 @@ impl Default for LocalAgentState {
         Self {
             runs: Arc::new(Mutex::new(HashMap::new())),
             bridge: Arc::new(ToolBridge::default()),
+            cleaned_run_roots: Mutex::new(HashSet::new()),
         }
     }
 }
 
 impl LocalAgentState {
+    fn ensure_stale_runs_cleaned(
+        &self,
+        app: &AppHandle,
+        provider: LocalAgentProvider,
+    ) -> Result<(), String> {
+        let mut cleaned = self
+            .cleaned_run_roots
+            .lock()
+            .map_err(|_| "local agent cleanup lock poisoned".to_string())?;
+        if cleaned.contains(&provider) {
+            return Ok(());
+        }
+        cleanup_stale_run_root(&runs_directory(app, provider)?)?;
+        cleaned.insert(provider);
+        Ok(())
+    }
+
     pub async fn shutdown_gracefully(&self) {
         let active = self
             .runs
@@ -291,25 +315,18 @@ impl Drop for LocalAgentState {
 }
 
 #[derive(Default, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ExecutableOverrides {
-    codex: Option<String>,
-    claude: Option<String>,
-}
+#[serde(transparent)]
+struct ExecutableOverrides(HashMap<String, Option<String>>);
 
 impl ExecutableOverrides {
     fn get(&self, provider: LocalAgentProvider) -> Option<&str> {
-        match provider {
-            LocalAgentProvider::Codex => self.codex.as_deref(),
-            LocalAgentProvider::Claude => self.claude.as_deref(),
-        }
+        self.0
+            .get(provider.command_name())
+            .and_then(Option::as_deref)
     }
 
     fn set(&mut self, provider: LocalAgentProvider, path: Option<String>) {
-        match provider {
-            LocalAgentProvider::Codex => self.codex = path,
-            LocalAgentProvider::Claude => self.claude = path,
-        }
+        self.0.insert(provider.command_name().to_string(), path);
     }
 }
 
@@ -357,17 +374,11 @@ fn write_overrides(app: &AppHandle, overrides: &ExecutableOverrides) -> Result<(
 }
 
 fn valid_executable_name(provider: LocalAgentProvider, path: &Path) -> bool {
-    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-        return false;
-    };
-    #[cfg(windows)]
-    {
-        return name.eq_ignore_ascii_case(&format!("{}.exe", provider.command_name()));
-    }
-    #[cfg(not(windows))]
-    {
-        name == provider.command_name()
-    }
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            adapter_identity(provider).accepts_executable_file_name(name, cfg!(windows))
+        })
 }
 
 fn validate_executable_path(provider: LocalAgentProvider, path: &Path) -> Result<PathBuf, String> {
@@ -403,11 +414,8 @@ fn validate_executable_path(provider: LocalAgentProvider, path: &Path) -> Result
 }
 
 fn executable_candidates(provider: LocalAgentProvider) -> Vec<(PathBuf, String)> {
-    let file_name = if cfg!(windows) {
-        format!("{}.exe", provider.command_name())
-    } else {
-        provider.command_name().to_string()
-    };
+    let adapter = adapter_identity(provider);
+    let file_name = adapter.executable_file_name(cfg!(windows));
     let mut candidates = Vec::new();
     if let Some(path) = std::env::var_os("PATH") {
         for directory in std::env::split_paths(&path) {
@@ -431,9 +439,11 @@ fn executable_candidates(provider: LocalAgentProvider) -> Vec<(PathBuf, String)>
                 ".volta/bin",
                 ".asdf/shims",
                 ".cargo/bin",
-                ".claude/local",
                 "Library/pnpm",
             ] {
+                candidates.push((home.join(directory).join(&file_name), "common".to_string()));
+            }
+            for directory in adapter.unix_home_directories {
                 candidates.push((home.join(directory).join(&file_name), "common".to_string()));
             }
             for (root, suffix) in [
@@ -454,22 +464,24 @@ fn executable_candidates(provider: LocalAgentProvider) -> Vec<(PathBuf, String)>
     #[cfg(windows)]
     {
         if let Some(home) = std::env::var_os("USERPROFILE") {
-            candidates.push((
-                PathBuf::from(home)
-                    .join(".codex")
-                    .join("bin")
-                    .join(&file_name),
-                "common".to_string(),
-            ));
+            let home = PathBuf::from(home);
+            for directory in adapter.windows_home_directories {
+                candidates.push((home.join(directory).join(&file_name), "common".to_string()));
+            }
         }
         if let Some(local) = std::env::var_os("LOCALAPPDATA") {
             let local = PathBuf::from(local);
-            for directory in ["Programs\\Codex", "Programs\\Claude", "pnpm"] {
+            for directory in adapter
+                .windows_local_directories
+                .iter()
+                .copied()
+                .chain(["pnpm"])
+            {
                 candidates.push((local.join(directory).join(&file_name), "common".to_string()));
             }
         }
         if let Some(program_files) = std::env::var_os("ProgramFiles") {
-            for directory in ["Codex", "Claude"] {
+            for directory in adapter.windows_program_directories {
                 candidates.push((
                     PathBuf::from(&program_files)
                         .join(directory)
@@ -500,186 +512,29 @@ fn resolve_executable(
     Ok(None)
 }
 
-async fn command_output(executable: &Path, args: &[&str]) -> Result<std::process::Output, String> {
-    command_output_capped(executable, args, PROBE_TIMEOUT, MAX_PROBE_OUTPUT_BYTES).await
-}
-
-fn clean_version(output: &std::process::Output) -> Option<String> {
-    let text = if output.stdout.is_empty() {
-        &output.stderr
-    } else {
-        &output.stdout
-    };
-    String::from_utf8_lossy(text)
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(|line| line.chars().take(160).collect())
-}
-
 async fn probe_path(
     provider: LocalAgentProvider,
     path: PathBuf,
     path_source: String,
 ) -> LocalAgentProbe {
-    let version_output = match command_output(&path, &["--version"]).await {
-        Ok(output) if output.status.success() => output,
-        Ok(_) => {
-            return LocalAgentProbe::unavailable(
-                provider,
-                LocalAgentAvailability::Unsupported,
-                "The selected executable did not report a supported version.".to_string(),
-            )
-        }
-        Err(message) => {
-            return LocalAgentProbe::unavailable(provider, LocalAgentAvailability::Error, message)
-        }
-    };
-    let version = clean_version(&version_output);
-    let (help_args, required_flags): (&[&str], &[&str]) = match provider {
-        LocalAgentProvider::Codex => (&["app-server", "--help"], &["--stdio", "--strict-config"]),
-        LocalAgentProvider::Claude => (
-            &["--help"],
-            &[
-                "--input-format",
-                "--output-format",
-                "--include-partial-messages",
-                "--strict-mcp-config",
-                "--system-prompt-file",
-                "--setting-sources",
-                "--permission-mode",
-                "--allowedTools",
-                "--tools",
-                "--resume",
-            ],
-        ),
-    };
-    let help = match command_output(&path, help_args).await {
-        Ok(output) => {
-            String::from_utf8_lossy(&output.stdout).to_string()
-                + &String::from_utf8_lossy(&output.stderr)
-        }
-        Err(message) => {
-            return LocalAgentProbe {
-                provider,
-                availability: LocalAgentAvailability::Unsupported,
-                path: Some(path.to_string_lossy().to_string()),
-                path_source: Some(path_source),
-                version,
-                authenticated: false,
-                login_command: provider.login_command().to_string(),
-                models: Vec::new(),
-                efforts: Vec::new(),
-                capabilities: Vec::new(),
-                message: Some(message),
-            }
-        }
-    };
-    if required_flags.iter().any(|flag| !help.contains(flag)) {
-        return LocalAgentProbe {
-            provider,
-            availability: LocalAgentAvailability::Unsupported,
-            path: Some(path.to_string_lossy().to_string()),
-            path_source: Some(path_source),
-            version,
-            authenticated: false,
-            login_command: provider.login_command().to_string(),
-            models: Vec::new(),
-            efforts: Vec::new(),
-            capabilities: Vec::new(),
-            message: Some(
-                "The installed CLI is missing required structured-agent capabilities.".to_string(),
-            ),
-        };
-    }
-    if provider == LocalAgentProvider::Claude {
-        return LocalAgentProbe {
-            provider,
-            availability: LocalAgentAvailability::Unsupported,
-            path: Some(path.to_string_lossy().to_string()),
-            path_source: Some(path_source),
-            version,
-            authenticated: false,
-            login_command: provider.login_command().to_string(),
-            models: Vec::new(),
-            efforts: Vec::new(),
-            capabilities: vec!["streamJson".to_string(), "streamableHttpMcp".to_string()],
-            message: Some(claude_isolation_error()),
-        };
-    }
-
-    let (authenticated, models, efforts, capabilities, auth_message) = match provider {
-        LocalAgentProvider::Codex => {
-            match tokio::time::timeout(PROBE_TIMEOUT, probe_codex_app_server(&path)).await {
-                Ok(Ok((authenticated, models))) => (
-                    authenticated,
-                    models,
-                    Vec::new(),
-                    vec!["appServer".to_string(), "streamableHttpMcp".to_string()],
-                    None,
-                ),
-                Ok(Err(_)) | Err(_) => {
-                    return LocalAgentProbe {
-                        provider,
-                        availability: LocalAgentAvailability::Error,
-                        path: Some(path.to_string_lossy().to_string()),
-                        path_source: Some(path_source),
-                        version,
-                        authenticated: false,
-                        login_command: provider.login_command().to_string(),
-                        models: Vec::new(),
-                        efforts: Vec::new(),
-                        capabilities: vec![
-                            "appServer".to_string(),
-                            "streamableHttpMcp".to_string(),
-                        ],
-                        message: Some(
-                            "Codex account/model probe failed. Re-run login or upgrade the CLI."
-                                .to_string(),
-                        ),
-                    };
-                }
-            }
-        }
-        LocalAgentProvider::Claude => {
-            let auth = command_output(&path, &["auth", "status", "--json"]).await;
-            let authenticated = auth
-                .as_ref()
-                .ok()
-                .filter(|output| output.status.success())
-                .and_then(|output| serde_json::from_slice::<serde_json::Value>(&output.stdout).ok())
-                .and_then(|value| {
-                    value
-                        .get("loggedIn")
-                        .or_else(|| value.get("authenticated"))
-                        .and_then(serde_json::Value::as_bool)
-                })
-                .unwrap_or(false);
-            (
-                authenticated,
-                Vec::new(),
-                Vec::new(),
-                vec!["streamJson".to_string(), "streamableHttpMcp".to_string()],
-                auth.err(),
-            )
-        }
-    };
+    let AdapterProbe {
+        availability,
+        version,
+        models,
+        efforts,
+        message,
+    } = probe_adapter(provider, &path).await;
     LocalAgentProbe {
         provider,
-        availability: if authenticated {
-            LocalAgentAvailability::Ready
-        } else {
-            LocalAgentAvailability::SignedOut
-        },
+        availability,
         path: Some(path.to_string_lossy().to_string()),
         path_source: Some(path_source),
         version,
-        authenticated,
-        login_command: provider.login_command().to_string(),
+        setup_command: provider.setup_command().to_string(),
         models,
         efforts,
-        capabilities,
-        message: auth_message,
+        capabilities: provider.capabilities(),
+        message,
     }
 }
 
@@ -688,8 +543,9 @@ async fn probe_path_bounded(
     path: PathBuf,
     path_source: String,
 ) -> LocalAgentProbe {
+    let timeout = adapter_identity(provider).probe_timeout;
     match tokio::time::timeout(
-        PROBE_TIMEOUT,
+        timeout,
         probe_path(provider, path.clone(), path_source.clone()),
     )
     .await
@@ -701,11 +557,10 @@ async fn probe_path_bounded(
             path: Some(path.to_string_lossy().to_string()),
             path_source: Some(path_source),
             version: None,
-            authenticated: false,
-            login_command: provider.login_command().to_string(),
+            setup_command: provider.setup_command().to_string(),
             models: Vec::new(),
             efforts: Vec::new(),
-            capabilities: Vec::new(),
+            capabilities: provider.capabilities(),
             message: Some("local CLI capability probe timed out".to_string()),
         },
     }
@@ -744,6 +599,7 @@ fn validate_start_request(request: &LocalAgentStartRequest) -> Result<(), String
     if request.native_search && matches!(request.mode.as_str(), "auto_qa" | "subagent") {
         return Err("native search is not allowed in isolated execution modes".to_string());
     }
+    validate_adapter_request(request)?;
     if request.prompt.trim().is_empty() {
         return Err("local agent prompt is required".to_string());
     }
@@ -780,36 +636,35 @@ fn validate_start_request(request: &LocalAgentStartRequest) -> Result<(), String
     Ok(())
 }
 
-fn validate_requested_preferences(
-    request: &LocalAgentStartRequest,
-    probe: &LocalAgentProbe,
-) -> Result<(), String> {
-    let selected_model = request.model.as_deref().filter(|value| !value.is_empty());
-    let model = selected_model
-        .map(|id| {
-            probe
-                .models
-                .iter()
-                .find(|model| model.id == id)
-                .ok_or_else(|| "the selected model is not reported by the local CLI".to_string())
-        })
-        .transpose()?;
-    if let Some(effort) = request.effort.as_deref().filter(|value| !value.is_empty()) {
-        let supported = model
-            .or_else(|| probe.models.iter().find(|model| model.is_default))
-            .map(|model| model.efforts.as_slice())
-            .unwrap_or(probe.efforts.as_slice());
-        if !supported.iter().any(|supported| supported == effort) {
-            return Err(
-                "the selected reasoning effort is not reported by the local CLI".to_string(),
-            );
-        }
+fn ensure_private_directory(path: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(path)
+        .map_err(|_| "failed to create private local agent directory".to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+            .map_err(|_| "failed to secure private local agent directory".to_string())?;
     }
     Ok(())
 }
 
-fn create_run_directory() -> Result<PathBuf, String> {
-    let path = std::env::temp_dir().join(format!("open-builder-agent-{}", uuid::Uuid::new_v4()));
+fn provider_data_directory(
+    app: &AppHandle,
+    provider: LocalAgentProvider,
+) -> Result<PathBuf, String> {
+    let path = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|_| "failed to resolve application local data directory".to_string())?
+        .join("local-agents")
+        .join(provider.command_name());
+    ensure_private_directory(&path)?;
+    Ok(path)
+}
+
+fn create_run_directory(app: &AppHandle, provider: LocalAgentProvider) -> Result<PathBuf, String> {
+    let runs = runs_directory(app, provider)?;
+    let path = runs.join(uuid::Uuid::new_v4().to_string());
     std::fs::create_dir(&path)
         .map_err(|_| "failed to create isolated local agent directory".to_string())?;
     #[cfg(unix)]
@@ -817,6 +672,59 @@ fn create_run_directory() -> Result<PathBuf, String> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
             .map_err(|_| "failed to secure isolated local agent directory".to_string())?;
+    }
+    Ok(path)
+}
+
+fn runs_directory(app: &AppHandle, provider: LocalAgentProvider) -> Result<PathBuf, String> {
+    let runs = provider_data_directory(app, provider)?.join("runs");
+    ensure_private_directory(&runs)?;
+    Ok(runs)
+}
+
+fn cleanup_stale_run_root(runs: &Path) -> Result<(), String> {
+    let entries = std::fs::read_dir(runs)
+        .map_err(|_| "failed to inspect stale local agent runs".to_string())?;
+    for entry in entries {
+        let entry = entry.map_err(|_| "failed to inspect a stale local agent run".to_string())?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Ok(id) = uuid::Uuid::parse_str(name) else {
+            continue;
+        };
+        if id.hyphenated().to_string() != name {
+            continue;
+        }
+        let file_type = entry
+            .file_type()
+            .map_err(|_| "failed to inspect a stale local agent run".to_string())?;
+        if !file_type.is_dir() || file_type.is_symlink() {
+            continue;
+        }
+        std::fs::remove_dir_all(entry.path())
+            .map_err(|_| "failed to remove a stale local agent run".to_string())?;
+    }
+    Ok(())
+}
+
+fn session_directory(app: &AppHandle, provider: LocalAgentProvider) -> Result<PathBuf, String> {
+    let path = provider_data_directory(app, provider)?.join("sessions");
+    ensure_private_directory(&path)?;
+    Ok(path)
+}
+
+fn workspace_directory(app: &AppHandle, provider: LocalAgentProvider) -> Result<PathBuf, String> {
+    let path = provider_data_directory(app, provider)?.join("workspace");
+    ensure_private_directory(&path)?;
+    if adapter_identity(provider).require_empty_workspace
+        && std::fs::read_dir(&path)
+            .map_err(|_| "failed to inspect the private local agent workspace".to_string())?
+            .next()
+            .is_some()
+    {
+        return Err("the private local agent workspace is not empty".to_string());
     }
     Ok(path)
 }
@@ -879,9 +787,24 @@ pub async fn local_agent_start(
     on_event: tauri::ipc::Channel<LocalAgentEvent>,
 ) -> Result<String, String> {
     validate_start_request(&request)?;
-    let (executable, path_source) = resolve_executable(&app, request.provider)?
+    let (executable, _path_source) = resolve_executable(&app, request.provider)?
         .ok_or_else(|| format!("{} was not found", request.provider.command_name()))?;
-    let run_dir = create_run_directory()?;
+    state.ensure_stale_runs_cleaned(&app, request.provider)?;
+    let run_dir = create_run_directory(&app, request.provider)?;
+    let session_dir = match session_directory(&app, request.provider) {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(&run_dir);
+            return Err(error);
+        }
+    };
+    let workspace_dir = match workspace_directory(&app, request.provider) {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(&run_dir);
+            return Err(error);
+        }
+    };
     let run_id = uuid::Uuid::new_v4().to_string();
     let cancellation = CancellationToken::new();
     let (bridge_url, bridge_token) = match state
@@ -932,40 +855,30 @@ pub async fn local_agent_start(
             message: None,
         });
         let mut work = Box::pin(async {
-            let readiness =
-                probe_path_bounded(request.provider, executable.clone(), path_source).await;
+            let mut request = request;
+            let preparation = tokio::time::timeout(
+                adapter_identity(request.provider).probe_timeout,
+                prepare_adapter_start(&executable, &mut request),
+            )
+            .await
+            .map_err(|_| "local CLI start preflight timed out".to_string())??;
             if cancellation.is_cancelled() {
                 return Ok(crate::local_agent_protocol::ProtocolOutcome {
                     session_id: request.session_id.clone(),
                     aborted: true,
                 });
             }
-            if readiness.availability != LocalAgentAvailability::Ready {
-                return Err(readiness
-                    .message
-                    .unwrap_or_else(|| match readiness.availability {
-                        LocalAgentAvailability::SignedOut => format!(
-                            "{} is not signed in; run {}",
-                            request.provider.command_name(),
-                            request.provider.login_command()
-                        ),
-                        LocalAgentAvailability::Unsupported => {
-                            "the installed local CLI is unsupported".to_string()
-                        }
-                        _ => "the local CLI is unavailable".to_string(),
-                    }));
-            }
-            validate_requested_preferences(&request, &readiness)?;
-            let cli_version = readiness.version.unwrap_or_else(|| "unknown".to_string());
-            run_protocol(ProtocolContext {
+            run_adapter(ProtocolContext {
                 executable,
                 request,
                 run_dir: run_dir.clone(),
+                session_dir,
+                workspace_dir,
                 bridge_url,
                 bridge_token,
                 cancellation: cancellation.clone(),
                 channel: on_event.clone(),
-                cli_version,
+                cli_version: preparation.cli_version,
             })
             .await
         });
@@ -1099,40 +1012,22 @@ mod tests {
     }
 
     #[test]
-    fn validates_preferences_against_probe_capabilities() {
-        let mut selected = request();
-        selected.model = Some("codex-model".to_string());
-        selected.effort = Some("high".to_string());
-        let probe = LocalAgentProbe {
-            provider: LocalAgentProvider::Codex,
-            availability: LocalAgentAvailability::Ready,
-            path: None,
-            path_source: None,
-            version: Some("1".to_string()),
-            authenticated: true,
-            login_command: "codex login".to_string(),
-            models: vec![LocalAgentModel {
-                id: "codex-model".to_string(),
-                display_name: "Codex".to_string(),
-                is_default: true,
-                default_effort: Some("medium".to_string()),
-                efforts: vec!["medium".to_string(), "high".to_string()],
-            }],
-            efforts: Vec::new(),
-            capabilities: Vec::new(),
-            message: None,
-        };
-        assert!(validate_requested_preferences(&selected, &probe).is_ok());
-        selected.effort = Some("unsupported".to_string());
-        assert!(validate_requested_preferences(&selected, &probe).is_err());
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_rejects_script_launchers() {
-        assert!(!valid_executable_name(
-            LocalAgentProvider::Codex,
-            Path::new("C:\\tools\\codex.cmd")
+    fn removes_only_app_owned_uuid_run_directories() {
+        let root = std::env::temp_dir().join(format!(
+            "open-builder-stale-runs-test-{}",
+            uuid::Uuid::new_v4()
         ));
+        std::fs::create_dir(&root).unwrap();
+        let stale = root.join(uuid::Uuid::new_v4().to_string());
+        let unrelated = root.join("keep-me");
+        std::fs::create_dir(&stale).unwrap();
+        std::fs::write(stale.join("pi-config.json"), b"sensitive").unwrap();
+        std::fs::create_dir(&unrelated).unwrap();
+
+        cleanup_stale_run_root(&root).unwrap();
+
+        assert!(!stale.exists());
+        assert!(unrelated.exists());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

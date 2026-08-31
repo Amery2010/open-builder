@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { useT } from "../i18n";
 import { useSettingsStore } from "../store/settings";
 import { SHORTCUT_LABELS } from "./useGlobalShortcuts";
+import { useProjectTemplateLibraryUi } from "../store/project-template-library-ui";
 import type { CommandAction } from "../components/command-palette/CommandPalette";
 
 interface UseCommandPaletteActionsArgs {
@@ -24,6 +25,9 @@ export function useCommandPaletteActions({
   const t = useT();
   const setSystem = useSettingsStore((s) => s.setSystem);
   const systemSettingsLive = useSettingsStore((s) => s.system);
+  const openProjectTemplates = useProjectTemplateLibraryUi(
+    (state) => state.openLibrary,
+  );
 
   return useMemo<CommandAction[]>(() => {
     const cycleTheme = () => {
@@ -39,6 +43,12 @@ export function useCommandPaletteActions({
         group: t.commandPalette.groups.session,
         shortcut: SHORTCUT_LABELS.newConversation,
         run: () => createConversation(),
+      },
+      {
+        id: "open-templates",
+        label: t.commandPalette.actions.openTemplates,
+        group: t.commandPalette.groups.session,
+        run: () => openProjectTemplates(),
       },
       {
         id: "compress-context",
@@ -72,6 +82,7 @@ export function useCommandPaletteActions({
   }, [
     t,
     createConversation,
+    openProjectTemplates,
     openSettings,
     messagesEmpty,
     compressContext,

@@ -2,8 +2,41 @@ import {
   DEFAULT_OPENAI_MODEL,
   type ApiType,
 } from "../../lib/ai/provider-config";
+import {
+  isLocalAgentProvider,
+  LOCAL_AGENT_PROVIDERS,
+  type LocalAgentProvider,
+} from "../../lib/local-agent/providers";
 
-export const SETTINGS_VERSION = 19;
+export const SETTINGS_VERSION = 20;
+
+interface PersistedLocalAgentPreferences {
+  model: string;
+  effort: string;
+}
+
+function migrateLocalAgentPreferences(
+  localAgent: Record<string, any>,
+): Record<LocalAgentProvider, PersistedLocalAgentPreferences> {
+  const source =
+    localAgent.preferences && typeof localAgent.preferences === "object"
+      ? localAgent.preferences
+      : localAgent;
+  return Object.fromEntries(
+    LOCAL_AGENT_PROVIDERS.map(({ id }) => {
+      const preferences = source[id];
+      return [
+        id,
+        {
+          model:
+            typeof preferences?.model === "string" ? preferences.model : "",
+          effort:
+            typeof preferences?.effort === "string" ? preferences.effort : "",
+        },
+      ];
+    }),
+  ) as Record<LocalAgentProvider, PersistedLocalAgentPreferences>;
+}
 
 export function migrateSettings(persisted: unknown, version: number): unknown {
   const state = persisted as Record<string, any>;
@@ -97,26 +130,7 @@ export function migrateSettings(persisted: unknown, version: number): unknown {
     const localAgent = state.ai.localAgent ?? {};
     state.ai.localAgent = {
       provider: localAgent.provider === "claude" ? "claude" : "codex",
-      codex: {
-        model:
-          typeof localAgent.codex?.model === "string"
-            ? localAgent.codex.model
-            : "",
-        effort:
-          typeof localAgent.codex?.effort === "string"
-            ? localAgent.codex.effort
-            : "",
-      },
-      claude: {
-        model:
-          typeof localAgent.claude?.model === "string"
-            ? localAgent.claude.model
-            : "",
-        effort:
-          typeof localAgent.claude?.effort === "string"
-            ? localAgent.claude.effort
-            : "",
-      },
+      preferences: migrateLocalAgentPreferences(localAgent),
     };
   }
   if (version < 17) {
@@ -140,6 +154,16 @@ export function migrateSettings(persisted: unknown, version: number): unknown {
     if (typeof state.webSearch.exaApiKey !== "string") {
       state.webSearch.exaApiKey = "";
     }
+  }
+  if (version < 20) {
+    if (!state.ai) state.ai = {};
+    const localAgent = state.ai.localAgent ?? {};
+    state.ai.localAgent = {
+      provider: isLocalAgentProvider(localAgent.provider)
+        ? localAgent.provider
+        : "codex",
+      preferences: migrateLocalAgentPreferences(localAgent),
+    };
   }
   return state;
 }

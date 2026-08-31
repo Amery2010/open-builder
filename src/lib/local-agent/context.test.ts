@@ -113,6 +113,60 @@ describe("local-agent conversation context", () => {
     );
   });
 
+  it("excludes UI-only Design Review activity from the fingerprint", async () => {
+    const baseline = conversation();
+    const withReviewActivity = conversation({
+      messages: [
+        ...baseline.messages,
+        {
+          role: "user",
+          content: "Automatic Design Review",
+          metadata: {
+            origin: "design_review",
+            reviewJobId: "review-job-1",
+            reviewSummary: { status: "succeeded", findingCount: 2 },
+          },
+        },
+      ],
+    });
+
+    await expect(
+      computeConversationFingerprint(withReviewActivity),
+    ).resolves.toBe(await computeConversationFingerprint(baseline));
+  });
+
+  it("normalizes a compressed boundary shifted by a UI-only review block", async () => {
+    const baseline = conversation({
+      messages: [
+        { role: "user", content: "Earlier request" },
+        { role: "assistant", content: "Earlier response" },
+        { role: "user", content: "Recent request" },
+      ],
+      compressedContext: { summary: "Earlier work", fromIndex: 2 },
+    });
+    const withReviewActivity = conversation({
+      messages: [
+        { role: "user", content: "Earlier request" },
+        { role: "assistant", content: "Earlier response" },
+        {
+          role: "user",
+          content: "",
+          metadata: {
+            origin: "design_review",
+            reviewJobId: "review-job-1",
+            reviewSummary: { status: "succeeded", findingCount: 0 },
+          },
+        },
+        { role: "user", content: "Recent request" },
+      ],
+      compressedContext: { summary: "Earlier work", fromIndex: 3 },
+    });
+
+    await expect(
+      computeConversationFingerprint(withReviewActivity),
+    ).resolves.toBe(await computeConversationFingerprint(baseline));
+  });
+
   it("uses the canonical compressed continuation boundary", () => {
     const bootstrap = formatConversationBootstrap({
       compressedContext: {

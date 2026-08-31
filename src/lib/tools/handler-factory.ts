@@ -37,10 +37,8 @@ import {
   APPLY_DESIGN_SYSTEM_TOOL,
   createApplyDesignSystemHandler,
 } from "../design-systems/apply";
-import {
-  PROJECT_HEALTH_CHECK_TOOL,
-  createProjectHealthCheckHandler,
-} from "./project-health";
+import { createProjectHealthCheckHandler } from "./project-health";
+import { PROJECT_HEALTH_CHECK_TOOL } from "./project-health-tool";
 import { formatConsoleLogs, type ConsoleLog } from "./console-log-format";
 import { getBuiltinSearchConfig } from "../ai/provider";
 import type { ApiType } from "../ai/provider";
@@ -63,7 +61,7 @@ import {
   type DesignReviewReport,
 } from "../design/review";
 import { SUBMIT_DESIGN_REVIEW_TOOL } from "../design/review-tool";
-import { SUBMIT_DESIGN_CONTRACT_TOOL } from "../design/run-contract";
+import { SUBMIT_DESIGN_CONTRACT_TOOL } from "../design/run-contract-tool";
 import type { DesignAdherenceInput } from "../design/adherence";
 
 export interface ToolFeatures {

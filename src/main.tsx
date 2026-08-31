@@ -1,6 +1,7 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
+import { ConfirmationDialogHost } from "./components/ConfirmationDialogHost";
 import { TooltipProvider } from "./components/ui/tooltip";
 import "./index.css";
 
@@ -15,6 +16,7 @@ async function bootstrap() {
   createRoot(document.getElementById("root")!).render(
     <StrictMode>
       <TooltipProvider>
+        <ConfirmationDialogHost />
         <App />
       </TooltipProvider>
     </StrictMode>,

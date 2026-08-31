@@ -61,6 +61,7 @@ import type {
 } from "../lib/design/review";
 import { useDesignReviewStore } from "../store/design-review";
 import type { AutomaticDesignReviewEvidence } from "../lib/design/automatic-review";
+import type { DesignReviewRun } from "../lib/design/review-jobs/types";
 import { DEFAULT_TITLE } from "../store/conversation";
 import { flushPendingSandpackFileChanges } from "./code-viewer/sandpack-file-changes";
 import {
@@ -91,6 +92,16 @@ function afterPreviewPaint(): Promise<void> {
   });
 }
 
+export function getSandpackFileContentToCommit(
+  canonicalContent: string | undefined,
+  sandpackContent: string,
+): string | undefined {
+  const content = stripDesignBridge(sandpackContent);
+  return canonicalContent !== undefined && canonicalContent === content
+    ? undefined
+    : content;
+}
+
 interface CodeViewerProps {
   conversationId: string;
   files: ProjectFiles;
@@ -108,6 +119,7 @@ interface CodeViewerProps {
   isGenerating?: boolean;
   onDesignReview?: (
     screenshots: readonly DesignReviewScreenshot[],
+    options?: { retryOf?: string },
   ) => Promise<void> | void;
   onAutomaticDesignReview?: (
     screenshots: readonly DesignReviewScreenshot[],
@@ -175,6 +187,7 @@ export function CodeViewer({
   const pendingCaptureRef = useRef<PendingDesignCapture | null>(null);
   const captureAbortRef = useRef<AbortController | null>(null);
   const captureTaskRef = useRef<Promise<void> | null>(null);
+  const manualRetryOfRef = useRef<string | null>(null);
   const softRefreshRef = useRef<(() => void) | null>(null);
   const previewHostRef = useRef<HTMLDivElement>(null);
   const isDark = useTheme();
@@ -194,6 +207,9 @@ export function CodeViewer({
   );
   const automaticCaptureRequestId = useDesignReviewStore(
     (state) => state.automatic?.captureRequestId,
+  );
+  const automaticCaptureConversationId = useDesignReviewStore(
+    (state) => state.automatic?.evidence.conversationId,
   );
   const automaticStage = useDesignReviewStore(
     (state) => state.automatic?.stage,
@@ -318,8 +334,10 @@ export function CodeViewer({
       ) {
         return;
       }
+      const nextContent = getSandpackFileContentToCommit(canonical, content);
+      if (nextContent === undefined) return;
       invalidateAutomaticReview();
-      onFileChange(targetConversationId, path, stripDesignBridge(content));
+      onFileChange(targetConversationId, path, nextContent);
     },
     [bridgeInjection, files, invalidateAutomaticReview, onFileChange],
   );
@@ -696,6 +714,15 @@ export function CodeViewer({
     [getPreviewIframe],
   );
 
+  const submitManualDesignReview = useCallback(
+    (screenshots: readonly DesignReviewScreenshot[]) => {
+      const retryOf = manualRetryOfRef.current ?? undefined;
+      manualRetryOfRef.current = null;
+      return onDesignReview?.(screenshots, retryOf ? { retryOf } : undefined);
+    },
+    [onDesignReview],
+  );
+
   const captureDesignReviewScreenshots = useCallback(
     (options: { automatic?: boolean } = {}) => {
       if (captureTaskRef.current) return captureTaskRef.current;
@@ -834,7 +861,7 @@ export function CodeViewer({
                 );
             });
           } else {
-            await onDesignReview?.(screenshots);
+            await submitManualDesignReview(screenshots);
           }
         } catch (error) {
           if ((error as { name?: string })?.name !== "AbortError") {
@@ -887,11 +914,11 @@ export function CodeViewer({
       captureRuntimeSource,
       deactivateDesignSelection,
       designSelectionActive,
-      onDesignReview,
       onAutomaticDesignReview,
       onAutomaticDesignReviewUnavailable,
       requestPreviewCapture,
       showConsole,
+      submitManualDesignReview,
       viewMode,
       waitForPreviewViewport,
     ],
@@ -900,6 +927,7 @@ export function CodeViewer({
   useEffect(() => {
     if (
       !automaticCaptureRequestId ||
+      automaticCaptureConversationId !== conversationId ||
       handledAutomaticCaptureRef.current === automaticCaptureRequestId ||
       isGenerating ||
       workspaceMode !== "design"
@@ -910,9 +938,29 @@ export function CodeViewer({
     void captureDesignReviewScreenshots({ automatic: true });
   }, [
     automaticCaptureRequestId,
+    automaticCaptureConversationId,
     captureDesignReviewScreenshots,
+    conversationId,
     isGenerating,
     workspaceMode,
+  ]);
+
+  useEffect(() => {
+    if (
+      !captureTaskRef.current ||
+      !automaticCaptureRequestId ||
+      automaticCaptureConversationId === conversationId
+    ) {
+      return;
+    }
+    captureAbortRef.current?.abort();
+    if (handledAutomaticCaptureRef.current === automaticCaptureRequestId) {
+      handledAutomaticCaptureRef.current = undefined;
+    }
+  }, [
+    automaticCaptureConversationId,
+    automaticCaptureRequestId,
+    conversationId,
   ]);
 
   useEffect(() => {
@@ -928,13 +976,6 @@ export function CodeViewer({
 
   const openDesignReview = useCallback(() => {
     const review = useDesignReviewStore.getState();
-    if (
-      review.automatic &&
-      review.status !== "complete" &&
-      review.status !== "error"
-    ) {
-      return;
-    }
     if (!review.automatic) {
       review.reset();
     }
@@ -943,13 +984,30 @@ export function CodeViewer({
 
   const handleDesignReviewOpenChange = useCallback((open: boolean) => {
     if (!open) {
-      captureAbortRef.current?.abort();
-      if (useDesignReviewStore.getState().status === "capturing") {
-        useDesignReviewStore.getState().reset();
+      const review = useDesignReviewStore.getState();
+      if (review.status === "capturing" && !review.automatic) {
+        captureAbortRef.current?.abort();
+        manualRetryOfRef.current = null;
+        review.reset();
       }
     }
     setDesignReviewOpen(open);
   }, []);
+
+  const cancelDesignReviewRun = useCallback((run: DesignReviewRun) => {
+    void import("../lib/design/review-jobs/runner").then(
+      ({ designReviewJobRunner }) => designReviewJobRunner.cancel(run.id),
+    );
+  }, []);
+
+  const retryDesignReviewRun = useCallback(
+    async (run: DesignReviewRun) => {
+      manualRetryOfRef.current = run.id;
+      useDesignReviewStore.getState().selectRun(conversationId, undefined);
+      await captureDesignReviewScreenshots();
+    },
+    [captureDesignReviewScreenshots, conversationId],
+  );
 
   const handleReloadPreview = useCallback(() => {
     flushPendingSandpackFileChanges(conversationId);
@@ -1052,9 +1110,12 @@ export function CodeViewer({
         <DesignReviewDialog
           open={designReviewOpen}
           onOpenChange={handleDesignReviewOpenChange}
-          onRunReview={onDesignReview}
+          onRunReview={submitManualDesignReview}
           onApplyFixes={applySelectedReviewFixes}
           onCaptureScreenshots={() => captureDesignReviewScreenshots()}
+          conversationId={conversationId}
+          onCancelRun={cancelDesignReviewRun}
+          onRetryRun={retryDesignReviewRun}
           isGenerating={isGenerating}
         />
       )}

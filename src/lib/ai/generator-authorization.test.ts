@@ -11,8 +11,8 @@ import type {
   ToolExecutionContext,
 } from "./generator-types";
 import type { SkillEntry } from "../skills/types";
-import { SUBMIT_DESIGN_CONTRACT_TOOL } from "../design/run-contract";
 import { createDesignContractController } from "../design/run-contract";
+import { SUBMIT_DESIGN_CONTRACT_TOOL } from "../design/run-contract-tool";
 
 type ToolInvoker = {
   executeTool(toolCall: ToolCall): Promise<{

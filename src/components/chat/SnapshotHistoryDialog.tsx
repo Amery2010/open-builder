@@ -12,6 +12,7 @@ import {
 import { saveAs } from "file-saver";
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogHeader,
   DialogTitle,
@@ -20,6 +21,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { TooltipIconButton } from "@/components/ui/tooltip-icon-button";
 import { Input } from "@/components/ui/input";
+import { requestConfirmation } from "@/lib/confirmation";
 import { useSnapshotStore } from "../../store/snapshot";
 import { findPrecedingUserLabel } from "../../lib/utils/message-navigation";
 import {
@@ -94,8 +96,18 @@ export function SnapshotHistoryDialog({
     setEditingLabel("");
   };
 
-  const handleDelete = (snapshotId: string) => {
-    if (!window.confirm(t.snapshots.deleteConfirm)) return;
+  const handleDelete = async (snapshotId: string) => {
+    if (
+      !(await requestConfirmation({
+        title: t.snapshots.delete,
+        message: t.snapshots.deleteConfirm,
+        confirmLabel: t.snapshots.delete,
+        cancelLabel: t.settings.cancel,
+        destructive: true,
+      }))
+    ) {
+      return;
+    }
     deleteSnapshot(conversationId, snapshotId);
   };
 
@@ -135,13 +147,13 @@ export function SnapshotHistoryDialog({
 
   return (
     <Dialog open onOpenChange={(next) => !next && onClose()}>
-      <DialogContent className="sm:max-w-2xl max-h-[80vh] flex flex-col p-0 gap-0 overflow-hidden">
-        <DialogHeader className="px-5 pt-5 pb-3 border-b">
+      <DialogContent className="flex min-h-0 max-h-[calc(100dvh-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-2xl">
+        <DialogHeader className="shrink-0 border-b px-5 pt-5 pb-3">
           <DialogTitle>{t.snapshots.title}</DialogTitle>
           {notice && <p className="text-xs text-muted-foreground">{notice}</p>}
         </DialogHeader>
 
-        <div className="flex-1 overflow-y-auto">
+        <DialogBody>
           {items.length === 0 ? (
             <p className="px-5 py-8 text-sm text-muted-foreground text-center">
               {t.snapshots.empty}
@@ -270,7 +282,7 @@ export function SnapshotHistoryDialog({
                         variant="ghost"
                         size="icon"
                         className="h-8 w-8 text-destructive hover:text-destructive"
-                        onClick={() => handleDelete(snapshot.id)}
+                        onClick={() => void handleDelete(snapshot.id)}
                         label={t.snapshots.delete}
                       >
                         <Trash2 size={15} />
@@ -305,7 +317,7 @@ export function SnapshotHistoryDialog({
               )}
             </div>
           )}
-        </div>
+        </DialogBody>
       </DialogContent>
     </Dialog>
   );

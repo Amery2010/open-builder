@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -111,13 +112,13 @@ export function DesignTokenPanel({
       open={open}
       onOpenChange={(next) => (next ? onOpenChange(true) : close())}
     >
-      <DialogContent className="max-h-[85vh] overflow-hidden p-0 sm:max-w-xl">
-        <DialogHeader className="border-b px-6 py-5 pr-14">
+      <DialogContent className="flex min-h-0 max-h-[calc(100dvh-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-xl">
+        <DialogHeader className="shrink-0 border-b px-6 py-5 pr-14">
           <DialogTitle>{t.designTokens.title}</DialogTitle>
           <DialogDescription>{t.designTokens.description}</DialogDescription>
         </DialogHeader>
 
-        <div className="overflow-y-auto px-6 py-5">
+        <DialogBody className="px-6 py-5">
           {!editable ? (
             <div className="rounded-xl border border-amber-500/25 bg-amber-500/5 p-4">
               <div className="flex gap-3">
@@ -209,9 +210,9 @@ export function DesignTokenPanel({
               {error}
             </p>
           )}
-        </div>
+        </DialogBody>
 
-        <DialogFooter className="border-t bg-muted/20 px-6 py-4">
+        <DialogFooter className="shrink-0 border-t bg-muted/20 px-6 py-4">
           {editable && (
             <Button
               type="button"

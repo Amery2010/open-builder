@@ -36,3 +36,10 @@ sha2 = "0.10"
 libc = "0.2"
 axum = "0.8"
 tokio-util = "0.7"
+
+[profile.dev]
+debug = "line-tables-only"
+incremental = false
+
+[profile.dev.package."*"]
+debug = 0

@@ -1,6 +1,8 @@
-export type LocalAgentProvider = "codex" | "claude";
+import type { LocalAgentProvider } from "./providers";
+
+export type { LocalAgentProvider } from "./providers";
 export type LocalAgentAvailability =
-  "notFound" | "unsupported" | "signedOut" | "ready" | "error";
+  "notFound" | "unsupported" | "needsSetup" | "ready" | "error";
 
 export interface LocalAgentModel {
   id: string;
@@ -16,11 +18,15 @@ export interface LocalAgentProbe {
   path?: string;
   pathSource?: "override" | "path" | "common";
   version?: string;
-  authenticated: boolean;
-  loginCommand: string;
+  setupCommand: string;
   models: LocalAgentModel[];
   efforts: string[];
-  capabilities: string[];
+  capabilities: {
+    sessions: boolean;
+    reasoning: boolean;
+    tools: boolean;
+    nativeSearch: boolean;
+  };
   message?: string;
 }
 

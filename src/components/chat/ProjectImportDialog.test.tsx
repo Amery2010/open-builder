@@ -53,6 +53,32 @@ describe("ProjectImportDialog", () => {
     Reflect.deleteProperty(window, "showDirectoryPicker");
   });
 
+  it("keeps import details scrollable with a fixed header and footer", () => {
+    render(
+      <ProjectImportDialog
+        open
+        hasExistingProject={false}
+        isGenerating={false}
+        onClose={vi.fn()}
+        onImport={vi.fn(() => ({ ok: true as const }))}
+      />,
+    );
+
+    const dialog = screen.getByRole("dialog");
+    const body = dialog.querySelector<HTMLElement>('[data-slot="dialog-body"]');
+    expect(dialog).toHaveClass("max-h-[calc(100dvh-2rem)]", "overflow-hidden");
+    expect(dialog.querySelector('[data-slot="dialog-header"]')).toHaveClass(
+      "shrink-0",
+    );
+    expect(dialog.querySelector('[data-slot="dialog-footer"]')).toHaveClass(
+      "shrink-0",
+    );
+    expect(dialog.querySelectorAll('[data-slot="dialog-body"]')).toHaveLength(
+      1,
+    );
+    expect(body).toHaveClass("min-h-0", "flex-1", "overflow-y-auto");
+  });
+
   it("stages a File System Access folder, reports filtering, and confirms replacement", async () => {
     const user = userEvent.setup();
     const directoryHandle = { kind: "directory", name: "sample-project" };

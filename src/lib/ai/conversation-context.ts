@@ -10,6 +10,14 @@ export function isErrorMessage(message: Message): boolean {
   );
 }
 
+/** Review activity blocks are persisted for UI history but never sent to a model. */
+export function isUiOnlyMessage(message: Message): boolean {
+  return Boolean(
+    message.metadata?.origin === "design_review" &&
+    message.metadata.reviewJobId,
+  );
+}
+
 export function removeErrorMessages(messages: readonly Message[]): Message[] {
   return messages.filter((message) => !isErrorMessage(message));
 }
@@ -20,10 +28,14 @@ export function messagesForConversationContinuation(
   conversation: Conversation,
 ): Message[] {
   const context = conversation.compressedContext;
-  if (!context) return removeErrorMessages(conversation.messages);
+  if (!context) {
+    return removeErrorMessages(conversation.messages).filter(
+      (message) => !isUiOnlyMessage(message),
+    );
+  }
   const recent = removeErrorMessages(
     conversation.messages.slice(context.fromIndex),
-  );
+  ).filter((message) => !isUiOnlyMessage(message));
   return [
     {
       role: "user",

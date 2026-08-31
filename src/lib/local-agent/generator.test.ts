@@ -8,6 +8,7 @@ import { DISPATCH_SUBAGENT_TOOL } from "../tools/subagent-tool";
 import { computeConversationFingerprint } from "./context";
 import { createLocalAgentGenerator, runLocalUtilityText } from "./generator";
 import type { LocalAgentEvent, LocalAgentStartRequest } from "./types";
+import type { LocalAgentProvider } from "./providers";
 import { buildCustomSystemPromptSection } from "../ai/custom-system-prompt";
 
 const localAgentMocks = vi.hoisted(() => ({
@@ -62,12 +63,13 @@ function generator(
     authorizeToolCall?: (name: string) => string | undefined;
     executionMode?: "chat" | "plan";
     nativeSearch?: boolean;
+    provider?: LocalAgentProvider;
   } = {},
 ) {
   const tools = options.tools ?? {};
   const instance = createLocalAgentGenerator(
     {
-      provider: "codex",
+      provider: options.provider ?? "codex",
       nativeSearch: options.nativeSearch ?? false,
       conversationId: conversation.id,
       getConversation: () => conversation,
@@ -326,6 +328,50 @@ describe("LocalAgentGenerator", () => {
     expect(requests[0].bootstrapContext).toContain("Earlier request");
   });
 
+  it("never resumes a session owned by another CLI provider", async () => {
+    const messages: Conversation["messages"] = [
+      { role: "user", content: "Earlier request" },
+      { role: "assistant", content: "Earlier response" },
+    ];
+    const fingerprint = await computeConversationFingerprint({
+      messages,
+      files: {},
+      compressedContext: undefined,
+      template: "vite-react-ts",
+    });
+    const conversation = baseConversation({
+      messages,
+      localAgentSessions: {
+        codex: {
+          provider: "codex",
+          sessionId: "codex-thread",
+          transcriptFingerprint: fingerprint,
+          cliVersion: "codex-cli 1.0.0",
+          updatedAt: 1,
+        },
+      },
+    });
+    let request: LocalAgentStartRequest | undefined;
+    localAgentMocks.start.mockImplementation(
+      async (
+        currentRequest: LocalAgentStartRequest,
+        onEvent: (event: LocalAgentEvent) => void,
+      ) => {
+        request = currentRequest;
+        queueMicrotask(() => completeRun(onEvent, "run-pi", "pi-session"));
+        return "run-pi";
+      },
+    );
+
+    await generator(conversation, vi.fn(), vi.fn(), {
+      provider: "pi",
+    }).instance.generate("Continue with Pi");
+
+    expect(request).toMatchObject({ provider: "pi" });
+    expect(request?.sessionId).toBeUndefined();
+    expect(request?.bootstrapContext).toContain("Earlier request");
+  });
+
   it("rebuilds once after a pre-activity resume failure and never replays other failures", async () => {
     const messages: Conversation["messages"] = [
       { role: "user", content: "Earlier request" },
@@ -487,6 +533,53 @@ describe("LocalAgentGenerator", () => {
           expect.objectContaining({
             type: "image",
             data: "Q09SUkVDVA==",
+          }),
+        ],
+      }),
+    );
+  });
+
+  it("preserves PDF attachments as resource content for transport adapters", async () => {
+    const attachment = {
+      id: "attachment-pdf",
+      type: "file" as const,
+      name: "brief.pdf",
+      mimeType: "application/pdf",
+      size: 8,
+      content: "data:application/pdf;base64,JVBERi0xLjQ=",
+    };
+    localAgentMocks.start.mockImplementation(
+      async (
+        _request: LocalAgentStartRequest,
+        onEvent: (event: LocalAgentEvent) => void,
+      ) => {
+        queueMicrotask(() => {
+          onEvent({
+            type: "toolRequest",
+            runId: "run-pdf",
+            callId: "attachment-pdf-call",
+            name: "read_attachment",
+            arguments: { id: attachment.id },
+          });
+          onEvent({ type: "done", aborted: false });
+        });
+        return "run-pdf";
+      },
+    );
+
+    await generator(baseConversation()).instance.generate("Inspect the PDF", [
+      attachment,
+    ]);
+
+    expect(localAgentMocks.resolve).toHaveBeenCalledWith(
+      "run-pdf",
+      "attachment-pdf-call",
+      expect.objectContaining({
+        content: [
+          expect.objectContaining({
+            type: "resource",
+            mimeType: "application/pdf",
+            blob: "JVBERi0xLjQ=",
           }),
         ],
       }),
@@ -696,6 +789,18 @@ describe("LocalAgentGenerator", () => {
     await instance.generate("Run automatic QA");
 
     expect(request).toMatchObject({ mode: "auto_qa", nativeSearch: false });
+  });
+
+  it("blocks Pi built-in search before starting a local CLI turn", async () => {
+    const { instance } = generator(baseConversation(), vi.fn(), vi.fn(), {
+      provider: "pi",
+      nativeSearch: true,
+    });
+
+    await expect(instance.generate("Search the web")).rejects.toThrow(
+      "Choose Tavily, Firecrawl, Exa, or Disabled",
+    );
+    expect(localAgentMocks.start).not.toHaveBeenCalled();
   });
 
   it("disables provider-native search for a restricted chat profile", async () => {

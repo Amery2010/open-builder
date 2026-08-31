@@ -40,11 +40,12 @@ import type {
   LocalToolContent,
   LocalToolResolution,
 } from "./types";
+import { localAgentSupportsNativeSearch } from "./providers";
 
 const LOCAL_RUNTIME_INSTRUCTIONS = `
 
 ## OPEN BUILDER LOCAL CLI RUNTIME
-Your working directory is an isolated, empty scratch directory — not the user's project. Anything written there is invisible to the user and deleted when the run ends.
+Your working directory is a stable, app-private blank scratch directory — not the user's project. Anything written there is outside Open Builder's project state and invisible to the user.
 The Open Builder host tools are the only authority for project files, preview state, Skills, memory, and approved MCP calls. Never route project work through the native shell, filesystem, hooks, plugins, or external MCP configuration.
 Read listed attachments with read_attachment, using the opaque attachment id.
 screenshot_to_code is deliberately unavailable here: inspect the attachment yourself and build with the normal project tools.
@@ -360,6 +361,7 @@ export class LocalAgentGenerator implements GenerationBackend {
   }
 
   async retry(): Promise<GenerateResult> {
+    this.assertSearchCompatibility();
     const prompt = this.lastFailureHadActivity
       ? RETRY_CONTINUATION_PROMPT
       : this.lastPrompt ||
@@ -380,6 +382,7 @@ export class LocalAgentGenerator implements GenerationBackend {
     userMessage: string,
     attachments: ResolvedAttachment[] = [],
   ): Promise<GenerateResult> {
+    this.assertSearchCompatibility();
     this.lastPrompt = userMessage;
     this.lastFailureHadActivity = false;
     this.host.appendUserMessage(userMessage, attachments);
@@ -390,6 +393,20 @@ export class LocalAgentGenerator implements GenerationBackend {
         this.lastFailureHadActivity = error.hadActivity;
       }
       throw error;
+    }
+  }
+
+  private assertSearchCompatibility(): void {
+    const mode = this.host.getRunContext().mode;
+    if (
+      !localAgentSupportsNativeSearch(this.config.provider) &&
+      this.config.nativeSearch &&
+      this.nativeSearchAllowed &&
+      (mode === "chat" || mode === "plan")
+    ) {
+      throw new Error(
+        "The selected local CLI does not provide native web search. Choose Tavily, Firecrawl, Exa, or Disabled before starting this turn.",
+      );
     }
   }
 

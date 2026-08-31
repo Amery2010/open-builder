@@ -9,8 +9,13 @@ import {
   RotateCcw,
   TerminalSquare,
 } from "lucide-react";
-import type { AISettings, LocalAgentProvider } from "../../../store/settings";
+import type { AISettings } from "../../../store/settings";
 import type { LocalAgentProbe } from "../../../lib/local-agent/types";
+import {
+  LOCAL_AGENT_PROVIDER_CATALOG,
+  LOCAL_AGENT_PROVIDERS,
+  type LocalAgentProvider,
+} from "../../../lib/local-agent/providers";
 import {
   chooseLocalAgentExecutable,
   clearLocalAgentExecutable,
@@ -46,7 +51,8 @@ export function LocalAgentSettings({
 }: LocalAgentSettingsProps) {
   const t = useT();
   const provider = formData.localAgent.provider;
-  const preferences = formData.localAgent[provider];
+  const providerDefinition = LOCAL_AGENT_PROVIDER_CATALOG[provider];
+  const preferences = formData.localAgent.preferences[provider];
   const [probe, setProbe] = useState<LocalAgentProbe | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [actionError, setActionError] = useState("");
@@ -59,15 +65,11 @@ export function LocalAgentSettings({
 
   const normalizePreferences = useCallback(
     (expectedProvider: LocalAgentProvider, result: LocalAgentProbe) => {
-      if (
-        result.availability !== "ready" &&
-        result.availability !== "signedOut"
-      ) {
-        return;
-      }
+      if (result.availability !== "ready") return;
 
       const current = formDataRef.current;
-      const currentPreferences = current.localAgent[expectedProvider];
+      const currentPreferences =
+        current.localAgent.preferences[expectedProvider];
       const selectedModel = currentPreferences.model
         ? result.models.find((model) => model.id === currentPreferences.model)
         : result.models.find((model) => model.isDefault);
@@ -78,9 +80,11 @@ export function LocalAgentSettings({
       const effectiveModel = normalizedModel
         ? result.models.find((model) => model.id === normalizedModel)
         : result.models.find((model) => model.isDefault);
-      const supportedEfforts = effectiveModel
-        ? effectiveModel.efforts
-        : result.efforts;
+      const supportedEfforts = result.capabilities.reasoning
+        ? effectiveModel
+          ? effectiveModel.efforts
+          : result.efforts
+        : [];
       const normalizedEffort = supportedEfforts.includes(
         currentPreferences.effort,
       )
@@ -98,9 +102,12 @@ export function LocalAgentSettings({
         ...current,
         localAgent: {
           ...current.localAgent,
-          [expectedProvider]: {
-            model: normalizedModel,
-            effort: normalizedEffort,
+          preferences: {
+            ...current.localAgent.preferences,
+            [expectedProvider]: {
+              model: normalizedModel,
+              effort: normalizedEffort,
+            },
           },
         },
       };
@@ -186,18 +193,47 @@ export function LocalAgentSettings({
   }, [refresh, supported]);
 
   const updatePreferences = (
-    patch: Partial<(typeof formData.localAgent)[typeof provider]>,
+    patch: Partial<(typeof formData.localAgent.preferences)[typeof provider]>,
   ) => {
-    setFormData({
-      ...formData,
+    const current = formDataRef.current;
+    const next: AISettings = {
+      ...current,
       localAgent: {
-        ...formData.localAgent,
-        [provider]: { ...preferences, ...patch },
+        ...current.localAgent,
+        preferences: {
+          ...current.localAgent.preferences,
+          [provider]: {
+            ...current.localAgent.preferences[provider],
+            ...patch,
+          },
+        },
       },
-    });
+    };
+    formDataRef.current = next;
+    setFormData(next);
+  };
+
+  const selectProvider = (nextProvider: LocalAgentProvider) => {
+    if (nextProvider === providerRef.current) return;
+    requestSequenceRef.current += 1;
+    providerRef.current = nextProvider;
+    setProbe(null);
+    setActionError("");
+    setIsLoading(false);
+    const current = formDataRef.current;
+    const next: AISettings = {
+      ...current,
+      localAgent: {
+        ...current.localAgent,
+        provider: nextProvider,
+      },
+    };
+    formDataRef.current = next;
+    setFormData(next);
   };
 
   const efforts = useMemo(() => {
+    if (visibleProbe?.capabilities.reasoning !== true) return [];
     const selected = preferences.model
       ? visibleProbe?.models.find((model) => model.id === preferences.model)
       : visibleProbe?.models.find((model) => model.isDefault);
@@ -228,8 +264,8 @@ export function LocalAgentSettings({
   }
 
   const ready = visibleProbe?.availability === "ready";
-  const signedOut = visibleProbe?.availability === "signedOut";
-  const hasAuthoritativeProbe = ready || signedOut;
+  const needsSetup = visibleProbe?.availability === "needsSetup";
+  const hasAuthoritativeProbe = ready || needsSetup;
 
   return (
     <div className="space-y-4">
@@ -241,20 +277,12 @@ export function LocalAgentSettings({
         <CapsuleGroup
           label={t.settings.localCli.provider}
           value={provider}
-          onChange={(value) =>
-            setFormData({
-              ...formData,
-              localAgent: {
-                ...formData.localAgent,
-                provider: value as LocalAgentProvider,
-              },
-            })
-          }
+          onChange={(value) => selectProvider(value as LocalAgentProvider)}
           disabled={runtimeChangeLocked}
-          options={[
-            { value: "codex", label: "Codex" },
-            { value: "claude", label: "Claude" },
-          ]}
+          options={LOCAL_AGENT_PROVIDERS.map((entry) => ({
+            value: entry.id,
+            label: entry.displayName,
+          }))}
         />
       </div>
 
@@ -287,8 +315,8 @@ export function LocalAgentSettings({
                 ? t.settings.localCli.scanning
                 : ready
                   ? t.settings.localCli.ready
-                  : signedOut
-                    ? t.settings.localCli.signedOut
+                  : needsSetup
+                    ? t.settings.localCli.needsSetup
                     : visibleProbe?.availability === "notFound"
                       ? t.settings.localCli.notFound
                       : t.settings.localCli.unavailable}
@@ -306,6 +334,11 @@ export function LocalAgentSettings({
             {visibleProbe?.message ? (
               <p className="mt-1 text-xs text-muted-foreground">
                 {visibleProbe.message}
+              </p>
+            ) : null}
+            {needsSetup && provider === "pi" ? (
+              <p className="mt-1 text-xs text-muted-foreground">
+                {t.settings.localCli.piSetupHint}
               </p>
             ) : null}
           </div>
@@ -344,24 +377,26 @@ export function LocalAgentSettings({
               {t.settings.localCli.useAutoDetect}
             </Button>
           ) : null}
-          {signedOut ? (
+          {needsSetup ? (
             <Button
               type="button"
               size="sm"
               variant="outline"
               onClick={() =>
-                void navigator.clipboard.writeText(visibleProbe.loginCommand)
+                void navigator.clipboard.writeText(visibleProbe.setupCommand)
               }
             >
               <Copy className="size-3.5" aria-hidden="true" />
-              {t.settings.localCli.copyLogin}
+              {t.settings.localCli.copySetup}
             </Button>
           ) : null}
         </div>
       </div>
 
       <div className="space-y-2">
-        <Label htmlFor="local-agent-model">{t.settings.model.label}</Label>
+        <Label htmlFor="local-agent-model">
+          {t.settings.localCli.model} ({providerDefinition.modelName})
+        </Label>
         <Select
           value={preferences.model || DEFAULT_OPTION}
           disabled={isLoading || !hasAuthoritativeProbe}

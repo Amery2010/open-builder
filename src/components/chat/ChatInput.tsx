@@ -74,12 +74,54 @@ const NEEDS_MESSAGES = new Set([
 const FILE_ACCEPT =
   "text/*,application/json,application/xml,application/javascript,application/xhtml+xml,application/x-yaml,application/sql,application/graphql,application/ld+json,application/x-sh,application/x-httpd-php,application/typescript,application/pdf,.txt,.md,.mdx,.json,.xml,.js,.jsx,.ts,.tsx,.yaml,.yml,.sql,.graphql,.gql,.sh,.php,.css,.scss,.html,.pdf";
 
+type SelectionDisplayContext = {
+  elementId: string;
+  idSource?: "explicit" | "runtime";
+  anchorElementId?: string;
+  sourceLocator?: {
+    path?: Array<{ tagName: string; nthOfType: number }>;
+  };
+};
+
+const SAFE_SELECTION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
+const SAFE_SELECTION_TAG_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;
+
+function formatSelectionReference(selection: SelectionDisplayContext): string {
+  if (selection.idSource !== "runtime") return selection.elementId;
+
+  const anchor = selection.anchorElementId?.trim();
+  const path = selection.sourceLocator?.path;
+  const finalPathItem = path?.[path.length - 1];
+  const tagName = finalPathItem?.tagName?.trim().toLowerCase();
+  const nthOfType = finalPathItem?.nthOfType;
+
+  if (
+    !anchor ||
+    !SAFE_SELECTION_ID_PATTERN.test(anchor) ||
+    !tagName ||
+    !SAFE_SELECTION_TAG_PATTERN.test(tagName) ||
+    typeof nthOfType !== "number" ||
+    !Number.isInteger(nthOfType) ||
+    nthOfType < 1 ||
+    nthOfType > 10_000
+  ) {
+    return selection.elementId;
+  }
+
+  return `${anchor} › ${tagName}:nth-of-type(${nthOfType})`;
+}
+
 interface ChatInputProps {
   input: string;
   onChange: (value: string) => void;
   onSubmit: (e: React.SyntheticEvent<HTMLFormElement>) => void;
   onStop: () => void;
   isGenerating: boolean;
+  /** Questionnaire overlays own the chat pane while this is true. */
+  isQuestionnairePending?: boolean;
+  /** Non-blocking warning for attachments that could not be rehydrated after
+   * withdrawing a message. */
+  attachmentRestoreWarning?: string;
   messages: Message[];
   attachments: Attachment[];
   onAttachmentsChange: (attachments: Attachment[]) => void;
@@ -137,6 +179,8 @@ export function ChatInput({
   onSubmit,
   onStop,
   isGenerating,
+  isQuestionnairePending = false,
+  attachmentRestoreWarning,
   messages,
   attachments,
   onAttachmentsChange,
@@ -229,10 +273,18 @@ export function ChatInput({
     }
   }, [forcedSkillIds, onForcedSkillIdsChange, skills]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const questionnaireWasPendingRef = useRef(false);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const slashMenuRef = useRef<HTMLDivElement>(null);
   const dragCounterRef = useRef(0);
+
+  useEffect(() => {
+    if (questionnaireWasPendingRef.current && !isQuestionnairePending) {
+      textareaRef.current?.focus();
+    }
+    questionnaireWasPendingRef.current = isQuestionnairePending;
+  }, [isQuestionnairePending]);
 
   const slashMatch = /^\/(\S*)$/.exec(input);
 
@@ -283,6 +335,10 @@ export function ChatInput({
   }, [input]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (isQuestionnairePending) {
+      e.preventDefault();
+      return;
+    }
     if (showSlashMenu) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
@@ -316,6 +372,7 @@ export function ChatInput({
 
   const processFiles = useCallback(
     async (files: File[]) => {
+      if (isQuestionnairePending) return;
       let next = [...attachments];
       const accepted: Attachment[] = [];
       const errors: string[] = [];
@@ -349,10 +406,14 @@ export function ChatInput({
       }
       setAttachmentError(errors[0] ?? null);
     },
-    [attachments, onAttachmentsChange, t],
+    [attachments, isQuestionnairePending, onAttachmentsChange, t],
   );
 
   const handlePaste = (e: React.ClipboardEvent) => {
+    if (isQuestionnairePending) {
+      e.preventDefault();
+      return;
+    }
     const items = e.clipboardData.items;
     for (const item of items) {
       if (isImageMime(item.type)) {
@@ -373,6 +434,7 @@ export function ChatInput({
   };
 
   const handleImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (isQuestionnairePending) return;
     const files = e.target.files;
     if (!files) return;
     void processFiles(Array.from(files));
@@ -380,6 +442,7 @@ export function ChatInput({
   };
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (isQuestionnairePending) return;
     const files = e.target.files;
     if (!files) return;
     void processFiles(Array.from(files));
@@ -412,6 +475,7 @@ export function ChatInput({
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
+    if (isQuestionnairePending) return;
     dragCounterRef.current = 0;
     setIsDragOver(false);
 
@@ -456,7 +520,15 @@ export function ChatInput({
       onDragOver={handleDragOver}
       onDrop={handleDrop}
     >
-      <form onSubmit={onSubmit}>
+      <form
+        onSubmit={(event) => {
+          if (isQuestionnairePending) {
+            event.preventDefault();
+            return;
+          }
+          onSubmit(event);
+        }}
+      >
         {designSelection && activeId && (
           <div
             className="mb-2 flex items-center gap-2 rounded-lg border border-violet-500/25 bg-violet-500/5 px-2.5 py-2 text-xs"
@@ -474,7 +546,7 @@ export function ChatInput({
               )}
             </span>
             <code className="max-w-32 truncate rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
-              {designSelection.elementId}
+              {formatSelectionReference(designSelection)}
             </code>
             <button
               type="button"
@@ -521,6 +593,15 @@ export function ChatInput({
             {attachmentError}
           </p>
         )}
+        {attachmentRestoreWarning && (
+          <p
+            className="mb-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-xs text-amber-700 dark:text-amber-300"
+            role="status"
+            aria-live="polite"
+          >
+            {attachmentRestoreWarning}
+          </p>
+        )}
         <div className="relative">
           {showSlashMenu && (
             <SlashCommandMenu
@@ -552,12 +633,12 @@ export function ChatInput({
           <div
             data-workspace-mode={workspaceMode}
             className={cn(
-              "overflow-hidden rounded-lg border bg-background focus-within:ring-1",
+              "overflow-hidden rounded-lg border bg-background outline-none transition-[border-color,box-shadow,outline-color] focus-within:outline-solid focus-within:outline-1 focus-within:outline-offset-0 focus-within:ring-2 focus-within:ring-offset-0",
               workspaceMode === "plan"
-                ? "border-blue-500/60 focus-within:border-blue-500 focus-within:ring-blue-500/25 dark:border-blue-400/60 dark:focus-within:border-blue-400"
+                ? "border-blue-500/50 focus-within:border-blue-500/60 focus-within:outline-blue-500/50 focus-within:ring-blue-500/15 dark:border-blue-400/50 dark:focus-within:border-blue-400/60 dark:focus-within:outline-blue-400/50 dark:focus-within:ring-blue-400/15"
                 : workspaceMode === "design"
-                  ? "border-violet-500/60 focus-within:border-violet-500 focus-within:ring-violet-500/25 dark:border-violet-400/60 dark:focus-within:border-violet-400"
-                  : "border-input focus-within:ring-ring",
+                  ? "border-violet-500/50 focus-within:border-violet-500/60 focus-within:outline-violet-500/50 focus-within:ring-violet-500/15 dark:border-violet-400/50 dark:focus-within:border-violet-400/60 dark:focus-within:outline-violet-400/50 dark:focus-within:ring-violet-400/15"
+                  : "border-input focus-within:border-ring/60 focus-within:outline-ring/50 focus-within:ring-ring/15",
             )}
           >
             <Textarea
@@ -571,7 +652,7 @@ export function ChatInput({
               onPaste={handlePaste}
               placeholder={t.chat.placeholder}
               rows={2}
-              disabled={isGenerating}
+              disabled={isGenerating || isQuestionnairePending}
               className="border-0 shadow-none focus-visible:ring-0 focus-visible:border-0 resize-none overflow-y-auto bg-transparent px-3 py-2 md:text-base min-h-0 field-sizing-fixed"
               style={{ maxHeight: 200 }}
             />

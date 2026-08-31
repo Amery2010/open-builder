@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { useCommandPaletteStore } from "../store/command-palette";
+import { useInteractiveStore } from "../store/interactive";
 
 const isMac =
   typeof navigator !== "undefined" &&
@@ -11,6 +12,8 @@ interface GlobalShortcutHandlers {
   focusChatInput: () => void;
   stopGenerating?: () => void;
   isGenerating: boolean;
+  /** Optional override for hosts that already track the questionnaire state. */
+  isQuestionnairePending?: boolean;
 }
 
 /** Detect whether the keydown should be ignored because the user is typing
@@ -34,6 +37,31 @@ export function useGlobalShortcuts(handlers: GlobalShortcutHandlers) {
       const h = handlersRef.current;
       const mod = isMac ? e.metaKey : e.ctrlKey;
       const key = e.key.toLowerCase();
+      const questionnairePending =
+        h.isQuestionnairePending === true ||
+        useInteractiveStore
+          .getState()
+          .pending.some(
+            (item) =>
+              item.kind === "question" && item.presentation === "questionnaire",
+          );
+
+      // A questionnaire owns the chat pane. Escape is its explicit cancel
+      // action; all other global shortcuts are blocked until it is resolved.
+      if (questionnairePending && key === "escape") {
+        e.preventDefault();
+        h.stopGenerating?.();
+        return;
+      }
+      if (
+        questionnairePending &&
+        mod &&
+        (key === "k" || key === "n" || key === "," || key === "/")
+      ) {
+        e.preventDefault();
+        return;
+      }
+      if (questionnairePending) return;
 
       // Cmd/Ctrl+K — toggle command palette. Always available.
       if (mod && key === "k") {

@@ -5,6 +5,7 @@ import type {
   ToolExecutionOutput as _ToolExecutionOutput,
   AttachmentRef as _AttachmentRef,
 } from "../lib/ai/generator-types";
+import type { LocalAgentProvider } from "../lib/local-agent/providers";
 
 export type {
   ProjectFiles,
@@ -138,6 +139,8 @@ export interface MergedMessage {
   blocks: Block[];
   id: string;
   origin?: "auto_qa" | "design_review" | "design_auto_fix";
+  reviewJobId?: string;
+  reviewSummary?: NonNullable<_Message["metadata"]>["reviewSummary"];
   /** True when this assistant message was synthesized to report a local error
    *  (network failure, aborted retry, etc.). Drives the retry affordance in the
    *  UI without relying on string-prefix sniffing. */
@@ -205,7 +208,7 @@ export interface CompressedContext {
   fromIndex: number;
 }
 
-export type LocalAgentProvider = "codex" | "claude";
+export type { LocalAgentProvider } from "../lib/local-agent/providers";
 
 export interface LocalAgentSessionRef {
   provider: LocalAgentProvider;
@@ -272,6 +275,13 @@ export interface Conversation {
   activeFile?: string;
   pinned?: boolean;
   archived?: boolean;
+  /** Read-only provenance for conversations materialized from a starter. */
+  templateOrigin?: {
+    templateId: string;
+    templateName: string;
+    contentDigest: string;
+    createdAt: number;
+  };
   createdAt: number;
   updatedAt: number;
 }
@@ -287,6 +297,27 @@ export interface ProjectTemplate {
   previewMode?: ProjectPreviewMode;
   sourceConversationId?: string;
   tags: string[];
+  /** Records without this field are retained v1 templates. */
+  schemaVersion?: 1 | 2;
+  contentDigest?: string;
+  activeFile?: string;
+  designState?: ConversationDesignState;
+  analysis?: {
+    framework: string;
+    language: string;
+    tests: string[];
+    designSystem?: string;
+    autoTags: string[];
+  };
+  safety?: {
+    status: "safe" | "pending-upgrade";
+    excludedPaths: string[];
+    redactedPaths: string[];
+    preparedAt?: number;
+  };
+  sourceUpdatedAt?: number;
+  lastUsedAt?: number;
+  useCount?: number;
   createdAt: number;
   updatedAt: number;
 }

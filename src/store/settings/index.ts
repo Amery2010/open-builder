@@ -18,11 +18,11 @@ export type {
   AISettings,
   GenerationRuntime,
   LocalAgentCapabilityStatus,
-  LocalAgentProvider,
   LocalAgentProviderSettings,
   LocalAgentSettings,
   ModelCache,
 } from "./ai";
+export type { LocalAgentProvider } from "../../lib/local-agent/providers";
 export type { WebSearchSettings } from "./web-search";
 export type { AssetSearchSettings } from "./asset-search";
 export type { Language, Theme, SystemSettings } from "./system";

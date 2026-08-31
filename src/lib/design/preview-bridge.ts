@@ -156,6 +156,9 @@ function previewBridgeClientSource(captureRuntimeAvailable: boolean): string {
   var parentOrigin = "*";
   var captureInFlight = false;
   var captureLibraryPromise = null;
+  var runtimeIds = new WeakMap();
+  var runtimeIdCounter = 0;
+  var MAX_LOCATOR_DEPTH = 12;
   var overlay = document.createElement("div");
   overlay.setAttribute("data-ob-design-overlay", "");
   overlay.style.cssText = "position:fixed;z-index:2147483647;pointer-events:none;border:2px solid #7c3aed;background:rgba(124,58,237,.08);border-radius:4px;box-shadow:0 0 0 1px rgba(255,255,255,.8);display:none;transition:all 60ms linear";
@@ -192,9 +195,67 @@ function previewBridgeClientSource(captureRuntimeAvailable: boolean): string {
       return header.slice(0, 4) === "RIFF" && header.slice(8, 12) === "WEBP";
     } catch (_) { return false; }
   }
+  function explicitId(element) {
+    var value = element && element.getAttribute ? element.getAttribute("data-ob-id") : null;
+    return validId(value) ? value : null;
+  }
+  function isSelectable(element) {
+    if (!(element instanceof HTMLElement || element instanceof SVGElement)) return false;
+    if (element === document.documentElement || element === document.body) return false;
+    if (element.closest("[data-ob-design-overlay]")) return false;
+    if (["script", "style", "template", "meta", "link"].indexOf(element.tagName.toLowerCase()) >= 0) return false;
+    if (element.hasAttribute("hidden") || element.getAttribute("aria-hidden") === "true") return false;
+    var rect = element.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return false;
+    var style = getComputedStyle(element);
+    return style.display !== "none" && style.visibility !== "hidden" &&
+      style.visibility !== "collapse" && style.pointerEvents !== "none";
+  }
   function targetFromEvent(event) {
-    var element = event.target && event.target.closest ? event.target.closest("[data-ob-id]") : null;
-    return element instanceof HTMLElement || element instanceof SVGElement ? element : null;
+    var direct = event.target;
+    if (!(direct instanceof HTMLElement || direct instanceof SVGElement)) return null;
+    if (direct.closest("[data-ob-design-overlay]")) return null;
+    if (explicitId(direct) && isSelectable(direct)) return direct;
+    var tagName = direct.tagName.toLowerCase();
+    if (["svg", "path", "span"].indexOf(tagName) >= 0) {
+      var control = direct.closest("button,a[href],input,select,textarea,summary,[role='button'],[role='link'],[role='checkbox'],[role='radio'],[role='switch'],[role='tab'],[role='menuitem'],[contenteditable='true']");
+      if (control && isSelectable(control)) return control;
+    }
+    return isSelectable(direct) ? direct : null;
+  }
+  function runtimeId(element) {
+    var current = runtimeIds.get(element);
+    if (current) return current;
+    do {
+      runtimeIdCounter += 1;
+      current = "runtime-" + runtimeIdCounter.toString(36);
+    } while (document.querySelector('[data-ob-id="' + current + '"]'));
+    runtimeIds.set(element, current);
+    return current;
+  }
+  function locatorFor(element) {
+    var anchor = element.parentElement;
+    while (anchor && anchor !== document.body && !explicitId(anchor)) anchor = anchor.parentElement;
+    if (!anchor) return null;
+    var path = [];
+    var current = element;
+    while (current && current !== anchor) {
+      var tagName = current.tagName.toLowerCase();
+      if (!/^[a-z][a-z0-9-]{0,31}$/.test(tagName) || path.length >= MAX_LOCATOR_DEPTH) return null;
+      var nthOfType = 1;
+      var sibling = current.previousElementSibling;
+      while (sibling) {
+        if (sibling.tagName === current.tagName) nthOfType += 1;
+        sibling = sibling.previousElementSibling;
+      }
+      path.unshift({ tagName: tagName, nthOfType: nthOfType });
+      current = current.parentElement;
+    }
+    if (!path.length || current !== anchor) return null;
+    return {
+      anchorElementId: anchor === document.body ? undefined : explicitId(anchor) || undefined,
+      sourceLocator: { path: path }
+    };
   }
   function show(element) {
     if (!element) { overlay.style.display = "none"; return; }
@@ -234,12 +295,17 @@ function previewBridgeClientSource(captureRuntimeAvailable: boolean): string {
       if (value) attributes[name] = value;
     });
     var text = clean(element.innerText || element.textContent || "", 240);
-    var id = element.getAttribute("data-ob-id");
-    if (!validId(id)) return null;
+    var explicit = explicitId(element);
+    var id = explicit || runtimeId(element);
+    var locator = explicit ? null : locatorFor(element);
+    if (!validId(id) || (!explicit && !locator)) return null;
     return {
       protocolVersion: VERSION,
       elementId: id,
-      label: aria.label || text || id,
+      idSource: explicit ? "explicit" : "runtime",
+      anchorElementId: locator ? locator.anchorElementId : undefined,
+      sourceLocator: locator ? locator.sourceLocator : undefined,
+      label: aria.label || accessibleName(element) || text || id,
       tagName: element.tagName.toLowerCase(),
       text: text || undefined,
       aria: Object.keys(aria).length ? aria : undefined,
@@ -247,16 +313,24 @@ function previewBridgeClientSource(captureRuntimeAvailable: boolean): string {
       attributes: Object.keys(attributes).length ? attributes : undefined
     };
   }
-  function onMove(event) { if (active) show(targetFromEvent(event)); }
+  function selectionFromEvent(event) {
+    var element = targetFromEvent(event);
+    if (!element) return null;
+    var payload = selection(element);
+    return payload ? { element: element, payload: payload } : null;
+  }
+  function onMove(event) {
+    if (!active) return;
+    var resolved = selectionFromEvent(event);
+    show(resolved ? resolved.element : null);
+  }
   function onClick(event) {
     if (!active) return;
-    var target = targetFromEvent(event);
-    if (!target) return;
-    var payload = selection(target);
-    if (!payload) return;
+    var resolved = selectionFromEvent(event);
+    if (!resolved) return;
     event.preventDefault();
     event.stopPropagation();
-    send("open-builder:design-bridge-selection", payload);
+    send("open-builder:design-bridge-selection", resolved.payload);
     active = false;
     show(null);
   }
@@ -631,9 +705,74 @@ export function sanitizeDesignSelectionPayload(
   const label = cleanText(raw.label, 160) ?? text ?? raw.elementId;
   const routeValue = cleanText(raw.route, 256)?.split(/[?#]/, 1)[0] ?? "/";
   const route = routeValue.startsWith("/") ? routeValue : "/";
+  if (
+    raw.idSource !== undefined &&
+    raw.idSource !== "explicit" &&
+    raw.idSource !== "runtime"
+  ) {
+    return null;
+  }
+  if (
+    raw.anchorElementId !== undefined &&
+    (typeof raw.anchorElementId !== "string" ||
+      !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(raw.anchorElementId))
+  ) {
+    return null;
+  }
+  const idSource =
+    raw.idSource === "explicit" || raw.idSource === "runtime"
+      ? raw.idSource
+      : undefined;
+  const anchorElementId =
+    typeof raw.anchorElementId === "string" &&
+    /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(raw.anchorElementId)
+      ? raw.anchorElementId
+      : undefined;
+  let sourceLocator: DesignSelectionContext["sourceLocator"];
+  if (raw.sourceLocator !== undefined) {
+    if (
+      !raw.sourceLocator ||
+      typeof raw.sourceLocator !== "object" ||
+      Array.isArray(raw.sourceLocator) ||
+      !Array.isArray((raw.sourceLocator as Record<string, unknown>).path) ||
+      (raw.sourceLocator as { path: unknown[] }).path.length < 1 ||
+      (raw.sourceLocator as { path: unknown[] }).path.length > 12
+    ) {
+      return null;
+    }
+    const path: Array<{ tagName: string; nthOfType: number }> = [];
+    for (const segment of (raw.sourceLocator as { path: unknown[] }).path) {
+      if (!segment || typeof segment !== "object" || Array.isArray(segment)) {
+        return null;
+      }
+      const rawSegment = segment as Record<string, unknown>;
+      if (
+        typeof rawSegment.tagName !== "string" ||
+        !/^[a-z][a-z0-9-]{0,31}$/.test(rawSegment.tagName) ||
+        !Number.isInteger(rawSegment.nthOfType) ||
+        (rawSegment.nthOfType as number) < 1 ||
+        (rawSegment.nthOfType as number) > 10_000
+      ) {
+        return null;
+      }
+      path.push({
+        tagName: rawSegment.tagName,
+        nthOfType: rawSegment.nthOfType as number,
+      });
+    }
+    sourceLocator = { path };
+  }
+  if (idSource === "runtime") {
+    if (!sourceLocator) return null;
+  } else if (anchorElementId || sourceLocator) {
+    return null;
+  }
   return {
     protocolVersion: DESIGN_BRIDGE_PROTOCOL_VERSION,
     elementId: raw.elementId,
+    ...(idSource ? { idSource } : {}),
+    ...(anchorElementId ? { anchorElementId } : {}),
+    ...(sourceLocator ? { sourceLocator } : {}),
     label,
     tagName: raw.tagName,
     ...(text ? { text } : {}),

@@ -20,6 +20,7 @@ import {
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
 import { cn } from "@/lib/utils";
+import { requestConfirmation } from "@/lib/confirmation";
 import { formatDeleteConfirmation } from "@/lib/utils/delete-confirmation";
 import { useT } from "../../../i18n";
 import type { FileNode } from "./types";
@@ -108,11 +109,15 @@ export const FileTreeNode = memo(function FileTreeNode(
   const t = useT();
   const isRenaming = renamingPath === node.path;
   const isCreatingIn = createState && createState.parent === node.path;
-  const confirmDelete = () => {
+  const confirmDelete = async () => {
     if (
-      window.confirm(
-        formatDeleteConfirmation(t.explorer.deleteConfirm, node.path),
-      )
+      await requestConfirmation({
+        title: t.explorer.delete,
+        message: formatDeleteConfirmation(t.explorer.deleteConfirm, node.path),
+        confirmLabel: t.explorer.delete,
+        cancelLabel: t.settings.cancel,
+        destructive: true,
+      })
     ) {
       onDeleteFile(node.path);
     }
@@ -204,10 +209,7 @@ export const FileTreeNode = memo(function FileTreeNode(
                 <Download size={14} />
                 {t.explorer.download}
               </ContextMenuItem>
-              <ContextMenuItem
-                variant="destructive"
-                onClick={confirmDelete}
-              >
+              <ContextMenuItem variant="destructive" onClick={confirmDelete}>
                 <Trash2 size={14} />
                 {t.explorer.delete}
               </ContextMenuItem>
@@ -308,10 +310,7 @@ export const FileTreeNode = memo(function FileTreeNode(
           <Download size={14} />
           {t.explorer.download}
         </ContextMenuItem>
-        <ContextMenuItem
-          variant="destructive"
-          onClick={confirmDelete}
-        >
+        <ContextMenuItem variant="destructive" onClick={confirmDelete}>
           <Trash2 size={14} />
           {t.explorer.delete}
         </ContextMenuItem>

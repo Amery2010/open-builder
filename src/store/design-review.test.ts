@@ -1,6 +1,29 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AutomaticDesignReviewEvidence } from "../lib/design/automatic-review";
-import { useDesignReviewStore } from "./design-review";
+import type { DesignReviewRun } from "../lib/design/review-jobs/types";
+import {
+  normalizePersistedDesignReviewRuns,
+  pruneDesignReviewRuns,
+  useDesignReviewStore,
+} from "./design-review";
+
+const localforageMock = vi.hoisted(() => {
+  const values = new Map<string, string>();
+  const instance = {
+    getItem: vi.fn(async (key: string) => values.get(key) ?? null),
+    setItem: vi.fn(async (key: string, value: string) => {
+      values.set(key, value);
+    }),
+    removeItem: vi.fn(async (key: string) => {
+      values.delete(key);
+    }),
+  };
+  return { instance, createInstance: vi.fn(() => instance) };
+});
+
+vi.mock("localforage", () => ({
+  default: { createInstance: localforageMock.createInstance },
+}));
 
 const evidence = {
   requestId: "request",
@@ -52,7 +75,10 @@ const evidence = {
 } satisfies AutomaticDesignReviewEvidence;
 
 describe("Design review automation state", () => {
-  beforeEach(() => useDesignReviewStore.getState().reset());
+  beforeEach(() => {
+    useDesignReviewStore.getState().reset();
+    useDesignReviewStore.getState().clearRuns();
+  });
 
   it("uses monotonic capture requests across resets", () => {
     useDesignReviewStore.getState().requestAutomaticCapture(evidence);
@@ -84,4 +110,258 @@ describe("Design review automation state", () => {
       initialDialogRequest,
     );
   });
+
+  it("allows at most one nonterminal run per conversation", () => {
+    const store = useDesignReviewStore.getState();
+    const first = store.createRun({
+      id: "review-1",
+      conversationId: "conversation",
+      kind: "manual",
+      sourceDigest: "a".repeat(64),
+      provider: { runtime: "api", provider: "openai", model: "gpt" },
+    });
+    const duplicate = store.createRun({
+      id: "review-2",
+      conversationId: "conversation",
+      kind: "automatic",
+      sourceDigest: "a".repeat(64),
+      provider: { runtime: "api", provider: "openai", model: "gpt" },
+    });
+
+    expect(first?.status).toBe("queued");
+    expect(duplicate).toBeNull();
+    store.updateRunStatus("review-1", "cancelled");
+    expect(
+      store.createRun({
+        id: "review-2",
+        conversationId: "conversation",
+        kind: "automatic",
+        sourceDigest: "a".repeat(64),
+        provider: { runtime: "api", provider: "openai", model: "gpt" },
+      }),
+    ).not.toBeNull();
+  });
+
+  it("interrupts nonterminal persisted runs without retaining volatile evidence", () => {
+    const run = persistedRun({ status: "running" });
+    const normalized = normalizePersistedDesignReviewRuns(
+      { conversation: [run] },
+      500,
+    );
+
+    expect(normalized.conversation[0]).toMatchObject({
+      status: "interrupted",
+      completedAt: 500,
+    });
+    expect(normalized.conversation[0].logs.at(-1)?.event).toBe("interrupted");
+    expect(normalized.conversation[0]).not.toHaveProperty("screenshots");
+    expect(normalized.conversation[0]).not.toHaveProperty("files");
+  });
+
+  it("retains only the latest 20 terminal runs per conversation", () => {
+    const runs = Array.from({ length: 23 }, (_, index) =>
+      persistedRun({
+        id: `review-${index}`,
+        status: "succeeded",
+        createdAt: index,
+        updatedAt: index,
+        completedAt: index,
+      }),
+    );
+    const pruned = pruneDesignReviewRuns(runs);
+
+    expect(pruned).toHaveLength(20);
+    expect(pruned.map((run) => run.id)).not.toContain("review-0");
+    expect(pruned[0].id).toBe("review-22");
+  });
+
+  it("rejects deleting an active run", () => {
+    const store = useDesignReviewStore.getState();
+    const run = store.createRun({
+      id: "review-active-delete",
+      conversationId: "conversation",
+      kind: "manual",
+      sourceDigest: "a".repeat(64),
+      provider: { runtime: "api", provider: "openai", model: "gpt" },
+    });
+
+    expect(run).not.toBeNull();
+    expect(store.removeRun("review-active-delete")).toBe(false);
+    expect(
+      useDesignReviewStore.getState().runsByConversation.conversation,
+    ).toHaveLength(1);
+  });
+
+  it("selects the next history item and clears findings when deleting the selected run", () => {
+    const store = useDesignReviewStore.getState();
+    const older = store.createRun({
+      id: "review-older",
+      conversationId: "conversation",
+      kind: "manual",
+      sourceDigest: "a".repeat(64),
+      provider: { runtime: "api", provider: "openai", model: "gpt" },
+      now: 100,
+    });
+    expect(older).not.toBeNull();
+    store.updateRunStatus("review-older", "succeeded");
+    const newer = store.createRun({
+      id: "review-newer",
+      conversationId: "conversation",
+      kind: "automatic",
+      sourceDigest: "a".repeat(64),
+      provider: { runtime: "api", provider: "openai", model: "gpt" },
+      now: 200,
+    });
+    expect(newer).not.toBeNull();
+    store.updateRunStatus("review-newer", "failed");
+    store.selectRun("conversation", "review-newer");
+    store.setSelectedFindingIds(["finding-1"]);
+
+    expect(store.removeRun("review-newer")).toBe(true);
+    const state = useDesignReviewStore.getState();
+    expect(state.runsByConversation.conversation.map((run) => run.id)).toEqual([
+      "review-older",
+    ]);
+    expect(state.selectedRunIdByConversation.conversation).toBe("review-older");
+    expect(state.selectedFindingIds).toEqual([]);
+  });
+
+  it("clears the selected history item when its last run is deleted", () => {
+    const store = useDesignReviewStore.getState();
+    store.createRun({
+      id: "review-only",
+      conversationId: "conversation",
+      kind: "manual",
+      sourceDigest: "a".repeat(64),
+      provider: { runtime: "api", provider: "openai", model: "gpt" },
+    });
+    store.updateRunStatus("review-only", "cancelled");
+
+    expect(store.removeRun("review-only")).toBe(true);
+    const state = useDesignReviewStore.getState();
+    expect(state.runsByConversation.conversation).toEqual([]);
+    expect(state.selectedRunIdByConversation.conversation).toBeUndefined();
+    expect(state.selectedFindingIds).toEqual([]);
+  });
+
+  it("clears finding selection when deleting the history item shown by fallback", () => {
+    const store = useDesignReviewStore.getState();
+    for (const [id, now] of [
+      ["review-older", 1],
+      ["review-newer", 2],
+    ] as const) {
+      store.createRun({
+        id,
+        conversationId: "conversation",
+        kind: "manual",
+        sourceDigest: "a".repeat(64),
+        provider: { runtime: "api", provider: "openai", model: "gpt" },
+        now,
+      });
+      store.updateRunStatus(id, "succeeded");
+    }
+    store.selectRun("conversation", undefined);
+    store.setSelectedFindingIds(["finding-1"]);
+
+    expect(store.removeRun("review-newer")).toBe(true);
+    const state = useDesignReviewStore.getState();
+    expect(state.selectedRunIdByConversation.conversation).toBe("review-older");
+    expect(state.selectedFindingIds).toEqual([]);
+  });
+
+  it("deduplicates volatile finding selections", () => {
+    const store = useDesignReviewStore.getState();
+
+    store.setSelectedFindingIds(["finding-1", "finding-2", "finding-1"]);
+
+    expect(useDesignReviewStore.getState().selectedFindingIds).toEqual([
+      "finding-1",
+      "finding-2",
+    ]);
+  });
+
+  it("marks reports stale when the project digest changes", () => {
+    const store = useDesignReviewStore.getState();
+    store.createRun({
+      id: "review-1",
+      conversationId: "conversation",
+      kind: "manual",
+      sourceDigest: "a".repeat(64),
+      provider: { runtime: "api", provider: "openai", model: "gpt" },
+    });
+    store.updateRunStatus("review-1", "failed");
+    store.markConversationFreshness("conversation", "b".repeat(64));
+
+    const run =
+      useDesignReviewStore.getState().runsByConversation.conversation[0];
+    expect(run.freshness).toBe("stale");
+    expect(run.logs.at(-1)?.event).toBe("stale");
+  });
+
+  it("can detect project changes after reload without retaining source files", () => {
+    const store = useDesignReviewStore.getState();
+    store.createRun({
+      id: "review-project-digest",
+      conversationId: "conversation",
+      kind: "manual",
+      sourceDigest: "a".repeat(64),
+      sourceProjectDigest: "b".repeat(64),
+      provider: { runtime: "api", provider: "openai", model: "gpt" },
+    });
+    store.updateRunStatus("review-project-digest", "succeeded");
+
+    store.markRunProjectFreshness("review-project-digest", "c".repeat(64));
+
+    expect(
+      useDesignReviewStore.getState().runsByConversation.conversation[0]
+        .freshness,
+    ).toBe("stale");
+  });
+
+  it("never persists screenshots or project file snapshots", async () => {
+    localforageMock.instance.setItem.mockClear();
+    const store = useDesignReviewStore.getState();
+    store.setScreenshots([
+      {
+        dataUrl: "data:image/png;base64,volatile-image-secret",
+        mimeType: "image/png",
+      },
+    ]);
+    store.createRun({
+      id: "review-persisted",
+      conversationId: "conversation",
+      kind: "manual",
+      sourceDigest: "a".repeat(64),
+      capturedCount: 1,
+      provider: { runtime: "api", provider: "openai", model: "gpt" },
+    });
+
+    await vi.waitFor(() =>
+      expect(localforageMock.instance.setItem).toHaveBeenCalled(),
+    );
+    const serialized = localforageMock.instance.setItem.mock.calls.at(-1)?.[1];
+    expect(serialized).not.toContain("volatile-image-secret");
+    expect(serialized).not.toContain("screenshots");
+    expect(serialized).not.toContain("files");
+    expect(serialized).toContain("review-persisted");
+  });
 });
+
+function persistedRun(
+  overrides: Partial<DesignReviewRun> = {},
+): DesignReviewRun {
+  return {
+    id: "review",
+    conversationId: "conversation",
+    kind: "manual",
+    phase: "initial",
+    status: "queued",
+    freshness: "fresh",
+    sourceDigest: "a".repeat(64),
+    provider: { runtime: "api", provider: "openai", model: "gpt" },
+    logs: [],
+    createdAt: 1,
+    updatedAt: 1,
+    ...overrides,
+  };
+}

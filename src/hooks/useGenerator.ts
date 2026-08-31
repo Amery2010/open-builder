@@ -12,6 +12,7 @@ import { useInteractiveStore } from "../store/interactive";
 import { useSubagentStore } from "../store/subagent";
 import { useSandpackStore } from "../store/sandpack";
 import { filterMemoryMessages } from "../lib/utils/memory-filter";
+import { findWithdrawableUserMessageIndex } from "../lib/utils/merge-messages";
 import { createSnapshotForCurrentState } from "../lib/utils/snapshot-helpers";
 import type {
   Message,
@@ -25,7 +26,6 @@ import type {
   StructuredGenerationError,
   WorkspaceMode,
   DesignSelectionContext,
-  ResolvedAttachment,
 } from "../types";
 import { useMemoryStore } from "../store/memory";
 import { useFileOperations } from "./useFileOperations";
@@ -39,7 +39,7 @@ import {
   isGenerationRunCurrent,
   isGeneratorConstructionCurrent,
 } from "../lib/ai/run-guard";
-import { getT } from "../i18n";
+import { getT, getResolvedLocale } from "../i18n";
 import type { McpRuntimeBundle } from "../lib/mcp/runtime";
 import type {
   ExecutionMode,
@@ -74,16 +74,17 @@ import {
 } from "../lib/ai/design-mode";
 import { formatDesignSelectionForModel } from "../lib/design/selection-context";
 import {
-  buildDesignReviewRequirementsContext,
-  buildDesignReviewSemanticContext,
-  DESIGN_REVIEW_REQUEST,
-  DESIGN_REVIEW_SYSTEM_SUFFIX,
-  getDesignReviewScreenshotByteLength,
   validateDesignReviewScreenshots,
-  type DesignReviewReport,
   type DesignReviewScreenshot,
 } from "../lib/design/review";
 import { useDesignReviewStore } from "../store/design-review";
+import { computeDesignReviewSourceDigest } from "../lib/design/review-jobs/digest";
+import { createDesignReviewLogEntry } from "../lib/design/review-jobs/logs";
+import {
+  isDesignReviewTerminalStatus,
+  type DesignReviewJobInput,
+  type DesignReviewRun,
+} from "../lib/design/review-jobs/types";
 import { useMcpStore } from "../store/mcp";
 import {
   formatAgnesAttachmentManifest,
@@ -100,7 +101,7 @@ import {
 } from "../lib/design/adherence";
 import {
   buildAutomaticDesignRepairPrompt,
-  buildAutomaticDesignReviewContext,
+  canEnterAutomaticDesignRepair,
   hasRemainingAutomaticDesignIssues,
   requiredSkillsForContract,
   selectAutomaticDesignRepairScope,
@@ -110,6 +111,7 @@ import {
   type AutomaticDesignReviewPhase,
 } from "../lib/design/automatic-review";
 import { runProjectHealthCheck } from "../lib/tools/project-health";
+import { localAgentSupportsNativeSearch } from "../lib/local-agent/providers";
 
 interface GeneratorConfigSnapshot {
   runtime: AISettings["runtime"];
@@ -131,6 +133,10 @@ interface GeneratorConfigSnapshot {
   developerSkillScriptsEnabled: boolean;
 }
 
+const EMPTY_DESIGN_REVIEW_RUNS: DesignReviewRun[] = [];
+const EMPTY_MESSAGES: Message[] = [];
+const pendingAutomaticCaptureIds = new Set<string>();
+
 function buildGeneratorConfigSnapshot(
   ai: AISettings,
   webSearch: WebSearchSettings,
@@ -138,7 +144,7 @@ function buildGeneratorConfigSnapshot(
   developerSkillScriptsEnabled: boolean,
 ): GeneratorConfigSnapshot {
   const localProvider = ai.localAgent.provider;
-  const localPreferences = ai.localAgent[localProvider];
+  const localPreferences = ai.localAgent.preferences[localProvider];
   return {
     runtime: ai.runtime,
     localProvider,
@@ -263,11 +269,33 @@ interface GenerateRunOptions {
   reusableDesignContract?: DesignContract;
   automaticDesignReviewPhase?: AutomaticDesignReviewPhase;
   automaticDesignOriginalRequest?: string;
+  automaticDesignReviewActivityId?: string;
   skipAutomaticDesignReview?: boolean;
   messageOrigin?: NonNullable<Message["metadata"]>["origin"];
   /** Request-scoped preparation that must run after the optimistic message and
    * loading state are visible, but before generator setup and provider I/O. */
   prepareRun?: () => Promise<void>;
+}
+
+export interface WithdrawnUserDraft {
+  content: string;
+  attachments: Attachment[];
+  forcedSkillIds: string[];
+  designSelection?: DesignSelectionContext;
+}
+
+function userMessageTextForDraft(message: Message): string {
+  if (typeof message.content === "string") return message.content;
+  if (!Array.isArray(message.content)) return "";
+  return message.content
+    .filter(
+      (
+        part,
+      ): part is Extract<(typeof message.content)[number], { type: "text" }> =>
+        part.type === "text" && !part.text.startsWith("[File: "),
+    )
+    .map((part) => part.text)
+    .join("\n");
 }
 
 function getConversationWorkspaceContext(conversationId: string | undefined): {
@@ -292,13 +320,114 @@ function getConversationWorkspaceContext(conversationId: string | undefined): {
   };
 }
 
-function sameProjectFiles(first: ProjectFiles, second: ProjectFiles): boolean {
-  const firstPaths = Object.keys(first);
-  const secondPaths = Object.keys(second);
-  return (
-    firstPaths.length === secondPaths.length &&
-    firstPaths.every((path) => first[path] === second[path])
+type DesignReviewSummary = NonNullable<
+  NonNullable<Message["metadata"]>["reviewSummary"]
+>;
+
+function appendAutomaticReviewActivity(
+  conversationId: string,
+  reviewJobId: string,
+  status: DesignReviewSummary["status"],
+): void {
+  const state = useConversationStore.getState();
+  const conversation = state.conversations[conversationId];
+  if (!conversation) return;
+  const existing = conversation.messages.some(
+    (message) => message.metadata?.reviewJobId === reviewJobId,
   );
+  if (existing) {
+    updateAutomaticReviewActivity(conversationId, reviewJobId, { status });
+    return;
+  }
+  state.setMessagesForConversation(conversationId, (messages) => [
+    ...messages,
+    {
+      role: "user",
+      content: "",
+      metadata: {
+        origin: "design_review",
+        reviewJobId,
+        reviewSummary: { status },
+      },
+    },
+  ]);
+}
+
+function updateAutomaticReviewActivity(
+  conversationId: string,
+  currentReviewJobId: string,
+  summary: Partial<DesignReviewSummary>,
+  nextReviewJobId = currentReviewJobId,
+): void {
+  const state = useConversationStore.getState();
+  const conversation = state.conversations[conversationId];
+  if (
+    !conversation?.messages.some(
+      (message) => message.metadata?.reviewJobId === currentReviewJobId,
+    )
+  ) {
+    return;
+  }
+  state.setMessagesForConversation(conversationId, (messages) =>
+    messages.map((message) =>
+      message.metadata?.reviewJobId === currentReviewJobId
+        ? {
+            ...message,
+            metadata: {
+              ...message.metadata,
+              reviewJobId: nextReviewJobId,
+              reviewSummary: {
+                status:
+                  summary.status ??
+                  message.metadata.reviewSummary?.status ??
+                  "capturing",
+                ...message.metadata.reviewSummary,
+                ...summary,
+              },
+            },
+          }
+        : message,
+    ),
+  );
+}
+
+function hasNewerGenuineUserMessage(
+  conversationId: string,
+  reviewJobId: string,
+): boolean {
+  const messages =
+    useConversationStore.getState().conversations[conversationId]?.messages ??
+    [];
+  const activityIndex = messages.findIndex(
+    (message) => message.metadata?.reviewJobId === reviewJobId,
+  );
+  if (activityIndex < 0) return true;
+  return messages
+    .slice(activityIndex + 1)
+    .some((message) => message.role === "user" && !message.metadata?.origin);
+}
+
+function waitForDesignReviewRun(
+  runId: string,
+): Promise<DesignReviewRun | null> {
+  const current = Object.values(
+    useDesignReviewStore.getState().runsByConversation,
+  )
+    .flat()
+    .find((run) => run.id === runId);
+  if (!current || isDesignReviewTerminalStatus(current.status)) {
+    return Promise.resolve(current ?? null);
+  }
+  return new Promise((resolve) => {
+    const unsubscribe = useDesignReviewStore.subscribe((state) => {
+      const run = Object.values(state.runsByConversation)
+        .flat()
+        .find((candidate) => candidate.id === runId);
+      if (run && !isDesignReviewTerminalStatus(run.status)) return;
+      unsubscribe();
+      resolve(run ?? null);
+    });
+  });
 }
 
 interface GeneratorRuntime {
@@ -425,6 +554,27 @@ export function useGenerator({
   const generatorConfigRef = useRef<GeneratorConfigSnapshot | null>(null);
   const generatorConstructionEpochRef = useRef(0);
   const activeId = useConversationStore((s) => s.activeId);
+  const activeReviewFiles = useConversationStore((state) =>
+    state.activeId ? state.conversations[state.activeId]?.files : undefined,
+  );
+  const activeReviewDesignSystem = useConversationStore((state) =>
+    state.activeId
+      ? state.conversations[state.activeId]?.designState?.appliedSystem
+      : undefined,
+  );
+  const activeReviewMessages = useConversationStore((state) =>
+    state.activeId
+      ? (state.conversations[state.activeId]?.messages ?? EMPTY_MESSAGES)
+      : EMPTY_MESSAGES,
+  );
+  const activeDesignReviewRuns = useDesignReviewStore((state) =>
+    activeId
+      ? (state.runsByConversation[activeId] ?? EMPTY_DESIGN_REVIEW_RUNS)
+      : EMPTY_DESIGN_REVIEW_RUNS,
+  );
+  const designReviewRunsHydrated = useDesignReviewStore(
+    (state) => state._hasHydratedRuns,
+  );
   const prevActiveIdRef = useRef(activeId);
   const textBufferRef = useRef("");
   const thinkingBufferRef = useRef("");
@@ -442,6 +592,9 @@ export function useGenerator({
   const activeToolProfileRef = useRef<ToolProfile>("default");
   const designContractControllerRef = useRef(createDesignContractController());
   const designRunInitialFilesRef = useRef<ProjectFiles>({});
+  const reviewContractByRunIdRef = useRef(
+    new Map<string, DesignContract | null>(),
+  );
 
   const clearOutputBuffers = useCallback(() => {
     if (typewriterTimerRef.current) {
@@ -531,6 +684,115 @@ export function useGenerator({
     setRunState("idle");
   }, [activeId, clearOutputBuffers, setIsGenerating]);
 
+  useEffect(() => {
+    if (!activeId || !activeReviewFiles) return;
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      const runs =
+        useDesignReviewStore.getState().runsByConversation[activeId] ?? [];
+      void computeDesignReviewSourceDigest({
+        files: activeReviewFiles,
+        designSystem: activeReviewDesignSystem ?? null,
+        designContract: null,
+      })
+        .then((sourceProjectDigest) =>
+          Promise.all(
+            runs.map(async (run) => {
+              let stale = run.sourceProjectDigest
+                ? run.sourceProjectDigest !== sourceProjectDigest
+                : run.freshness === "stale";
+              if (reviewContractByRunIdRef.current.has(run.id)) {
+                const contract =
+                  reviewContractByRunIdRef.current.get(run.id) ?? null;
+                const sourceDigest = await computeDesignReviewSourceDigest({
+                  files: activeReviewFiles,
+                  designSystem: activeReviewDesignSystem ?? null,
+                  designContract: contract,
+                });
+                if (cancelled) return;
+                stale = run.sourceDigest !== sourceDigest;
+                useDesignReviewStore
+                  .getState()
+                  .markRunFreshness(run.id, sourceDigest);
+              } else if (run.sourceProjectDigest) {
+                if (cancelled) return;
+                useDesignReviewStore
+                  .getState()
+                  .markRunProjectFreshness(run.id, sourceProjectDigest);
+              }
+              if (run.kind === "automatic") {
+                updateAutomaticReviewActivity(activeId, run.id, { stale });
+              }
+            }),
+          ),
+        )
+        .catch(() => undefined);
+    }, 150);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [activeId, activeReviewDesignSystem, activeReviewFiles]);
+
+  useEffect(() => {
+    if (!activeId) return;
+    for (const run of activeDesignReviewRuns) {
+      if (
+        run.kind !== "automatic" ||
+        !isDesignReviewTerminalStatus(run.status)
+      ) {
+        continue;
+      }
+      const activityStatus = useConversationStore
+        .getState()
+        .conversations[activeId]?.messages.find(
+          (message) => message.metadata?.reviewJobId === run.id,
+        )?.metadata?.reviewSummary?.status;
+      if (
+        run.status === "succeeded" &&
+        (activityStatus === "fixing" || activityStatus === "verifying")
+      ) {
+        continue;
+      }
+      updateAutomaticReviewActivity(activeId, run.id, {
+        status: run.status,
+        findingCount: run.report?.findings.length ?? 0,
+        stale: run.freshness === "stale",
+      });
+    }
+  }, [activeDesignReviewRuns, activeId]);
+
+  useEffect(() => {
+    if (!activeId || !designReviewRunsHydrated) return;
+    const persistedIds = new Set(activeDesignReviewRuns.map((run) => run.id));
+    const activeCaptureId =
+      useDesignReviewStore.getState().automatic?.evidence.requestId;
+    for (const message of activeReviewMessages) {
+      const reviewJobId = message.metadata?.reviewJobId;
+      const status = message.metadata?.reviewSummary?.status;
+      if (
+        !reviewJobId ||
+        !status ||
+        !["capturing", "queued", "running", "fixing", "verifying"].includes(
+          status,
+        ) ||
+        persistedIds.has(reviewJobId) ||
+        activeCaptureId === reviewJobId ||
+        pendingAutomaticCaptureIds.has(reviewJobId)
+      ) {
+        continue;
+      }
+      updateAutomaticReviewActivity(activeId, reviewJobId, {
+        status: "interrupted",
+      });
+    }
+  }, [
+    activeDesignReviewRuns,
+    activeId,
+    activeReviewMessages,
+    designReviewRunsHydrated,
+  ]);
+
   const { updateFiles, deleteFile, renameFile, moveFile } = useFileOperations({
     setFiles,
     generatorRef,
@@ -552,7 +814,7 @@ export function useGenerator({
       options?: { timeoutMs?: number; signal?: AbortSignal },
     ) => {
       const provider = settings.localAgent.provider;
-      const preferences = settings.localAgent[provider];
+      const preferences = settings.localAgent.preferences[provider];
       const { runLocalUtilityText } =
         await import("../lib/local-agent/generator");
       return runLocalUtilityText(
@@ -668,7 +930,7 @@ export function useGenerator({
   const getGenerator = useCallback(async () => {
     const isLocalRuntime = settings.runtime === "localCli";
     const localProvider = settings.localAgent.provider;
-    const localPreferences = settings.localAgent[localProvider];
+    const localPreferences = settings.localAgent.preferences[localProvider];
     const currentApiType = settings.apiType;
     const currentApiKey = settings.apiKey;
     const currentApiBaseUrl = settings.apiBaseUrl;
@@ -680,6 +942,12 @@ export function useGenerator({
     )
       return null;
     if (isLocalRuntime) {
+      if (
+        webSearchSettings.engine === "builtin" &&
+        !localAgentSupportsNativeSearch(localProvider)
+      ) {
+        throw new Error(getT().settings.localCli.builtinSearchBlocked);
+      }
       const { supportsLocalAgents } = await import("../lib/local-agent/tauri");
       if (!(await supportsLocalAgents())) {
         throw new Error(
@@ -850,6 +1118,30 @@ export function useGenerator({
             expectedSystemId: appliedSystem?.id ?? null,
             skillContext: context.skillContext,
           });
+          const sourceConversation =
+            useConversationStore.getState().conversations[
+              generatorConversationId
+            ];
+          if (sourceConversation) {
+            void computeDesignReviewSourceDigest({
+              files: sourceConversation.files,
+              designSystem:
+                sourceConversation.designState?.appliedSystem ?? null,
+              designContract: contract,
+            })
+              .then((sourceDigest) => {
+                const runs =
+                  useDesignReviewStore.getState().runsByConversation[
+                    generatorConversationId
+                  ] ?? [];
+                for (const run of runs) {
+                  useDesignReviewStore
+                    .getState()
+                    .markRunFreshness(run.id, sourceDigest);
+                }
+              })
+              .catch(() => undefined);
+          }
           return JSON.stringify({ accepted: true, contract });
         },
         getDesignHealthContext: () => {
@@ -1707,23 +1999,62 @@ export function useGenerator({
         },
       );
       const applied = conversation.designState?.appliedSystem;
-      useDesignReviewStore.getState().requestAutomaticCapture({
-        requestId: crypto.randomUUID(),
-        conversationId: runConversationId,
-        phase,
-        originalRequest: options.automaticDesignOriginalRequest ?? prompt,
-        contract,
-        appliedSystem: applied
-          ? {
-              id: applied.id,
-              name: applied.name,
-              version: applied.version,
-              digest: applied.digest,
-            }
-          : null,
-        designReport,
-        healthReport,
-      });
+      const requestId =
+        options.automaticDesignReviewActivityId ?? crypto.randomUUID();
+      pendingAutomaticCaptureIds.add(requestId);
+      appendAutomaticReviewActivity(
+        runConversationId,
+        requestId,
+        phase === "verify" ? "verifying" : "capturing",
+      );
+      void computeDesignReviewSourceDigest({
+        files: result.files,
+        designSystem: applied ?? null,
+        designContract: contract,
+      })
+        .then((sourceDigest) => {
+          if (hasNewerGenuineUserMessage(runConversationId, requestId)) {
+            pendingAutomaticCaptureIds.delete(requestId);
+            updateAutomaticReviewActivity(runConversationId, requestId, {
+              status: "interrupted",
+            });
+            return;
+          }
+          const store = useDesignReviewStore.getState();
+          const previous = store.automatic?.evidence;
+          if (previous && previous.requestId !== requestId) {
+            updateAutomaticReviewActivity(
+              previous.conversationId,
+              previous.requestId,
+              { status: "interrupted" },
+            );
+          }
+          store.requestAutomaticCapture({
+            requestId,
+            conversationId: runConversationId,
+            sourceDigest,
+            phase,
+            originalRequest: options.automaticDesignOriginalRequest ?? prompt,
+            contract,
+            appliedSystem: applied
+              ? {
+                  id: applied.id,
+                  name: applied.name,
+                  version: applied.version,
+                  digest: applied.digest,
+                }
+              : null,
+            designReport,
+            healthReport,
+          });
+          pendingAutomaticCaptureIds.delete(requestId);
+        })
+        .catch(() => {
+          pendingAutomaticCaptureIds.delete(requestId);
+          updateAutomaticReviewActivity(runConversationId, requestId, {
+            status: "failed",
+          });
+        });
     },
     [],
   );
@@ -1737,7 +2068,16 @@ export function useGenerator({
       const runConversationId = useConversationStore.getState().activeId;
       if (!runConversationId) return;
       if (options.messageOrigin !== "design_auto_fix") {
-        useDesignReviewStore.getState().reset();
+        const reviewStore = useDesignReviewStore.getState();
+        const pendingAutomatic = reviewStore.automatic?.evidence;
+        if (pendingAutomatic) {
+          updateAutomaticReviewActivity(
+            pendingAutomatic.conversationId,
+            pendingAutomatic.requestId,
+            { status: "interrupted" },
+          );
+        }
+        reviewStore.reset();
       }
       const runEpoch = ++generationRunEpochRef.current;
       generatorRef.current?.abort();
@@ -1937,6 +2277,94 @@ export function useGenerator({
     useDesignReviewStore.getState().reset();
   }, [flushOutputBuffers, setIsGenerating]);
 
+  const withdrawLastUserMessage = useCallback((): WithdrawnUserDraft | null => {
+    const state = useConversationStore.getState();
+    const conversationId = state.activeId;
+    const conversation = conversationId
+      ? state.conversations[conversationId]
+      : undefined;
+    const withdrawableIndex = conversation
+      ? findWithdrawableUserMessageIndex(conversation.messages)
+      : null;
+    const lastMessage =
+      withdrawableIndex === null
+        ? undefined
+        : conversation?.messages[withdrawableIndex];
+    if (
+      !conversationId ||
+      !conversation ||
+      lastMessage?.role !== "user" ||
+      lastMessage.metadata?.origin
+    ) {
+      return null;
+    }
+
+    generationRunEpochRef.current += 1;
+    generatorConstructionEpochRef.current += 1;
+    generatorRef.current?.abort();
+    generatorRef.current = null;
+    generatorConfigRef.current = null;
+    runConversationIdRef.current = null;
+    forcedSkillsPromptRef.current = "";
+    customSystemPromptRef.current = "";
+    requestPromptContextRef.current = "";
+    baseCustomToolSetRef.current = {};
+    mcpRuntimeRef.current = null;
+    activeToolProfileRef.current = "default";
+    designContractControllerRef.current.reset({ enabled: false });
+    designRunInitialFilesRef.current = {};
+    clearOutputBuffers();
+    useInteractiveStore.getState().rejectAllPending("user message withdrawn");
+    useSubagentStore.setState({ progress: {} });
+
+    const removed = useConversationStore
+      .getState()
+      .withdrawLastUserMessage(conversationId);
+    if (!removed) return null;
+    const draft: WithdrawnUserDraft = {
+      content: userMessageTextForDraft(removed),
+      attachments: (removed.metadata?.attachments ?? []).map((attachment) => ({
+        ...attachment,
+      })),
+      forcedSkillIds: [...(removed.forcedSkillIds ?? [])],
+      ...(removed.metadata?.designSelection
+        ? { designSelection: { ...removed.metadata.designSelection } }
+        : {}),
+    };
+    const retainedMessages =
+      useConversationStore.getState().conversations[conversationId]?.messages ??
+      [];
+    if (
+      !retainedMessages.some(
+        (message) => message.role === "user" && !message.metadata?.origin,
+      )
+    ) {
+      useConversationStore
+        .getState()
+        .renameConversation(conversationId, DEFAULT_TITLE);
+    }
+    if (settings.runtime === "localCli") {
+      useConversationStore
+        .getState()
+        .setLocalAgentSessionForConversation(
+          conversationId,
+          settings.localAgent.provider,
+          undefined,
+        );
+    }
+
+    setLastError(null);
+    setIsThinkingStreaming(false);
+    setRunState("idle");
+    setIsGenerating(false);
+    return draft;
+  }, [
+    clearOutputBuffers,
+    setIsGenerating,
+    settings.localAgent.provider,
+    settings.runtime,
+  ]);
+
   const retry = useCallback(async () => {
     const runConversationId = useConversationStore.getState().activeId;
     if (!runConversationId) return;
@@ -2048,15 +2476,15 @@ export function useGenerator({
   const designReview = useCallback(
     async (
       screenshots: readonly DesignReviewScreenshot[],
-      options?: { automaticEvidence?: AutomaticDesignReviewEvidence },
+      options?: {
+        automaticEvidence?: AutomaticDesignReviewEvidence;
+        captureErrors?: readonly string[];
+        retryOf?: string;
+      },
     ) => {
-      if (runConversationIdRef.current !== null) {
-        useDesignReviewStore
-          .getState()
-          .fail("Wait for the active generation to finish before reviewing.");
-        return null;
-      }
-      const runConversationId = useConversationStore.getState().activeId;
+      const runConversationId =
+        options?.automaticEvidence?.conversationId ??
+        useConversationStore.getState().activeId;
       const conversation = runConversationId
         ? useConversationStore.getState().conversations[runConversationId]
         : undefined;
@@ -2071,161 +2499,109 @@ export function useGenerator({
         return null;
       }
       try {
+        // Capture the UI language before any async digest or queue work so a
+        // run/retry keeps one consistent report language.
+        const locale = getResolvedLocale();
         validateDesignReviewScreenshots(screenshots);
-      } catch (error) {
-        useDesignReviewStore
-          .getState()
-          .fail(error instanceof Error ? error.message : String(error));
-        return null;
-      }
-
-      const beforeFiles = { ...conversation.files };
-      const beforeMessages = [...conversation.messages];
-      let reviewGenerator: GenerationBackend | null = null;
-      let completedReport: DesignReviewReport | null = null;
-      runConversationIdRef.current = runConversationId;
-      setRunState("preparing");
-      setLastError(null);
-      setIsThinkingStreaming(false);
-      setIsGenerating(true);
-      useDesignReviewStore.getState().setStatus("reviewing");
-      try {
-        const generator = await getGenerator();
-        if (!generator) {
-          throw new Error(
-            "Configure an AI model before running Design Review.",
-          );
-        }
-        reviewGenerator = generator;
-        if (!isCurrentGeneratorRun(runConversationId)) return;
-        // Review receives only its screenshots plus a bounded text-only
-        // requirements extract. Historical attachments, tool traffic, and
-        // resumable Local CLI sessions remain outside this isolated run.
-        generator.syncMessages([]);
-        await applyDynamicGeneratorState(generator, [], {
-          includeMcp: false,
-          mode: "chat",
-          workspaceMode: "auto",
-          profile: "design_review",
-          customSystemPromptSnapshot: "",
-        });
-        generator.setSystemPromptSuffix(
-          DESIGN_REVIEW_SYSTEM_SUFFIX +
-            buildDesignReviewRequirementsContext(conversation.messages) +
-            buildDesignReviewSemanticContext(screenshots) +
-            (options?.automaticEvidence
-              ? buildAutomaticDesignReviewContext(options.automaticEvidence)
-              : ""),
-        );
-        if (!isCurrentGeneratorRun(runConversationId)) return;
-
-        setMessages((previous) => [
-          ...removeErrorMessages(previous),
-          {
-            role: "user",
-            content: DESIGN_REVIEW_REQUEST,
-            metadata: { origin: "design_review" },
-          },
-        ]);
-        const attachments: ResolvedAttachment[] = screenshots.map(
-          (screenshot, index) => ({
-            id: `design-review-${runConversationId}-${index}`,
-            type: "image",
-            name:
-              screenshot.name
-                ?.replace(/[\u0000-\u001f\u007f<>]/g, " ")
-                .replace(/\s+/g, " ")
-                .trim()
-                .slice(0, 160) || `screenshot-${index + 1}.png`,
-            mimeType: screenshot.mimeType ?? "image/png",
-            size: Math.max(
-              1,
-              getDesignReviewScreenshotByteLength(screenshot.dataUrl),
-            ),
-            content: screenshot.dataUrl,
+        const contract =
+          options?.automaticEvidence?.contract ??
+          designContractControllerRef.current.getContract();
+        const files = { ...conversation.files };
+        const [sourceDigest, sourceProjectDigest] = await Promise.all([
+          computeDesignReviewSourceDigest({
+            files,
+            designSystem: conversation.designState?.appliedSystem ?? null,
+            designContract: contract,
           }),
-        );
-        setRunState("streaming");
-        await generator.generate(DESIGN_REVIEW_REQUEST, attachments);
-
-        if (!sameProjectFiles(beforeFiles, generator.getFiles())) {
-          generator.setFiles(beforeFiles);
-          setFiles(beforeFiles);
-          throw new Error(
-            "Design Review attempted to change project files; all changes were discarded.",
+          computeDesignReviewSourceDigest({
+            files,
+            designSystem: conversation.designState?.appliedSystem ?? null,
+            designContract: null,
+          }),
+        ]);
+        const provider: DesignReviewJobInput["provider"] =
+          settings.runtime === "localCli"
+            ? {
+                runtime: "local",
+                config: {
+                  provider: settings.localAgent.provider,
+                  model:
+                    settings.localAgent.preferences[
+                      settings.localAgent.provider
+                    ].model,
+                  effort:
+                    settings.localAgent.preferences[
+                      settings.localAgent.provider
+                    ].effort,
+                },
+              }
+            : {
+                runtime: "api",
+                config: {
+                  apiType: settings.apiType,
+                  apiBaseUrl: settings.apiBaseUrl,
+                  apiKey: settings.apiKey,
+                  model: settings.model,
+                },
+              };
+        const input: DesignReviewJobInput = {
+          conversationId: runConversationId,
+          kind: options?.automaticEvidence ? "automatic" : "manual",
+          locale,
+          phase: options?.automaticEvidence?.phase ?? "initial",
+          sourceDigest,
+          sourceProjectDigest,
+          files,
+          screenshots,
+          provider,
+          requirementsMessages: [...conversation.messages],
+          automaticEvidence: options?.automaticEvidence,
+          captureErrors:
+            options?.captureErrors ??
+            useDesignReviewStore.getState().captureErrors,
+        };
+        const { designReviewJobRunner } =
+          await import("../lib/design/review-jobs/runner");
+        const run = options?.retryOf
+          ? designReviewJobRunner.retry(options.retryOf, input)
+          : designReviewJobRunner.start(input);
+        reviewContractByRunIdRef.current.set(run.id, contract);
+        useDesignReviewStore.getState().selectRun(runConversationId, run.id);
+        if (options?.automaticEvidence) {
+          updateAutomaticReviewActivity(
+            runConversationId,
+            options.automaticEvidence.requestId,
+            {
+              status:
+                options.automaticEvidence.phase === "verify"
+                  ? "verifying"
+                  : "queued",
+            },
+            run.id,
           );
         }
-        if (useDesignReviewStore.getState().status !== "complete") {
-          throw new Error(
-            "The model did not submit a structured Design review.",
-          );
-        }
-        completedReport = useDesignReviewStore.getState().report ?? null;
+        return run;
       } catch (error) {
-        if (!isCurrentGeneratorRun(runConversationId)) return;
         const message = error instanceof Error ? error.message : String(error);
         useDesignReviewStore.getState().fail(message);
-        if (
-          !options?.automaticEvidence &&
-          (error as { name?: string })?.name !== "AbortError"
-        ) {
-          appendGenerationError(error);
-        }
-      } finally {
-        if (isCurrentGeneratorRun(runConversationId)) {
-          if (
-            reviewGenerator &&
-            !sameProjectFiles(beforeFiles, reviewGenerator.getFiles())
-          ) {
-            reviewGenerator.setFiles(beforeFiles);
-            setFiles(beforeFiles);
-          }
-          // The review result belongs to the dedicated review card. Keep its
-          // screenshots, tool traffic, and prose out of the normal chat.
-          setMessages(beforeMessages);
-          setIsGenerating(false);
-          setIsThinkingStreaming(false);
-          setRunState((state) =>
-            state === "error" || state === "aborted" ? state : "idle",
+        if (options?.automaticEvidence) {
+          updateAutomaticReviewActivity(
+            runConversationId,
+            options.automaticEvidence.requestId,
+            { status: "failed" },
           );
-          if (settings.runtime === "localCli") {
-            useConversationStore
-              .getState()
-              .setLocalAgentSessionForConversation(
-                runConversationId,
-                settings.localAgent.provider,
-                undefined,
-              );
-          }
-          // Discard the restricted review backend so the next Design turn is
-          // rebuilt with its normal tools and cannot resume screenshot context.
-          generatorConstructionEpochRef.current += 1;
-          generatorRef.current?.abort();
-          generatorRef.current = null;
-          generatorConfigRef.current = null;
-          baseCustomToolSetRef.current = {};
-          mcpRuntimeRef.current = null;
-          activeToolProfileRef.current = "default";
-          clearOutputBuffers();
-          forcedSkillsPromptRef.current = "";
-          customSystemPromptRef.current = "";
-          requestPromptContextRef.current = "";
-          runConversationIdRef.current = null;
         }
+        return null;
       }
-      return completedReport;
     },
     [
-      appendGenerationError,
-      applyDynamicGeneratorState,
-      clearOutputBuffers,
-      getGenerator,
-      isCurrentGeneratorRun,
+      settings.apiBaseUrl,
+      settings.apiKey,
+      settings.apiType,
+      settings.localAgent.preferences,
       settings.localAgent.provider,
+      settings.model,
       settings.runtime,
-      setFiles,
-      setIsGenerating,
-      setMessages,
     ],
   );
 
@@ -2235,16 +2611,9 @@ export function useGenerator({
       evidence: AutomaticDesignReviewEvidence,
       captureErrors: readonly string[] = [],
     ) => {
-      const state = useConversationStore.getState();
-      const conversation = state.conversations[evidence.conversationId];
-      if (
-        state.activeId !== evidence.conversationId ||
-        !conversation ||
-        useDesignReviewStore.getState().automatic?.evidence.requestId !==
-          evidence.requestId
-      ) {
-        return;
-      }
+      const conversation =
+        useConversationStore.getState().conversations[evidence.conversationId];
+      if (!conversation) return;
 
       const runtimeSnapshots = screenshots.flatMap((screenshot) =>
         screenshot.semanticSnapshot ? [screenshot.semanticSnapshot] : [],
@@ -2298,94 +2667,140 @@ export function useGenerator({
       };
 
       useDesignReviewStore.getState().setAutomaticStage("reviewing");
-      const report = await designReview(screenshots, {
+      const startedRun = await designReview(screenshots, {
         automaticEvidence: enrichedEvidence,
+        captureErrors,
       });
-      if (
-        useDesignReviewStore.getState().automatic?.evidence.requestId !==
-        evidence.requestId
-      ) {
-        return;
+      if (!startedRun) return;
+      const completedRun = await waitForDesignReviewRun(startedRun.id);
+      if (!completedRun) return;
+      const report = completedRun.report ?? {
+        overview: "Visual review unavailable.",
+        findings: [],
+      };
+      const currentConversation =
+        useConversationStore.getState().conversations[evidence.conversationId];
+      const currentDigest = currentConversation
+        ? await computeDesignReviewSourceDigest({
+            files: currentConversation.files,
+            designSystem:
+              currentConversation.designState?.appliedSystem ?? null,
+            designContract: evidence.contract,
+          })
+        : null;
+      const fresh = currentDigest === completedRun.sourceDigest;
+      if (currentDigest) {
+        useDesignReviewStore
+          .getState()
+          .markRunFreshness(completedRun.id, currentDigest);
       }
-      if (!report) {
-        const fallbackScope = selectAutomaticDesignRepairScope(
-          enrichedEvidence,
-          { overview: "Visual review unavailable.", findings: [] },
-        );
-        if (shouldRunAutomaticDesignRepair(evidence.phase, fallbackScope)) {
-          useDesignReviewStore.getState().setAutomaticStage("fixing");
-          await generate(
-            buildAutomaticDesignRepairPrompt(enrichedEvidence, fallbackScope),
-            undefined,
-            {
-              skipAutoQa: true,
-              forcedSkillIds: requiredSkillsForContract(evidence.contract),
-              reusableDesignContract: evidence.contract,
-              automaticDesignReviewPhase: "verify",
-              automaticDesignOriginalRequest: evidence.originalRequest,
-              messageOrigin: "design_auto_fix",
-            },
-          );
-          const automatic = useDesignReviewStore.getState().automatic;
-          if (
-            useConversationStore.getState().activeId ===
-              evidence.conversationId &&
-            automatic?.evidence.phase !== "verify"
-          ) {
-            useDesignReviewStore
-              .getState()
-              .failAutomatic(
-                "The static fallback repair did not reach its single verification pass.",
-              );
-          }
-        } else if (
-          useConversationStore.getState().activeId === evidence.conversationId
+      updateAutomaticReviewActivity(evidence.conversationId, completedRun.id, {
+        status: completedRun.status,
+        findingCount: completedRun.report?.findings.length ?? 0,
+        stale: !fresh,
+      });
+
+      if (evidence.phase === "verify") {
+        if (
+          useDesignReviewStore.getState().automatic?.evidence.requestId ===
+          evidence.requestId
         ) {
           useDesignReviewStore
             .getState()
-            .failAutomatic(
-              useDesignReviewStore.getState().error ??
-                "Automatic Design review did not produce a report. Static checks remain available.",
+            .finishAutomatic(
+              completedRun.status === "succeeded" &&
+                hasRemainingAutomaticDesignIssues(enrichedEvidence, report),
             );
         }
         return;
       }
 
       const scope = selectAutomaticDesignRepairScope(enrichedEvidence, report);
-      if (shouldRunAutomaticDesignRepair(evidence.phase, scope)) {
-        useDesignReviewStore.getState().setAutomaticStage("fixing");
-        await generate(
-          buildAutomaticDesignRepairPrompt(enrichedEvidence, scope),
-          undefined,
-          {
-            skipAutoQa: true,
-            forcedSkillIds: requiredSkillsForContract(evidence.contract),
-            reusableDesignContract: evidence.contract,
-            automaticDesignReviewPhase: "verify",
-            automaticDesignOriginalRequest: evidence.originalRequest,
-            messageOrigin: "design_auto_fix",
-          },
-        );
-        const automatic = useDesignReviewStore.getState().automatic;
+      if (!shouldRunAutomaticDesignRepair(evidence.phase, scope)) {
         if (
-          useConversationStore.getState().activeId ===
-            evidence.conversationId &&
-          automatic?.evidence.phase !== "verify"
+          useDesignReviewStore.getState().automatic?.evidence.requestId ===
+          evidence.requestId
         ) {
-          useDesignReviewStore
-            .getState()
-            .failAutomatic(
-              "The automatic repair did not reach its single verification pass. Static results remain available.",
-            );
+          useDesignReviewStore.getState().finishAutomatic(false);
+        }
+        return;
+      }
+      const safeToRepair = canEnterAutomaticDesignRepair({
+        fresh,
+        activeConversation:
+          useConversationStore.getState().activeId === evidence.conversationId,
+        currentReview:
+          useDesignReviewStore.getState().automatic?.evidence.requestId ===
+          evidence.requestId,
+        chatIdle: runConversationIdRef.current === null,
+        hasNewerUserRequest: hasNewerGenuineUserMessage(
+          evidence.conversationId,
+          completedRun.id,
+        ),
+      });
+      if (!safeToRepair) {
+        if (
+          useDesignReviewStore.getState().automatic?.evidence.requestId ===
+          evidence.requestId
+        ) {
+          useDesignReviewStore.getState().finishAutomatic(false);
         }
         return;
       }
 
+      updateAutomaticReviewActivity(evidence.conversationId, completedRun.id, {
+        status: "fixing",
+        findingCount: report.findings.length,
+      });
+      const trackFixingOnRun =
+        completedRun.status === "succeeded" &&
+        completedRun.report !== undefined;
+      if (trackFixingOnRun) {
+        useDesignReviewStore
+          .getState()
+          .updateRunStatus(completedRun.id, "fixing");
+      }
       useDesignReviewStore
         .getState()
-        .finishAutomatic(
-          hasRemainingAutomaticDesignIssues(enrichedEvidence, report),
+        .appendRunLog(
+          completedRun.id,
+          createDesignReviewLogEntry(
+            "fixing",
+            "Automatic repair entered the foreground write queue.",
+            { level: "info" },
+          ),
         );
+      useDesignReviewStore.getState().setAutomaticStage("fixing");
+      await generate(
+        buildAutomaticDesignRepairPrompt(enrichedEvidence, scope),
+        undefined,
+        {
+          skipAutoQa: true,
+          forcedSkillIds: requiredSkillsForContract(evidence.contract),
+          reusableDesignContract: evidence.contract,
+          automaticDesignReviewPhase: "verify",
+          automaticDesignOriginalRequest: evidence.originalRequest,
+          automaticDesignReviewActivityId: completedRun.id,
+          messageOrigin: "design_auto_fix",
+        },
+      );
+      if (trackFixingOnRun && completedRun.report) {
+        useDesignReviewStore
+          .getState()
+          .completeRun(completedRun.id, completedRun.report);
+      }
+      const activity = useConversationStore
+        .getState()
+        .conversations[evidence.conversationId]?.messages.find(
+          (message) => message.metadata?.reviewJobId === completedRun.id,
+        );
+      if (activity?.metadata?.reviewSummary?.status === "fixing") {
+        updateAutomaticReviewActivity(
+          evidence.conversationId,
+          completedRun.id,
+          { status: "interrupted" },
+        );
+      }
     },
     [designReview, generate],
   );
@@ -2393,19 +2808,41 @@ export function useGenerator({
   const automaticDesignReviewUnavailable = useCallback(
     async (evidence: AutomaticDesignReviewEvidence, message: string) => {
       const state = useConversationStore.getState();
-      if (
-        state.activeId !== evidence.conversationId ||
-        !state.conversations[evidence.conversationId] ||
-        useDesignReviewStore.getState().automatic?.evidence.requestId !==
-          evidence.requestId
-      ) {
-        return;
-      }
+      const conversation = state.conversations[evidence.conversationId];
+      if (!conversation) return;
       const scope = selectAutomaticDesignRepairScope(evidence, {
         overview: "Visual review unavailable.",
         findings: [],
       });
-      if (shouldRunAutomaticDesignRepair(evidence.phase, scope)) {
+      const currentDigest = await computeDesignReviewSourceDigest({
+        files: conversation.files,
+        designSystem: conversation.designState?.appliedSystem ?? null,
+        designContract: evidence.contract,
+      });
+      const fresh = Boolean(
+        evidence.sourceDigest && currentDigest === evidence.sourceDigest,
+      );
+      const safeToRepair = canEnterAutomaticDesignRepair({
+        fresh,
+        activeConversation: state.activeId === evidence.conversationId,
+        currentReview:
+          useDesignReviewStore.getState().automatic?.evidence.requestId ===
+          evidence.requestId,
+        chatIdle: runConversationIdRef.current === null,
+        hasNewerUserRequest: hasNewerGenuineUserMessage(
+          evidence.conversationId,
+          evidence.requestId,
+        ),
+      });
+      if (
+        shouldRunAutomaticDesignRepair(evidence.phase, scope) &&
+        safeToRepair
+      ) {
+        updateAutomaticReviewActivity(
+          evidence.conversationId,
+          evidence.requestId,
+          { status: "fixing" },
+        );
         useDesignReviewStore.getState().setAutomaticStage("fixing");
         await generate(
           buildAutomaticDesignRepairPrompt(evidence, scope),
@@ -2416,14 +2853,20 @@ export function useGenerator({
             reusableDesignContract: evidence.contract,
             automaticDesignReviewPhase: "verify",
             automaticDesignOriginalRequest: evidence.originalRequest,
+            automaticDesignReviewActivityId: evidence.requestId,
             messageOrigin: "design_auto_fix",
           },
         );
-        const automatic = useDesignReviewStore.getState().automatic;
-        if (automatic?.evidence.phase === "verify") return;
+        return;
       }
+      updateAutomaticReviewActivity(
+        evidence.conversationId,
+        evidence.requestId,
+        { status: "failed", stale: !fresh },
+      );
       if (
-        useConversationStore.getState().activeId === evidence.conversationId
+        useDesignReviewStore.getState().automatic?.evidence.requestId ===
+        evidence.requestId
       ) {
         useDesignReviewStore.getState().failAutomatic(message);
       }
@@ -2492,6 +2935,7 @@ export function useGenerator({
   return {
     generate,
     stop,
+    withdrawLastUserMessage,
     retry,
     continueTask,
     updateFiles,

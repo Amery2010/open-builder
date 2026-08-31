@@ -31,6 +31,9 @@ const projectFiles = {
       body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--font-body); }
       main { min-height: 100vh; display: grid; place-items: center; }
       h1 { color: var(--accent); font: 700 56px/1 var(--font-display); }
+      section { padding: 24px; }
+      h2 { font: 600 24px/1.2 var(--font-display); }
+      img { display: block; width: 48px; height: 48px; }
       button { border: 0; border-radius: var(--radius-md); padding: 12px 18px; background: var(--accent); color: var(--accent-on); }
     </style>
     <title>Design fixture</title>
@@ -39,7 +42,14 @@ const projectFiles = {
     <main data-ob-id="hero">
       <section data-ob-id="hero-content">
         <h1 data-ob-id="hero-title">Hero title</h1>
+        <h2 id="fine-grained-heading">Fine-grained heading</h2>
+        <img id="fine-grained-image" alt="Independent preview" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='48' height='48'%3E%3Crect width='48' height='48' fill='%236541f5'/%3E%3C/svg%3E" />
         <button data-ob-id="hero-cta" aria-label="Start building">Start building</button>
+        <button data-ob-id="icon-action" aria-label="Icon action">
+          <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true">
+            <path id="decorative-icon-path" d="M4 12h16M12 4v16" fill="none" stroke="currentColor" stroke-width="2" />
+          </svg>
+        </button>
       </section>
     </main>
   </body>
@@ -159,6 +169,37 @@ test("point-selects a real Sandpack element, previews tokens, and keeps Bridge o
     "Editing Hero title",
   );
   await expect(page.getByText("hero-title", { exact: true })).toBeVisible();
+
+  await page
+    .getByRole("button", { name: "Select an element in the preview" })
+    .click();
+  await frame.locator("#fine-grained-heading").click();
+  await expect(page.getByLabel("Selected preview element")).toContainText(
+    "Editing Fine-grained heading",
+  );
+  await expect(
+    page.getByText("hero-content › h2:nth-of-type(1)", { exact: true }),
+  ).toBeVisible();
+
+  await page
+    .getByRole("button", { name: "Select an element in the preview" })
+    .click();
+  await frame.locator("#fine-grained-image").click();
+  await expect(page.getByLabel("Selected preview element")).toContainText(
+    "Editing Independent preview",
+  );
+  await expect(
+    page.getByText("hero-content › img:nth-of-type(1)", { exact: true }),
+  ).toBeVisible();
+
+  await page
+    .getByRole("button", { name: "Select an element in the preview" })
+    .click();
+  await frame.locator("#decorative-icon-path").click();
+  await expect(page.getByLabel("Selected preview element")).toContainText(
+    "Editing Icon action",
+  );
+  await expect(page.getByText("icon-action", { exact: true })).toBeVisible();
 
   await page.getByRole("button", { name: "Tablet" }).click();
   await expect(page.getByRole("button", { name: "Tablet" })).toHaveAttribute(

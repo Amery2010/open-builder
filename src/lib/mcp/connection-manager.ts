@@ -40,6 +40,8 @@ import {
   validateMcpServerEntry,
 } from "./validation";
 import { recordPermissionActivity } from "../security/activity-log";
+import { getT } from "../../i18n";
+import { requestConfirmation } from "../confirmation";
 import { validateMcpToolInput } from "./tool-input-validator";
 import {
   assertMcpLifecycleCurrent,
@@ -65,11 +67,14 @@ export interface PrepareMcpRuntimeOptions {
   includeMcp?: boolean;
 }
 
-function confirmIssuerOrigin(origin: string): boolean {
-  if (typeof window === "undefined") return false;
-  return window.confirm(
-    `This MCP server wants to contact a different OAuth origin:\n\n${origin}\n\nAllow this origin for this server?`,
-  );
+async function confirmIssuerOrigin(origin: string): Promise<boolean> {
+  const t = getT().approvals;
+  return requestConfirmation({
+    title: t.mcpIssuerHeader,
+    message: t.mcpIssuerQuestion.replace("{origin}", () => origin),
+    confirmLabel: t.approveOnce,
+    cancelLabel: t.deny,
+  });
 }
 
 function platformFromCapabilities(
@@ -146,7 +151,7 @@ export class McpConnectionManager {
     const approveOrigin = async (candidate: string): Promise<boolean> => {
       assertMcpLifecycleCurrent(lifecycleEpoch);
       if (approvedOrigins.has(candidate)) return true;
-      if (!confirmIssuerOrigin(candidate)) return false;
+      if (!(await confirmIssuerOrigin(candidate))) return false;
       approvedOrigins.add(candidate);
       if (capabilities.remoteStreaming) {
         await setTauriMcpRemotePolicy(

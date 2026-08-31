@@ -1,6 +1,7 @@
 import type { Conversation, Message, ProjectFiles } from "../../types";
 import {
   isErrorMessage,
+  isUiOnlyMessage,
   messagesForConversationContinuation,
 } from "../ai/conversation-context";
 import { filterMemoryMessages } from "../utils/memory-filter";
@@ -79,12 +80,23 @@ export async function computeConversationFingerprint(
     "messages" | "files" | "compressedContext" | "template"
   >,
 ): Promise<string> {
+  const compressedContext = conversation.compressedContext
+    ? {
+        ...conversation.compressedContext,
+        fromIndex:
+          conversation.compressedContext.fromIndex -
+          conversation.messages
+            .slice(0, conversation.compressedContext.fromIndex)
+            .filter(isUiOnlyMessage).length,
+      }
+    : undefined;
   const payload = {
     version: 1,
     template: conversation.template,
-    compressedContext: conversation.compressedContext,
+    compressedContext,
     messages: filterMemoryMessages(conversation.messages)
       .filter((message) => !isErrorMessage(message))
+      .filter((message) => !isUiOnlyMessage(message))
       .map(fingerprintMessage),
     files: await fingerprintFiles(conversation.files),
   };

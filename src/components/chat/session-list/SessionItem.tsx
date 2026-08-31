@@ -8,7 +8,7 @@ import {
   Pin,
   Archive,
   Sparkles,
-  Library,
+  LayoutTemplate,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -19,6 +19,7 @@ import {
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
+import { requestConfirmation } from "@/lib/confirmation";
 import { formatDeleteConfirmation } from "@/lib/utils/delete-confirmation";
 import { useT } from "../../../i18n";
 import type { Conversation } from "../../../types";
@@ -89,11 +90,18 @@ export const SessionItem = memo(function SessionItem({
     if (e.key === "Escape") cancelEdit();
   };
 
-  const confirmDelete = () => {
+  const confirmDelete = async () => {
     if (
-      window.confirm(
-        formatDeleteConfirmation(t.sessions.deleteConfirm, displayTitle(conv)),
-      )
+      await requestConfirmation({
+        title: t.sessions.delete,
+        message: formatDeleteConfirmation(
+          t.sessions.deleteConfirm,
+          displayTitle(conv),
+        ),
+        confirmLabel: t.sessions.delete,
+        cancelLabel: t.sessions.cancelEdit,
+        destructive: true,
+      })
     ) {
       onDelete(conv.id);
     }
@@ -215,7 +223,7 @@ export const SessionItem = memo(function SessionItem({
                 onSelect={() => onSaveAsTemplate(conv.id)}
                 disabled={!canSaveAsTemplate}
               >
-                <Library size={14} />
+                <LayoutTemplate size={14} />
                 {t.sessions.templates.saveAs}
               </DropdownMenuItem>
               <DropdownMenuSeparator />

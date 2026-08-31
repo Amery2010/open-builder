@@ -3,6 +3,7 @@ import type { DesignReviewReport } from "./review";
 import {
   buildAutomaticDesignRepairPrompt,
   buildAutomaticDesignReviewContext,
+  canEnterAutomaticDesignRepair,
   hasRemainingAutomaticDesignIssues,
   requiredSkillsForContract,
   selectAutomaticDesignRepairScope,
@@ -206,5 +207,28 @@ describe("automatic Design review policy", () => {
     expect(shouldRequestAutomaticDesignReview([], "verify")).toBe(true);
     expect(shouldRunAutomaticDesignRepair("initial", scope)).toBe(true);
     expect(shouldRunAutomaticDesignRepair("verify", scope)).toBe(false);
+  });
+
+  it("never enters the write queue while chat is busy or a newer request exists", () => {
+    const safe = {
+      fresh: true,
+      activeConversation: true,
+      currentReview: true,
+      chatIdle: true,
+      hasNewerUserRequest: false,
+    };
+    expect(canEnterAutomaticDesignRepair(safe)).toBe(true);
+    expect(canEnterAutomaticDesignRepair({ ...safe, chatIdle: false })).toBe(
+      false,
+    );
+    expect(
+      canEnterAutomaticDesignRepair({
+        ...safe,
+        hasNewerUserRequest: true,
+      }),
+    ).toBe(false);
+    expect(canEnterAutomaticDesignRepair({ ...safe, fresh: false })).toBe(
+      false,
+    );
   });
 });

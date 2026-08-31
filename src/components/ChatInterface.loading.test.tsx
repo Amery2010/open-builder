@@ -1,9 +1,12 @@
 // @vitest-environment jsdom
 
 import { act, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { axe } from "vitest-axe";
 import { useInteractiveStore } from "../store/interactive";
 import { useSettingsStore } from "../store/settings";
+import { TooltipProvider } from "./ui/tooltip";
 import { ChatInterface } from "./ChatInterface";
 
 vi.mock("@tanstack/react-virtual", () => ({
@@ -14,8 +17,12 @@ vi.mock("@tanstack/react-virtual", () => ({
   }),
 }));
 
-vi.mock("./chat/ChatHeader", () => ({ ChatHeader: () => null }));
-vi.mock("./chat/ChatInput", () => ({ ChatInput: () => null }));
+vi.mock("./chat/ChatHeader", () => ({
+  ChatHeader: () => <button type="button">Header action</button>,
+}));
+vi.mock("./chat/ChatInput", () => ({
+  ChatInput: () => <button type="button">Send message</button>,
+}));
 vi.mock("./chat/EmptyState", () => ({ EmptyState: () => null }));
 
 const baseProps = {
@@ -87,5 +94,52 @@ describe("ChatInterface generation loading", () => {
       useInteractiveStore.getState().resolvePlan("plan-1", { approved: true });
     });
     expect(screen.getByRole("status")).toHaveTextContent("Thinking…");
+  });
+
+  it("owns the chat pane while a questionnaire is pending", async () => {
+    const user = userEvent.setup();
+    const onStop = vi.fn(() =>
+      useInteractiveStore.getState().rejectAllPending("stopped"),
+    );
+    const pending = useInteractiveStore
+      .getState()
+      .askQuestion({
+        toolCallId: "question-1",
+        questions: [
+          {
+            header: "Scope",
+            question: "Which scope?",
+            multiSelect: false,
+            options: [{ label: "Current", description: "Current page" }],
+          },
+        ],
+      })
+      .catch(() => undefined);
+    const { container } = render(
+      <TooltipProvider>
+        <ChatInterface {...baseProps} onStop={onStop} />
+      </TooltipProvider>,
+    );
+
+    const dialog = screen.getByRole("dialog", {
+      name: "AI Has a Question",
+    });
+    expect(dialog).toBeVisible();
+    expect(container.querySelector(".contents")).toHaveAttribute("inert");
+    expect(screen.getByRole("button", { name: "Header action" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Send message" })).toBeVisible();
+    expect(
+      (
+        await axe(container, {
+          rules: { "color-contrast": { enabled: false } },
+        })
+      ).violations,
+    ).toEqual([]);
+
+    await user.click(dialog);
+    expect(onStop).not.toHaveBeenCalled();
+    await user.keyboard("{Escape}");
+    expect(onStop).toHaveBeenCalledOnce();
+    await pending;
   });
 });

@@ -23,6 +23,7 @@ import {
   AskUserQuestionCard,
 } from "./AskUserQuestionCard";
 import { SubagentCallCard } from "./SubagentCallCard";
+import { DesignReviewActivityBlock } from "./DesignReviewActivityBlock";
 import { useT } from "../../i18n";
 import { useInteractiveStore } from "../../store/interactive";
 import type {
@@ -58,6 +59,11 @@ interface MessageBubbleProps {
   onOpenSettings?: () => void;
   onCompressContext?: () => void;
   onHealthCheck?: () => void;
+  /** Render the one-shot withdrawal affordance for the final genuine user
+   *  message. The owner performs the atomic removal and draft restoration. */
+  canWithdraw?: boolean;
+  onWithdraw?: () => void;
+  withdrawLabel?: string;
 }
 
 function StoredAttachmentImage({ block }: { block: ImageBlock }) {
@@ -98,9 +104,20 @@ export const MessageBubble = memo(function MessageBubble({
   onOpenSettings,
   onCompressContext,
   onHealthCheck,
+  canWithdraw = false,
+  onWithdraw,
+  withdrawLabel = "Withdraw",
 }: MessageBubbleProps) {
   const t = useT();
   const pendingInteractions = useInteractiveStore((state) => state.pending);
+  if (message.reviewJobId) {
+    return (
+      <DesignReviewActivityBlock
+        reviewJobId={message.reviewJobId}
+        summary={message.reviewSummary}
+      />
+    );
+  }
   if (message.role === "user") {
     const textBlocks = message.blocks.filter(
       (b): b is TextBlock => b.type === "text",
@@ -136,7 +153,7 @@ export const MessageBubble = memo(function MessageBubble({
     }
 
     return (
-      <div className="flex justify-end">
+      <div className="flex flex-col items-end gap-1">
         <div className="bg-secondary px-4 py-2.5 rounded-2xl rounded-tr-sm max-w-[80%]">
           {imageBlocks.length > 0 && (
             <div className="flex gap-2 flex-wrap mb-2">
@@ -179,6 +196,17 @@ export const MessageBubble = memo(function MessageBubble({
             />
           )}
         </div>
+        {canWithdraw && !message.origin && onWithdraw && (
+          <button
+            type="button"
+            onClick={onWithdraw}
+            aria-label={withdrawLabel}
+            className="flex items-center gap-1 px-1 text-xs text-muted-foreground transition-colors hover:text-foreground cursor-pointer"
+          >
+            <Undo2 className="size-3.5" aria-hidden="true" />
+            <span>{withdrawLabel}</span>
+          </button>
+        )}
       </div>
     );
   }

@@ -24,6 +24,15 @@ describe("Design mode design-system context", () => {
     expect(DESIGN_MODE_SYSTEM_SUFFIX).toContain("one automatic repair");
   });
 
+  it("requires stable selection ids on independently editable content", () => {
+    expect(DESIGN_MODE_SYSTEM_SUFFIX).toContain(
+      "independently editable headings, body copy, and media",
+    );
+    expect(DESIGN_MODE_SYSTEM_SUFFIX).toContain(
+      "stable semantic suffixes, not array indexes",
+    );
+  });
+
   it("records an AI none decision without inventing a selected system", () => {
     const context = buildDesignSystemContext({
       recommendation: {

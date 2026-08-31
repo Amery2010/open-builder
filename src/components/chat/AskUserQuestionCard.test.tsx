@@ -291,6 +291,29 @@ describe("AskUserQuestionCard", () => {
     });
   });
 
+  it("exposes a questionnaire-only close action", async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    const answerPromise = useInteractiveStore.getState().askQuestion({
+      toolCallId: "questionnaire-close",
+      questions: [questions[0]],
+    });
+    render(
+      <AskUserQuestionCard
+        toolCallId="questionnaire-close"
+        questions={[questions[0]]}
+        onClose={onClose}
+        closeLabel="Close question"
+      />,
+      { wrapper: TooltipProvider },
+    );
+
+    await user.click(screen.getByRole("button", { name: "Close question" }));
+    expect(onClose).toHaveBeenCalledOnce();
+    useInteractiveStore.getState().rejectAllPending("test cleanup");
+    await expect(answerPromise).rejects.toMatchObject({ name: "AbortError" });
+  });
+
   it("renders one right-aligned answer summary with short headers", () => {
     render(
       <AskUserAnswerSummary

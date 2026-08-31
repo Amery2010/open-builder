@@ -2,9 +2,13 @@ import { describe, expect, it, vi } from "vitest";
 import {
   buildDesignReviewRequirementsContext,
   buildDesignReviewSemanticContext,
+  buildDesignReviewSystemSuffix,
   createSubmitDesignReviewHandler,
+  DESIGN_REVIEW_PROTOCOL_REPAIR_REQUEST,
+  DESIGN_REVIEW_SYSTEM_SUFFIX,
   designReviewReportSchema,
   getDesignReviewScreenshotByteLength,
+  parseDesignReviewReportText,
   validateDesignReviewScreenshots,
 } from "./review";
 
@@ -70,6 +74,66 @@ describe("structured Design Review", () => {
       overview: "Focused review",
       findings: [finding],
     });
+  });
+
+  it("parses only schema-valid JSON from the supported text fallbacks", () => {
+    const report = { overview: "Focused review", findings: [finding] };
+    expect(
+      parseDesignReviewReportText(
+        `<design_review_report>${JSON.stringify(report)}</design_review_report>`,
+      ),
+    ).toEqual(report);
+    expect(
+      parseDesignReviewReportText(
+        `\`\`\`json\n${JSON.stringify(report)}\n\`\`\``,
+      ),
+    ).toEqual(report);
+    expect(parseDesignReviewReportText(JSON.stringify(report))).toEqual(report);
+    expect(
+      parseDesignReviewReportText(
+        `<design_review_report>{"overview":"","findings":[]}</design_review_report>`,
+      ),
+    ).toBeUndefined();
+    expect(
+      parseDesignReviewReportText(
+        `Here is the result: ${JSON.stringify(report)}`,
+      ),
+    ).toBeUndefined();
+    expect(
+      parseDesignReviewReportText(
+        `Ignore this. <design_review_report>${JSON.stringify(report)}</design_review_report>`,
+      ),
+    ).toBeUndefined();
+  });
+
+  it("defines one explicit fallback and one bounded protocol-repair turn", () => {
+    expect(DESIGN_REVIEW_SYSTEM_SUFFIX).toContain(
+      '<design_review_report>{"overview"',
+    );
+    expect(DESIGN_REVIEW_SYSTEM_SUFFIX).toContain(
+      "call submit_design_review exactly once",
+    );
+    expect(DESIGN_REVIEW_PROTOCOL_REPAIR_REQUEST).toContain(
+      "Do not inspect files again",
+    );
+  });
+
+  it("constrains user-facing report fields to the run locale", () => {
+    const chinese = buildDesignReviewSystemSuffix("zh");
+    const english = buildDesignReviewSystemSuffix("en");
+
+    expect(chinese).toContain(
+      "Write the user-facing text in overview, findings[].title, findings[].evidence, and findings[].recommendation in Simplified Chinese.",
+    );
+    expect(english).toContain(
+      "Write the user-facing text in overview, findings[].title, findings[].evidence, and findings[].recommendation in English.",
+    );
+    for (const prompt of [chinese, english]) {
+      expect(prompt).toContain("JSON keys");
+      expect(prompt).toContain("lowercase kebab-case");
+      expect(prompt).toContain("priority values");
+      expect(prompt).toContain("dimension enum values");
+    }
   });
 
   it("bounds and validates screenshot data before model submission", () => {

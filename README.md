@@ -64,7 +64,7 @@ The Tauri desktop build (macOS / Windows / Linux) provides local runtime capabil
 
 - **Multi-Session Management** — Sidebar with create, switch, delete sessions; history persisted locally
 - **Session Organization** — Search, pin, archive, fork, and smart-rename conversations
-- **Project Templates** — Save generated projects as reusable local templates and start new sessions from them
+- **Project Starter Library** — Search, edit, update, and reuse safely prepared local project copies with deterministic stack metadata; sensitive paths are excluded and high-confidence plaintext credentials are redacted before an explicit save confirmation
 - **Smart Session Naming** — Auto-generates session titles based on conversation content
 - **Slash Commands** — Input box supports `/new`, `/fork`, `/clear`, `/reset`, `/compact`, `/health`, `/review`, `/continue`, and `/retry`
 - **Command Palette & Shortcuts** — Open commands with `Cmd/Ctrl+K`, create sessions, open settings, focus input, or stop generation from the keyboard
@@ -198,18 +198,25 @@ pnpm tauri:android:build
 
 ### Local CLI Runtime (Desktop)
 
-The desktop app can use an installed Codex CLI as a complete agent runtime. API mode remains the default and Open Builder never silently falls back between runtimes. The Claude adapter is included, but current Claude CLI releases are reported as **Unsupported** because they cannot prove isolation before receiving user content while also retaining both the Open Builder MCP bridge and subscription authentication.
+The desktop app can use installed Codex and Pi CLIs as complete agent runtimes. API mode remains the default, and Open Builder never silently falls back between runtimes or providers. The Claude adapter remains visible for capability diagnostics, but current Claude CLI releases are reported as **Unsupported** because they cannot prove isolation before receiving user content while retaining both the Open Builder tool bridge and subscription authentication.
 
-1. Install the official Codex CLI and sign in with `codex login`.
-2. Start the desktop app and open **Settings → Model → Runtime → Local CLI**.
-3. Select Codex. Open Builder scans `PATH` and common installation locations; **Choose program** can store a validated executable override in native app data. Claude remains visible for capability diagnostics but cannot start a turn until a compatible CLI protocol is available.
-4. Confirm that the status is **Installed and signed in**, then optionally select a model and reasoning effort reported by the CLI.
+Install and configure one supported CLI:
 
-The local CLI is not an offline model. Prompts, attachments, web-search activity, and tool results are normally sent to the selected provider and may consume account subscription or usage quota. Open Builder checks login status but does not read, copy, or persist CLI credentials.
+- **Codex:** install the official Codex CLI, then run `codex login`.
+- **Pi with Node.js 22.19 or newer:** Open Builder currently supports Pi `>=0.84.4 <0.85.0`; install the current pinned release with `npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.84.4`. Pi also publishes the official installer `curl -fsSL https://pi.dev/install.sh | sh`, but verify that it installed a version in the supported range. Start `pi`, then run `/login` inside Pi to configure a model provider. See the [Pi quickstart](https://pi.dev/docs/latest/quickstart).
+- **Pi standalone on Windows:** download the official `pi-windows-x64.zip` or `pi-windows-arm64.zip` asset and `SHA256SUMS` from a [Pi release](https://github.com/earendil-works/pi/releases/tag/v0.84.4), extract it, then select `pi.exe` with **Choose program** if it is not on `PATH`.
 
-Projects remain in Open Builder's in-memory virtual file system. The CLI runs in an isolated empty directory and can interact with the project only through the per-run loopback MCP bridge. Attachment IDs are opaque; host file paths are not exposed. Provider configuration, hooks, unrelated MCP servers, shell tools, and CLI project-instruction injection are rejected or disabled before user content is sent.
+Start the desktop app, open **Settings → Model → Runtime → Local CLI**, select the CLI provider, and confirm that its status is **Installed and ready**. Open Builder scans `PATH` and common installation locations; **Choose program** stores only a validated executable override in native app data. Model and reasoning choices are provider-specific and come from the selected CLI. Changing from Codex to Pi, or back again, never reuses the other provider's session.
 
-When Web Search is **Model Built-in**, local mode uses the selected CLI's native search. Tavily, Firecrawl, or Exa selections instead use the existing Open Builder tools and keep native search disabled. If detection reports not installed, signed out, unsupported, or an isolation error, use **Rescan**, **Choose program**, **Use auto-detection**, or copy the displayed login command. Web and mobile builds show a blocking message and require switching back to API.
+The local CLI is not an offline model. Prompts, attachments, search activity, and tool results are normally sent to the model provider configured in that CLI and may consume subscription or API quota. Open Builder does not read, copy, or persist CLI credentials. Pi owns OAuth and API-key data in `~/.pi/agent/auth.json`, created with owner-only permissions; Open Builder strips provider API-key environment variables from the Pi child and relies on that OAuth/auth file. Inline, environment-resolved, and command-resolved credentials from `models.json` are rejected before user content is sent; the credential-source probe does not resolve or execute those values. Save the provider credential through Pi's `/login` flow instead. Ordinary Pi sessions default to cwd-organized JSONL under `~/.pi/agent/sessions/`, but Open Builder supplies an app-private session directory instead and retains only the provider-scoped opaque session ID with its local conversation. See the official [provider](https://pi.dev/docs/latest/providers) and [session](https://pi.dev/docs/latest/sessions) references.
+
+Projects remain in Open Builder's in-memory virtual file system. Each provider uses a stable app-private blank scratch directory and can interact with the project only through the per-run authenticated loopback tool bridge. Attachment IDs are opaque; host file paths are not exposed. Pi's own reported provider/model catalog and `auth.json` authentication remain available, while project-local instructions and resources, hooks, unrelated MCP servers or extensions, native shell/filesystem tools, and CLI project-instruction injection are rejected or disabled before user content is sent.
+
+Pi tool results can carry text and images. Text-backed resources and image resources are converted without loss; PDF, audio, and other binary resource results that Pi cannot consume are rejected with an explicit tool error instead of being silently reduced to a filename or summary. Convert those attachments to text or images before asking Pi to inspect them.
+
+When Web Search is **Model Built-in**, compatible local CLIs use their native search. Pi has no native web-search tool, so Open Builder blocks the turn and asks you to choose Tavily, Firecrawl, Exa, or Disabled; it never silently changes the search engine. Those explicit search providers use Open Builder's brokered tools and keep CLI-native or extension-provided search disabled. If detection reports not installed, setup required, unsupported, or an isolation error, use **Rescan**, **Choose program**, **Use auto-detection**, or copy the displayed setup command. Web and mobile builds show a blocking message and require switching back to API.
+
+DeepSeek Harness support is intentionally deferred and will use ACP only. At this documentation snapshot, the installable [npm `latest`](https://www.npmjs.com/package/@deepseek-ai/dsh) is `0.1.1-rc.2` and its Open Builder-relevant CLI surface is only the one-shot headless runner; ACP remains alpha/source-only in the pinned [official ACP adapter source](https://github.com/deepseek-ai/deepseek-harness/blob/cd5ef8148158c3a752a658978873241fdf8e2bbc/packages/acp/acp/README.md). DeepSeek Harness will not enter the provider catalog or settings UI until an official npm release with no alpha, beta, or RC prerelease suffix includes `dsh --profile acp`; source-only profiles, headless output, and the separate SDK protocol do not meet the integration threshold.
 
 ### Configuration
 

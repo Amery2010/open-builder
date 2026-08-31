@@ -1,5 +1,7 @@
 import { Button } from "@/components/ui/button";
+import { LayoutTemplate } from "lucide-react";
 import { useT } from "../../i18n";
+import { useProjectTemplateLibraryUi } from "../../store/project-template-library-ui";
 
 interface EmptyStateProps {
   onSelectSuggestion: (text: string) => void;
@@ -7,6 +9,7 @@ interface EmptyStateProps {
 
 export function EmptyState({ onSelectSuggestion }: EmptyStateProps) {
   const t = useT();
+  const openLibrary = useProjectTemplateLibraryUi((state) => state.openLibrary);
   const suggestions = [
     { icon: "📝", text: t.empty.suggestions.todo },
     { icon: "☁️", text: t.empty.suggestions.weather },
@@ -32,6 +35,15 @@ export function EmptyState({ onSelectSuggestion }: EmptyStateProps) {
           </Button>
         ))}
       </div>
+      <Button
+        type="button"
+        variant="ghost"
+        className="mt-4 gap-2 text-muted-foreground"
+        onClick={() => openLibrary()}
+      >
+        <LayoutTemplate size={16} aria-hidden="true" />
+        {t.commandPalette.actions.openTemplates}
+      </Button>
     </div>
   );
 }

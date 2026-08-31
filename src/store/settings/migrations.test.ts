@@ -63,7 +63,7 @@ describe("migrateSettings", () => {
   });
 
   it("adds custom prompts without overwriting an existing value", () => {
-    expect(SETTINGS_VERSION).toBe(19);
+    expect(SETTINGS_VERSION).toBe(20);
     const missing = migrateSettings({ system: {} }, 17) as Record<string, any>;
     const existing = migrateSettings(
       { system: { customSystemPrompt: "Keep changes surgical." } },
@@ -186,8 +186,11 @@ describe("migrateSettings", () => {
       model: "existing-model",
       localAgent: {
         provider: "codex",
-        codex: { model: "", effort: "" },
-        claude: { model: "", effort: "" },
+        preferences: {
+          codex: { model: "", effort: "" },
+          claude: { model: "", effort: "" },
+          pi: { model: "", effort: "" },
+        },
       },
     });
   });
@@ -211,9 +214,39 @@ describe("migrateSettings", () => {
       runtime: "localCli",
       localAgent: {
         provider: "claude",
-        codex: { model: "codex-model", effort: "high" },
-        claude: { model: "claude-model", effort: "medium" },
+        preferences: {
+          codex: { model: "codex-model", effort: "high" },
+          claude: { model: "claude-model", effort: "medium" },
+          pi: { model: "", effort: "" },
+        },
       },
     });
+  });
+
+  it("migrates every v19 Codex and Claude preference into the provider record", () => {
+    const migrated = migrateSettings(
+      {
+        ai: {
+          runtime: "localCli",
+          localAgent: {
+            provider: "claude",
+            codex: { model: "gpt-5.6-sol", effort: "high" },
+            claude: { model: "claude-opus-4-1", effort: "max" },
+          },
+        },
+      },
+      19,
+    ) as Record<string, any>;
+
+    expect(migrated.ai.localAgent).toEqual({
+      provider: "claude",
+      preferences: {
+        codex: { model: "gpt-5.6-sol", effort: "high" },
+        claude: { model: "claude-opus-4-1", effort: "max" },
+        pi: { model: "", effort: "" },
+      },
+    });
+    expect(migrated.ai.localAgent).not.toHaveProperty("codex");
+    expect(migrated.ai.localAgent).not.toHaveProperty("claude");
   });
 });

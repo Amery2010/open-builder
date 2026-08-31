@@ -34,6 +34,44 @@ describe("mergeMessages", () => {
     vi.unstubAllGlobals();
   });
 
+  it("allows withdrawal through hidden records but not through visible activity", async () => {
+    const { findWithdrawableUserMessageIndex } =
+      await import("./merge-messages");
+    const user: Message = { role: "user", content: "Build the app" };
+    const hiddenTail: Message[] = [
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "memory-call",
+            type: "function",
+            function: { name: "manage_memories", arguments: "{}" },
+          },
+        ],
+      },
+      { role: "tool", tool_call_id: "memory-call", content: "OK" },
+    ];
+
+    expect(findWithdrawableUserMessageIndex([user, ...hiddenTail])).toBe(0);
+    expect(
+      findWithdrawableUserMessageIndex([
+        user,
+        { role: "assistant", content: "I started working." },
+      ]),
+    ).toBeNull();
+    expect(
+      findWithdrawableUserMessageIndex([
+        user,
+        {
+          role: "user",
+          content: "",
+          metadata: { origin: "design_review", reviewJobId: "review-1" },
+        },
+      ]),
+    ).toBeNull();
+  });
+
   it("groups user attachments and hides background memory tool calls", async () => {
     const { mergeMessages } = await import("./merge-messages");
     const messages: Message[] = [
@@ -103,6 +141,39 @@ describe("mergeMessages", () => {
         (block) => block.type === "tool" && block.toolName === "patch_file",
       ),
     ).toBe(true);
+  });
+
+  it("keeps automatic Design Review records as dedicated UI-only blocks", async () => {
+    const { mergeMessages } = await import("./merge-messages");
+    const merged = mergeMessages([
+      {
+        role: "user",
+        content: "",
+        metadata: {
+          origin: "design_review",
+          reviewJobId: "review-1",
+          reviewSummary: {
+            status: "succeeded",
+            findingCount: 2,
+            stale: false,
+          },
+        },
+      },
+    ]);
+
+    expect(merged).toEqual([
+      expect.objectContaining({
+        role: "user",
+        blocks: [],
+        origin: "design_review",
+        reviewJobId: "review-1",
+        reviewSummary: {
+          status: "succeeded",
+          findingCount: 2,
+          stale: false,
+        },
+      }),
+    ]);
   });
 
   it("keeps each assistant thinking phase in its original tool-loop position", async () => {

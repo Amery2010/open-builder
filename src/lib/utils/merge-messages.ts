@@ -213,6 +213,20 @@ export function mergeMessages(
     const msg = messages[i];
 
     if (msg.role === "user") {
+      if (
+        msg.metadata?.origin === "design_review" &&
+        msg.metadata.reviewJobId
+      ) {
+        merged.push({
+          role: "user",
+          blocks: [],
+          id: `user-${i}`,
+          origin: "design_review",
+          reviewJobId: msg.metadata.reviewJobId,
+          reviewSummary: msg.metadata.reviewSummary,
+        });
+        continue;
+      }
       const blocks: Block[] = [];
       const origin = msg.metadata?.origin;
       let j = i;
@@ -421,4 +435,41 @@ export function mergeMessages(
   }
 
   return merged;
+}
+
+/** Return the final genuine user message when no later message is rendered in
+ *  the conversation timeline. Raw internal placeholders may trail it. */
+export function findWithdrawableUserMessageIndex(
+  messages: Message[],
+  mergedMessages: readonly MergedMessage[] = mergeMessages(messages),
+): number | null {
+  const lastVisible = mergedMessages.at(-1);
+  if (
+    !lastVisible ||
+    lastVisible.role !== "user" ||
+    lastVisible.origin !== undefined
+  ) {
+    return null;
+  }
+
+  const match = /^user-(\d+)$/.exec(lastVisible.id);
+  if (!match) return null;
+  const start = Number.parseInt(match[1], 10);
+  if (
+    !Number.isSafeInteger(start) ||
+    messages[start]?.role !== "user" ||
+    messages[start]?.metadata?.origin
+  ) {
+    return null;
+  }
+
+  let end = start;
+  while (
+    end < messages.length &&
+    messages[end].role === "user" &&
+    !messages[end].metadata?.origin
+  ) {
+    end += 1;
+  }
+  return end - 1;
 }

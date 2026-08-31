@@ -1,11 +1,11 @@
 use std::borrow::Cow;
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::Arc;
 
-use axum::extract::DefaultBodyLimit;
-use axum::http::{header::AUTHORIZATION, request::Parts};
+use axum::extract::{DefaultBodyLimit, State};
+use axum::http::{header::AUTHORIZATION, request::Parts, HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::Json;
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ListToolsResult,
     PaginatedRequestParams, Resource, ResourceContents, ServerCapabilities, ServerInfo, Tool,
@@ -16,105 +16,21 @@ use rmcp::transport::{
     StreamableHttpService,
 };
 use rmcp::{ErrorData, ServerHandler};
-use tokio::sync::oneshot;
+use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::local_agent::{LocalAgentEvent, LocalToolContent, LocalToolResolution, LocalToolSpec};
 
-const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
-const MAX_RESULT_BYTES: usize = 20 * 1024 * 1024;
-const TOOL_CALL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
-const TOOL_CALL_BUDGET_EXHAUSTED: &str = "local agent tool-call budget exhausted";
+#[path = "local_agent_bridge_broker.rs"]
+mod broker;
 
-type PendingResult = Result<LocalToolResolution, String>;
+use broker::{BrokerError, BrokerErrorKind, BrokerTool, ToolBroker, MAX_ARGUMENT_BYTES};
 
-struct BridgeRun {
-    run_id: String,
-    token: String,
-    tools: Vec<Tool>,
-    max_tool_calls: usize,
-    tool_calls_started: AtomicUsize,
-    cancellation: CancellationToken,
-    channel: tauri::ipc::Channel<LocalAgentEvent>,
-    pending: Mutex<HashMap<String, oneshot::Sender<PendingResult>>>,
-}
-
-impl BridgeRun {
-    fn abort(&self, reason: &str) {
-        self.cancellation.cancel();
-        self.cancel_pending(reason);
-    }
-
-    fn reserve_tool_call(&self) -> bool {
-        let reserved = self
-            .tool_calls_started
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |started| {
-                (started < self.max_tool_calls).then_some(started + 1)
-            })
-            .is_ok();
-        if !reserved {
-            self.abort(TOOL_CALL_BUDGET_EXHAUSTED);
-        }
-        reserved
-    }
-
-    fn cancel_pending(&self, reason: &str) {
-        if let Ok(mut pending) = self.pending.lock() {
-            for (_, sender) in pending.drain() {
-                let _ = sender.send(Err(reason.to_string()));
-            }
-        }
-    }
-}
-
-#[derive(Default)]
-struct BridgeRegistry {
-    by_token: Mutex<HashMap<String, Arc<BridgeRun>>>,
-    token_by_run: Mutex<HashMap<String, String>>,
-}
-
-impl BridgeRegistry {
-    fn run_for_token(&self, token: &str) -> Result<Arc<BridgeRun>, ErrorData> {
-        self.by_token
-            .lock()
-            .map_err(|_| ErrorData::internal_error("tool bridge lock poisoned", None))?
-            .get(token)
-            .cloned()
-            .ok_or_else(|| ErrorData::invalid_request("invalid tool bridge credentials", None))
-    }
-
-    fn token_from_context(
-        &self,
-        context: &RequestContext<RoleServer>,
-    ) -> Result<String, ErrorData> {
-        let parts = context
-            .extensions
-            .get::<Parts>()
-            .ok_or_else(|| ErrorData::invalid_request("missing HTTP request context", None))?;
-        let header = parts
-            .headers
-            .get(AUTHORIZATION)
-            .and_then(|value| value.to_str().ok())
-            .ok_or_else(|| ErrorData::invalid_request("missing tool bridge credentials", None))?;
-        header
-            .strip_prefix("Bearer ")
-            .filter(|token| !token.is_empty())
-            .map(str::to_string)
-            .ok_or_else(|| ErrorData::invalid_request("invalid tool bridge credentials", None))
-    }
-
-    fn run_from_context(
-        &self,
-        context: &RequestContext<RoleServer>,
-    ) -> Result<Arc<BridgeRun>, ErrorData> {
-        let token = self.token_from_context(context)?;
-        self.run_for_token(&token)
-    }
-}
+pub(crate) use broker::canonical_tool_digest;
 
 #[derive(Clone)]
 struct OpenBuilderToolServer {
-    registry: Arc<BridgeRegistry>,
+    broker: ToolBroker,
 }
 
 impl ServerHandler for OpenBuilderToolServer {
@@ -128,9 +44,18 @@ impl ServerHandler for OpenBuilderToolServer {
         _request: Option<PaginatedRequestParams>,
         context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
-        let run = self.registry.run_from_context(&context)?;
+        let authorization = authorization_from_context(&context)?;
+        let catalog = self
+            .broker
+            .catalog(Some(&authorization))
+            .map_err(broker_error_to_mcp)?;
+        let tools = catalog
+            .tools
+            .into_iter()
+            .map(broker_tool_to_mcp)
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(ListToolsResult {
-            tools: run.tools.clone(),
+            tools,
             ..Default::default()
         })
     }
@@ -140,112 +65,82 @@ impl ServerHandler for OpenBuilderToolServer {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
-        let run = self.registry.run_from_context(&context)?;
-        if run.cancellation.is_cancelled() {
-            return Err(ErrorData::invalid_request(
-                "local agent run is cancelled",
-                None,
-            ));
-        }
-        let name = request.name.to_string();
-        if !run.tools.iter().any(|tool| tool.name == name) {
-            run.abort("local agent requested an unknown tool");
-            return Err(ErrorData::invalid_params(
-                "tool is not authorized for this run",
-                None,
-            ));
-        }
-
+        let authorization = authorization_from_context(&context)?;
         let arguments = serde_json::Value::Object(request.arguments.unwrap_or_default());
-        let argument_bytes = serde_json::to_vec(&arguments)
-            .map_err(|_| ErrorData::invalid_params("invalid tool arguments", None))?
-            .len();
-        if argument_bytes > MAX_REQUEST_BYTES {
-            run.abort("local agent tool arguments exceeded the request limit");
-            return Err(ErrorData::invalid_params(
-                "tool arguments exceed the request limit",
-                None,
-            ));
-        }
-        if !run.reserve_tool_call() {
-            return Err(ErrorData::invalid_request(TOOL_CALL_BUDGET_EXHAUSTED, None));
-        }
-
-        let call_id = uuid::Uuid::new_v4().to_string();
-        let (sender, receiver) = oneshot::channel();
-        run.pending
-            .lock()
-            .map_err(|_| ErrorData::internal_error("tool call lock poisoned", None))?
-            .insert(call_id.clone(), sender);
-
-        if run
-            .channel
-            .send(LocalAgentEvent::ToolRequest {
-                run_id: run.run_id.clone(),
-                call_id: call_id.clone(),
-                name,
-                arguments,
-            })
-            .is_err()
+        match self
+            .broker
+            .call(Some(&authorization), request.name.into_owned(), arguments)
+            .await
         {
-            if let Ok(mut pending) = run.pending.lock() {
-                pending.remove(&call_id);
+            Ok(resolution) => Ok(resolution_to_mcp(resolution).into()),
+            Err(error) if error.is_tool_result_error() => {
+                Ok(
+                    CallToolResult::error(vec![ContentBlock::text(error.message().to_string())])
+                        .into(),
+                )
             }
-            return Err(ErrorData::internal_error(
-                "tool bridge consumer is unavailable",
-                None,
-            ));
+            Err(error) => Err(broker_error_to_mcp(error)),
         }
-
-        let resolution = match tokio::time::timeout(TOOL_CALL_TIMEOUT, receiver).await {
-            Ok(Ok(Ok(value))) => value,
-            Ok(Ok(Err(message))) => {
-                return Ok(CallToolResult::error(vec![ContentBlock::text(message)]).into())
-            }
-            Ok(Err(_)) => {
-                return Ok(CallToolResult::error(vec![ContentBlock::text(
-                    "Open Builder cancelled this tool call.",
-                )])
-                .into())
-            }
-            Err(_) => {
-                if let Ok(mut pending) = run.pending.lock() {
-                    pending.remove(&call_id);
-                }
-                return Ok(CallToolResult::error(vec![ContentBlock::text(
-                    "Open Builder tool call timed out.",
-                )])
-                .into());
-            }
-        };
-
-        let result_bytes = serde_json::to_vec(&resolution)
-            .map_err(|_| ErrorData::internal_error("invalid tool result", None))?
-            .len();
-        if result_bytes > MAX_RESULT_BYTES {
-            return Ok(CallToolResult::error(vec![ContentBlock::text(
-                "Open Builder tool result exceeded the response limit.",
-            )])
-            .into());
-        }
-
-        let mut content = resolution
-            .content
-            .unwrap_or_default()
-            .into_iter()
-            .map(content_block)
-            .collect::<Vec<_>>();
-        if content.is_empty() {
-            content.push(ContentBlock::text(resolution.text));
-        }
-        let mut result = if resolution.is_error.unwrap_or(false) {
-            CallToolResult::error(content)
-        } else {
-            CallToolResult::success(content)
-        };
-        result.structured_content = resolution.structured_content;
-        Ok(result.into())
     }
+}
+
+fn authorization_from_context(context: &RequestContext<RoleServer>) -> Result<String, ErrorData> {
+    let parts = context
+        .extensions
+        .get::<Parts>()
+        .ok_or_else(|| ErrorData::invalid_request("missing HTTP request context", None))?;
+    parts
+        .headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string)
+        .ok_or_else(|| ErrorData::invalid_request("missing tool broker credentials", None))
+}
+
+fn broker_tool_to_mcp(tool: BrokerTool) -> Result<Tool, ErrorData> {
+    let schema = tool
+        .input_schema
+        .as_object()
+        .cloned()
+        .ok_or_else(|| ErrorData::internal_error("invalid registered tool schema", None))?;
+    Ok(Tool::new_with_raw(
+        Cow::Owned(tool.name),
+        Some(Cow::Owned(tool.description)),
+        Arc::new(schema),
+    ))
+}
+
+fn broker_error_to_mcp(error: BrokerError) -> ErrorData {
+    match error.kind() {
+        BrokerErrorKind::UnknownTool
+        | BrokerErrorKind::InvalidArguments
+        | BrokerErrorKind::ArgumentsTooLarge => {
+            ErrorData::invalid_params(error.message().to_string(), None)
+        }
+        BrokerErrorKind::Internal | BrokerErrorKind::ConsumerUnavailable => {
+            ErrorData::internal_error(error.message().to_string(), None)
+        }
+        _ => ErrorData::invalid_request(error.message().to_string(), None),
+    }
+}
+
+fn resolution_to_mcp(resolution: LocalToolResolution) -> CallToolResult {
+    let mut content = resolution
+        .content
+        .unwrap_or_default()
+        .into_iter()
+        .map(content_block)
+        .collect::<Vec<_>>();
+    if content.is_empty() {
+        content.push(ContentBlock::text(resolution.text));
+    }
+    let mut result = if resolution.is_error.unwrap_or(false) {
+        CallToolResult::error(content)
+    } else {
+        CallToolResult::success(content)
+    };
+    result.structured_content = resolution.structured_content;
+    result
 }
 
 fn content_block(content: LocalToolContent) -> ContentBlock {
@@ -295,21 +190,110 @@ fn content_block(content: LocalToolContent) -> ContentBlock {
     }
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PiToolCatalogResponse {
+    version: u8,
+    run_id: String,
+    tools: Vec<BrokerTool>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PiCallRequest {
+    name: String,
+    arguments: serde_json::Value,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PiCallResponse {
+    version: u8,
+    result: LocalToolResolution,
+}
+
+#[derive(Serialize)]
+struct PiErrorEnvelope {
+    error: PiErrorBody,
+}
+
+#[derive(Serialize)]
+struct PiErrorBody {
+    code: &'static str,
+    message: String,
+}
+
+async fn pi_tools(State(broker): State<ToolBroker>, headers: HeaderMap) -> Response {
+    let authorization = authorization_from_headers(&headers);
+    match broker.catalog(authorization) {
+        Ok(catalog) => Json(PiToolCatalogResponse {
+            version: 1,
+            run_id: catalog.run_id,
+            tools: catalog.tools,
+        })
+        .into_response(),
+        Err(error) => pi_error_response(error),
+    }
+}
+
+async fn pi_call(
+    State(broker): State<ToolBroker>,
+    headers: HeaderMap,
+    Json(request): Json<PiCallRequest>,
+) -> Response {
+    let authorization = authorization_from_headers(&headers);
+    match broker
+        .call(authorization, request.name, request.arguments)
+        .await
+    {
+        Ok(result) => Json(PiCallResponse { version: 1, result }).into_response(),
+        Err(error) => pi_error_response(error),
+    }
+}
+
+fn authorization_from_headers(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+}
+
+fn pi_error_response(error: BrokerError) -> Response {
+    let status = match error.kind() {
+        BrokerErrorKind::MissingBearer | BrokerErrorKind::InvalidBearer => StatusCode::UNAUTHORIZED,
+        BrokerErrorKind::UnknownTool => StatusCode::FORBIDDEN,
+        BrokerErrorKind::InvalidArguments => StatusCode::BAD_REQUEST,
+        BrokerErrorKind::ArgumentsTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+        BrokerErrorKind::BudgetExhausted => StatusCode::TOO_MANY_REQUESTS,
+        BrokerErrorKind::RunCancelled | BrokerErrorKind::PendingCancelled => StatusCode::CONFLICT,
+        BrokerErrorKind::TimedOut => StatusCode::GATEWAY_TIMEOUT,
+        BrokerErrorKind::ResultTooLarge => StatusCode::BAD_GATEWAY,
+        BrokerErrorKind::ConsumerUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+        BrokerErrorKind::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    let body = PiErrorEnvelope {
+        error: PiErrorBody {
+            code: error.code(),
+            message: error.message().to_string(),
+        },
+    };
+    (status, Json(body)).into_response()
+}
+
 struct BridgeRuntime {
-    url: String,
+    mcp_url: String,
     cancellation: CancellationToken,
     task: tauri::async_runtime::JoinHandle<()>,
 }
 
 pub struct ToolBridge {
-    registry: Arc<BridgeRegistry>,
+    broker: ToolBroker,
     runtime: tokio::sync::Mutex<Option<BridgeRuntime>>,
 }
 
 impl Default for ToolBridge {
     fn default() -> Self {
         Self {
-            registry: Arc::new(BridgeRegistry::default()),
+            broker: ToolBroker::default(),
             runtime: tokio::sync::Mutex::new(None),
         }
     }
@@ -319,7 +303,7 @@ impl ToolBridge {
     async fn ensure_started(&self) -> Result<String, String> {
         let mut runtime = self.runtime.lock().await;
         if let Some(runtime) = runtime.as_ref() {
-            return Ok(runtime.url.clone());
+            return Ok(runtime.mcp_url.clone());
         }
 
         let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
@@ -329,12 +313,12 @@ impl ToolBridge {
             .local_addr()
             .map_err(|error| format!("failed to read local tool bridge address: {error}"))?;
         let cancellation = CancellationToken::new();
-        let registry = self.registry.clone();
+        let service_broker = self.broker.clone();
         let service: StreamableHttpService<OpenBuilderToolServer, LocalSessionManager> =
             StreamableHttpService::new(
                 move || {
                     Ok(OpenBuilderToolServer {
-                        registry: registry.clone(),
+                        broker: service_broker.clone(),
                     })
                 },
                 Default::default(),
@@ -343,8 +327,11 @@ impl ToolBridge {
                     .with_cancellation_token(cancellation.child_token()),
             );
         let router = axum::Router::new()
+            .route("/pi/tools", get(pi_tools))
+            .route("/pi/call", post(pi_call))
             .nest_service("/mcp", service)
-            .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES));
+            .layer(DefaultBodyLimit::max(MAX_ARGUMENT_BYTES + 64 * 1024))
+            .with_state(self.broker.clone());
         let server_cancellation = cancellation.clone();
         let task = tauri::async_runtime::spawn(async move {
             let _ = axum::serve(listener, router)
@@ -353,13 +340,13 @@ impl ToolBridge {
                 })
                 .await;
         });
-        let url = format!("http://127.0.0.1:{}/mcp", address.port());
+        let mcp_url = format!("http://127.0.0.1:{}/mcp", address.port());
         *runtime = Some(BridgeRuntime {
-            url: url.clone(),
+            mcp_url: mcp_url.clone(),
             cancellation,
             task,
         });
-        Ok(url)
+        Ok(mcp_url)
     }
 
     pub async fn register(
@@ -370,43 +357,11 @@ impl ToolBridge {
         cancellation: CancellationToken,
         channel: tauri::ipc::Channel<LocalAgentEvent>,
     ) -> Result<(String, String), String> {
-        let url = self.ensure_started().await?;
-        let token = format!("{}{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
-        let tools = tools
-            .into_iter()
-            .map(|spec| {
-                let schema =
-                    spec.input_schema.as_object().cloned().ok_or_else(|| {
-                        format!("tool {} has a non-object JSON schema", spec.name)
-                    })?;
-                Ok(Tool::new_with_raw(
-                    Cow::Owned(spec.name),
-                    Some(Cow::Owned(spec.description)),
-                    Arc::new(schema),
-                ))
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-        let run = Arc::new(BridgeRun {
-            run_id: run_id.clone(),
-            token: token.clone(),
-            tools,
-            max_tool_calls,
-            tool_calls_started: AtomicUsize::new(0),
-            cancellation,
-            channel,
-            pending: Mutex::new(HashMap::new()),
-        });
-        self.registry
-            .by_token
-            .lock()
-            .map_err(|_| "tool bridge lock poisoned".to_string())?
-            .insert(token.clone(), run);
-        self.registry
-            .token_by_run
-            .lock()
-            .map_err(|_| "tool bridge lock poisoned".to_string())?
-            .insert(run_id, token.clone());
-        Ok((url, token))
+        let mcp_url = self.ensure_started().await?;
+        let token = self
+            .broker
+            .register(run_id, tools, max_tool_calls, cancellation, channel)?;
+        Ok((mcp_url, token))
     }
 
     pub fn resolve(
@@ -415,69 +370,15 @@ impl ToolBridge {
         call_id: &str,
         result: LocalToolResolution,
     ) -> Result<(), String> {
-        let result_bytes = serde_json::to_vec(&result)
-            .map_err(|_| "invalid local agent tool result".to_string())?
-            .len();
-        if result_bytes > MAX_RESULT_BYTES {
-            return Err("local agent tool result exceeded the response limit".to_string());
-        }
-        let token = self
-            .registry
-            .token_by_run
-            .lock()
-            .map_err(|_| "tool bridge lock poisoned".to_string())?
-            .get(run_id)
-            .cloned()
-            .ok_or_else(|| "local agent run is not active".to_string())?;
-        let run = self
-            .registry
-            .by_token
-            .lock()
-            .map_err(|_| "tool bridge lock poisoned".to_string())?
-            .get(&token)
-            .cloned()
-            .ok_or_else(|| "local agent run is not active".to_string())?;
-        let sender = run
-            .pending
-            .lock()
-            .map_err(|_| "tool call lock poisoned".to_string())?
-            .remove(call_id)
-            .ok_or_else(|| "local agent tool call is not pending".to_string())?;
-        sender
-            .send(Ok(result))
-            .map_err(|_| "local agent tool call was cancelled".to_string())
+        self.broker.resolve(run_id, call_id, result)
     }
 
     pub fn unregister(&self, run_id: &str, reason: &str) {
-        let token = self
-            .registry
-            .token_by_run
-            .lock()
-            .ok()
-            .and_then(|mut runs| runs.remove(run_id));
-        if let Some(token) = token {
-            if let Some(run) = self
-                .registry
-                .by_token
-                .lock()
-                .ok()
-                .and_then(|mut runs| runs.remove(&token))
-            {
-                debug_assert_eq!(run.token, token);
-                run.cancel_pending(reason);
-            }
-        }
+        self.broker.unregister(run_id, reason);
     }
 
     pub fn shutdown_now(&self) {
-        if let Ok(mut runs) = self.registry.by_token.lock() {
-            for (_, run) in runs.drain() {
-                run.cancel_pending("application exiting");
-            }
-        }
-        if let Ok(mut runs) = self.registry.token_by_run.lock() {
-            runs.clear();
-        }
+        self.broker.shutdown("application exiting");
         if let Ok(mut runtime) = self.runtime.try_lock() {
             if let Some(runtime) = runtime.take() {
                 runtime.cancellation.cancel();
@@ -495,39 +396,163 @@ impl Drop for ToolBridge {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+    use tauri::ipc::InvokeResponseBody;
+    use tokio::sync::mpsc;
+
     use super::*;
 
-    #[test]
-    fn rejects_missing_bearer_credentials() {
-        let registry = BridgeRegistry::default();
-        assert!(registry.run_for_token("missing").is_err());
+    fn tool(name: &str) -> LocalToolSpec {
+        LocalToolSpec {
+            name: name.to_string(),
+            description: format!("{name} description"),
+            input_schema: json!({"type": "object"}),
+        }
+    }
+
+    fn channel() -> (
+        tauri::ipc::Channel<LocalAgentEvent>,
+        mpsc::UnboundedReceiver<serde_json::Value>,
+    ) {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let channel = tauri::ipc::Channel::new(move |body| {
+            if let InvokeResponseBody::Json(json) = body {
+                if let Ok(event) = serde_json::from_str(&json) {
+                    let _ = sender.send(event);
+                }
+            }
+            Ok(())
+        });
+        (channel, receiver)
     }
 
     #[test]
-    fn enforces_total_tool_call_budget_atomically() {
-        let cancellation = CancellationToken::new();
-        let run = BridgeRun {
-            run_id: "run".to_string(),
-            token: "token".to_string(),
-            tools: Vec::new(),
-            max_tool_calls: 2,
-            tool_calls_started: AtomicUsize::new(0),
-            cancellation: cancellation.clone(),
-            channel: tauri::ipc::Channel::new(|_| Ok(())),
-            pending: Mutex::new(HashMap::new()),
+    fn mcp_adapter_preserves_tool_and_result_shapes() {
+        let broker_tool = BrokerTool {
+            name: "read".to_string(),
+            description: "Read a value".to_string(),
+            input_schema: json!({"type": "object", "required": ["key"]}),
         };
-        assert!(run.reserve_tool_call());
-        assert!(run.reserve_tool_call());
-        let (sender, mut receiver) = oneshot::channel();
-        run.pending
-            .lock()
+        let mcp_tool = broker_tool_to_mcp(broker_tool).unwrap();
+        assert_eq!(mcp_tool.name, "read");
+        assert_eq!(mcp_tool.input_schema["required"], json!(["key"]));
+
+        let result = resolution_to_mcp(LocalToolResolution {
+            text: "fallback".to_string(),
+            is_error: Some(false),
+            structured_content: Some(json!({"value": 1})),
+            content: Some(vec![LocalToolContent::Text {
+                text: "done".to_string(),
+            }]),
+        });
+        assert_eq!(result.is_error, Some(false));
+        assert_eq!(result.structured_content, Some(json!({"value": 1})));
+        assert_eq!(result.content.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn pi_transport_requires_bearer_and_round_trips_calls() {
+        let bridge = ToolBridge::default();
+        let (channel, mut events) = channel();
+        let (mcp_url, token) = bridge
+            .register(
+                "pi-run".to_string(),
+                vec![tool("allowed")],
+                2,
+                CancellationToken::new(),
+                channel,
+            )
+            .await
+            .unwrap();
+        let origin = mcp_url.strip_suffix("/mcp").unwrap();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+        let unauthorized = client
+            .get(format!("{origin}/pi/tools"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let catalog_response = client
+            .get(format!("{origin}/pi/tools"))
+            .bearer_auth(&token)
+            .send()
+            .await
             .unwrap()
-            .insert("pending".to_string(), sender);
-        assert!(!run.reserve_tool_call());
-        assert!(cancellation.is_cancelled());
-        assert!(matches!(
-            receiver.try_recv(),
-            Ok(Err(message)) if message == TOOL_CALL_BUDGET_EXHAUSTED
-        ));
+            .error_for_status()
+            .unwrap();
+        let catalog: serde_json::Value =
+            serde_json::from_str(&catalog_response.text().await.unwrap()).unwrap();
+        assert_eq!(catalog["version"], 1);
+        assert_eq!(catalog["runId"], "pi-run");
+        assert_eq!(catalog["tools"][0]["name"], "allowed");
+
+        let call = {
+            let client = client.clone();
+            let url = format!("{origin}/pi/call");
+            let token = token.clone();
+            tokio::spawn(async move {
+                client
+                    .post(url)
+                    .bearer_auth(token)
+                    .header(reqwest::header::CONTENT_TYPE, "application/json")
+                    .body(json!({"name": "allowed", "arguments": {"value": 1}}).to_string())
+                    .send()
+                    .await
+                    .unwrap()
+            })
+        };
+        let event = events.recv().await.unwrap();
+        assert_eq!(event["type"], "toolRequest");
+        bridge
+            .resolve(
+                event["runId"].as_str().unwrap(),
+                event["callId"].as_str().unwrap(),
+                LocalToolResolution {
+                    text: "ok".to_string(),
+                    is_error: Some(false),
+                    structured_content: Some(json!({"answer": 42})),
+                    content: None,
+                },
+            )
+            .unwrap();
+        let response = call.await.unwrap().error_for_status().unwrap();
+        let response: serde_json::Value =
+            serde_json::from_str(&response.text().await.unwrap()).unwrap();
+        assert_eq!(response["result"]["text"], "ok");
+        assert_eq!(response["result"]["structuredContent"]["answer"], 42);
+    }
+
+    #[tokio::test]
+    async fn pi_transport_rejects_unknown_tools() {
+        let bridge = ToolBridge::default();
+        let (channel, _) = channel();
+        let (mcp_url, token) = bridge
+            .register(
+                "pi-run".to_string(),
+                vec![tool("allowed")],
+                1,
+                CancellationToken::new(),
+                channel,
+            )
+            .await
+            .unwrap();
+        let origin = mcp_url.strip_suffix("/mcp").unwrap();
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .post(format!("{origin}/pi/call"))
+            .bearer_auth(token)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(json!({"name": "forbidden", "arguments": {}}).to_string())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body: serde_json::Value =
+            serde_json::from_str(&response.text().await.unwrap()).unwrap();
+        assert_eq!(body["error"]["code"], "unknown_tool");
     }
 }

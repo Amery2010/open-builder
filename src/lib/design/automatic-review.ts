@@ -14,6 +14,8 @@ export type AutomaticDesignReviewStage =
 export interface AutomaticDesignReviewEvidence {
   requestId: string;
   conversationId: string;
+  /** Digest of the generated source before responsive capture starts. */
+  sourceDigest?: string;
   phase: AutomaticDesignReviewPhase;
   originalRequest: string;
   contract: DesignContract;
@@ -45,6 +47,22 @@ export function shouldRunAutomaticDesignRepair(
   return (
     phase === "initial" &&
     (scope.staticIssues.length > 0 || scope.visualFindings.length > 0)
+  );
+}
+
+export function canEnterAutomaticDesignRepair(input: {
+  fresh: boolean;
+  activeConversation: boolean;
+  currentReview: boolean;
+  chatIdle: boolean;
+  hasNewerUserRequest: boolean;
+}): boolean {
+  return (
+    input.fresh &&
+    input.activeConversation &&
+    input.currentReview &&
+    input.chatIdle &&
+    !input.hasNewerUserRequest
   );
 }
 

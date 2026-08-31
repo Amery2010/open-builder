@@ -377,7 +377,7 @@ export const OPEN_BUILDER_TEMPLATE_NAMES = Object.freeze(
 export function isOpenBuilderTemplateName(
   template: string,
 ): template is OpenBuilderTemplateName {
-  return template in OPEN_BUILDER_TEMPLATE_MANIFEST;
+  return Object.hasOwn(OPEN_BUILDER_TEMPLATE_MANIFEST, template);
 }
 
 export function applyOpenBuilderTemplateProfile(

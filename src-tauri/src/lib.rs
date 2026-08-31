@@ -3,7 +3,15 @@ mod design;
 #[cfg(desktop)]
 mod local_agent;
 #[cfg(desktop)]
+mod local_agent_adapter;
+#[cfg(desktop)]
 mod local_agent_bridge;
+#[cfg(desktop)]
+mod local_agent_claude;
+#[cfg(desktop)]
+mod local_agent_codex;
+#[cfg(desktop)]
+mod local_agent_pi;
 #[cfg(desktop)]
 mod local_agent_protocol;
 #[cfg(desktop)]

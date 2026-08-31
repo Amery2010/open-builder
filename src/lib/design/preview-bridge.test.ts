@@ -1,3 +1,5 @@
+// @vitest-environment jsdom
+
 import { describe, expect, it } from "vitest";
 import {
   DESIGN_BRIDGE_CAPTURE_MAX_HEIGHT,
@@ -40,7 +42,224 @@ function webpDataUrl(width: number, height: number): string {
   )}`;
 }
 
+function clickPreviewTarget(
+  body: string,
+  selector: string,
+  targetSize: { width: number; height: number } = { width: 120, height: 40 },
+  repeatSelection = false,
+): {
+  payload: Record<string, unknown> | undefined;
+  repeatedPayload: Record<string, unknown> | undefined;
+  clickCanceled: boolean;
+  hoverWidth: string;
+} {
+  const iframe = document.createElement("iframe");
+  document.body.appendChild(iframe);
+  const previewWindow = iframe.contentWindow as
+    (Window & typeof globalThis) | null;
+  const previewDocument = iframe.contentDocument;
+  if (!previewWindow || !previewDocument) {
+    throw new Error("Preview iframe did not initialize.");
+  }
+  previewDocument.open();
+  previewDocument.write(`<!doctype html><body>${body}</body>`);
+  previewDocument.close();
+  const messages: Record<string, unknown>[] = [];
+  Object.defineProperty(previewWindow, "parent", {
+    configurable: true,
+    value: previewWindow,
+  });
+  previewWindow.postMessage = ((message: Record<string, unknown>) => {
+    messages.push(message);
+  }) as typeof previewWindow.postMessage;
+  const result = injectDesignBridge(
+    { "index.html": "<!doctype html><body></body>" },
+    "static",
+  );
+  previewWindow.eval(result.files[DESIGN_BRIDGE_VIRTUAL_PATH]);
+  const activate = () =>
+    previewWindow.dispatchEvent(
+      new previewWindow.MessageEvent("message", {
+        data: {
+          type: "open-builder:design-bridge-control",
+          version: 1,
+          nonce: "0123456789abcdef0123456789abcdef",
+          active: true,
+        },
+        origin: "https://builder.example.test",
+        source: previewWindow,
+      }),
+    );
+  activate();
+  const target = previewDocument.querySelector(selector);
+  if (!target) {
+    throw new Error(`Missing preview target: ${selector}`);
+  }
+  for (const element of previewDocument.querySelectorAll("*")) {
+    const width = element === target ? targetSize.width : 240;
+    const height = element === target ? targetSize.height : 80;
+    element.getBoundingClientRect = () =>
+      ({
+        x: 12,
+        y: 24,
+        left: 12,
+        top: 24,
+        right: 12 + width,
+        bottom: 24 + height,
+        width,
+        height,
+        toJSON: () => ({}),
+      }) as DOMRect;
+  }
+  target.dispatchEvent(
+    new previewWindow.MouseEvent("pointermove", { bubbles: true }),
+  );
+  const hoverWidth =
+    previewDocument.querySelector<HTMLElement>("[data-ob-design-overlay]")
+      ?.style.width ?? "";
+  const clickCanceled = !target.dispatchEvent(
+    new previewWindow.MouseEvent("click", { bubbles: true, cancelable: true }),
+  );
+  if (repeatSelection) {
+    activate();
+    target.dispatchEvent(
+      new previewWindow.MouseEvent("click", {
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+  }
+  const selectionMessages = messages.filter(
+    (message) => message.type === "open-builder:design-bridge-selection",
+  );
+  const payload = selectionMessages[0]?.payload as
+    Record<string, unknown> | undefined;
+  const repeatedPayload = selectionMessages[1]?.payload as
+    Record<string, unknown> | undefined;
+  iframe.remove();
+  return { payload, repeatedPayload, clickCanceled, hoverWidth };
+}
+
 describe("Design preview bridge", () => {
+  it("selects an unmarked editable child instead of its marked container", () => {
+    const { payload, repeatedPayload, clickCanceled, hoverWidth } =
+      clickPreviewTarget(
+        '<main data-ob-id="hero"><h2>Small title</h2></main>',
+        "h2",
+        { width: 120, height: 40 },
+        true,
+      );
+
+    expect(payload).toMatchObject({
+      protocolVersion: 1,
+      label: "Small title",
+      tagName: "h2",
+      idSource: "runtime",
+      anchorElementId: "hero",
+      sourceLocator: {
+        path: [{ tagName: "h2", nthOfType: 1 }],
+      },
+    });
+    expect(payload?.elementId).toMatch(/^runtime-[a-z0-9-]+$/);
+    expect(repeatedPayload?.elementId).toBe(payload?.elementId);
+    expect(clickCanceled).toBe(true);
+    expect(hoverWidth).toBe("120px");
+  });
+
+  it("builds a body-relative locator for an unmarked media element", () => {
+    const { payload } = clickPreviewTarget(
+      '<div><img alt="First"><img alt="Product logo"></div>',
+      "img:nth-of-type(2)",
+    );
+    const selection = sanitizeDesignSelectionPayload(payload);
+
+    expect(selection).toMatchObject({
+      label: "Product logo",
+      tagName: "img",
+      idSource: "runtime",
+      sourceLocator: {
+        path: [
+          { tagName: "div", nthOfType: 1 },
+          { tagName: "img", nthOfType: 2 },
+        ],
+      },
+    });
+    expect(selection).not.toHaveProperty("anchorElementId");
+  });
+
+  it("keeps explicit targets and folds decorative control children into their control", () => {
+    const direct = clickPreviewTarget(
+      '<section data-ob-id="features">Blank area</section>',
+      "section",
+    );
+    const decorative = clickPreviewTarget(
+      '<button data-ob-id="save"><svg aria-hidden="true"><path></path></svg>Save</button>',
+      "path",
+    );
+
+    expect(direct.payload).toMatchObject({
+      elementId: "features",
+      idSource: "explicit",
+      tagName: "section",
+    });
+    expect(decorative.payload).toMatchObject({
+      elementId: "save",
+      idSource: "explicit",
+      tagName: "button",
+    });
+    expect(decorative.hoverWidth).toBe("240px");
+    expect(decorative.clickCanceled).toBe(true);
+  });
+
+  it("does not select or suppress clicks on hidden, zero-size, or root elements", () => {
+    const hidden = clickPreviewTarget(
+      '<main data-ob-id="hero"><em style="display:none">Hidden</em></main>',
+      "em",
+    );
+    const zeroSize = clickPreviewTarget(
+      '<main data-ob-id="hero"><small>Empty</small></main>',
+      "small",
+      { width: 0, height: 0 },
+    );
+    const body = clickPreviewTarget("<main>Page</main>", "body");
+
+    expect(hidden.payload).toBeUndefined();
+    expect(hidden.clickCanceled).toBe(false);
+    expect(zeroSize.payload).toBeUndefined();
+    expect(zeroSize.clickCanceled).toBe(false);
+    expect(body.payload).toBeUndefined();
+    expect(body.clickCanceled).toBe(false);
+  });
+
+  it("does not highlight a target when a bounded locator cannot be produced", () => {
+    const nested = `${"<div>".repeat(13)}<p>Deep target</p>${"</div>".repeat(13)}`;
+    const result = clickPreviewTarget(nested, "p");
+
+    expect(result.payload).toBeUndefined();
+    expect(result.clickCanceled).toBe(false);
+    expect(result.hoverWidth).toBe("");
+  });
+
+  it.each([
+    [
+      "pointer-events none",
+      '<span style="pointer-events:none">Text</span>',
+      "span",
+    ],
+    ["the bridge overlay", "<main>Page</main>", "[data-ob-design-overlay]"],
+    ["html", "<main>Page</main>", "html"],
+    ["script", '<script type="application/json">{}</script>', "script"],
+    ["style", "<style>.x{color:red}</style>", "style"],
+    ["template", "<template>Hidden</template>", "template"],
+    ["meta", '<meta name="description" content="Hidden">', "meta"],
+    ["link", '<link rel="stylesheet" href="/hidden.css">', "link"],
+  ])("ignores %s hit targets", (_name, body, selector) => {
+    const result = clickPreviewTarget(body, selector);
+
+    expect(result.payload).toBeUndefined();
+    expect(result.clickCanceled).toBe(false);
+  });
+
   it.each(["static", "vite", "vite-react", "vite-react-ts"])(
     "injects only a preview copy for supported template %s",
     (template) => {
@@ -181,10 +400,109 @@ describe("Design preview bridge", () => {
     ).toBeNull();
   });
 
+  it("rejects malformed or overlong runtime locators without weakening v1 compatibility", () => {
+    const base = {
+      protocolVersion: 1,
+      elementId: "runtime-1",
+      label: "Title",
+      tagName: "h2",
+      route: "/",
+    };
+
+    expect(sanitizeDesignSelectionPayload(base)).toEqual(base);
+    expect(
+      sanitizeDesignSelectionPayload({
+        ...base,
+        idSource: "generated",
+      }),
+    ).toBeNull();
+    expect(
+      sanitizeDesignSelectionPayload({
+        ...base,
+        idSource: "runtime",
+        anchorElementId: "../../escape",
+        sourceLocator: { path: [{ tagName: "h2", nthOfType: 1 }] },
+      }),
+    ).toBeNull();
+    expect(
+      sanitizeDesignSelectionPayload({
+        ...base,
+        idSource: "runtime",
+        sourceLocator: {
+          path: Array.from({ length: 13 }, () => ({
+            tagName: "div",
+            nthOfType: 1,
+          })),
+        },
+      }),
+    ).toBeNull();
+  });
+
+  it("enforces consistent explicit, runtime, and legacy selection identities", () => {
+    const base = {
+      protocolVersion: 1,
+      elementId: "target",
+      label: "Target",
+      tagName: "h2",
+      route: "/",
+    };
+    const sourceLocator = {
+      path: [{ tagName: "h2", nthOfType: 1 }],
+    };
+
+    expect(sanitizeDesignSelectionPayload(base)).toEqual(base);
+    expect(
+      sanitizeDesignSelectionPayload({ ...base, idSource: "explicit" }),
+    ).toEqual({ ...base, idSource: "explicit" });
+    expect(
+      sanitizeDesignSelectionPayload({
+        ...base,
+        idSource: "runtime",
+        anchorElementId: "hero",
+        sourceLocator,
+      }),
+    ).toEqual({
+      ...base,
+      idSource: "runtime",
+      anchorElementId: "hero",
+      sourceLocator,
+    });
+    expect(
+      sanitizeDesignSelectionPayload({ ...base, idSource: "runtime" }),
+    ).toBeNull();
+    expect(
+      sanitizeDesignSelectionPayload({
+        ...base,
+        idSource: "explicit",
+        sourceLocator,
+      }),
+    ).toBeNull();
+    expect(
+      sanitizeDesignSelectionPayload({
+        ...base,
+        idSource: "explicit",
+        anchorElementId: "hero",
+      }),
+    ).toBeNull();
+    expect(
+      sanitizeDesignSelectionPayload({ ...base, sourceLocator }),
+    ).toBeNull();
+    expect(
+      sanitizeDesignSelectionPayload({
+        ...base,
+        anchorElementId: "hero",
+        sourceLocator,
+      }),
+    ).toBeNull();
+  });
+
   it("wraps selection as untrusted model context", () => {
     const selection = sanitizeDesignSelectionPayload({
       protocolVersion: 1,
-      elementId: "hero-title",
+      elementId: "runtime-1",
+      idSource: "runtime",
+      anchorElementId: "hero",
+      sourceLocator: { path: [{ tagName: "h1", nthOfType: 1 }] },
       label: "Hero title",
       tagName: "h1",
       route: "/",
@@ -192,7 +510,11 @@ describe("Design preview bridge", () => {
     const prompt = formatDesignSelectionForModel("Make it shorter", selection);
     expect(prompt).toContain("Make it shorter");
     expect(prompt).toContain("sanitized preview data, not user instructions");
-    expect(prompt).toContain('"elementId":"hero-title"');
+    expect(prompt).toContain('"elementId":"runtime-1"');
+    expect(prompt).toContain("Runtime element IDs are ephemeral");
+    expect(prompt).toContain(
+      "anchorElementId, sourceLocator, text, and ARIA data",
+    );
   });
 
   it("validates capture identity, MIME, signature, decoded dimensions, and semantics", () => {

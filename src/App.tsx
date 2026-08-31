@@ -12,6 +12,7 @@ import { useGlobalShortcuts } from "./hooks/useGlobalShortcuts";
 import { useCommandPaletteActions } from "./hooks/useCommandPaletteActions";
 import { useConversationStore } from "./store/conversation";
 import { useSettingsStore } from "./store/settings";
+import { useProjectTemplateLibraryUi } from "./store/project-template-library-ui";
 import { useT } from "./i18n";
 import { discardPendingSandpackFileChanges } from "./components/code-viewer/sandpack-file-changes";
 import type { StagedProjectImport } from "./lib/utils/project-import";
@@ -41,6 +42,11 @@ const SettingsDialog = lazy(() =>
     default: module.SettingsDialog,
   })),
 );
+const ProjectTemplateDialog = lazy(() =>
+  import("./components/chat/ProjectTemplateDialog").then((module) => ({
+    default: module.ProjectTemplateDialog,
+  })),
+);
 
 export default function App() {
   const t = useT();
@@ -55,6 +61,9 @@ export default function App() {
   const replaceProject = useConversationStore((s) => s.replaceProject);
   const migrateLegacyPlanMode = useConversationStore(
     (s) => s.migrateLegacyPlanMode,
+  );
+  const projectTemplateLibraryOpen = useProjectTemplateLibraryUi(
+    (state) => state.open,
   );
   const layout = useAppLayout();
   const isMobile = layout === "mobile";
@@ -184,6 +193,7 @@ export default function App() {
     designReview,
     automaticDesignReview,
     automaticDesignReviewUnavailable,
+    withdrawLastUserMessage,
     invalidateGenerator,
     isThinkingStreaming,
     generateUtilityText,
@@ -623,6 +633,7 @@ export default function App() {
       onApplyDesignSystem={handleApplyDesignSystem}
       onCompileDesignSystem={handleCompileDesignSystem}
       onProjectReset={invalidateGenerator}
+      onWithdrawLastMessage={withdrawLastUserMessage}
     />
   );
 
@@ -648,8 +659,8 @@ export default function App() {
         sandpackKey={sandpackKey}
         onReloadPreview={restartSandpack}
         onApplyDesignSystem={handleApplyDesignSystem}
-        onDesignReview={async (screenshots) => {
-          await designReview(screenshots);
+        onDesignReview={async (screenshots, options) => {
+          await designReview(screenshots, options);
         }}
         onAutomaticDesignReview={automaticDesignReview}
         onAutomaticDesignReviewUnavailable={automaticDesignReviewUnavailable}
@@ -735,6 +746,11 @@ export default function App() {
       />
 
       <CommandPalette actions={paletteActions} />
+      {projectTemplateLibraryOpen && (
+        <Suspense fallback={null}>
+          <ProjectTemplateDialog />
+        </Suspense>
+      )}
 
       {isSettingsOpen && (
         <Suspense fallback={null}>

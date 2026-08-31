@@ -3,6 +3,7 @@ import { FileArchive, FolderOpen, Loader2, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -164,8 +165,8 @@ export function ProjectImportDialog({
 
   return (
     <Dialog open={open} onOpenChange={(next) => !next && onClose()}>
-      <DialogContent className="sm:max-w-lg">
-        <DialogHeader>
+      <DialogContent className="flex min-h-0 max-h-[calc(100dvh-2rem)] flex-col gap-0 overflow-hidden sm:max-w-lg">
+        <DialogHeader className="shrink-0">
           <DialogTitle>{t.chat.projectImport.title}</DialogTitle>
           <DialogDescription>
             {t.chat.projectImport.description}
@@ -199,119 +200,123 @@ export function ProjectImportDialog({
           }}
         />
 
-        <div className="grid gap-2 sm:grid-cols-2">
-          <Button
-            type="button"
-            variant="outline"
-            className="h-auto justify-start gap-3 px-3 py-3 text-left"
-            disabled={busy || isGenerating}
-            onClick={() => void pickFolder()}
-          >
-            <FolderOpen className="size-5 shrink-0" aria-hidden="true" />
-            <span>
-              <span className="block text-sm font-medium">
-                {t.chat.projectImport.pickFolder}
+        <DialogBody className="space-y-4">
+          <div className="grid gap-2 sm:grid-cols-2">
+            <Button
+              type="button"
+              variant="outline"
+              className="h-auto justify-start gap-3 px-3 py-3 text-left"
+              disabled={busy || isGenerating}
+              onClick={() => void pickFolder()}
+            >
+              <FolderOpen className="size-5 shrink-0" aria-hidden="true" />
+              <span>
+                <span className="block text-sm font-medium">
+                  {t.chat.projectImport.pickFolder}
+                </span>
+                <span className="block text-xs font-normal text-muted-foreground">
+                  {t.chat.projectImport.folderHint}
+                </span>
               </span>
-              <span className="block text-xs font-normal text-muted-foreground">
-                {t.chat.projectImport.folderHint}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              className="h-auto justify-start gap-3 px-3 py-3 text-left"
+              disabled={busy || isGenerating}
+              onClick={() => zipInputRef.current?.click()}
+            >
+              <FileArchive className="size-5 shrink-0" aria-hidden="true" />
+              <span>
+                <span className="block text-sm font-medium">
+                  {t.chat.projectImport.pickZip}
+                </span>
+                <span className="block text-xs font-normal text-muted-foreground">
+                  {t.chat.projectImport.zipHint}
+                </span>
               </span>
-            </span>
-          </Button>
-          <Button
-            type="button"
-            variant="outline"
-            className="h-auto justify-start gap-3 px-3 py-3 text-left"
-            disabled={busy || isGenerating}
-            onClick={() => zipInputRef.current?.click()}
-          >
-            <FileArchive className="size-5 shrink-0" aria-hidden="true" />
-            <span>
-              <span className="block text-sm font-medium">
-                {t.chat.projectImport.pickZip}
-              </span>
-              <span className="block text-xs font-normal text-muted-foreground">
-                {t.chat.projectImport.zipHint}
-              </span>
-            </span>
-          </Button>
-        </div>
-
-        {isGenerating && (
-          <p className="text-xs text-muted-foreground">
-            {t.chat.projectImport.stopFirst}
-          </p>
-        )}
-
-        {busy && (
-          <div
-            role="status"
-            className="flex items-center justify-center gap-2 rounded-lg border bg-muted/30 px-3 py-8 text-sm text-muted-foreground"
-          >
-            <Loader2 className="size-4 animate-spin" aria-hidden="true" />
-            {t.chat.projectImport.reading}
+            </Button>
           </div>
-        )}
 
-        {error && (
-          <p
-            role="alert"
-            className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive"
-          >
-            {error}
-          </p>
-        )}
+          {isGenerating && (
+            <p className="text-xs text-muted-foreground">
+              {t.chat.projectImport.stopFirst}
+            </p>
+          )}
 
-        {staged && !busy && (
-          <div className="space-y-3 rounded-lg border bg-muted/20 p-3">
-            <div className="flex items-start gap-2">
-              <ShieldCheck
-                className="mt-0.5 size-4 shrink-0 text-emerald-600"
-                aria-hidden="true"
-              />
-              <div className="min-w-0 flex-1">
-                <p className="truncate text-sm font-medium">{staged.name}</p>
-                <p className="text-xs text-muted-foreground">
-                  {t.chat.projectImport.fileSummary
-                    .replace("{count}", String(staged.report.importedFiles))
-                    .replace("{size}", formatBytes(staged.report.totalBytes))}
-                </p>
-              </div>
+          {busy && (
+            <div
+              role="status"
+              className="flex items-center justify-center gap-2 rounded-lg border bg-muted/30 px-3 py-8 text-sm text-muted-foreground"
+            >
+              <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+              {t.chat.projectImport.reading}
             </div>
-            <dl className="grid gap-1 text-xs text-muted-foreground sm:grid-cols-2">
-              <div>
-                <dt className="inline">{t.chat.projectImport.template}: </dt>
-                <dd className="inline font-mono text-foreground">
-                  {staged.template}
-                </dd>
-              </div>
-              <div>
-                <dt className="inline">{t.chat.projectImport.filtered}: </dt>
-                <dd className="inline text-foreground">{skippedTotal}</dd>
-              </div>
-              <div>
-                <dt className="inline">{t.chat.projectImport.redacted}: </dt>
-                <dd className="inline text-foreground">
-                  {staged.report.redactedFiles}
-                </dd>
-              </div>
-            </dl>
-            {skippedDetails && (
-              <p className="text-xs text-muted-foreground">{skippedDetails}</p>
-            )}
-            {staged.previewMode === "code-only" && (
-              <p className="text-xs text-amber-700 dark:text-amber-300">
-                {t.chat.projectImport.codeOnly}
-              </p>
-            )}
-            {hasExistingProject && (
-              <p className="text-xs text-amber-700 dark:text-amber-300">
-                {t.chat.projectImport.replaceWarning}
-              </p>
-            )}
-          </div>
-        )}
+          )}
 
-        <DialogFooter>
+          {error && (
+            <p
+              role="alert"
+              className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive"
+            >
+              {error}
+            </p>
+          )}
+
+          {staged && !busy && (
+            <div className="space-y-3 rounded-lg border bg-muted/20 p-3">
+              <div className="flex items-start gap-2">
+                <ShieldCheck
+                  className="mt-0.5 size-4 shrink-0 text-emerald-600"
+                  aria-hidden="true"
+                />
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm font-medium">{staged.name}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {t.chat.projectImport.fileSummary
+                      .replace("{count}", String(staged.report.importedFiles))
+                      .replace("{size}", formatBytes(staged.report.totalBytes))}
+                  </p>
+                </div>
+              </div>
+              <dl className="grid gap-1 text-xs text-muted-foreground sm:grid-cols-2">
+                <div>
+                  <dt className="inline">{t.chat.projectImport.template}: </dt>
+                  <dd className="inline font-mono text-foreground">
+                    {staged.template}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="inline">{t.chat.projectImport.filtered}: </dt>
+                  <dd className="inline text-foreground">{skippedTotal}</dd>
+                </div>
+                <div>
+                  <dt className="inline">{t.chat.projectImport.redacted}: </dt>
+                  <dd className="inline text-foreground">
+                    {staged.report.redactedFiles}
+                  </dd>
+                </div>
+              </dl>
+              {skippedDetails && (
+                <p className="text-xs text-muted-foreground">
+                  {skippedDetails}
+                </p>
+              )}
+              {staged.previewMode === "code-only" && (
+                <p className="text-xs text-amber-700 dark:text-amber-300">
+                  {t.chat.projectImport.codeOnly}
+                </p>
+              )}
+              {hasExistingProject && (
+                <p className="text-xs text-amber-700 dark:text-amber-300">
+                  {t.chat.projectImport.replaceWarning}
+                </p>
+              )}
+            </div>
+          )}
+        </DialogBody>
+
+        <DialogFooter className="shrink-0">
           <Button type="button" variant="outline" onClick={onClose}>
             {t.chat.projectImport.cancel}
           </Button>

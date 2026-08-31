@@ -17,6 +17,7 @@ import type {
 import { validateProjectFiles } from "../lib/utils/project-files";
 import { deleteAttachmentsForMessages } from "../lib/attachments/store";
 import { normalizeCompressedSummary } from "../lib/utils/compress-context";
+import { findWithdrawableUserMessageIndex } from "../lib/utils/merge-messages";
 
 const CONVERSATION_STORE_VERSION = 4;
 const DEFAULT_PROJECT_TEMPLATE = "vite-react-ts";
@@ -189,6 +190,9 @@ interface ConversationState {
   forkConversation: () => string;
   setMessages: (updater: Updater<Message[]>) => void;
   setMessagesForConversation: (id: string, updater: Updater<Message[]>) => void;
+  /** Remove the final visible genuine user message plus trailing hidden
+   *  records, and return that user message for draft restoration. */
+  withdrawLastUserMessage: (conversationId?: string) => Message | undefined;
   setFiles: (updater: Updater<ProjectFiles>) => void;
   setFilesForConversation: (id: string, updater: Updater<ProjectFiles>) => void;
   replaceProject: (input: {
@@ -341,6 +345,13 @@ export const useConversationStore = create<ConversationState>()(
         ).catch((error) => {
           console.warn("Failed to release conversation attachments:", error);
         });
+        void import("../lib/design/review-jobs/runner")
+          .then(({ designReviewJobRunner }) => {
+            designReviewJobRunner.removeConversation(id);
+          })
+          .catch((error) => {
+            console.warn("Failed to clear conversation Design Reviews:", error);
+          });
       },
 
       switchConversation: (id) => {
@@ -464,6 +475,58 @@ export const useConversationStore = create<ConversationState>()(
             },
           };
         });
+      },
+
+      withdrawLastUserMessage: (requestedId) => {
+        const id = requestedId ?? get().activeId;
+        const conversation = id ? get().conversations[id] : undefined;
+        const withdrawableIndex = conversation
+          ? findWithdrawableUserMessageIndex(conversation.messages)
+          : null;
+        const lastMessage =
+          withdrawableIndex === null
+            ? undefined
+            : conversation?.messages[withdrawableIndex];
+        if (
+          !id ||
+          !conversation ||
+          !lastMessage ||
+          lastMessage.role !== "user" ||
+          lastMessage.metadata?.origin
+        ) {
+          return undefined;
+        }
+
+        let removed = false;
+        set((state) => {
+          const current = state.conversations[id];
+          const currentIndex = current
+            ? findWithdrawableUserMessageIndex(current.messages)
+            : null;
+          const currentLast =
+            currentIndex === null ? undefined : current?.messages[currentIndex];
+          if (
+            !current ||
+            currentIndex === null ||
+            currentLast !== lastMessage ||
+            currentLast.role !== "user" ||
+            currentLast.metadata?.origin
+          ) {
+            return state;
+          }
+          removed = true;
+          return {
+            conversations: {
+              ...state.conversations,
+              [id]: {
+                ...current,
+                messages: current.messages.slice(0, currentIndex),
+                updatedAt: Date.now(),
+              },
+            },
+          };
+        });
+        return removed ? lastMessage : undefined;
       },
 
       setFiles: (updater) => {

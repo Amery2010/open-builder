@@ -3,7 +3,7 @@
 import { act, renderHook } from "@testing-library/react";
 import { useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { useConversationStore } from "../store/conversation";
+import { DEFAULT_TITLE, useConversationStore } from "../store/conversation";
 import { useInteractiveStore } from "../store/interactive";
 import { useSettingsStore } from "../store/settings";
 import { useGenerator } from "./useGenerator";
@@ -121,6 +121,82 @@ describe("useGenerator optimistic request lifecycle", () => {
     ).toEqual([expect.objectContaining({ role: "user", content: "Build it" })]);
   });
 
+  it("withdraws the final visible user message through a hidden assistant tail", async () => {
+    const conversationId = useConversationStore.getState().createConversation();
+    const preparation = deferred();
+    const hook = renderGenerator();
+    let generation!: Promise<void>;
+
+    await act(async () => {
+      generation = hook.result.current.generate(
+        "Refine this card",
+        [
+          {
+            id: "attachment-1",
+            type: "image",
+            name: "reference.png",
+            mimeType: "image/png",
+            size: 42,
+          },
+        ],
+        {
+          forcedSkillIds: ["art-direct-web"],
+          designSelection: {
+            protocolVersion: 1,
+            elementId: "hero-card",
+            label: "Hero card",
+            tagName: "section",
+            route: "/",
+          },
+          prepareRun: () => preparation.promise,
+        },
+      );
+      await Promise.resolve();
+    });
+
+    act(() => {
+      useConversationStore
+        .getState()
+        .setMessagesForConversation(conversationId, (messages) => [
+          ...messages,
+          { role: "assistant", content: null },
+        ]);
+    });
+
+    let draft: ReturnType<typeof hook.result.current.withdrawLastUserMessage> =
+      null;
+    act(() => {
+      draft = hook.result.current.withdrawLastUserMessage();
+    });
+
+    expect(draft).toEqual({
+      content: "Refine this card",
+      attachments: [
+        {
+          id: "attachment-1",
+          type: "image",
+          name: "reference.png",
+          mimeType: "image/png",
+          size: 42,
+        },
+      ],
+      forcedSkillIds: ["art-direct-web"],
+      designSelection: expect.objectContaining({ elementId: "hero-card" }),
+    });
+    expect(hook.result.current.isGenerating).toBe(false);
+    expect(
+      useConversationStore.getState().conversations[conversationId],
+    ).toEqual(expect.objectContaining({ messages: [], title: DEFAULT_TITLE }));
+
+    await act(async () => {
+      preparation.resolve();
+      await generation;
+    });
+    expect(
+      useConversationStore.getState().conversations[conversationId].messages,
+    ).toEqual([]);
+  });
+
   it("starts one smart-title call from the first submitted request", async () => {
     const conversationId = useConversationStore.getState().createConversation();
     const preparation = deferred();
@@ -160,6 +236,45 @@ describe("useGenerator optimistic request lifecycle", () => {
     });
 
     expect(generateSmartTitle).toHaveBeenCalledOnce();
+  });
+
+  it("does not apply a late smart title after withdrawing the first request", async () => {
+    const conversationId = useConversationStore.getState().createConversation();
+    const preparation = deferred();
+    let resolveTitle!: (title: string) => void;
+    generateSmartTitle.mockReturnValueOnce(
+      new Promise<string>((resolve) => {
+        resolveTitle = resolve;
+      }),
+    );
+    const hook = renderGenerator();
+    let generation!: Promise<void>;
+
+    await act(async () => {
+      generation = hook.result.current.generate(
+        "Temporary request",
+        undefined,
+        {
+          prepareRun: () => preparation.promise,
+        },
+      );
+      await Promise.resolve();
+    });
+    act(() => {
+      hook.result.current.withdrawLastUserMessage();
+    });
+    await act(async () => {
+      resolveTitle("Late title");
+      await Promise.resolve();
+    });
+
+    expect(
+      useConversationStore.getState().conversations[conversationId].title,
+    ).toBe(DEFAULT_TITLE);
+    await act(async () => {
+      preparation.resolve();
+      await generation;
+    });
   });
 
   it("recovers a default title from the original request on a later turn", async () => {

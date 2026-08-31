@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useConversationStore } from "../../store/conversation";
 import { useProjectTemplateStore } from "../../store/project-templates";
 import { useSettingsStore } from "../../store/settings";
+import { useProjectTemplateLibraryUi } from "../../hooks/useProjectTemplateController";
 import type { Conversation } from "../../types";
 import { TooltipProvider } from "../ui/tooltip";
 import { SessionList } from "./SessionList";
@@ -54,6 +55,10 @@ describe("SessionList batching", () => {
       system: { ...state.system, language: "en" },
     }));
     useProjectTemplateStore.setState({ templates: {} });
+    useProjectTemplateLibraryUi.setState({
+      open: false,
+      sourceConversationId: null,
+    });
   });
 
   it("shows five recent sessions per batch and hides the control after the last batch", async () => {
@@ -143,5 +148,41 @@ describe("SessionList batching", () => {
     expect(screen.getAllByRole("button", { name: "Show more" })).toHaveLength(
       3,
     );
+  });
+
+  it("opens the shared project starter library for the active conversation", async () => {
+    const user = userEvent.setup();
+    setConversations([makeConversation(1)]);
+    renderSessionList();
+
+    await user.click(screen.getByRole("button", { name: "Project Starters" }));
+    expect(useProjectTemplateLibraryUi.getState()).toMatchObject({
+      open: true,
+      sourceConversationId: "session-1",
+    });
+  });
+
+  it("uses the layout-template icon for every starter-library action", async () => {
+    const user = userEvent.setup();
+    setConversations([
+      {
+        ...makeConversation(1),
+        files: { "src/App.tsx": "export default function App() {}" },
+      },
+    ]);
+    renderSessionList();
+
+    expect(
+      screen
+        .getByRole("button", { name: "Project Starters" })
+        .querySelector("svg"),
+    ).toHaveClass("lucide-layout-template");
+
+    await user.click(screen.getByRole("button", { name: "Session actions" }));
+    expect(
+      (
+        await screen.findByRole("menuitem", { name: "Save as starter" })
+      ).querySelector("svg"),
+    ).toHaveClass("lucide-layout-template");
   });
 });

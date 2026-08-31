@@ -1,4 +1,10 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { chmod, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const tauriConfig = JSON.parse(
   readFileSync(
@@ -28,16 +34,528 @@ const localAgent = readFileSync(
   new URL("../src-tauri/src/local_agent.rs", import.meta.url),
   "utf8",
 );
+const localAgentAdapter = readFileSync(
+  new URL("../src-tauri/src/local_agent_adapter.rs", import.meta.url),
+  "utf8",
+);
 const localAgentProtocol = readFileSync(
   new URL("../src-tauri/src/local_agent_protocol.rs", import.meta.url),
   "utf8",
 );
-const localAgentBridge = readFileSync(
-  new URL("../src-tauri/src/local_agent_bridge.rs", import.meta.url),
+const localAgentCodex = readFileSync(
+  new URL("../src-tauri/src/local_agent_codex.rs", import.meta.url),
   "utf8",
 );
-
+const localAgentClaude = readFileSync(
+  new URL("../src-tauri/src/local_agent_claude.rs", import.meta.url),
+  "utf8",
+);
 const failures = [];
+
+async function listen(server) {
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+}
+
+async function close(server) {
+  await new Promise((resolve, reject) => {
+    server.close((error) => (error ? reject(error) : resolve()));
+  });
+}
+
+async function checkPiProbeExtensionConformance() {
+  const nonce = "123e4567-e89b-12d3-a456-426614174000";
+  const previousNonce = process.env.OPEN_BUILDER_PI_PROBE_NONCE;
+  const registeredCommands = new Map();
+  const notifications = [];
+  let authSource = "stored";
+  try {
+    process.env.OPEN_BUILDER_PI_PROBE_NONCE = nonce;
+    const extensionUrl = new URL(
+      "../src-tauri/src/local_agent_pi_probe_extension.mjs",
+      import.meta.url,
+    );
+    const imported = await import(
+      `${extensionUrl.href}?security-conformance=${Date.now()}`
+    );
+    imported.default({
+      registerCommand(name, command) {
+        registeredCommands.set(name, command);
+      },
+    });
+    if (process.env.OPEN_BUILDER_PI_PROBE_NONCE !== undefined) {
+      throw new Error(
+        "probe extension retained its nonce environment variable",
+      );
+    }
+    const command = registeredCommands.get("open-builder-probe-auth");
+    if (!command)
+      throw new Error("probe extension did not register its command");
+    const context = {
+      mode: "rpc",
+      model: { provider: "test-provider", id: "test-model" },
+      modelRegistry: {
+        getProviderAuthStatus() {
+          return {
+            configured: true,
+            source: authSource,
+            label: "must-not-leak",
+            credential: "must-not-leak",
+          };
+        },
+      },
+      ui: {
+        notify(message, type) {
+          notifications.push({ message, type });
+        },
+      },
+    };
+    command.handler(nonce, context);
+    const stored = JSON.parse(notifications.at(-1)?.message ?? "null");
+    if (
+      notifications.at(-1)?.type !== "info" ||
+      stored.source !== "stored" ||
+      stored.provider !== "test-provider" ||
+      JSON.stringify(stored).includes("must-not-leak")
+    ) {
+      throw new Error("probe extension emitted an unsafe stored-auth payload");
+    }
+
+    authSource = "models_json_command";
+    command.handler(nonce, context);
+    const commandAuth = JSON.parse(notifications.at(-1)?.message ?? "null");
+    if (commandAuth.source !== "models_json_command") {
+      throw new Error("probe extension lost command-auth source metadata");
+    }
+  } finally {
+    if (previousNonce === undefined) {
+      delete process.env.OPEN_BUILDER_PI_PROBE_NONCE;
+    } else {
+      process.env.OPEN_BUILDER_PI_PROBE_NONCE = previousNonce;
+    }
+  }
+}
+
+async function checkPiAdapterConformance() {
+  const token = "desktop-security-conformance-token";
+  const tools = [
+    {
+      name: "open_builder_echo",
+      description: "Echo a value through the isolated host broker.",
+      inputSchema: {
+        type: "object",
+        properties: { value: { type: "string" } },
+        required: ["value"],
+        additionalProperties: false,
+      },
+    },
+  ];
+  const canonicalTools = [...tools].sort((left, right) =>
+    left.name.localeCompare(right.name),
+  );
+  const digest = createHash("sha256")
+    .update(JSON.stringify(canonicalTools))
+    .digest("hex");
+  let authenticatedCatalogRequests = 0;
+  let authenticatedCallRequests = 0;
+  let receivedCall;
+
+  const server = createServer((request, response) => {
+    if (request.headers.authorization !== `Bearer ${token}`) {
+      response.writeHead(401, { "content-type": "application/json" });
+      response.end(
+        JSON.stringify({
+          error: { code: "invalid_bearer", message: "denied" },
+        }),
+      );
+      return;
+    }
+    if (request.method === "GET" && request.url === "/pi/tools") {
+      authenticatedCatalogRequests += 1;
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ version: 1, runId: "conformance", tools }));
+      return;
+    }
+    if (request.method === "POST" && request.url === "/pi/call") {
+      authenticatedCallRequests += 1;
+      const chunks = [];
+      request.on("data", (chunk) => chunks.push(chunk));
+      request.on("end", () => {
+        receivedCall = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        const value = receivedCall.arguments.value;
+        const content =
+          value === "resource-text"
+            ? [
+                {
+                  type: "resource",
+                  uri: "attachment://text",
+                  mimeType: "text/plain",
+                  text: "resource body",
+                },
+              ]
+            : value === "pdf"
+              ? [
+                  {
+                    type: "resource",
+                    uri: "attachment://pdf",
+                    mimeType: "application/pdf",
+                    blob: "JVBERi0xLjQ=",
+                  },
+                ]
+              : [{ type: "text", text: value }];
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(
+          JSON.stringify({
+            version: 1,
+            result: {
+              text: value === "fail" ? "bounded host failure" : "echoed",
+              isError: value === "fail",
+              structuredContent: { echoed: value },
+              content,
+            },
+          }),
+        );
+      });
+      return;
+    }
+    response.writeHead(404, { "content-type": "application/json" });
+    response.end(
+      JSON.stringify({ error: { code: "not_found", message: "missing" } }),
+    );
+  });
+
+  const temporaryDirectory = await mkdtemp(
+    path.join(tmpdir(), "open-builder-pi-conformance-"),
+  );
+  const previousConfig = process.env.OPEN_BUILDER_PI_CONFIG;
+  try {
+    await listen(server);
+    const address = server.address();
+    if (!address || typeof address === "string") {
+      throw new Error("mock broker did not expose a TCP address");
+    }
+    const origin = `http://127.0.0.1:${address.port}`;
+    const cwd = await realpath(temporaryDirectory);
+    const extensionPath = await realpath(
+      fileURLToPath(
+        new URL(
+          "../src-tauri/src/local_agent_pi_extension.mjs",
+          import.meta.url,
+        ),
+      ),
+    );
+    const configPath = path.join(temporaryDirectory, "pi-config.json");
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        version: 1,
+        toolsUrl: `${origin}/pi/tools`,
+        callUrl: `${origin}/pi/call`,
+        bearerToken: token,
+        attestationNonce: "attestation-nonce",
+        expectedCwd: cwd,
+        expectedModel: { provider: "test-provider", id: "test-model" },
+        systemPrompt: "exact isolated system prompt",
+        systemPromptNonce: "system-prompt-nonce",
+        expectedToolNames: ["open_builder_echo"],
+        toolDigest: digest,
+        extensionPath,
+      }),
+      { mode: 0o600 },
+    );
+    await chmod(configPath, 0o600);
+    process.env.OPEN_BUILDER_PI_CONFIG = configPath;
+
+    const handlers = new Map();
+    const registeredTools = new Map();
+    const registeredCommands = new Map();
+    const notifications = [];
+    let activeTools = [];
+    let runtimeReady = false;
+    const extensionSourceInfo = {
+      path: extensionPath,
+      source: "cli",
+      scope: "temporary",
+      origin: "top-level",
+    };
+    const pi = {
+      on(event, handler) {
+        const eventHandlers = handlers.get(event) ?? [];
+        eventHandlers.push(handler);
+        handlers.set(event, eventHandlers);
+      },
+      registerTool(tool) {
+        registeredTools.set(tool.name, {
+          ...tool,
+          sourceInfo: extensionSourceInfo,
+        });
+      },
+      registerCommand(name, command) {
+        registeredCommands.set(name, {
+          name,
+          ...command,
+          sourceInfo: extensionSourceInfo,
+        });
+      },
+      getActiveTools() {
+        return [...activeTools];
+      },
+      setActiveTools(names) {
+        if (!runtimeReady) {
+          throw new Error("setActiveTools ran during extension loading");
+        }
+        activeTools = [...names];
+      },
+      getAllTools() {
+        return [
+          {
+            name: "read",
+            description: "inactive builtin",
+            parameters: { type: "object" },
+            sourceInfo: {
+              path: "<builtin:read>",
+              source: "builtin",
+              scope: "temporary",
+              origin: "top-level",
+            },
+          },
+          ...registeredTools.values(),
+        ];
+      },
+      getCommands() {
+        return [
+          ...registeredCommands.values(),
+          {
+            name: "llama",
+            sourceInfo: {
+              path: "<inline:llama.cpp>",
+              source: "inline",
+              scope: "temporary",
+              origin: "top-level",
+            },
+          },
+        ];
+      },
+    };
+
+    const imported = await import(
+      `${pathToFileURL(extensionPath).href}?security-conformance=${Date.now()}`
+    );
+    await imported.default(pi);
+    if (process.env.OPEN_BUILDER_PI_CONFIG !== undefined) {
+      throw new Error(
+        "extension retained the sensitive config-path environment variable",
+      );
+    }
+    runtimeReady = true;
+    for (const handler of handlers.get("session_start") ?? []) {
+      await handler({ type: "session_start", reason: "startup" }, {});
+    }
+    if (JSON.stringify(activeTools) !== JSON.stringify(["open_builder_echo"])) {
+      throw new Error(
+        "extension did not replace active tools with broker tools",
+      );
+    }
+
+    const inputHandler = (handlers.get("input") ?? [])[0];
+    if (!inputHandler)
+      throw new Error("extension did not register an input gate");
+    const blocked = await inputHandler({
+      type: "input",
+      source: "rpc",
+      text: "early",
+    });
+    if (blocked?.action !== "handled") {
+      throw new Error("extension accepted input before attestation");
+    }
+
+    const command = registeredCommands.get("open-builder-attest");
+    if (!command)
+      throw new Error("extension did not register its attestation command");
+    const attestationContext = (source) => ({
+      mode: "rpc",
+      cwd,
+      model: { provider: "test-provider", id: "test-model" },
+      modelRegistry: {
+        getProviderAuthStatus(provider) {
+          if (provider !== "test-provider") {
+            throw new Error("extension queried the wrong provider auth status");
+          }
+          return {
+            configured: true,
+            source,
+            label: "sensitive-auth-label",
+            credential: "must-never-be-attested",
+          };
+        },
+      },
+      thinkingLevel: "medium",
+      getSystemPromptOptions() {
+        return { cwd, contextFiles: [], skills: [] };
+      },
+      ui: {
+        notify(message, type) {
+          notifications.push({ message, type });
+        },
+      },
+    });
+    const storedAuthContext = attestationContext("stored");
+    await command.handler(
+      "attestation-nonce system-prompt-nonce",
+      storedAuthContext,
+    );
+    const notification = notifications.at(-1);
+    if (!notification || notification.type !== "info") {
+      throw new Error("extension did not emit an attestation notification");
+    }
+    const attestation = JSON.parse(notification.message);
+    if (
+      attestation.type !== "open_builder_pi_attestation" ||
+      attestation.computedToolDigest !== digest ||
+      attestation.extensionPath !== extensionPath ||
+      attestation.providerAuth?.configured !== true ||
+      attestation.providerAuth?.source !== "stored" ||
+      Object.keys(attestation.providerAuth).sort().join(",") !==
+        "configured,source" ||
+      notification.message.includes("sensitive-auth-label") ||
+      notification.message.includes("must-never-be-attested") ||
+      attestation.violations.length !== 0 ||
+      JSON.stringify(attestation.activeTools) !==
+        JSON.stringify(["open_builder_echo"]) ||
+      attestation.allTools.some(
+        (tool) => tool.name === "read" && activeTools.includes(tool.name),
+      )
+    ) {
+      throw new Error("extension emitted an invalid runtime attestation");
+    }
+
+    const accepted = await inputHandler(
+      {
+        type: "input",
+        source: "rpc",
+        text: "real prompt",
+      },
+      storedAuthContext,
+    );
+    if (accepted?.action !== "continue") {
+      throw new Error("extension rejected the first attested prompt");
+    }
+    const beforeAgentStart = (handlers.get("before_agent_start") ?? [])[0];
+    const injection = await beforeAgentStart(
+      { type: "before_agent_start" },
+      {},
+    );
+    if (injection?.systemPrompt !== "exact isolated system prompt") {
+      throw new Error(
+        "extension did not inject the exact one-shot system prompt",
+      );
+    }
+    const replay = await inputHandler(
+      {
+        type: "input",
+        source: "rpc",
+        text: "replay",
+      },
+      storedAuthContext,
+    );
+    if (replay?.action !== "handled") {
+      throw new Error("extension reused an attestation for a second prompt");
+    }
+
+    const tool = registeredTools.get("open_builder_echo");
+    const result = await tool.execute("call", { value: "through-broker" });
+    if (
+      result.content?.[0]?.text !== "through-broker" ||
+      result.details?.structuredContent?.echoed !== "through-broker" ||
+      authenticatedCatalogRequests !== 1 ||
+      authenticatedCallRequests !== 1 ||
+      receivedCall?.name !== "open_builder_echo"
+    ) {
+      throw new Error(
+        "extension tool adapter did not round-trip through the broker",
+      );
+    }
+    await tool.execute("call", { value: "fail" }).then(
+      () => {
+        throw new Error(
+          "extension treated a failed broker tool result as success",
+        );
+      },
+      (error) => {
+        if (
+          !(error instanceof Error) ||
+          error.message !== "bounded host failure"
+        ) {
+          throw new Error("extension did not throw the bounded broker failure");
+        }
+      },
+    );
+    if (authenticatedCallRequests !== 2) {
+      throw new Error("extension failure conformance did not reach the broker");
+    }
+
+    const resourceResult = await tool.execute("call", {
+      value: "resource-text",
+    });
+    if (resourceResult.content?.[0]?.text !== "resource body") {
+      throw new Error("extension dropped a text-backed host resource");
+    }
+    await tool.execute("call", { value: "pdf" }).then(
+      () => {
+        throw new Error(
+          "extension silently accepted an unsupported PDF result",
+        );
+      },
+      (error) => {
+        if (
+          !(error instanceof Error) ||
+          !error.message.includes("application/pdf")
+        ) {
+          throw new Error("extension did not explain unsupported PDF content");
+        }
+      },
+    );
+    if (authenticatedCallRequests !== 4) {
+      throw new Error(
+        "extension resource conformance did not reach the broker",
+      );
+    }
+
+    const commandAuthContext = attestationContext("models_json_command");
+    await command.handler(
+      "attestation-nonce system-prompt-nonce",
+      commandAuthContext,
+    );
+    const unsafeNotification = notifications.at(-1);
+    const unsafeAttestation = JSON.parse(unsafeNotification.message);
+    if (
+      unsafeAttestation.providerAuth?.configured !== true ||
+      unsafeAttestation.providerAuth?.source !== "models_json_command" ||
+      !unsafeAttestation.violations.includes("providerAuth") ||
+      unsafeNotification.message.includes("sensitive-auth-label") ||
+      unsafeNotification.message.includes("must-never-be-attested")
+    ) {
+      throw new Error("extension did not reject unsafe Pi credential sourcing");
+    }
+    const unsafeInput = await inputHandler(
+      { type: "input", source: "rpc", text: "must stay hidden" },
+      commandAuthContext,
+    );
+    if (unsafeInput?.action !== "handled") {
+      throw new Error("extension accepted input with models.json command auth");
+    }
+  } finally {
+    if (previousConfig === undefined) {
+      delete process.env.OPEN_BUILDER_PI_CONFIG;
+    } else {
+      process.env.OPEN_BUILDER_PI_CONFIG = previousConfig;
+    }
+    if (server.listening) await close(server);
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  }
+}
 
 if (!tauriConfig.app?.security?.csp) {
   failures.push("Tauri CSP must not be null or empty.");
@@ -81,29 +599,7 @@ if (
 }
 
 if (
-  !localAgentBridge.includes("std::net::Ipv4Addr::LOCALHOST") ||
-  !localAgentBridge.includes('strip_prefix("Bearer ")') ||
-  !localAgentBridge.includes("MAX_REQUEST_BYTES") ||
-  !localAgentBridge.includes("MAX_RESULT_BYTES")
-) {
-  failures.push(
-    "Local-agent MCP must bind loopback, require bearer auth, and enforce payload budgets.",
-  );
-}
-
-if (
   !localAgentProtocol.includes("command.env_clear()") ||
-  !localAgentProtocol.includes("features.shell_tool=false") ||
-  !localAgentProtocol.includes("features.hooks=false") ||
-  !localAgentProtocol.includes("agents.enabled=false") ||
-  !localAgentProtocol.includes('"--strict-mcp-config"') ||
-  !localAgentProtocol.includes('"--setting-sources"') ||
-  !localAgentProtocol.includes('"--no-chrome"') ||
-  !localAgentProtocol.includes('"--strict-config"') ||
-  !localAgentProtocol.includes('model_provider=\\"openai\\"') ||
-  !localAgentProtocol.includes("validate_codex_effective_config") ||
-  !localAgentProtocol.includes("validate_claude_init") ||
-  !localAgentProtocol.includes("HANDSHAKE_TIMEOUT") ||
   !localAgentProtocol.includes("MAX_PROTOCOL_OUTPUT_BYTES") ||
   !localAgentProtocol.includes("MAX_PROTOCOL_EVENTS") ||
   !localAgentProtocol.includes("127.0.0.1,localhost,::1") ||
@@ -116,13 +612,40 @@ if (
 }
 
 if (
+  !localAgentCodex.includes("features.shell_tool=false") ||
+  !localAgentCodex.includes("features.hooks=false") ||
+  !localAgentCodex.includes("agents.enabled=false") ||
+  !localAgentCodex.includes('"--strict-config"') ||
+  !localAgentCodex.includes('model_provider=\\"openai\\"') ||
+  !localAgentCodex.includes("validate_effective_config") ||
+  !localAgentCodex.includes("HANDSHAKE_TIMEOUT")
+) {
+  failures.push(
+    "The Codex adapter must disable native execution and attest its effective configuration before input.",
+  );
+}
+
+if (
+  !localAgentClaude.includes("pre-input structured isolation handshake") ||
+  !localAgentClaude.includes(
+    "availability: LocalAgentAvailability::Unsupported",
+  ) ||
+  !/pub\(crate\) async fn run[\s\S]*?Err\(isolation_error\(\)\)/.test(
+    localAgentClaude,
+  )
+) {
+  failures.push(
+    "The Claude adapter must remain fail-closed until it has a pre-input isolation handshake.",
+  );
+}
+
+if (
   !localAgent.includes("shutdown_gracefully") ||
   !localAgent.includes("local_agent_cancel_all") ||
   !localAgent.includes(
     "native search is not allowed in isolated execution modes",
   ) ||
-  !localAgentProtocol.includes("SHUTDOWN_TIMEOUT") ||
-  !localAgentBridge.includes("cancel_pending")
+  !localAgentProtocol.includes("SHUTDOWN_TIMEOUT")
 ) {
   failures.push(
     "Local-agent cancellation must reject pending tools and clean up process trees with a bounded grace period.",
@@ -142,8 +665,9 @@ if (
 }
 
 if (
-  !localAgent.includes('format!("{}.exe", provider.command_name())') ||
-  !localAgent.includes("valid_executable_name")
+  !localAgent.includes("valid_executable_name") ||
+  !localAgentAdapter.includes('format!("{}.exe", self.command_name)') ||
+  !localAgentAdapter.includes("accepts_executable_file_name")
 ) {
   failures.push(
     "Windows local-agent launchers must be restricted to provider-native .exe files.",
@@ -179,6 +703,17 @@ if (
 ) {
   failures.push(
     "Skill ZIP metadata must be preflighted before JSZip, and chunks budgeted before buffering.",
+  );
+}
+
+try {
+  await checkPiProbeExtensionConformance();
+  await checkPiAdapterConformance();
+} catch (error) {
+  failures.push(
+    `Pi local-agent adapter conformance failed: ${
+      error instanceof Error ? error.message : String(error)
+    }`,
   );
 }
 

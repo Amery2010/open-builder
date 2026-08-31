@@ -40,11 +40,15 @@ function probe(
       availability === "notFound" ? undefined : `/usr/local/bin/${provider}`,
     pathSource: "path" as const,
     version: `${provider} 1.0.0`,
-    authenticated: availability === "ready",
-    loginCommand: `${provider} login`,
+    setupCommand: provider === "pi" ? "pi" : `${provider} login`,
     models,
     efforts: [],
-    capabilities: [],
+    capabilities: {
+      sessions: true,
+      reasoning: true,
+      tools: true,
+      nativeSearch: provider !== "pi",
+    },
     message:
       availability === "unsupported"
         ? "Protocol isolation unavailable"
@@ -96,8 +100,8 @@ describe("LocalAgentSettings", () => {
   });
 
   it.each([
-    ["ready", "Installed and signed in"],
-    ["signedOut", "Installed, not signed in"],
+    ["ready", "Installed and ready"],
+    ["needsSetup", "Installed, setup required"],
     ["notFound", "CLI not found"],
     ["unsupported", "CLI unavailable"],
     ["error", "CLI unavailable"],
@@ -107,9 +111,9 @@ describe("LocalAgentSettings", () => {
     render(<Harness />);
 
     expect(await screen.findByText(label)).toBeInTheDocument();
-    if (availability === "signedOut") {
+    if (availability === "needsSetup") {
       expect(
-        screen.getByRole("button", { name: "Copy login command" }),
+        screen.getByRole("button", { name: "Copy setup command" }),
       ).toBeInTheDocument();
     }
   });
@@ -127,9 +131,7 @@ describe("LocalAgentSettings", () => {
 
     expect(await screen.findByText("Detecting local CLI…")).toBeInTheDocument();
     resolveProbe?.(probe("ready"));
-    expect(
-      await screen.findByText("Installed and signed in"),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("Installed and ready")).toBeInTheDocument();
 
     localAgentMocks.probe.mockResolvedValue(probe("ready"));
     const rescan = screen.getByRole("button", { name: "Rescan" });
@@ -199,6 +201,74 @@ describe("LocalAgentSettings", () => {
     ).toBeInTheDocument();
   });
 
+  it("offers Pi models and explains its in-CLI setup flow", async () => {
+    const user = userEvent.setup();
+    localAgentMocks.probe.mockImplementation(
+      async (provider: LocalAgentProvider) =>
+        provider === "pi"
+          ? probe("needsSetup", "pi", [
+              {
+                id: "anthropic/claude-sonnet-4",
+                displayName: "Claude Sonnet 4",
+                isDefault: true,
+                efforts: ["low", "high"],
+              },
+            ])
+          : probe("ready", provider),
+    );
+
+    render(<Harness />);
+    await user.click(screen.getByRole("button", { name: "Pi" }));
+
+    expect(
+      await screen.findByText(
+        "Start pi, then run /login to configure a provider.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText("CLI model (Pi)")).toBeInTheDocument();
+    expect(screen.getByLabelText("CLI model (Pi)")).toBeEnabled();
+    expect(localAgentMocks.probe).toHaveBeenCalledWith("pi");
+    expect(screen.getByLabelText("Reasoning effort")).toBeInTheDocument();
+  });
+
+  it("preserves Pi preferences when setup is required and models are unavailable", async () => {
+    localAgentMocks.probe.mockResolvedValue(probe("needsSetup", "pi"));
+    const setFormData = vi.fn();
+    const formData: AISettings = {
+      ...aiDefaults,
+      runtime: "localCli",
+      localAgent: {
+        provider: "pi",
+        preferences: {
+          ...aiDefaults.localAgent.preferences,
+          pi: {
+            model: "anthropic/claude-sonnet-4",
+            effort: "high",
+          },
+        },
+      },
+    };
+
+    render(
+      <LocalAgentSettings
+        formData={formData}
+        setFormData={setFormData}
+        supported
+      />,
+    );
+
+    expect(
+      await screen.findByText(
+        "Start pi, then run /login to configure a provider.",
+      ),
+    ).toBeInTheDocument();
+    expect(formData.localAgent.preferences.pi).toEqual({
+      model: "anthropic/claude-sonnet-4",
+      effort: "high",
+    });
+    expect(setFormData).not.toHaveBeenCalled();
+  });
+
   it("normalizes stale model and effort preferences after a successful probe", async () => {
     localAgentMocks.probe.mockResolvedValue(
       probe("ready", "codex", [
@@ -217,7 +287,10 @@ describe("LocalAgentSettings", () => {
           runtime: "localCli",
           localAgent: {
             ...aiDefaults.localAgent,
-            codex: { model: "removed-model", effort: "ultra" },
+            preferences: {
+              ...aiDefaults.localAgent.preferences,
+              codex: { model: "removed-model", effort: "ultra" },
+            },
           },
         }}
       />,
@@ -226,7 +299,7 @@ describe("LocalAgentSettings", () => {
     await waitFor(() =>
       expect(
         JSON.parse(screen.getByTestId("local-agent-state").textContent ?? "{}")
-          .codex,
+          .preferences.codex,
       ).toEqual({ model: "", effort: "" }),
     );
   });

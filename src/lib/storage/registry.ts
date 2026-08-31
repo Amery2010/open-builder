@@ -5,6 +5,7 @@ import { useProjectTemplateStore } from "../../store/project-templates";
 import { useSettingsStore } from "../../store/settings";
 import { useSkillsStore } from "../../store/skills";
 import { useSnapshotStore } from "../../store/snapshot";
+import { useDesignReviewStore } from "../../store/design-review";
 import {
   clearAttachmentStorage,
   estimateAttachmentStorage,
@@ -32,6 +33,7 @@ export interface StorageDomain {
   id:
     | "settings"
     | "conversations"
+    | "designReviews"
     | "snapshots"
     | "memories"
     | "templates"
@@ -84,6 +86,32 @@ export const STORAGE_DOMAINS: readonly StorageDomain[] = [
         assetSearch: useSettingsStore.getState().assetSearch,
         system: useSettingsStore.getState().system,
       }),
+  },
+  {
+    id: "designReviews",
+    estimate: async () => {
+      const runsByConversation =
+        useDesignReviewStore.getState().runsByConversation;
+      return jsonEstimate(
+        runsByConversation,
+        Object.values(runsByConversation).reduce(
+          (count, runs) => count + runs.length,
+          0,
+        ),
+      );
+    },
+    clear: async () => {
+      const { designReviewJobRunner } =
+        await import("../design/review-jobs/runner");
+      designReviewJobRunner.clear();
+      await clearPersistedStore(() =>
+        useDesignReviewStore.persist.clearStorage(),
+      );
+      useDesignReviewStore.getState().reset();
+      useDesignReviewStore.getState().clearRuns();
+    },
+    export: async () =>
+      redactStorageExport(useDesignReviewStore.getState().runsByConversation),
   },
   {
     id: "conversations",

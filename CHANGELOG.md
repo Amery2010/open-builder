@@ -12,6 +12,7 @@ Tagged versions use their Git tag date. Versions 1.4.0 through 1.7.0 were not ta
 
 ### Added
 
+- Added a local Project Starter Library with search, metadata editing, current-project updates, deterministic framework/language/test/Design metadata, and entry points from the session sidebar, empty state, and command palette.
 - Added a managed Agnes AI MCP adapter for image generation, text-to-video tasks, and manual video-status queries across Web, desktop, and experimental mobile, using a fixed official endpoint, local masked API-key configuration, per-tool approval, and an image-only opt-in subagent grant.
 - Agnes image and video calls now render as direct conversation placeholders instead of generic tool cards. Image URLs replace their placeholder immediately; active source conversations poll video tasks on a bounded in-memory schedule and replace the original placeholder without adding messages or notifications.
 - Added per-project Code, Plan, and Design workspace modes while retaining the persisted `"auto"` compatibility value. Design mode generates runnable marketing sites and multi-screen product interfaces, returns from approved plans to Design, defaults new visual projects to `vite-react-ts`, and skips Automatic QA in favor of an explicit review flow.
@@ -23,6 +24,7 @@ Tagged versions use their Git tag date. Versions 1.4.0 through 1.7.0 were not ta
 
 ### Changed
 
+- Project starters now use an additive version-2 record with content digests, source and usage metadata, valid active-file and verified applied-Design preservation, and awaited persistence. Existing version-1 templates remain in the same database but are blocked until explicitly upgraded through the safe-copy review.
 - User messages and the generating state now appear immediately after submission, before Design-system selection, attachment hydration, generator setup, or the first provider response completes.
 - Skill discovery and loading now use the shared `ScrollText` icon. Multiple `list_skills` and `read_skill` calls in one Agent turn render as one expandable status list without exposing loaded instruction bodies.
 - Ask Question now uses compact native radio and checkbox controls, retains option descriptions and recommendations, keeps single-choice auto-advance, and presents custom answers as one-line input rows.
@@ -40,6 +42,7 @@ Tagged versions use their Git tag date. Versions 1.4.0 through 1.7.0 were not ta
 
 ### Security
 
+- Saving or updating a project starter now prepares a non-mutating local copy, excludes sensitive paths, redacts high-confidence plaintext credentials while retaining environment examples, validates project/runtime/template limits, and previews all excluded or redacted paths before confirmation. Starter conversations never copy messages, snapshots, compressed context, local-agent sessions, recommendations, or failed Design state.
 - Agnes credentials are excluded from history, logs, diagnostics, and storage exports; current-message image IDs are run-scoped, public references require HTTPS, attachment counts and decoded bytes are bounded, response bodies are size-limited, and permission changes abort in-flight work. Plan, Automatic QA, Design Review, and video-capable subagent paths remain fail-closed.
 - Design-system imports and custom compilation now enforce safe app-owned IDs and paths, text-only files, strict JSON/schema checks, semantic-token CSS validation, digest verification, strict input and package limits, no symlinks, serialized ID allocation, one bounded repair attempt, and no silent overwrite. Automatic selection accepts only the current candidate pool and runs without tools or project writes.
 - The preview Bridge validates iframe source, origin when available, protocol version, per-activation nonce, and an 8 KB payload ceiling; Bridge files never enter canonical project files, snapshots, or exports.

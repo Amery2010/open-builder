@@ -7,9 +7,9 @@ import {
   queryLocalAgentSupport,
   resetLocalAgentSupportCache,
 } from "../../lib/local-agent/tauri";
+import type { LocalAgentProvider } from "../../lib/local-agent/providers";
 
 export type GenerationRuntime = "api" | "localCli";
-export type LocalAgentProvider = "codex" | "claude";
 export type LocalAgentCapabilityStatus =
   "loading" | "supported" | "unsupported" | "error";
 
@@ -20,8 +20,7 @@ export interface LocalAgentProviderSettings {
 
 export interface LocalAgentSettings {
   provider: LocalAgentProvider;
-  codex: LocalAgentProviderSettings;
-  claude: LocalAgentProviderSettings;
+  preferences: Record<LocalAgentProvider, LocalAgentProviderSettings>;
 }
 
 export interface AISettings {
@@ -41,8 +40,11 @@ export const aiDefaults: AISettings = {
   model: DEFAULT_OPENAI_MODEL,
   localAgent: {
     provider: "codex",
-    codex: { model: "", effort: "" },
-    claude: { model: "", effort: "" },
+    preferences: {
+      codex: { model: "", effort: "" },
+      claude: { model: "", effort: "" },
+      pi: { model: "", effort: "" },
+    },
   },
 };
 

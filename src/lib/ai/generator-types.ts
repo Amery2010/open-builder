@@ -50,11 +50,33 @@ export interface MessageMetadata {
   origin?: "auto_qa" | "design_review" | "design_auto_fix";
   attachments?: AttachmentRef[];
   designSelection?: DesignSelectionContext;
+  /** UI-only reference for an automatic Design Review activity block. */
+  reviewJobId?: string;
+  /** Compact fallback retained after the detailed review job is pruned. */
+  reviewSummary?: {
+    status:
+      | "capturing"
+      | "queued"
+      | "running"
+      | "fixing"
+      | "verifying"
+      | "succeeded"
+      | "failed"
+      | "cancelled"
+      | "interrupted";
+    findingCount?: number;
+    stale?: boolean;
+  };
 }
 
 export interface DesignSelectionContext {
   protocolVersion: 1;
   elementId: string;
+  idSource?: "explicit" | "runtime";
+  anchorElementId?: string;
+  sourceLocator?: {
+    path: Array<{ tagName: string; nthOfType: number }>;
+  };
   label: string;
   tagName: string;
   text?: string;

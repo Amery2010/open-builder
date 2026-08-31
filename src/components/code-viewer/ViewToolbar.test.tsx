@@ -90,7 +90,12 @@ describe("ViewToolbar preview availability", () => {
     const tokenButton = screen.getByRole("button", {
       name: "Edit design tokens",
     });
-    expect(tokenButton.querySelector("svg")).toHaveClass("lucide-palette");
+    expect(tokenButton.querySelector("svg")).toHaveClass("lucide-shapes");
+    expect(
+      screen
+        .getByRole("button", { name: "Select an element in the preview" })
+        .querySelector("svg"),
+    ).toHaveClass("lucide-mouse-pointer-click");
     expect(
       screen.queryByRole("button", { name: "Design system" }),
     ).not.toBeInTheDocument();

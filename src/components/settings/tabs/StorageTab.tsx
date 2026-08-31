@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Archive, Database, History, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
+import { requestConfirmation } from "@/lib/confirmation";
 import { useT } from "../../../i18n";
 import {
   analyzeStorage,
@@ -70,34 +71,64 @@ export function StorageTab() {
     );
   };
 
-  const cleanArchived = () => {
+  const cleanArchived = async () => {
     const ids = report.cleanup.archivedConversationIds;
     if (ids.length === 0) {
       showNotice(0);
       return;
     }
-    if (!window.confirm(t.settings.storage.confirmArchived)) return;
+    if (
+      !(await requestConfirmation({
+        title: t.settings.storage.cleanupArchived,
+        message: t.settings.storage.confirmArchived,
+        confirmLabel: t.settings.storage.cleanupArchived,
+        cancelLabel: t.settings.cancel,
+        destructive: true,
+      }))
+    ) {
+      return;
+    }
     ids.forEach(deleteConversation);
     showNotice(ids.length);
   };
 
-  const cleanEmpty = () => {
+  const cleanEmpty = async () => {
     const ids = report.cleanup.emptyConversationIds;
     if (ids.length === 0) {
       showNotice(0);
       return;
     }
-    if (!window.confirm(t.settings.storage.confirmEmpty)) return;
+    if (
+      !(await requestConfirmation({
+        title: t.settings.storage.cleanupEmpty,
+        message: t.settings.storage.confirmEmpty,
+        confirmLabel: t.settings.storage.cleanupEmpty,
+        cancelLabel: t.settings.cancel,
+        destructive: true,
+      }))
+    ) {
+      return;
+    }
     ids.forEach(deleteConversation);
     showNotice(ids.length);
   };
 
-  const pruneOldSnapshots = () => {
+  const pruneOldSnapshots = async () => {
     if (report.cleanup.prunableSnapshotCount === 0) {
       showNotice(0);
       return;
     }
-    if (!window.confirm(t.settings.storage.confirmSnapshots)) return;
+    if (
+      !(await requestConfirmation({
+        title: t.settings.storage.pruneSnapshots,
+        message: t.settings.storage.confirmSnapshots,
+        confirmLabel: t.settings.storage.pruneSnapshots,
+        cancelLabel: t.settings.cancel,
+        destructive: true,
+      }))
+    ) {
+      return;
+    }
     showNotice(pruneSnapshots(STORAGE_SNAPSHOT_LIMIT));
   };
 

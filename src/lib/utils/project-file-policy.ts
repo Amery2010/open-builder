@@ -48,7 +48,7 @@ const UNSAFE_PROJECT_PATH_CHARACTERS =
 export const REDACTED_PROJECT_SECRET = "[REDACTED]";
 
 const CREDENTIAL_KEY =
-  "(?:client[_-]?secret|private[_-]?key|api[_-]?key|access[_-]?token|refresh[_-]?token|password)";
+  "(?:client[_-]?secret|private[_-]?key|api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|password|token)";
 const QUOTED_CREDENTIAL_ASSIGNMENT = new RegExp(
   `(^|[\\s{\\[,])((?:["']${CREDENTIAL_KEY}["']|${CREDENTIAL_KEY})[ \\t]*[:=][ \\t]*)("(?:\\\\.|[^"\\\\])*"|'(?:\\\\.|[^'\\\\])*')`,
   "gim",

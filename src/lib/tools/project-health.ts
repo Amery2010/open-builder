@@ -1,5 +1,3 @@
-import { tool } from "ai";
-import { z } from "zod";
 import type { ProjectFiles } from "../../types";
 import type { ToolExecutionContext } from "../ai/generator-types";
 import { redactSensitiveText } from "../utils/message-security";
@@ -48,20 +46,6 @@ export interface ProjectHealthReport {
   issues: ProjectHealthIssue[];
   truncated?: boolean;
 }
-
-export const PROJECT_HEALTH_CHECK_TOOL = {
-  project_health_check: tool({
-    description:
-      "Run a structured project health check over the current files and preview console logs. " +
-      "Use after code changes to detect missing entry files, invalid package.json, env gaps, HTML basics, runtime console errors, and Design-system state, Token wiring, and changed-scope drift when Design context is active.",
-    inputSchema: z.object({
-      include_console: z
-        .boolean()
-        .optional()
-        .describe("Include current Sandpack console logs. Default: true."),
-    }),
-  }),
-};
 
 export function runProjectHealthCheck(
   files: ProjectFiles,

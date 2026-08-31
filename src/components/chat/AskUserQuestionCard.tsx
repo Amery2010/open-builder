@@ -1,5 +1,5 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
-import { ChevronLeft, ChevronRight, HelpCircle, Pencil } from "lucide-react";
+import { ChevronLeft, ChevronRight, HelpCircle, Pencil, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { TooltipIconButton } from "@/components/ui/tooltip-icon-button";
@@ -17,6 +17,10 @@ interface AskUserQuestionCardProps {
   toolCallId: string;
   questions: AskUserQuestion[];
   presentation?: QuestionPresentation;
+  /** Questionnaire-only dismissal. Approval cards remain inline and are not
+   * dismissible from this component. */
+  onClose?: () => void;
+  closeLabel?: string;
 }
 
 interface QuestionDraft {
@@ -119,18 +123,29 @@ export function AskUserQuestionCard({
   toolCallId,
   questions,
   presentation = "questionnaire",
+  onClose,
+  closeLabel = "Close",
 }: AskUserQuestionCardProps) {
   if (presentation === "approval") {
     return (
       <ApprovalQuestionCard toolCallId={toolCallId} questions={questions} />
     );
   }
-  return <QuestionnaireCard toolCallId={toolCallId} questions={questions} />;
+  return (
+    <QuestionnaireCard
+      toolCallId={toolCallId}
+      questions={questions}
+      onClose={onClose}
+      closeLabel={closeLabel}
+    />
+  );
 }
 
 function QuestionnaireCard({
   toolCallId,
   questions,
+  onClose,
+  closeLabel = "Close",
 }: Omit<AskUserQuestionCardProps, "presentation">) {
   const t = useT();
   const headingId = useId();
@@ -248,7 +263,7 @@ function QuestionnaireCard({
     >
       <header
         className="grid shrink-0 items-start gap-3 px-4 py-4"
-        style={{ gridTemplateColumns: "minmax(0, 1fr) auto" }}
+        style={{ gridTemplateColumns: "minmax(0, 1fr) auto auto" }}
       >
         <div className="min-w-0">
           <h3
@@ -301,6 +316,19 @@ function QuestionnaireCard({
             <ChevronRight aria-hidden="true" />
           </TooltipIconButton>
         </div>
+
+        {onClose && (
+          <TooltipIconButton
+            type="button"
+            label={closeLabel}
+            variant="ghost"
+            size="icon-sm"
+            onClick={onClose}
+            className="rounded-full text-muted-foreground hover:text-foreground"
+          >
+            <X aria-hidden="true" />
+          </TooltipIconButton>
+        )}
       </header>
 
       <div className="flex min-h-0 flex-1 flex-col px-2 pb-2">

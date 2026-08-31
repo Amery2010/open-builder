@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogHeader,
   DialogTitle,
@@ -268,188 +269,190 @@ export function SkillsPanel({ open, onClose }: SkillsPanelProps) {
   return (
     <>
       <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-        <DialogContent className="max-h-[80vh] flex flex-col sm:max-w-xl">
-          <DialogHeader>
+        <DialogContent className="flex min-h-0 max-h-[calc(100dvh-2rem)] flex-col gap-0 overflow-hidden sm:max-w-xl">
+          <DialogHeader className="shrink-0">
             <DialogTitle>{t.skills.title}</DialogTitle>
             <DialogDescription>{t.skills.description}</DialogDescription>
           </DialogHeader>
 
-          <div className="flex items-center justify-between gap-2">
-            <p
-              className="flex items-center gap-1.5 text-xs text-muted-foreground"
-              aria-live="polite"
-            >
-              {initializingRegistry && (
-                <Loader2
-                  size={12}
-                  className="animate-spin"
-                  aria-hidden="true"
-                />
-              )}
-              {initializingRegistry
-                ? t.app.loading
-                : catalogSummary.total === 0
-                  ? t.skills.empty
-                  : `${catalogSummary.autoEnabled} / ${catalogSummary.total}`}
-            </p>
-            <div className="flex items-center gap-1">
-              {isTauriEnv && (
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  onClick={handleRevealInFiles}
-                  title={t.skills.revealInFiles}
-                >
-                  <FolderOpen size={14} /> {t.skills.revealInFiles}
-                </Button>
-              )}
-              <Button
-                type="button"
-                size="sm"
-                variant={showImporter ? "secondary" : "default"}
-                onClick={() => setShowImporter((v) => !v)}
-              >
-                {showImporter ? (
-                  <>
-                    <X size={14} /> {t.skills.importer.cancel}
-                  </>
-                ) : (
-                  <>
-                    <Plus size={14} /> {t.skills.import}
-                  </>
-                )}
-              </Button>
-            </div>
-          </div>
-
-          <div className="space-y-2">
-            <div className="relative">
-              <Search
-                size={14}
-                className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none"
-              />
-              <Input
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                placeholder={t.skills.market.search}
-                aria-label={t.skills.market.search}
-                className="h-8 pl-8 text-sm"
-              />
-            </div>
-            <div className="flex gap-1 overflow-x-auto">
-              {filterOptions.map((option) => (
-                <Button
-                  key={option.value}
-                  type="button"
-                  variant={
-                    catalogFilter === option.value ? "secondary" : "ghost"
-                  }
-                  size="sm"
-                  className="h-7 shrink-0 px-2 text-xs"
-                  onClick={() => setCatalogFilter(option.value)}
-                >
-                  {option.label}
-                </Button>
-              ))}
-            </div>
+          <DialogBody className="space-y-4">
             <div className="flex items-center justify-between gap-2">
+              <p
+                className="flex items-center gap-1.5 text-xs text-muted-foreground"
+                aria-live="polite"
+              >
+                {initializingRegistry && (
+                  <Loader2
+                    size={12}
+                    className="animate-spin"
+                    aria-hidden="true"
+                  />
+                )}
+                {initializingRegistry
+                  ? t.app.loading
+                  : catalogSummary.total === 0
+                    ? t.skills.empty
+                    : `${catalogSummary.autoEnabled} / ${catalogSummary.total}`}
+              </p>
+              <div className="flex items-center gap-1">
+                {isTauriEnv && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={handleRevealInFiles}
+                    title={t.skills.revealInFiles}
+                  >
+                    <FolderOpen size={14} /> {t.skills.revealInFiles}
+                  </Button>
+                )}
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={showImporter ? "secondary" : "default"}
+                  onClick={() => setShowImporter((v) => !v)}
+                >
+                  {showImporter ? (
+                    <>
+                      <X size={14} /> {t.skills.importer.cancel}
+                    </>
+                  ) : (
+                    <>
+                      <Plus size={14} /> {t.skills.import}
+                    </>
+                  )}
+                </Button>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <div className="relative">
+                <Search
+                  size={14}
+                  className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none"
+                />
+                <Input
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                  placeholder={t.skills.market.search}
+                  aria-label={t.skills.market.search}
+                  className="h-8 pl-8 text-sm"
+                />
+              </div>
               <div className="flex gap-1 overflow-x-auto">
-                {sortOptions.map((option) => (
+                {filterOptions.map((option) => (
                   <Button
                     key={option.value}
                     type="button"
                     variant={
-                      catalogSort === option.value ? "secondary" : "ghost"
+                      catalogFilter === option.value ? "secondary" : "ghost"
                     }
                     size="sm"
                     className="h-7 shrink-0 px-2 text-xs"
-                    onClick={() => setCatalogSort(option.value)}
+                    onClick={() => setCatalogFilter(option.value)}
                   >
                     {option.label}
                   </Button>
                 ))}
               </div>
-              <p className="shrink-0 text-[11px] text-muted-foreground">
-                {catalogStats.join(" · ")}
-              </p>
-            </div>
-          </div>
-
-          {showImporter && (
-            <>
-              <Separator />
-              <SkillImporter onImported={onImported} />
-              <Separator />
-            </>
-          )}
-
-          {lastImport && (
-            <div className="border border-green-500/20 bg-green-500/10 rounded-lg p-3 space-y-2">
-              <p className="text-xs font-medium text-green-700 dark:text-green-400">
-                {t.skills.importer.successOne.replace(
-                  "{name}",
-                  lastImport.name,
-                )}
-              </p>
-              {lastImport.warnings.length > 0 && (
-                <div className="space-y-1">
-                  <p className="text-xs text-muted-foreground">
-                    {t.skills.importer.warningsHeader}
-                  </p>
-                  <ul className="text-xs text-muted-foreground list-disc pl-4 space-y-0.5">
-                    {lastImport.warnings.map((w, i) => (
-                      <li key={i}>{w}</li>
-                    ))}
-                  </ul>
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex gap-1 overflow-x-auto">
+                  {sortOptions.map((option) => (
+                    <Button
+                      key={option.value}
+                      type="button"
+                      variant={
+                        catalogSort === option.value ? "secondary" : "ghost"
+                      }
+                      size="sm"
+                      className="h-7 shrink-0 px-2 text-xs"
+                      onClick={() => setCatalogSort(option.value)}
+                    >
+                      {option.label}
+                    </Button>
+                  ))}
                 </div>
-              )}
-            </div>
-          )}
-
-          {error && (
-            <div
-              role="alert"
-              className="border border-destructive/30 bg-destructive/5 rounded-lg p-3 flex gap-2"
-            >
-              <AlertTriangle
-                size={16}
-                className="text-destructive shrink-0 mt-0.5"
-              />
-              <p className="text-xs text-destructive whitespace-pre-wrap flex-1">
-                {error}
-              </p>
-            </div>
-          )}
-
-          <div className="flex-1 overflow-y-auto space-y-2 pr-1">
-            {catalogItems.length === 0 ? (
-              <div className="flex flex-col items-center justify-center py-10 text-muted-foreground">
-                <Inbox size={28} className="mb-2 opacity-60" />
-                <p className="text-sm">
-                  {catalogSummary.total === 0
-                    ? t.skills.empty
-                    : t.skills.market.emptySearch}
+                <p className="shrink-0 text-[11px] text-muted-foreground">
+                  {catalogStats.join(" · ")}
                 </p>
               </div>
-            ) : (
-              catalogItems.map((item) => {
-                const { skill, ...catalog } = item;
-                return (
-                  <SkillCard
-                    key={skill.id}
-                    skill={skill}
-                    catalog={catalog}
-                    onToggleAutoEnabled={handleToggle}
-                    onDelete={requestDelete}
-                    pending={pendingAutoIds.has(skill.id)}
-                    details={detailsMap[skill.id]}
-                    onRequestDetails={handleRequestDetails}
-                  />
-                );
-              })
+            </div>
+
+            {showImporter && (
+              <>
+                <Separator />
+                <SkillImporter onImported={onImported} />
+                <Separator />
+              </>
             )}
-          </div>
+
+            {lastImport && (
+              <div className="border border-green-500/20 bg-green-500/10 rounded-lg p-3 space-y-2">
+                <p className="text-xs font-medium text-green-700 dark:text-green-400">
+                  {t.skills.importer.successOne.replace(
+                    "{name}",
+                    lastImport.name,
+                  )}
+                </p>
+                {lastImport.warnings.length > 0 && (
+                  <div className="space-y-1">
+                    <p className="text-xs text-muted-foreground">
+                      {t.skills.importer.warningsHeader}
+                    </p>
+                    <ul className="text-xs text-muted-foreground list-disc pl-4 space-y-0.5">
+                      {lastImport.warnings.map((w, i) => (
+                        <li key={i}>{w}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {error && (
+              <div
+                role="alert"
+                className="border border-destructive/30 bg-destructive/5 rounded-lg p-3 flex gap-2"
+              >
+                <AlertTriangle
+                  size={16}
+                  className="text-destructive shrink-0 mt-0.5"
+                />
+                <p className="text-xs text-destructive whitespace-pre-wrap flex-1">
+                  {error}
+                </p>
+              </div>
+            )}
+
+            <div className="space-y-2 pr-1">
+              {catalogItems.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-10 text-muted-foreground">
+                  <Inbox size={28} className="mb-2 opacity-60" />
+                  <p className="text-sm">
+                    {catalogSummary.total === 0
+                      ? t.skills.empty
+                      : t.skills.market.emptySearch}
+                  </p>
+                </div>
+              ) : (
+                catalogItems.map((item) => {
+                  const { skill, ...catalog } = item;
+                  return (
+                    <SkillCard
+                      key={skill.id}
+                      skill={skill}
+                      catalog={catalog}
+                      onToggleAutoEnabled={handleToggle}
+                      onDelete={requestDelete}
+                      pending={pendingAutoIds.has(skill.id)}
+                      details={detailsMap[skill.id]}
+                      onRequestDetails={handleRequestDetails}
+                    />
+                  );
+                })
+              )}
+            </div>
+          </DialogBody>
         </DialogContent>
       </Dialog>
 

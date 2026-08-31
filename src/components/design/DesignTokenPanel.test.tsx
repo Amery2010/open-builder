@@ -32,6 +32,43 @@ describe("DesignTokenPanel", () => {
     }));
   });
 
+  it("keeps the token editor body scrollable between fixed header and footer", () => {
+    render(
+      <DesignTokenPanel
+        open
+        onOpenChange={vi.fn()}
+        files={{ "tokens.css": css }}
+        designState={{
+          appliedSystem: {
+            id: "stripe",
+            name: "Stripe",
+            source: "builtin",
+            version: "pinned",
+            digest: "a".repeat(64),
+          },
+        }}
+        onDraftChange={vi.fn()}
+        onCommit={vi.fn()}
+        onUpgrade={vi.fn()}
+        isGenerating={false}
+      />,
+    );
+
+    const dialog = screen.getByRole("dialog");
+    const body = dialog.querySelector<HTMLElement>('[data-slot="dialog-body"]');
+    expect(dialog).toHaveClass("max-h-[calc(100dvh-2rem)]", "overflow-hidden");
+    expect(dialog.querySelector('[data-slot="dialog-header"]')).toHaveClass(
+      "shrink-0",
+    );
+    expect(dialog.querySelector('[data-slot="dialog-footer"]')).toHaveClass(
+      "shrink-0",
+    );
+    expect(dialog.querySelectorAll('[data-slot="dialog-body"]')).toHaveLength(
+      1,
+    );
+    expect(body).toHaveClass("min-h-0", "flex-1", "overflow-y-auto");
+  });
+
   it("previews repeated input but commits only once on Save", async () => {
     const user = userEvent.setup();
     const onDraftChange = vi.fn();

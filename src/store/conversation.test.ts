@@ -273,6 +273,137 @@ describe("conversation store", () => {
     expect(state.conversations[second].files).toEqual({});
   });
 
+  it("withdraws only the final genuine user message and returns it for draft restoration", () => {
+    const id = useConversationStore.getState().createConversation();
+    const finalMessage = {
+      role: "user" as const,
+      content: "Build the app",
+      forcedSkillIds: ["ui-review"],
+    };
+    useConversationStore.setState((state) => ({
+      conversations: {
+        ...state.conversations,
+        [id]: {
+          ...state.conversations[id],
+          messages: [
+            { role: "assistant" as const, content: "Ready" },
+            finalMessage,
+          ],
+        },
+      },
+    }));
+
+    expect(useConversationStore.getState().withdrawLastUserMessage(id)).toBe(
+      finalMessage,
+    );
+    expect(useConversationStore.getState().conversations[id].messages).toEqual([
+      { role: "assistant", content: "Ready" },
+    ]);
+  });
+
+  it("withdraws the final visible user message together with hidden trailing records", () => {
+    const id = useConversationStore.getState().createConversation();
+    const finalMessage = { role: "user" as const, content: "Build the app" };
+    useConversationStore.setState((state) => ({
+      conversations: {
+        ...state.conversations,
+        [id]: {
+          ...state.conversations[id],
+          messages: [
+            { role: "assistant" as const, content: "Ready" },
+            finalMessage,
+            {
+              role: "assistant" as const,
+              content: null,
+              tool_calls: [
+                {
+                  id: "memory-call",
+                  type: "function" as const,
+                  function: { name: "manage_memories", arguments: "{}" },
+                },
+              ],
+            },
+            {
+              role: "tool" as const,
+              tool_call_id: "memory-call",
+              content: "OK",
+            },
+          ],
+        },
+      },
+    }));
+
+    expect(useConversationStore.getState().withdrawLastUserMessage(id)).toBe(
+      finalMessage,
+    );
+    expect(useConversationStore.getState().conversations[id].messages).toEqual([
+      { role: "assistant", content: "Ready" },
+    ]);
+  });
+
+  it("does not withdraw an internal activity or a user with visible follow-up", () => {
+    const id = useConversationStore.getState().createConversation();
+    useConversationStore.setState((state) => ({
+      conversations: {
+        ...state.conversations,
+        [id]: {
+          ...state.conversations[id],
+          messages: [
+            {
+              role: "user" as const,
+              content: "First",
+              metadata: { origin: "auto_qa" as const },
+            },
+            { role: "assistant" as const, content: "Answer" },
+          ],
+        },
+      },
+    }));
+
+    expect(
+      useConversationStore.getState().withdrawLastUserMessage(id),
+    ).toBeUndefined();
+    expect(
+      useConversationStore.getState().conversations[id].messages,
+    ).toHaveLength(2);
+
+    useConversationStore.setState((state) => ({
+      conversations: {
+        ...state.conversations,
+        [id]: {
+          ...state.conversations[id],
+          messages: [
+            { role: "assistant" as const, content: "Answer" },
+            {
+              role: "user" as const,
+              content: "Internal",
+              metadata: { origin: "auto_qa" as const },
+            },
+          ],
+        },
+      },
+    }));
+    expect(
+      useConversationStore.getState().withdrawLastUserMessage(id),
+    ).toBeUndefined();
+
+    useConversationStore.setState((state) => ({
+      conversations: {
+        ...state.conversations,
+        [id]: {
+          ...state.conversations[id],
+          messages: [
+            { role: "user" as const, content: "Build the app" },
+            { role: "assistant" as const, content: "Visible response" },
+          ],
+        },
+      },
+    }));
+    expect(
+      useConversationStore.getState().withdrawLastUserMessage(id),
+    ).toBeUndefined();
+  });
+
   it("derives project initialization atomically from the file tree", () => {
     const id = useConversationStore.getState().createConversation();
 
@@ -524,6 +655,13 @@ describe("conversation store", () => {
         provider: "claude",
         sessionId: "session-2",
       });
+    useConversationStore
+      .getState()
+      .setLocalAgentSessionForConversation(original, "pi", {
+        ...session,
+        provider: "pi",
+        sessionId: "session-3",
+      });
 
     expect(
       useConversationStore.getState().conversations[original]
@@ -531,6 +669,7 @@ describe("conversation store", () => {
     ).toMatchObject({
       codex: { sessionId: "thread-1" },
       claude: { sessionId: "session-2" },
+      pi: { sessionId: "session-3" },
     });
 
     const fork = useConversationStore.getState().forkConversation();

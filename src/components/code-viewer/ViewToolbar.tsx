@@ -8,8 +8,8 @@ import {
   Minus,
   Plus,
   Scan,
-  Palette,
-  MousePointer2,
+  Shapes,
+  MousePointerClick,
   CircleHelp,
   FolderOutput,
   ScanSearch,
@@ -156,7 +156,7 @@ export function ViewToolbar({
             label={t.toolbar.designTokens}
             disabled={isGenerating}
           >
-            <Palette size={15} />
+            <Shapes size={15} />
           </ToolbarIconButton>
         )}
         {designMode && viewMode === "preview" && onOpenDesignReview && (
@@ -179,7 +179,7 @@ export function ViewToolbar({
                 : t.toolbar.selectElement
             }
           >
-            <MousePointer2 size={15} />
+            <MousePointerClick size={15} />
           </ToolbarIconButton>
         )}
         {designMode &&

@@ -13,22 +13,14 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { useConversationStore, DEFAULT_TITLE } from "../../store/conversation";
-import { useProjectTemplateStore } from "../../store/project-templates";
 import { useSettingsStore } from "../../store/settings";
+import { useProjectTemplateLibraryUi } from "../../store/project-template-library-ui";
 import {
   getNextVisibleCount,
   getVisibleListWindow,
 } from "../../lib/utils/list-window";
-import {
-  createConversationFromProjectTemplate,
-  createProjectTemplateFromConversation,
-} from "../../lib/utils/project-templates";
 import { useT } from "../../i18n";
 import type { Conversation } from "../../types";
-import {
-  ProjectTemplateDialog,
-  type ProjectTemplateSaveInput,
-} from "./ProjectTemplateDialog";
 import { SessionItem } from "./session-list/SessionItem";
 import { SessionGroup } from "./session-list/SessionGroup";
 
@@ -44,7 +36,6 @@ export function SessionList({ onClose }: SessionListProps) {
   const activeId = useConversationStore((s) => s.activeId);
   const switchConversation = useConversationStore((s) => s.switchConversation);
   const createConversation = useConversationStore((s) => s.createConversation);
-  const addConversation = useConversationStore((s) => s.addConversation);
   const deleteConversation = useConversationStore((s) => s.deleteConversation);
   const renameConversation = useConversationStore((s) => s.renameConversation);
   const pinConversation = useConversationStore((s) => s.pinConversation);
@@ -55,17 +46,13 @@ export function SessionList({ onClose }: SessionListProps) {
   const unarchiveConversation = useConversationStore(
     (s) => s.unarchiveConversation,
   );
-  const templateRecord = useProjectTemplateStore((s) => s.templates);
-  const addTemplate = useProjectTemplateStore((s) => s.addTemplate);
-  const deleteTemplate = useProjectTemplateStore((s) => s.deleteTemplate);
+  const openLibrary = useProjectTemplateLibraryUi((state) => state.openLibrary);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
 
   const [pinnedOpen, setPinnedOpen] = useState(true);
   const [normalOpen, setNormalOpen] = useState(true);
   const [archivedOpen, setArchivedOpen] = useState(false);
-  const [templatesOpen, setTemplatesOpen] = useState(false);
-  const [templateSourceId, setTemplateSourceId] = useState<string | null>(null);
   const isSearching = query.trim().length > 0;
   const [visibleSessionCount, setVisibleSessionCount] =
     useState(SESSION_LIST_BATCH);
@@ -112,11 +99,6 @@ export function SessionList({ onClose }: SessionListProps) {
     [sorted],
   );
   const archived = useMemo(() => sorted.filter((c) => c.archived), [sorted]);
-  const templates = useMemo(
-    () =>
-      Object.values(templateRecord).sort((a, b) => b.updatedAt - a.updatedAt),
-    [templateRecord],
-  );
 
   const hasGroups = pinned.length > 0 || archived.length > 0;
   const deleteDisabled = Object.keys(conversations).length <= 1;
@@ -172,71 +154,6 @@ export function SessionList({ onClose }: SessionListProps) {
     [t.chat.newApp],
   );
 
-  const openTemplates = useCallback(
-    (sourceId?: string) => {
-      setTemplateSourceId(sourceId ?? activeId);
-      setTemplatesOpen(true);
-    },
-    [activeId],
-  );
-
-  const templateSourceConversation = useMemo(() => {
-    const sourceId = templateSourceId ?? activeId;
-    return sourceId ? (conversations[sourceId] ?? null) : null;
-  }, [activeId, conversations, templateSourceId]);
-
-  const templateSourceTitle = templateSourceConversation
-    ? displayTitle(templateSourceConversation)
-    : t.chat.newApp;
-
-  const handleSaveCurrentTemplate = useCallback(
-    (input: ProjectTemplateSaveInput) => {
-      const sourceId = templateSourceId ?? activeId;
-      const conversation = sourceId
-        ? useConversationStore.getState().conversations[sourceId]
-        : null;
-      if (!conversation) {
-        return { ok: false as const, error: "Source conversation not found." };
-      }
-
-      try {
-        addTemplate(
-          createProjectTemplateFromConversation(conversation, {
-            id: crypto.randomUUID(),
-            name: input.name,
-            description: input.description,
-            tags: input.tags,
-            now: Date.now(),
-          }),
-        );
-        return { ok: true as const };
-      } catch (err) {
-        return {
-          ok: false as const,
-          error:
-            err instanceof Error ? err.message : "Failed to save template.",
-        };
-      }
-    },
-    [activeId, addTemplate, templateSourceId],
-  );
-
-  const handleCreateFromTemplate = useCallback(
-    (templateId: string) => {
-      const template = useProjectTemplateStore.getState().templates[templateId];
-      if (!template) return;
-      const conversation = createConversationFromProjectTemplate(template, {
-        id: crypto.randomUUID(),
-        now: Date.now(),
-      });
-      addConversation(conversation);
-      setQuery("");
-      setTemplatesOpen(false);
-      onClose();
-    },
-    [addConversation, onClose],
-  );
-
   const handleSmartRename = useCallback(
     async (convId: string) => {
       const conv = useConversationStore.getState().conversations[convId];
@@ -255,7 +172,7 @@ export function SessionList({ onClose }: SessionListProps) {
             ? await import("../../lib/local-agent/generator").then(
                 ({ runLocalUtilityText }) => {
                   const provider = ai.localAgent.provider;
-                  const preferences = ai.localAgent[provider];
+                  const preferences = ai.localAgent.preferences[provider];
                   return (
                     instructions: string,
                     prompt: string,
@@ -305,7 +222,7 @@ export function SessionList({ onClose }: SessionListProps) {
       onSelect={handleSelect}
       onRename={renameConversation}
       onSmartRename={handleSmartRename}
-      onSaveAsTemplate={openTemplates}
+      onSaveAsTemplate={openLibrary}
       canSaveAsTemplate={Object.keys(conv.files).length > 0}
       pin={pinConversation}
       unpin={unpinConversation}
@@ -359,7 +276,7 @@ export function SessionList({ onClose }: SessionListProps) {
                 variant="ghost"
                 size="icon"
                 className="h-8 w-8"
-                onClick={() => openTemplates()}
+                onClick={() => openLibrary(activeId)}
                 aria-label={t.sessions.templates.title}
               >
                 <LayoutTemplate size={17} aria-hidden="true" />
@@ -464,18 +381,6 @@ export function SessionList({ onClose }: SessionListProps) {
           </>
         )}
       </div>
-
-      {templatesOpen && (
-        <ProjectTemplateDialog
-          sourceConversation={templateSourceConversation}
-          sourceTitle={templateSourceTitle}
-          templates={templates}
-          onClose={() => setTemplatesOpen(false)}
-          onSaveCurrent={handleSaveCurrentTemplate}
-          onCreateFromTemplate={handleCreateFromTemplate}
-          onDeleteTemplate={deleteTemplate}
-        />
-      )}
     </nav>
   );
 }

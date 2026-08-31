@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 
 import { render, screen } from "@testing-library/react";
-import { beforeEach, describe, expect, it } from "vitest";
+import userEvent from "@testing-library/user-event";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useSettingsStore } from "../../store/settings";
 import { useInteractiveStore } from "../../store/interactive";
 import type { MergedMessage } from "../../types";
@@ -83,5 +84,68 @@ describe("MessageBubble ask-user answers", () => {
     expect(screen.getByLabelText("Your answers")).toHaveTextContent(
       "Layout: Compact",
     );
+  });
+
+  it("shows a withdrawal affordance only when the chat owner enables it", async () => {
+    const user = userEvent.setup();
+    const onWithdraw = vi.fn();
+    const message: MergedMessage = {
+      id: "user-0",
+      role: "user",
+      blocks: [{ id: "text-0-0", type: "text", content: "Build the app" }],
+    };
+
+    const { rerender } = render(
+      <MessageBubble
+        message={message}
+        canWithdraw
+        onWithdraw={onWithdraw}
+        withdrawLabel="Withdraw last message"
+      />,
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Withdraw last message" }),
+    );
+    expect(onWithdraw).toHaveBeenCalledOnce();
+
+    rerender(<MessageBubble message={message} />);
+    expect(
+      screen.queryByRole("button", { name: "Withdraw last message" }),
+    ).not.toBeInTheDocument();
+
+    rerender(
+      <MessageBubble
+        message={{ ...message, origin: "auto_qa" }}
+        canWithdraw
+        onWithdraw={onWithdraw}
+        withdrawLabel="Withdraw last message"
+      />,
+    );
+    expect(
+      screen.queryByRole("button", { name: "Withdraw last message" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders an automatic Design Review timeline block", () => {
+    render(
+      <MessageBubble
+        message={{
+          id: "user-0",
+          role: "user",
+          blocks: [],
+          origin: "design_review",
+          reviewJobId: "review-pruned",
+          reviewSummary: {
+            status: "succeeded",
+            findingCount: 3,
+          },
+        }}
+      />,
+    );
+
+    expect(
+      screen.getByRole("region", { name: "Automatic Design Review" }),
+    ).toBeVisible();
+    expect(screen.getByText("3 findings")).toBeVisible();
   });
 });
