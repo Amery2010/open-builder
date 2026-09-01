@@ -662,6 +662,13 @@ describe("conversation store", () => {
         provider: "pi",
         sessionId: "session-3",
       });
+    useConversationStore
+      .getState()
+      .setLocalAgentSessionForConversation(original, "antigravity", {
+        ...session,
+        provider: "antigravity",
+        sessionId: "conversation-4",
+      });
 
     expect(
       useConversationStore.getState().conversations[original]
@@ -670,6 +677,7 @@ describe("conversation store", () => {
       codex: { sessionId: "thread-1" },
       claude: { sessionId: "session-2" },
       pi: { sessionId: "session-3" },
+      antigravity: { sessionId: "conversation-4" },
     });
 
     const fork = useConversationStore.getState().forkConversation();

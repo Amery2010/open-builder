@@ -105,6 +105,15 @@ function completeRun(
   sessionId = "thread-1",
 ) {
   onEvent({
+    type: "prepared",
+    compatibilityKey: `compat-${sessionId}`,
+    installationFingerprint: "install-1",
+    cliVersion: "codex-cli 1.0.0",
+    actualModel: "gpt-5.6-sol",
+    actualEffort: "high",
+    resumed: false,
+  });
+  onEvent({
     type: "session",
     sessionId,
     cliVersion: "codex-cli 1.0.0",
@@ -160,11 +169,54 @@ describe("LocalAgentGenerator", () => {
         provider: "codex",
         sessionId: "thread-1",
         cliVersion: "codex-cli 1.0.0",
+        compatibilityKey: "compat-thread-1",
+        installationFingerprint: "install-1",
       }),
     );
+    expect(request).toMatchObject({
+      scope: { kind: "conversation", id: "conversation-1" },
+      sessionCompatibilityKey: undefined,
+    });
 
     instance.abort();
     expect(localAgentMocks.cancel).not.toHaveBeenCalled();
+  });
+
+  it("persists safe local CLI lifecycle telemetry on the assistant message", async () => {
+    localAgentMocks.start.mockImplementation(
+      async (
+        _request: LocalAgentStartRequest,
+        onEvent: (event: LocalAgentEvent) => void,
+      ) => {
+        queueMicrotask(() => {
+          onEvent({ type: "status", state: "streaming" });
+          onEvent({ type: "textDelta", delta: "Done" });
+          onEvent({ type: "usage", inputTokens: 8, outputTokens: 2 });
+          onEvent({ type: "warning", message: "Gateway fallback" });
+          onEvent({
+            type: "done",
+            aborted: false,
+            sessionId: "thread-telemetry",
+          });
+        });
+        return "run-telemetry";
+      },
+    );
+
+    const { instance } = generator(baseConversation());
+    await instance.generate("Run with telemetry");
+
+    expect(instance.getMessages().at(-1)).toMatchObject({
+      role: "assistant",
+      metadata: {
+        localCli: {
+          provider: "codex",
+          status: { state: "streaming" },
+          usage: { inputTokens: 8, outputTokens: 2 },
+          warnings: ["Gateway fallback"],
+        },
+      },
+    });
   });
 
   it("enforces host write authorization for local CLI tool requests", async () => {
@@ -211,6 +263,47 @@ describe("LocalAgentGenerator", () => {
       expect.objectContaining({
         isError: true,
         text: expect.stringContaining("Design contract required"),
+      }),
+    );
+  });
+
+  it("cannot execute a tool omitted from the run authority snapshot", async () => {
+    let request: LocalAgentStartRequest | undefined;
+    const customToolHandler = vi.fn(async () => "must not execute");
+    localAgentMocks.start.mockImplementation(
+      async (
+        currentRequest: LocalAgentStartRequest,
+        onEvent: (event: LocalAgentEvent) => void,
+      ) => {
+        request = currentRequest;
+        queueMicrotask(() => {
+          onEvent({
+            type: "toolRequest",
+            runId: "run-hidden-tool",
+            callId: "hidden-tool-call",
+            name: "screenshot_to_code",
+            arguments: { url: "https://example.test" },
+          });
+          onEvent({ type: "done", aborted: false });
+        });
+        return "run-hidden-tool";
+      },
+    );
+    const { instance } = generator(baseConversation(), vi.fn(), vi.fn(), {
+      tools: { screenshot_to_code: BUILTIN_TOOLS.write_file },
+      customToolHandler,
+    });
+
+    await instance.generate("Attempt a hidden tool");
+
+    expect(request?.tools).toEqual([]);
+    expect(customToolHandler).not.toHaveBeenCalled();
+    expect(localAgentMocks.resolve).toHaveBeenCalledWith(
+      "run-hidden-tool",
+      "hidden-tool-call",
+      expect.objectContaining({
+        isError: true,
+        text: expect.stringContaining("not authorized"),
       }),
     );
   });
@@ -292,6 +385,7 @@ describe("LocalAgentGenerator", () => {
           provider: "codex",
           sessionId: "thread-existing",
           transcriptFingerprint: fingerprint,
+          compatibilityKey: "compat-thread-existing",
           cliVersion: "codex-cli 1.0.0",
           updatedAt: 1,
         },
@@ -311,7 +405,7 @@ describe("LocalAgentGenerator", () => {
 
     await generator(matching).instance.generate("Next request");
     expect(requests[0].sessionId).toBe("thread-existing");
-    expect(requests[0].bootstrapContext).toBeUndefined();
+    expect(requests[0].bootstrapContext).toContain("Earlier request");
 
     requests.length = 0;
     const mismatched = baseConversation({
@@ -326,6 +420,78 @@ describe("LocalAgentGenerator", () => {
     await generator(mismatched).instance.generate("Next request");
     expect(requests[0].sessionId).toBeUndefined();
     expect(requests[0].bootstrapContext).toContain("Earlier request");
+  });
+
+  it("excludes the optimistically stored current request by canonical index", async () => {
+    const previousMessages: Conversation["messages"] = [
+      { role: "user", content: "Earlier request" },
+      { role: "assistant", content: "Earlier response" },
+    ];
+    const fingerprint = await computeConversationFingerprint({
+      messages: previousMessages,
+      files: {},
+      compressedContext: undefined,
+      template: "vite-react-ts",
+    });
+    const currentPrompt = "Next request with expanded context";
+    const storedConversation = baseConversation({
+      messages: [
+        ...previousMessages,
+        { role: "user", content: "Next request" },
+      ],
+      localAgentSessions: {
+        codex: {
+          provider: "codex",
+          sessionId: "thread-existing",
+          transcriptFingerprint: fingerprint,
+          compatibilityKey: "compat-thread-existing",
+          cliVersion: "codex-cli 1.0.0",
+          updatedAt: 1,
+        },
+      },
+    });
+    let request: LocalAgentStartRequest | undefined;
+    localAgentMocks.start.mockImplementation(
+      async (
+        currentRequest: LocalAgentStartRequest,
+        onEvent: (event: LocalAgentEvent) => void,
+      ) => {
+        request = currentRequest;
+        queueMicrotask(() =>
+          completeRun(onEvent, "run-indexed", "thread-existing"),
+        );
+        return "run-indexed";
+      },
+    );
+    const instance = createLocalAgentGenerator(
+      {
+        provider: "codex",
+        nativeSearch: false,
+        conversationId: storedConversation.id,
+        getConversation: () => storedConversation,
+      },
+      {},
+      storedConversation.files,
+      {},
+      undefined,
+      {
+        tools: {},
+        executionMode: "chat",
+        runtimePlatform: "desktop",
+        systemPrompt: "Open Builder system",
+      },
+    );
+    instance.syncMessages(previousMessages);
+
+    await instance.generate(currentPrompt, [], {
+      currentMessageIndex: previousMessages.length,
+    });
+
+    expect(request?.sessionId).toBe("thread-existing");
+    expect(request?.bootstrapContext).toContain("Earlier request");
+    expect(request?.bootstrapContext).not.toContain("Next request");
+    expect(request?.bootstrapContext).not.toContain(currentPrompt);
+    expect(request?.prompt).toBe(currentPrompt);
   });
 
   it("never resumes a session owned by another CLI provider", async () => {
@@ -346,6 +512,7 @@ describe("LocalAgentGenerator", () => {
           provider: "codex",
           sessionId: "codex-thread",
           transcriptFingerprint: fingerprint,
+          compatibilityKey: "compat-codex-thread",
           cliVersion: "codex-cli 1.0.0",
           updatedAt: 1,
         },
@@ -372,6 +539,62 @@ describe("LocalAgentGenerator", () => {
     expect(request?.bootstrapContext).toContain("Earlier request");
   });
 
+  it("resumes Antigravity only from its provider-scoped conversation", async () => {
+    const messages: Conversation["messages"] = [
+      { role: "user", content: "Earlier request" },
+      { role: "assistant", content: "Earlier response" },
+    ];
+    const fingerprint = await computeConversationFingerprint({
+      messages,
+      files: {},
+      compressedContext: undefined,
+      template: "vite-react-ts",
+    });
+    const conversation = baseConversation({
+      messages,
+      localAgentSessions: {
+        codex: {
+          provider: "codex",
+          sessionId: "codex-thread",
+          transcriptFingerprint: fingerprint,
+          cliVersion: "codex-cli 1.0.0",
+          updatedAt: 1,
+        },
+        antigravity: {
+          provider: "antigravity",
+          sessionId: "agy-conversation",
+          transcriptFingerprint: fingerprint,
+          compatibilityKey: "compat-agy-conversation",
+          cliVersion: "agy 1.1.22",
+          updatedAt: 2,
+        },
+      },
+    });
+    let request: LocalAgentStartRequest | undefined;
+    localAgentMocks.start.mockImplementation(
+      async (
+        currentRequest: LocalAgentStartRequest,
+        onEvent: (event: LocalAgentEvent) => void,
+      ) => {
+        request = currentRequest;
+        queueMicrotask(() =>
+          completeRun(onEvent, "run-antigravity", "agy-conversation"),
+        );
+        return "run-antigravity";
+      },
+    );
+
+    await generator(conversation, vi.fn(), vi.fn(), {
+      provider: "antigravity",
+    }).instance.generate("Continue with Antigravity");
+
+    expect(request).toMatchObject({
+      provider: "antigravity",
+      sessionId: "agy-conversation",
+    });
+    expect(request?.bootstrapContext).toContain("Earlier request");
+  });
+
   it("rebuilds once after a pre-activity resume failure and never replays other failures", async () => {
     const messages: Conversation["messages"] = [
       { role: "user", content: "Earlier request" },
@@ -390,6 +613,7 @@ describe("LocalAgentGenerator", () => {
           provider: "codex",
           sessionId: "missing-thread",
           transcriptFingerprint: fingerprint,
+          compatibilityKey: "compat-missing-thread",
           cliVersion: "codex-cli 1.0.0",
           updatedAt: 1,
         },
@@ -408,6 +632,17 @@ describe("LocalAgentGenerator", () => {
               type: "error",
               message: "thread not found while resuming",
               retryable: false,
+              failure: {
+                code: "sessionUnavailable",
+                phase: "handshake",
+                provider: "codex",
+                safeMessage:
+                  "The saved local CLI session is no longer available.",
+                diagnosticId: "diag-session-missing",
+                hadActivity: false,
+                hadHostSideEffect: false,
+                retryPolicy: "freshSessionSafe",
+              },
             });
             onEvent({ type: "done", aborted: false });
           } else {
@@ -441,7 +676,7 @@ describe("LocalAgentGenerator", () => {
     );
     await expect(
       generator(conversation).instance.generate("Next request"),
-    ).rejects.toThrow("capability probe timed out");
+    ).rejects.toThrow("The local CLI reported an error.");
     expect(calls).toBe(1);
   });
 
@@ -620,7 +855,7 @@ describe("LocalAgentGenerator", () => {
     const { instance } = generator(baseConversation());
 
     await expect(instance.generate("Create the report")).rejects.toThrow(
-      "provider stream failed",
+      "The local CLI reported an error.",
     );
     await instance.retry();
 
@@ -653,10 +888,11 @@ describe("LocalAgentGenerator", () => {
     );
     const noActivity = generator(baseConversation()).instance;
     await expect(noActivity.generate("Keep the original")).rejects.toThrow(
-      "provider unavailable",
+      "The local CLI reported an error.",
     );
     await noActivity.retry();
     expect(requests[1].prompt).toBe("Keep the original");
+    expect(requests[1].bootstrapContext).not.toContain("Keep the original");
   });
 
   it("passes the remaining shared tool budget into plan continuation", async () => {
@@ -781,14 +1017,37 @@ describe("LocalAgentGenerator", () => {
         return "run-qa";
       },
     );
-    const { instance } = generator(baseConversation(), vi.fn(), vi.fn(), {
-      nativeSearch: true,
-    });
+    const conversation = baseConversation();
+    const fingerprint = await computeConversationFingerprint(conversation);
+    conversation.localAgentSessions = {
+      codex: {
+        provider: "codex",
+        sessionId: "main-thread",
+        transcriptFingerprint: fingerprint,
+        compatibilityKey: "main-compatibility",
+        cliVersion: "codex-cli 1.0.0",
+        updatedAt: 1,
+      },
+    };
+    const { instance, saveSession } = generator(
+      conversation,
+      vi.fn(),
+      vi.fn(),
+      {
+        nativeSearch: true,
+      },
+    );
     instance.setExecutionMode("auto_qa");
 
     await instance.generate("Run automatic QA");
 
-    expect(request).toMatchObject({ mode: "auto_qa", nativeSearch: false });
+    expect(request).toMatchObject({
+      mode: "auto_qa",
+      nativeSearch: false,
+      sessionId: undefined,
+      scope: { kind: "utility" },
+    });
+    expect(saveSession).not.toHaveBeenCalled();
   });
 
   it("blocks Pi built-in search before starting a local CLI turn", async () => {
@@ -945,5 +1204,106 @@ describe("LocalAgentGenerator", () => {
     expect(dispatch).toHaveBeenCalledTimes(3);
     expect(result.maxIterationsReached).toBe(true);
     expect(localAgentMocks.cancel).toHaveBeenCalledWith("run-1");
+  });
+
+  it("does not resume a legacy session without a compatibility key", async () => {
+    const messages: Conversation["messages"] = [
+      { role: "user", content: "Earlier request" },
+      { role: "assistant", content: "Earlier response" },
+    ];
+    const fingerprint = await computeConversationFingerprint({
+      messages,
+      files: {},
+      compressedContext: undefined,
+      template: "vite-react-ts",
+    });
+    const conversation = baseConversation({
+      messages,
+      localAgentSessions: {
+        codex: {
+          provider: "codex",
+          sessionId: "legacy-thread",
+          transcriptFingerprint: fingerprint,
+          cliVersion: "codex-cli 1.0.0",
+          updatedAt: 1,
+        },
+      },
+    });
+    let request: LocalAgentStartRequest | undefined;
+    localAgentMocks.start.mockImplementation(
+      async (
+        currentRequest: LocalAgentStartRequest,
+        onEvent: (event: LocalAgentEvent) => void,
+      ) => {
+        request = currentRequest;
+        queueMicrotask(() => completeRun(onEvent, "run-legacy"));
+        return "run-legacy";
+      },
+    );
+
+    await generator(conversation).instance.generate("Continue safely");
+
+    expect(request?.sessionId).toBeUndefined();
+    expect(request?.sessionCompatibilityKey).toBeUndefined();
+    expect(request?.bootstrapContext).toContain("Earlier request");
+  });
+
+  it("does not infer a fresh-session retry from prose when typed failure is present", async () => {
+    const messages: Conversation["messages"] = [
+      { role: "user", content: "Earlier request" },
+      { role: "assistant", content: "Earlier response" },
+    ];
+    const fingerprint = await computeConversationFingerprint({
+      messages,
+      files: {},
+      compressedContext: undefined,
+      template: "vite-react-ts",
+    });
+    const conversation = baseConversation({
+      messages,
+      localAgentSessions: {
+        codex: {
+          provider: "codex",
+          sessionId: "typed-thread",
+          transcriptFingerprint: fingerprint,
+          compatibilityKey: "compat-typed-thread",
+          cliVersion: "codex-cli 1.0.0",
+          updatedAt: 1,
+        },
+      },
+    });
+    let calls = 0;
+    localAgentMocks.start.mockImplementation(
+      async (
+        _request: LocalAgentStartRequest,
+        onEvent: (event: LocalAgentEvent) => void,
+      ) => {
+        calls += 1;
+        queueMicrotask(() => {
+          onEvent({
+            type: "error",
+            message: "thread not found while resuming",
+            retryable: false,
+            failure: {
+              code: "protocolViolation",
+              phase: "handshake",
+              provider: "codex",
+              safeMessage: "The local CLI returned an unsupported response.",
+              diagnosticId: "diag-protocol",
+              hadActivity: false,
+              hadHostSideEffect: false,
+              retryPolicy: "none",
+            },
+          });
+          onEvent({ type: "done", aborted: false });
+        });
+        return `run-typed-${calls}`;
+      },
+    );
+
+    await expect(
+      generator(conversation).instance.generate("Continue safely"),
+    ).rejects.toThrow("unsupported response");
+    expect(calls).toBe(1);
   });
 });

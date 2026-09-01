@@ -2,42 +2,12 @@ import type { DesignSystemStorageAdapter } from "./registry";
 import { assertDesignSystemId, type DesignSystemInputFile } from "./validation";
 
 const ROOT = "design-systems";
-const FS_MODULE_ID = "@tauri-apps/plugin-fs";
-
-interface PluginFsModule {
-  BaseDirectory: { AppData: number };
-  exists: (path: string, options: { baseDir: number }) => Promise<boolean>;
-  mkdir: (
-    path: string,
-    options: { baseDir: number; recursive?: boolean },
-  ) => Promise<void>;
-  readDir: (
-    path: string,
-    options: { baseDir: number },
-  ) => Promise<
-    Array<{
-      name: string;
-      isDirectory: boolean;
-      isFile: boolean;
-      isSymlink: boolean;
-    }>
-  >;
-  readTextFile: (path: string, options: { baseDir: number }) => Promise<string>;
-  writeTextFile: (
-    path: string,
-    content: string,
-    options: { baseDir: number },
-  ) => Promise<void>;
-  remove: (
-    path: string,
-    options: { baseDir: number; recursive?: boolean },
-  ) => Promise<void>;
-}
+type PluginFsModule = typeof import("@tauri-apps/plugin-fs");
 
 let fsPromise: Promise<PluginFsModule> | undefined;
 
 function loadFs(): Promise<PluginFsModule> {
-  fsPromise ??= import(/* @vite-ignore */ FS_MODULE_ID);
+  fsPromise ??= import("@tauri-apps/plugin-fs");
   return fsPromise;
 }
 

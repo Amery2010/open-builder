@@ -1,57 +1,22 @@
 import type { DirEntry, SkillFs } from "./index";
 
 const SKILLS_DIR = "skills";
-const PLUGIN_FS_MODULE_ID = "@tauri-apps/plugin-fs";
-const PLUGIN_PATH_MODULE_ID = "@tauri-apps/api/path";
-
-interface PluginFsModule {
-  readTextFile: (path: string, options?: { baseDir?: number }) => Promise<string>;
-  writeTextFile: (
-    path: string,
-    contents: string,
-    options?: { baseDir?: number },
-  ) => Promise<void>;
-  readDir: (
-    path: string,
-    options?: { baseDir?: number },
-  ) => Promise<
-    Array<{
-      name: string;
-      isDirectory: boolean;
-      isFile: boolean;
-      isSymlink: boolean;
-    }>
-  >;
-  mkdir: (
-    path: string,
-    options?: { baseDir?: number; recursive?: boolean },
-  ) => Promise<void>;
-  remove: (
-    path: string,
-    options?: { baseDir?: number; recursive?: boolean },
-  ) => Promise<void>;
-  exists: (path: string, options?: { baseDir?: number }) => Promise<boolean>;
-  BaseDirectory: { AppData: number };
-}
-
-interface PluginPathModule {
-  appDataDir: () => Promise<string>;
-  join: (...parts: string[]) => Promise<string>;
-}
+type PluginFsModule = typeof import("@tauri-apps/plugin-fs");
+type PluginPathModule = typeof import("@tauri-apps/api/path");
 
 let fsModulePromise: Promise<PluginFsModule> | null = null;
 let pathModulePromise: Promise<PluginPathModule> | null = null;
 
 async function loadFs(): Promise<PluginFsModule> {
   if (!fsModulePromise) {
-    fsModulePromise = import(/* @vite-ignore */ PLUGIN_FS_MODULE_ID);
+    fsModulePromise = import("@tauri-apps/plugin-fs");
   }
   return fsModulePromise;
 }
 
 async function loadPath(): Promise<PluginPathModule> {
   if (!pathModulePromise) {
-    pathModulePromise = import(/* @vite-ignore */ PLUGIN_PATH_MODULE_ID);
+    pathModulePromise = import("@tauri-apps/api/path");
   }
   return pathModulePromise;
 }
@@ -112,10 +77,7 @@ export class TauriSkillFs implements SkillFs {
     }));
   }
 
-  async mkdir(
-    path: string,
-    options?: { recursive?: boolean },
-  ): Promise<void> {
+  async mkdir(path: string, options?: { recursive?: boolean }): Promise<void> {
     const fs = await this.ready();
     await fs.mkdir(joinUnder(path), {
       baseDir: fs.BaseDirectory.AppData,
@@ -123,10 +85,7 @@ export class TauriSkillFs implements SkillFs {
     });
   }
 
-  async remove(
-    path: string,
-    options?: { recursive?: boolean },
-  ): Promise<void> {
+  async remove(path: string, options?: { recursive?: boolean }): Promise<void> {
     const fs = await this.ready();
     await fs.remove(joinUnder(path), {
       baseDir: fs.BaseDirectory.AppData,

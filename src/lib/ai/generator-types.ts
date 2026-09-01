@@ -14,6 +14,13 @@ import type {
   SkillActiveContext,
   SkillActiveContextController,
 } from "../skills/active-context";
+import type {
+  LocalCliFailure,
+  LocalAgentProvider,
+  LocalCliRunStatus,
+  LocalCliUsage,
+  LocalToolAnnotations,
+} from "../local-agent/types";
 
 export type {
   AskUserQuestion,
@@ -47,6 +54,14 @@ export interface ResolvedAttachment extends AttachmentRef {
 }
 
 export interface MessageMetadata {
+  /** Safe lifecycle telemetry captured from one local CLI run. Provider stderr
+   * and other diagnostics are deliberately excluded. */
+  localCli?: {
+    provider: LocalAgentProvider;
+    status?: LocalCliRunStatus;
+    usage?: LocalCliUsage;
+    warnings?: string[];
+  };
   origin?: "auto_qa" | "design_review" | "design_auto_fix";
   attachments?: AttachmentRef[];
   designSelection?: DesignSelectionContext;
@@ -167,6 +182,8 @@ export interface Message {
   errorKind?: StructuredGenerationErrorKind;
   errorRetryable?: boolean;
   errorStatus?: number;
+  /** Structured local CLI diagnostics. Raw provider stderr is never stored. */
+  localCliFailure?: LocalCliFailure;
   /** Skills explicitly attached to this user request. Persisted so retry can
    *  rebuild the same mandatory system context. */
   forcedSkillIds?: string[];
@@ -225,6 +242,7 @@ export type StructuredGenerationErrorKind =
   | "network"
   | "model"
   | "tool"
+  | "local_cli"
   | "context_length"
   | "aborted"
   | "runtime_check"
@@ -235,6 +253,7 @@ export interface StructuredGenerationError {
   message: string;
   status?: number;
   retryable: boolean;
+  localCliFailure?: LocalCliFailure;
 }
 
 export interface InitializedProjectPreparation {
@@ -290,6 +309,8 @@ export interface GeneratorOptions {
   executionMode?: ExecutionMode;
   runtimePlatform?: RuntimePlatform;
   allowedMcpAliases?: ReadonlySet<string>;
+  /** Provider-facing annotations for dynamic local tools. */
+  localToolAnnotations?: ReadonlyMap<string, LocalToolAnnotations>;
   initialSkillContext?: SkillActiveContext | null;
   thinking?: boolean;
   thinkingBudget?: number;
@@ -362,6 +383,18 @@ export interface GeneratorEvents {
   onError?: (error: Error) => void;
   onRetry?: (attempt: number, maxAttempts: number, error: Error) => void;
   onCompact?: () => Promise<Message[] | null>;
+  onLocalCliStatus?: (status: LocalCliRunStatus) => void;
+  onLocalCliWarning?: (message: string) => void;
+  onLocalCliUsage?: (usage: LocalCliUsage) => void;
+}
+
+/** Per-request orchestration facts that are known before the UI appends the
+ * optimistic user message. Runtime backends may ignore fields they do not
+ * need. */
+export interface GenerationRequestContext {
+  /** Index of the current user message in the canonical conversation. Local
+   * runtimes use it to exclude that message from bootstrap/resume history. */
+  currentMessageIndex?: number;
 }
 
 /** Runtime-independent generation surface consumed by the React orchestrator. */
@@ -382,6 +415,10 @@ export interface GenerationBackend {
   /** Prevent an isolated utility profile from bootstrapping or resuming the
    * normal conversation when it supplies its own bounded context. */
   setConversationContextAllowed?(allowed: boolean): void;
+  /** Set the MCP annotations used by the local Host Tool Authority snapshot. */
+  setLocalToolAnnotations?(
+    annotations: ReadonlyMap<string, LocalToolAnnotations>,
+  ): void;
   setAllowedMcpAliases(aliases: ReadonlySet<string>): void;
   getSkillContext(): SkillActiveContextController;
   getRunContext(): ToolRunContext;
@@ -392,12 +429,15 @@ export interface GenerationBackend {
   generate(
     userMessage: string,
     attachments?: ResolvedAttachment[],
+    context?: GenerationRequestContext,
   ): Promise<GenerateResult>;
 }
 
 /** Shared authoritative tool boundary used by API and local CLI runtimes. */
 export interface AgentToolExecutor {
-  executeToolCall(
-    toolCall: ToolCall,
-  ): Promise<{ result: ToolExecutionOutput; changes: FileChange[] }>;
+  executeToolCall(toolCall: ToolCall): Promise<{
+    result: ToolExecutionOutput;
+    changes: FileChange[];
+    hadSideEffect: boolean;
+  }>;
 }

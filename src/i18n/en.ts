@@ -75,6 +75,7 @@ export const en: typeof zh = {
       provider: "CLI provider",
       scanning: "Detecting local CLI…",
       ready: "Installed and ready",
+      verificationRequired: "Ready to send; verification required on first run",
       needsSetup: "Installed, setup required",
       notFound: "CLI not found",
       unavailable: "CLI unavailable",
@@ -82,21 +83,44 @@ export const en: typeof zh = {
       chooseExecutable: "Choose program",
       useAutoDetect: "Use auto-detection",
       copySetup: "Copy setup command",
+      copied: "Setup command copied",
+      copyFailed:
+        "Could not copy the setup command. Copy it manually and retry.",
       piSetupHint: "Start pi, then run /login to configure a provider.",
       builtinSearchBlocked:
         "The selected local CLI does not provide native web search. Choose Tavily, Firecrawl, Exa, or Disabled before starting this turn.",
       probeMismatch:
         "The CLI capability check returned data for a different agent. Rescan and try again.",
+      probeFailed: "The local CLI capability check failed.",
+      probeDetails: {
+        ready: "The launch contract is available for this CLI.",
+        verificationRequired:
+          "Login, gateway, or model access will be verified by the first inference.",
+        setupRequired: "Complete the provider setup shown below, then rescan.",
+        unavailable:
+          "Check the installation or choose the executable, then rescan.",
+      },
       cliDefault: "Use CLI default",
+      unverified: "Unverified",
+      defaults: "Generation defaults",
       model: "CLI model",
       modelHint:
-        "Leave blank to follow the CLI default. Available models come from the CLI itself.",
+        "Leave blank to follow the CLI default. Available models come from the CLI and any configured provider gateway.",
       effort: "Reasoning effort",
+      executablePath: "Program path",
+      version: "Version",
+      dataNotice: "Data and billing",
       cloudNotice:
-        "Local CLI does not mean a local model. Prompts, attachments, and tool results are normally sent to the provider configured in the selected CLI and may consume subscription or API quota. Open Builder never reads or stores CLI credentials.",
+        "Local CLI may still connect to the selected model provider and consume subscription or API quota. The CLI receives prompts, attachments, and tool results; Open Builder reads only supported provider configuration when detecting or launching the CLI and does not store or display CLI credentials.",
       desktopOnly: "Local CLI is desktop-only",
       desktopOnlyDesc:
         "Switch back to API or open these settings in an Open Builder desktop build with local-agent support.",
+      runtimeUnavailable:
+        "Local CLI agents are available only in the desktop application.",
+      runtimeUnavailableAction:
+        "Local CLI agents are available only in the desktop application. Switch the runtime back to API.",
+      outputLimit: "Local CLI output exceeded the renderer limit.",
+      utilityTimeout: "Local utility generation timed out after {timeoutMs}ms.",
     },
     webSearch: {
       desc: "After configuration, AI will be able to search and read web pages",
@@ -785,6 +809,7 @@ export const en: typeof zh = {
         network: "Network connection error",
         model: "Model service error",
         tool: "Tool call error",
+        local_cli: "Local CLI runtime error",
         context_length: "Context is too long",
         aborted: "Generation stopped",
         runtime_check: "Runtime check failed",
@@ -797,6 +822,8 @@ export const en: typeof zh = {
         model:
           "The model service may be unavailable or rate-limited. Try again later or switch models.",
         tool: "A tool call failed. Retrying often recovers; if it repeats, inspect recent files or tool arguments.",
+        local_cli:
+          "Check the local CLI installation, login state, selected model, and Host tool permissions, then retry if the policy allows it.",
         context_length:
           "This conversation is too long. Compress context before continuing.",
         aborted:
@@ -805,6 +832,68 @@ export const en: typeof zh = {
           "The automatic check did not finish. You can still run a manual health check.",
         unknown:
           "Review the error details. If retry still fails, compress context or check model settings.",
+      },
+      localCli: {
+        provider: "Provider",
+        phase: "Phase",
+        retryPolicy: "Retry policy",
+        diagnosticId: "Diagnostic ID",
+        copyDiagnosticId: "Copy diagnostic ID",
+        phases: {
+          inspect: "Capability check",
+          prepare: "Preparation",
+          spawn: "Process startup",
+          input: "Prompt input",
+          handshake: "CLI handshake",
+          stream: "Response stream",
+          tool: "Host tool",
+          shutdown: "Shutdown",
+        },
+        retryPolicies: {
+          none: "Do not retry automatically",
+          reprobe: "Check the CLI again",
+          afterSetup: "Retry after setup",
+          freshSessionSafe: "Retry with a fresh session",
+          manual: "Retry manually",
+        },
+        failureCodes: {
+          executableNotFound:
+            "The selected local CLI executable was not found.",
+          cliUnsupported:
+            "The installed CLI version does not support this verified run contract.",
+          setupRequired: "The local CLI requires setup before it can run.",
+          selectionRejected:
+            "The CLI rejected the selected model or reasoning effort.",
+          installationChanged:
+            "The CLI installation changed after inspection. Rescan before retrying.",
+          credentialRejected:
+            "The CLI rejected its configured credentials or login session.",
+          modelRejected: "The CLI rejected the selected model.",
+          runAlreadyActive:
+            "This conversation already has an active run for this CLI provider.",
+          providerApprovalRejected:
+            "The headless CLI rejected a Host tool at its provider approval layer.",
+          spawnFailed: "Open Builder could not start the local CLI process.",
+          inputFailed:
+            "Open Builder could not deliver the prompt to the local CLI.",
+          handshakeFailed:
+            "The local CLI did not complete its startup handshake.",
+          sessionUnavailable:
+            "The saved local CLI session is no longer available.",
+          toolBridgeFailed:
+            "The Host tool bridge could not complete the tool call.",
+          isolationViolation:
+            "The local CLI attempted to use a capability outside the verified Host boundary.",
+          protocolViolation:
+            "The local CLI returned an unsupported or malformed protocol event.",
+          outputLimit: "The local CLI exceeded the safe output limit.",
+          timeout: "The local CLI did not complete within the allowed time.",
+          processExit: "The local CLI process exited before the run completed.",
+          cancelled: "The local CLI run was cancelled.",
+          consumerGone: "The page stopped receiving this local CLI run.",
+          internal:
+            "Open Builder encountered an internal local CLI runtime error.",
+        },
       },
     },
     generatingVerbs: [

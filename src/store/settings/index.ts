@@ -18,6 +18,7 @@ export type {
   AISettings,
   GenerationRuntime,
   LocalAgentCapabilityStatus,
+  LocalAgentReadiness,
   LocalAgentProviderSettings,
   LocalAgentSettings,
   ModelCache,
@@ -49,6 +50,8 @@ export const useSettingsStore = create<SettingsState>()(
           assetSearch: assetSearchDefaults,
           system: systemDefaults,
           modelCache: null,
+          localAgentCapability: "loading",
+          localAgentReadiness: {},
         });
       },
     }),

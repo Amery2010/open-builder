@@ -39,6 +39,10 @@ export function useAppState() {
   const setSystem = useSettingsStore((s) => s.setSystem);
   const isAIValid = useSettingsStore((s) => s.isAIValid);
   const localAgentCapability = useSettingsStore((s) => s.localAgentCapability);
+  // Subscribe to volatile provider readiness so the send gate updates when a
+  // Settings probe completes. The capability flag alone only describes the
+  // desktop host, not the selected CLI's launch contract.
+  const localAgentReadiness = useSettingsStore((s) => s.localAgentReadiness);
   const refreshLocalAgentCapability = useSettingsStore(
     (s) => s.refreshLocalAgentCapability,
   );
@@ -49,10 +53,7 @@ export function useAppState() {
     }
   }, [localAgentCapability, refreshLocalAgentCapability]);
 
-  const hasValidSettings =
-    settings.runtime === "localCli"
-      ? localAgentCapability === "supported"
-      : isAIValid();
+  const hasValidSettings = isAIValid();
 
   const handleSaveSettings = setAI;
   const handleSaveWebSearchSettings = setWebSearch;
@@ -86,6 +87,7 @@ export function useAppState() {
     isGenerating,
     setIsGenerating,
     settings,
+    localAgentReadiness,
     hasValidSettings,
     isSettingsOpen,
     setIsSettingsOpen,

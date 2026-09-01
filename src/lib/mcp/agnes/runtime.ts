@@ -134,6 +134,7 @@ export function mergeMcpRuntimeBundles(
       ...managed.subagentToolNames,
     ]),
     aliases,
+    annotations: new Map([...external.annotations, ...managed.annotations]),
     instructions: [external.instructions, managed.instructions]
       .filter(Boolean)
       .join("\n\n"),

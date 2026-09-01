@@ -1,0 +1,700 @@
+use std::fmt;
+use std::fs::Metadata;
+use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
+
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+use crate::local_agent::LocalAgentProvider;
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum LocalCliFailureCode {
+    ExecutableNotFound,
+    CliUnsupported,
+    SetupRequired,
+    SelectionRejected,
+    InstallationChanged,
+    CredentialRejected,
+    ModelRejected,
+    RunAlreadyActive,
+    SpawnFailed,
+    InputFailed,
+    HandshakeFailed,
+    SessionUnavailable,
+    ProviderApprovalRejected,
+    ToolBridgeFailed,
+    IsolationViolation,
+    ProtocolViolation,
+    OutputLimit,
+    Timeout,
+    ProcessExit,
+    Cancelled,
+    ConsumerGone,
+    Internal,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum LocalCliFailurePhase {
+    Inspect,
+    Prepare,
+    Spawn,
+    Input,
+    Handshake,
+    Stream,
+    Tool,
+    Shutdown,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum LocalCliRetryPolicy {
+    None,
+    Reprobe,
+    AfterSetup,
+    FreshSessionSafe,
+    Manual,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalCliFailure {
+    pub code: LocalCliFailureCode,
+    pub phase: LocalCliFailurePhase,
+    pub provider: LocalAgentProvider,
+    pub safe_message: String,
+    pub diagnostic_id: String,
+    pub had_activity: bool,
+    pub had_host_side_effect: bool,
+    pub retry_policy: LocalCliRetryPolicy,
+}
+
+impl LocalCliFailure {
+    pub fn new(
+        provider: LocalAgentProvider,
+        code: LocalCliFailureCode,
+        phase: LocalCliFailurePhase,
+        safe_message: impl Into<String>,
+        retry_policy: LocalCliRetryPolicy,
+    ) -> Self {
+        Self {
+            code,
+            phase,
+            provider,
+            safe_message: safe_message.into(),
+            diagnostic_id: uuid::Uuid::new_v4().to_string(),
+            had_activity: false,
+            had_host_side_effect: false,
+            retry_policy,
+        }
+    }
+
+    pub fn classified(
+        provider: LocalAgentProvider,
+        phase: LocalCliFailurePhase,
+        internal_message: &str,
+        attempted_resume: bool,
+        cancelled: bool,
+    ) -> Self {
+        let message = internal_message.to_ascii_lowercase();
+        let (code, safe_message, retry_policy) = if cancelled
+            || message.contains("run cancelled")
+            || message.contains("run canceled")
+        {
+            (
+                LocalCliFailureCode::Cancelled,
+                "The local CLI run was cancelled.",
+                LocalCliRetryPolicy::None,
+            )
+        } else if attempted_resume && is_session_unavailable(&message) {
+            (
+                LocalCliFailureCode::SessionUnavailable,
+                "The saved local CLI session is no longer available.",
+                LocalCliRetryPolicy::FreshSessionSafe,
+            )
+        } else if message.contains("installation changed")
+            || message.contains("executable changed")
+            || message.contains("changed during preparation")
+        {
+            (
+                LocalCliFailureCode::InstallationChanged,
+                "The local CLI installation or launch configuration changed while the run was being prepared.",
+                LocalCliRetryPolicy::Reprobe,
+            )
+        } else if message.contains("was not found") || message.contains("executable does not exist")
+        {
+            (
+                LocalCliFailureCode::ExecutableNotFound,
+                "The selected local CLI executable could not be found.",
+                LocalCliRetryPolicy::Reprobe,
+            )
+        } else if message.contains("installed local cli is unsupported")
+            || message.contains("local cli version is not supported")
+            || message.contains("upgrade the")
+        {
+            (
+                LocalCliFailureCode::CliUnsupported,
+                "The installed local CLI version is not supported.",
+                LocalCliRetryPolicy::AfterSetup,
+            )
+        } else if message.contains("needs setup")
+            || message.contains("not authenticated")
+            || message.contains("login") && message.contains("required")
+            || message.contains("eligibility check")
+        {
+            (
+                LocalCliFailureCode::SetupRequired,
+                if message.contains("eligibility check") {
+                    "The local CLI account is not eligible for this provider or region."
+                } else {
+                    "The local CLI needs setup before it can run."
+                },
+                LocalCliRetryPolicy::AfterSetup,
+            )
+        } else if message.contains("credential")
+            || message.contains("api key")
+            || message.contains("authentication")
+        {
+            (
+                LocalCliFailureCode::CredentialRejected,
+                "The local CLI rejected its configured credentials.",
+                LocalCliRetryPolicy::AfterSetup,
+            )
+        } else if message.contains("rate limit") || message.contains("rate-limited") {
+            (
+                LocalCliFailureCode::ProcessExit,
+                "The local CLI provider rate limit prevented this request from completing.",
+                LocalCliRetryPolicy::Manual,
+            )
+        } else if message.contains("unknown model")
+            || message.contains("model not found")
+            || message.contains("invalid model")
+            || message.contains("selected model")
+            || message.contains("reasoning effort")
+        {
+            (
+                LocalCliFailureCode::ModelRejected,
+                "The local CLI rejected the selected model or reasoning effort.",
+                LocalCliRetryPolicy::Manual,
+            )
+        } else if message.contains("selection") || message.contains("invalid local agent option") {
+            (
+                LocalCliFailureCode::SelectionRejected,
+                "The selected local CLI options are not valid.",
+                LocalCliRetryPolicy::Manual,
+            )
+        } else if message.contains("already has an active")
+            || message.contains("run already active")
+        {
+            (
+                LocalCliFailureCode::RunAlreadyActive,
+                "This conversation already has an active run for the selected local CLI.",
+                LocalCliRetryPolicy::None,
+            )
+        } else if message.contains("failed to start") || phase == LocalCliFailurePhase::Spawn {
+            (
+                LocalCliFailureCode::SpawnFailed,
+                "The local CLI process could not be started.",
+                LocalCliRetryPolicy::Reprobe,
+            )
+        } else if message.contains("failed to write")
+            || message.contains("failed to flush")
+            || message.contains("failed to close")
+            || phase == LocalCliFailurePhase::Input
+        {
+            (
+                LocalCliFailureCode::InputFailed,
+                "Open Builder could not deliver the request to the local CLI.",
+                LocalCliRetryPolicy::Manual,
+            )
+        } else if message.contains("event consumer") {
+            (
+                LocalCliFailureCode::ConsumerGone,
+                "The local CLI event consumer is no longer available.",
+                LocalCliRetryPolicy::None,
+            )
+        } else if is_provider_approval_rejected(&message) {
+            (
+                LocalCliFailureCode::ProviderApprovalRejected,
+                "The local CLI rejected an Open Builder tool before it reached Host authorization.",
+                LocalCliRetryPolicy::None,
+            )
+        } else if message.contains("isolation")
+            || message.contains("external mcp")
+            || message.contains("unauthorized")
+            || message.contains("disabled native capability")
+            || message.contains("unexpected permission")
+        {
+            (
+                LocalCliFailureCode::IsolationViolation,
+                "The local CLI attempted to use a capability outside the Open Builder sandbox.",
+                LocalCliRetryPolicy::None,
+            )
+        } else if phase == LocalCliFailurePhase::Tool
+            || ((message.contains("bridge") || message.contains("tool result"))
+                && !message.contains("attempted")
+                && !message.contains("unauthorized")
+                && !message.contains("disabled native")
+                && !message.contains("external mcp"))
+        {
+            (
+                LocalCliFailureCode::ToolBridgeFailed,
+                "The Open Builder tool bridge could not complete the local CLI request.",
+                LocalCliRetryPolicy::Manual,
+            )
+        } else if message.contains("output") && message.contains("limit")
+            || message.contains("event limit")
+            || message.contains("line limit")
+        {
+            (
+                LocalCliFailureCode::OutputLimit,
+                "The local CLI exceeded a bounded output limit.",
+                LocalCliRetryPolicy::None,
+            )
+        } else if phase == LocalCliFailurePhase::Handshake
+            || message.contains("handshake")
+            || message.contains("closed before")
+        {
+            (
+                LocalCliFailureCode::HandshakeFailed,
+                "The local CLI did not complete its structured startup handshake.",
+                LocalCliRetryPolicy::Manual,
+            )
+        } else if message.contains("timed out") || message.contains("exceeded the 30 minute") {
+            (
+                LocalCliFailureCode::Timeout,
+                "The local CLI did not complete within the allowed time.",
+                LocalCliRetryPolicy::Manual,
+            )
+        } else if message.contains("exited unsuccessfully")
+            || message.contains("failed to wait")
+            || phase == LocalCliFailurePhase::Shutdown
+        {
+            (
+                LocalCliFailureCode::ProcessExit,
+                "The local CLI process exited before completing the request.",
+                LocalCliRetryPolicy::Manual,
+            )
+        } else if message.contains("malformed")
+            || message.contains("invalid utf-8")
+            || message.contains("unexpected")
+            || message.contains("protocol")
+            || message.contains("unsupported thread item")
+            || message.contains("emitted") && message.contains("unsupported")
+            || message.contains("assistant message contained an unsupported")
+        {
+            (
+                LocalCliFailureCode::ProtocolViolation,
+                "The local CLI returned an unsupported structured response.",
+                LocalCliRetryPolicy::None,
+            )
+        } else {
+            (
+                LocalCliFailureCode::Internal,
+                "The local CLI run could not be completed.",
+                LocalCliRetryPolicy::Manual,
+            )
+        };
+
+        Self::new(provider, code, phase, safe_message, retry_policy)
+    }
+}
+
+fn is_provider_approval_rejected(message: &str) -> bool {
+    [
+        "approval policy is never",
+        "requires approval",
+        "approval required",
+        "approval was rejected",
+        "permission denied",
+        "permission to use",
+        "not authorized",
+        "user cancelled mcp tool call",
+        "user canceled mcp tool call",
+        "provider approval rejected",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+}
+
+pub fn infer_failure_phase(message: &str, fallback: LocalCliFailurePhase) -> LocalCliFailurePhase {
+    let message = message.to_ascii_lowercase();
+    if message.contains("changed during preparation") {
+        LocalCliFailurePhase::Prepare
+    } else if message.contains("failed to start") || message.contains("spawn") {
+        LocalCliFailurePhase::Spawn
+    } else if message.contains("failed to write")
+        || message.contains("failed to flush")
+        || message.contains("failed to close")
+        || message.contains("stdin")
+    {
+        LocalCliFailurePhase::Input
+    } else if message.contains("handshake")
+        || message.contains("initialization")
+        || message.contains("init inventory")
+        || message.contains("closed before")
+    {
+        LocalCliFailurePhase::Handshake
+    } else if is_provider_approval_rejected(&message)
+        || message.contains("tool bridge")
+        || message.contains("tool result")
+        || message.contains("mcp tool")
+    {
+        LocalCliFailurePhase::Tool
+    } else if message.contains("failed to wait")
+        || message.contains("shutdown")
+        || message.contains("exited unsuccessfully")
+    {
+        LocalCliFailurePhase::Shutdown
+    } else {
+        fallback
+    }
+}
+
+impl fmt::Display for LocalCliFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.safe_message)
+    }
+}
+
+impl std::error::Error for LocalCliFailure {}
+
+fn is_session_unavailable(message: &str) -> bool {
+    let mentions_session = ["session", "thread", "conversation", "resume"]
+        .iter()
+        .any(|needle| message.contains(needle));
+    let unavailable = [
+        "invalid",
+        "missing",
+        "not found",
+        "expired",
+        "unavailable",
+        "does not exist",
+        "no conversation found",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle));
+    mentions_session && unavailable
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InstallationIdentity {
+    canonical_path: PathBuf,
+    fingerprint: String,
+}
+
+impl InstallationIdentity {
+    pub fn capture(path: &Path) -> Result<Self, String> {
+        let canonical_path = std::fs::canonicalize(path)
+            .map_err(|_| "local CLI executable does not exist".to_string())?;
+        let metadata = canonical_path
+            .metadata()
+            .map_err(|_| "failed to inspect local CLI executable".to_string())?;
+        if !metadata.is_file() {
+            return Err("local CLI path is not a file".to_string());
+        }
+        let fingerprint = installation_fingerprint(&canonical_path, &metadata);
+        Ok(Self {
+            canonical_path,
+            fingerprint,
+        })
+    }
+
+    pub fn canonical_path(&self) -> &Path {
+        &self.canonical_path
+    }
+
+    pub fn fingerprint(&self) -> &str {
+        &self.fingerprint
+    }
+
+    pub fn verify_unchanged(&self) -> Result<(), String> {
+        let current = Self::capture(&self.canonical_path)?;
+        if current.fingerprint != self.fingerprint {
+            return Err("local CLI installation changed during preparation".to_string());
+        }
+        Ok(())
+    }
+}
+
+fn installation_fingerprint(path: &Path, metadata: &Metadata) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"open-builder-local-cli-installation-v1\0");
+    update_path_hash(&mut hash, path);
+    hash.update(metadata.len().to_le_bytes());
+    if let Ok(modified) = metadata.modified() {
+        if let Ok(duration) = modified.duration_since(UNIX_EPOCH) {
+            hash.update(duration.as_secs().to_le_bytes());
+            hash.update(duration.subsec_nanos().to_le_bytes());
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        hash.update(metadata.dev().to_le_bytes());
+        hash.update(metadata.ino().to_le_bytes());
+        hash.update(metadata.mode().to_le_bytes());
+    }
+    format!("{:x}", hash.finalize())
+}
+
+fn update_path_hash(hash: &mut Sha256, path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        hash.update(path.as_os_str().as_bytes());
+    }
+    #[cfg(not(unix))]
+    hash.update(path.to_string_lossy().as_bytes());
+}
+
+pub fn hash_compatibility_material(parts: &[&str]) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"open-builder-local-cli-compatibility-v1\0");
+    for part in parts {
+        hash.update((part.len() as u64).to_le_bytes());
+        hash.update(part.as_bytes());
+    }
+    format!("{:x}", hash.finalize())
+}
+
+pub struct CompatibilityKeyMaterial<'a> {
+    pub provider: LocalAgentProvider,
+    pub protocol_version: &'a str,
+    pub installation_fingerprint: &'a str,
+    pub configuration_fingerprint: &'a str,
+    pub model: Option<&'a str>,
+    pub effort: Option<&'a str>,
+    pub mode: &'a str,
+    pub tool_digest: &'a str,
+}
+
+pub fn compatibility_key(material: CompatibilityKeyMaterial<'_>) -> String {
+    hash_compatibility_material(&[
+        match material.provider {
+            LocalAgentProvider::Codex => "codex",
+            LocalAgentProvider::Claude => "claude",
+            LocalAgentProvider::Pi => "pi",
+            LocalAgentProvider::Antigravity => "antigravity",
+        },
+        material.protocol_version,
+        material.installation_fingerprint,
+        material.configuration_fingerprint,
+        material.model.unwrap_or("<cli-default>"),
+        material.effort.unwrap_or("<cli-default>"),
+        material.mode,
+        "open-builder-tool-bridge-v2",
+        material.tool_digest,
+    ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_unavailable_is_the_only_fresh_session_retry() {
+        let failure = LocalCliFailure::classified(
+            LocalAgentProvider::Codex,
+            LocalCliFailurePhase::Handshake,
+            "thread not found while resuming",
+            true,
+            false,
+        );
+        assert_eq!(failure.code, LocalCliFailureCode::SessionUnavailable);
+        assert_eq!(failure.retry_policy, LocalCliRetryPolicy::FreshSessionSafe);
+
+        let timeout = LocalCliFailure::classified(
+            LocalAgentProvider::Codex,
+            LocalCliFailurePhase::Handshake,
+            "Codex exec handshake timed out",
+            true,
+            false,
+        );
+        assert_eq!(timeout.code, LocalCliFailureCode::HandshakeFailed);
+        assert_eq!(timeout.phase, LocalCliFailurePhase::Handshake);
+        assert_ne!(timeout.retry_policy, LocalCliRetryPolicy::FreshSessionSafe);
+
+        let rate_limit = LocalCliFailure::classified(
+            LocalAgentProvider::Claude,
+            LocalCliFailurePhase::Stream,
+            "Claude request was rate limited",
+            false,
+            false,
+        );
+        assert_eq!(rate_limit.code, LocalCliFailureCode::ProcessExit);
+        assert_eq!(rate_limit.retry_policy, LocalCliRetryPolicy::Manual);
+
+        let generic_request = LocalCliFailure::classified(
+            LocalAgentProvider::Claude,
+            LocalCliFailurePhase::Stream,
+            "Claude model request failed",
+            false,
+            false,
+        );
+        assert_ne!(generic_request.code, LocalCliFailureCode::ModelRejected);
+
+        let setup = LocalCliFailure::classified(
+            LocalAgentProvider::Pi,
+            LocalCliFailurePhase::Prepare,
+            "pi needs setup; Pi has no configured model; run pi",
+            false,
+            false,
+        );
+        assert_eq!(setup.code, LocalCliFailureCode::SetupRequired);
+    }
+
+    #[test]
+    fn compatibility_key_changes_for_launch_authority_inputs() {
+        let material =
+            |installation_fingerprint, tool_digest, model, effort| CompatibilityKeyMaterial {
+                provider: LocalAgentProvider::Codex,
+                protocol_version: "codex-exec-json-v2",
+                installation_fingerprint,
+                configuration_fingerprint: "config-a",
+                model: Some(model),
+                effort: Some(effort),
+                mode: "chat",
+                tool_digest,
+            };
+        let base = compatibility_key(material("installation-a", "tools-a", "gpt-test", "high"));
+        let changed = compatibility_key(material("installation-b", "tools-a", "gpt-test", "high"));
+        assert_ne!(base, changed);
+
+        let changed_tools =
+            compatibility_key(material("installation-a", "tools-b", "gpt-test", "high"));
+        assert_ne!(base, changed_tools);
+
+        let changed_model =
+            compatibility_key(material("installation-a", "tools-a", "gpt-other", "high"));
+        assert_ne!(base, changed_model);
+
+        let changed_effort =
+            compatibility_key(material("installation-a", "tools-a", "gpt-test", "medium"));
+        assert_ne!(base, changed_effort);
+    }
+
+    #[test]
+    fn run_failure_phase_is_inferred_before_public_classification() {
+        assert_eq!(
+            infer_failure_phase(
+                "failed to write the Codex request",
+                LocalCliFailurePhase::Stream
+            ),
+            LocalCliFailurePhase::Input
+        );
+        assert_eq!(
+            infer_failure_phase(
+                "provider approval rejected the MCP tool call",
+                LocalCliFailurePhase::Stream
+            ),
+            LocalCliFailurePhase::Tool
+        );
+        assert_eq!(
+            infer_failure_phase(
+                "Claude isolation handshake timed out",
+                LocalCliFailurePhase::Stream
+            ),
+            LocalCliFailurePhase::Handshake
+        );
+        assert_eq!(
+            infer_failure_phase(
+                "private local CLI artifact changed during preparation",
+                LocalCliFailurePhase::Stream
+            ),
+            LocalCliFailurePhase::Prepare
+        );
+    }
+
+    #[test]
+    fn installation_identity_rejects_a_changed_executable() {
+        let path = std::env::temp_dir().join(format!(
+            "open-builder-installation-identity-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&path, b"first").unwrap();
+        let identity = InstallationIdentity::capture(&path).unwrap();
+        std::fs::write(&path, b"second-version").unwrap();
+        assert!(identity.verify_unchanged().is_err());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn classified_failure_never_echoes_internal_cli_output() {
+        let sentinel = "secret-sentinel-value";
+        let failure = LocalCliFailure::classified(
+            LocalAgentProvider::Claude,
+            LocalCliFailurePhase::Stream,
+            &format!("authentication failed with API key {sentinel}"),
+            false,
+            false,
+        );
+        assert_eq!(failure.code, LocalCliFailureCode::CredentialRejected);
+        assert!(!failure.safe_message.contains(sentinel));
+        assert!(!serde_json::to_string(&failure).unwrap().contains(sentinel));
+
+        let isolation = LocalCliFailure::classified(
+            LocalAgentProvider::Codex,
+            LocalCliFailurePhase::Stream,
+            "Codex attempted to use an unauthorized native tool",
+            false,
+            false,
+        );
+        assert_eq!(isolation.code, LocalCliFailureCode::IsolationViolation);
+
+        let tool_phase_isolation = LocalCliFailure::classified(
+            LocalAgentProvider::Claude,
+            LocalCliFailurePhase::Tool,
+            "Claude attempted to use an external MCP server",
+            false,
+            false,
+        );
+        assert_eq!(
+            tool_phase_isolation.code,
+            LocalCliFailureCode::IsolationViolation
+        );
+        assert_eq!(tool_phase_isolation.retry_policy, LocalCliRetryPolicy::None);
+
+        let approval = LocalCliFailure::classified(
+            LocalAgentProvider::Codex,
+            LocalCliFailurePhase::Tool,
+            "MCP tool call requires approval, but approval policy is never",
+            false,
+            false,
+        );
+        assert_eq!(approval.code, LocalCliFailureCode::ProviderApprovalRejected);
+        assert_eq!(approval.phase, LocalCliFailurePhase::Tool);
+        assert_eq!(approval.retry_policy, LocalCliRetryPolicy::None);
+
+        for message in [
+            "Codex emitted an unsupported event type",
+            "Claude assistant message contained an unsupported block",
+            "Pi emitted an unsupported assistant event",
+            "Antigravity emitted an unsupported stream event",
+        ] {
+            let failure = LocalCliFailure::classified(
+                LocalAgentProvider::Codex,
+                LocalCliFailurePhase::Stream,
+                message,
+                false,
+                false,
+            );
+            assert_eq!(failure.code, LocalCliFailureCode::ProtocolViolation);
+            assert_eq!(failure.retry_policy, LocalCliRetryPolicy::None);
+        }
+
+        let unsupported_installation = LocalCliFailure::classified(
+            LocalAgentProvider::Codex,
+            LocalCliFailurePhase::Prepare,
+            "the installed local CLI is unsupported: upgrade the Codex CLI",
+            false,
+            false,
+        );
+        assert_eq!(
+            unsupported_installation.code,
+            LocalCliFailureCode::CliUnsupported
+        );
+    }
+}

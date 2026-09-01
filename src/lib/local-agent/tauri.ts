@@ -2,6 +2,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import { getMcpPlatformCapabilities } from "../mcp/tauri-host";
 import type {
   LocalAgentEvent,
+  LocalAgentPreference,
   LocalAgentProbe,
   LocalAgentProvider,
   LocalAgentStartRequest,
@@ -51,22 +52,34 @@ export const resetLocalAgentSupportCacheForTests = resetLocalAgentSupportCache;
 
 export async function probeLocalAgent(
   provider: LocalAgentProvider,
+  preference: LocalAgentPreference,
+  forceRefresh = false,
 ): Promise<LocalAgentProbe> {
-  return invoke<LocalAgentProbe>("local_agent_probe", { provider });
+  return invoke<LocalAgentProbe>("local_agent_probe", {
+    provider,
+    preference,
+    forceRefresh,
+  });
 }
 
 export async function chooseLocalAgentExecutable(
   provider: LocalAgentProvider,
+  preference: LocalAgentPreference,
 ): Promise<LocalAgentProbe | null> {
   return invoke<LocalAgentProbe | null>("local_agent_choose_executable", {
     provider,
+    preference,
   });
 }
 
 export async function clearLocalAgentExecutable(
   provider: LocalAgentProvider,
+  preference: LocalAgentPreference,
 ): Promise<LocalAgentProbe> {
-  return invoke<LocalAgentProbe>("local_agent_clear_executable", { provider });
+  return invoke<LocalAgentProbe>("local_agent_clear_executable", {
+    provider,
+    preference,
+  });
 }
 
 export async function startLocalAgent(

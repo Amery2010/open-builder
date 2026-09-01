@@ -549,4 +549,53 @@ describe("mergeMessages", () => {
       toolName: AGNES_TOOL_ALIASES.create_video,
     });
   });
+
+  it("preserves local CLI diagnostics when merging assistant error messages", async () => {
+    const { mergeMessages } = await import("./merge-messages");
+    const merged = mergeMessages(
+      [
+        {
+          role: "assistant",
+          content: "⚠️ Local CLI runtime error",
+          isError: true,
+          errorKind: "local_cli",
+          errorRetryable: false,
+          localCliFailure: {
+            code: "providerApprovalRejected",
+            phase: "tool",
+            provider: "codex",
+            safeMessage: "The approved Host tool could not be invoked.",
+            diagnosticId: "diag-merge",
+            hadActivity: true,
+            hadHostSideEffect: false,
+            retryPolicy: "none",
+          },
+          metadata: {
+            localCli: {
+              provider: "codex",
+              status: { state: "streaming" },
+              usage: { inputTokens: 5, outputTokens: 1 },
+              warnings: ["safe warning"],
+            },
+          },
+        },
+      ],
+      en,
+    );
+
+    expect(merged[0]).toMatchObject({
+      isError: true,
+      errorKind: "local_cli",
+      localCliFailure: {
+        provider: "codex",
+        phase: "tool",
+        diagnosticId: "diag-merge",
+      },
+      localCli: {
+        provider: "codex",
+        usage: { inputTokens: 5, outputTokens: 1 },
+        warnings: ["safe warning"],
+      },
+    });
+  });
 });

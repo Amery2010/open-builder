@@ -18,6 +18,7 @@ type ToolInvoker = {
   executeTool(toolCall: ToolCall): Promise<{
     result: { text: string; isError?: boolean };
     changes: unknown[];
+    hadSideEffect: boolean;
   }>;
   ctrl: AbortController;
 };
@@ -122,6 +123,7 @@ describe("generator execution authorization", () => {
 
     expect(outcome.result.isError).not.toBe(true);
     expect(outcome.result.text).toContain("empty project");
+    expect(outcome.hadSideEffect).toBe(false);
   });
 
   it("enforces a run-local write authorization hook before mutation", async () => {
@@ -142,6 +144,7 @@ describe("generator execution authorization", () => {
     expect(outcome.result.text).toContain("Design contract required");
     expect(generator.getFiles()).toEqual({});
     expect(authorizeToolCall).toHaveBeenCalledOnce();
+    expect(outcome.hadSideEffect).toBe(false);
   });
 
   it("unlocks Design writes only after the structured contract tool succeeds", async () => {
@@ -210,6 +213,7 @@ describe("generator execution authorization", () => {
       call("write_file", { path: "src/App.tsx", content: "allowed" }),
     );
     expect(written.result.isError).not.toBe(true);
+    expect(written.hadSideEffect).toBe(true);
     expect(generator.getFiles()["src/App.tsx"]).toBe("allowed");
   });
 

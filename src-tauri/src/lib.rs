@@ -5,15 +5,21 @@ mod local_agent;
 #[cfg(desktop)]
 mod local_agent_adapter;
 #[cfg(desktop)]
+mod local_agent_antigravity;
+#[cfg(desktop)]
 mod local_agent_bridge;
 #[cfg(desktop)]
 mod local_agent_claude;
 #[cfg(desktop)]
 mod local_agent_codex;
 #[cfg(desktop)]
+mod local_agent_models;
+#[cfg(desktop)]
 mod local_agent_pi;
 #[cfg(desktop)]
 mod local_agent_protocol;
+#[cfg(desktop)]
+mod local_agent_runtime;
 #[cfg(desktop)]
 mod mcp_oauth;
 #[cfg(desktop)]

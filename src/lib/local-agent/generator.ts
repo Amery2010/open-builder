@@ -4,6 +4,7 @@ import type {
   FileChange,
   GenerateResult,
   GenerationBackend,
+  GenerationRequestContext,
   GeneratorEvents,
   GeneratorOptions,
   Message,
@@ -19,26 +20,30 @@ import { resolveAttachmentForModel } from "../attachments/store";
 import { formatUntrustedReferenceContext } from "../ai/messages";
 import { normalizeToolExecutionOutput } from "../utils/tool-result";
 import { PLAN_APPROVED_PREFIX } from "../ai/plan-mode";
+import { getT } from "../../i18n";
+import { cancelLocalAgent, supportsLocalAgents } from "./tauri";
 import {
-  cancelLocalAgent,
-  resolveLocalAgentTool,
-  startLocalAgent,
-  supportsLocalAgents,
-} from "./tauri";
+  isLocalCliRuntimeError,
+  localCliRuntime,
+  type LocalCliRunResult,
+} from "./runtime";
 import {
   computeConversationFingerprint,
   formatConversationBootstrap,
 } from "./context";
-import {
-  serializeLocalToolSet,
-  validateLocalToolArguments,
-} from "./tool-schema";
+import { createLocalToolAuthoritySnapshot } from "./authority";
 import type {
   LocalAgentEvent,
   LocalAgentProvider,
   LocalAgentStartRequest,
+  LocalCliFailure,
+  LocalCliHostToolOutcome,
+  LocalCliPreparedMetadata,
+  LocalCliUsage,
+  LocalToolAnnotations,
   LocalToolContent,
   LocalToolResolution,
+  LocalToolSpec,
 } from "./types";
 import { localAgentSupportsNativeSearch } from "./providers";
 
@@ -67,6 +72,7 @@ export interface LocalAgentClientConfig {
   effort?: string;
   nativeSearch: boolean;
   conversationId?: string;
+  toolAnnotations?: ReadonlyMap<string, LocalToolAnnotations>;
   getConversation?: () => Conversation | null;
   saveSession?: (session: LocalAgentSessionRef | undefined) => void;
   maxToolCalls?: number;
@@ -76,9 +82,9 @@ class LocalRunFailure extends Error {
   constructor(
     message: string,
     readonly hadActivity: boolean,
-    readonly canRetryFresh = /\b(resume|resuming)\b|\bno conversation found\b|\b(session|thread)\b.{0,48}\b(invalid|missing|not found|expired|unavailable|does not exist)\b/i.test(
-      message,
-    ),
+    readonly failure?: LocalCliFailure,
+    readonly canRetryFresh = failure?.code === "sessionUnavailable" &&
+      failure.retryPolicy === "freshSessionSafe",
   ) {
     super(message);
     this.name = "LocalRunFailure";
@@ -88,6 +94,10 @@ class LocalRunFailure extends Error {
 interface RunOutcome {
   sessionId?: string;
   cliVersion?: string;
+  prepared?: LocalCliPreparedMetadata;
+  usage?: LocalCliUsage;
+  warnings?: string[];
+  status?: { state: string; message?: string };
   aborted: boolean;
   text: string;
 }
@@ -167,22 +177,6 @@ function toLocalResolution(output: ToolExecutionOutput): LocalToolResolution {
   };
 }
 
-function conversationBeforeCurrentPrompt(
-  conversation: Conversation,
-  prompt: string,
-): Conversation {
-  const messages = [...conversation.messages];
-  const last = messages.at(-1);
-  if (
-    last?.role === "user" &&
-    typeof last.content === "string" &&
-    last.content === prompt
-  ) {
-    messages.pop();
-  }
-  return { ...conversation, messages };
-}
-
 async function collectAttachmentIndex(
   messages: readonly Message[],
   current: readonly ResolvedAttachment[],
@@ -256,6 +250,10 @@ export class LocalAgentGenerator implements GenerationBackend {
   private conversationContextAllowed = true;
   private lastPrompt = "";
   private lastFailureHadActivity = false;
+  private lastBaseline: Conversation | null = null;
+  private activeSignal: AbortSignal | null = null;
+  private readonly utilityScopeId: string;
+  private localToolAnnotations: ReadonlyMap<string, LocalToolAnnotations>;
 
   private conversationSnapshot(): Conversation {
     return (
@@ -282,6 +280,10 @@ export class LocalAgentGenerator implements GenerationBackend {
     this.host = host;
     this.config = config;
     this.events = events;
+    this.localToolAnnotations = new Map(config.toolAnnotations ?? []);
+    this.utilityScopeId =
+      globalThis.crypto?.randomUUID?.() ??
+      `utility-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   }
 
   getFiles(): ProjectFiles {
@@ -336,6 +338,12 @@ export class LocalAgentGenerator implements GenerationBackend {
     this.host.setAllowedMcpAliases(aliases);
   }
 
+  setLocalToolAnnotations(
+    annotations: ReadonlyMap<string, LocalToolAnnotations>,
+  ): void {
+    this.localToolAnnotations = new Map(annotations);
+  }
+
   getSkillContext() {
     return this.host.getSkillContext();
   }
@@ -362,13 +370,20 @@ export class LocalAgentGenerator implements GenerationBackend {
 
   async retry(): Promise<GenerateResult> {
     this.assertSearchCompatibility();
-    const prompt = this.lastFailureHadActivity
+    const failureHadActivity = this.lastFailureHadActivity;
+    const prompt = failureHadActivity
       ? RETRY_CONTINUATION_PROMPT
       : this.lastPrompt ||
         "Retry the most recent unfinished user request using the current Open Builder project state.";
     try {
-      const result = await this.runTurn(prompt, [], false);
+      const result = await this.runTurn(
+        prompt,
+        [],
+        false,
+        failureHadActivity ? undefined : (this.lastBaseline ?? undefined),
+      );
       this.lastFailureHadActivity = false;
+      this.lastBaseline = null;
       return result;
     } catch (error) {
       if (error instanceof LocalRunFailure) {
@@ -381,13 +396,35 @@ export class LocalAgentGenerator implements GenerationBackend {
   async generate(
     userMessage: string,
     attachments: ResolvedAttachment[] = [],
+    context?: GenerationRequestContext,
   ): Promise<GenerateResult> {
     this.assertSearchCompatibility();
     this.lastPrompt = userMessage;
     this.lastFailureHadActivity = false;
+    const conversation = this.conversationSnapshot();
+    const currentMessageIndex = context?.currentMessageIndex;
+    if (
+      currentMessageIndex !== undefined &&
+      (!Number.isInteger(currentMessageIndex) ||
+        currentMessageIndex < 0 ||
+        currentMessageIndex > conversation.messages.length)
+    ) {
+      throw new Error("The current conversation message index is invalid.");
+    }
+    // The UI optimistically persists the current request before invoking the
+    // backend. Use its canonical index to exclude it from bootstrap/resume
+    // history, independent of prompt transformations and attachments.
+    const baseline =
+      currentMessageIndex === undefined
+        ? conversation
+        : {
+            ...conversation,
+            messages: conversation.messages.slice(0, currentMessageIndex),
+          };
+    this.lastBaseline = baseline;
     this.host.appendUserMessage(userMessage, attachments);
     try {
-      return await this.runTurn(userMessage, attachments, true);
+      return await this.runTurn(userMessage, attachments, true, baseline);
     } catch (error) {
       if (error instanceof LocalRunFailure) {
         this.lastFailureHadActivity = error.hadActivity;
@@ -404,9 +441,7 @@ export class LocalAgentGenerator implements GenerationBackend {
       this.nativeSearchAllowed &&
       (mode === "chat" || mode === "plan")
     ) {
-      throw new Error(
-        "The selected local CLI does not provide native web search. Choose Tavily, Firecrawl, Exa, or Disabled before starting this turn.",
-      );
+      throw new Error(getT().settings.localCli.builtinSearchBlocked);
     }
   }
 
@@ -414,27 +449,32 @@ export class LocalAgentGenerator implements GenerationBackend {
     prompt: string,
     attachments: ResolvedAttachment[],
     allowResume: boolean,
+    baselineOverride?: Conversation,
   ): Promise<GenerateResult> {
     this.abortRequested = false;
     if (!(await supportsLocalAgents())) {
-      throw new Error(
-        "Local CLI agents are available only in the desktop application.",
-      );
+      throw new Error(getT().settings.localCli.runtimeUnavailable);
     }
     this.planApproved = false;
-    this.host.beginExternalRun();
-    const conversation = this.conversationSnapshot();
-    const baseline = conversationBeforeCurrentPrompt(conversation, prompt);
+    this.activeSignal = this.host.beginExternalRun();
+    const initialMode = this.host.getRunContext().mode;
+    const persistentConversationRun =
+      initialMode === "chat" || initialMode === "plan";
+    const conversation = baselineOverride ?? this.conversationSnapshot();
+    const baseline = baselineOverride ?? conversation;
     const baselineFingerprint = await computeConversationFingerprint(baseline);
     const storedSession = baseline.localAgentSessions?.[this.config.provider];
     const sessionId =
       allowResume &&
+      persistentConversationRun &&
+      Boolean(storedSession?.compatibilityKey) &&
       storedSession?.transcriptFingerprint === baselineFingerprint
         ? storedSession.sessionId
         : undefined;
-    const bootstrapContext = sessionId
-      ? undefined
-      : formatConversationBootstrap(baseline);
+    // The backend discards bootstrap context when the compatibility key proves
+    // a valid resume. Sending it for every request keeps the wire complete and
+    // lets a fresh run recover without rebuilding the request object.
+    const bootstrapContext = formatConversationBootstrap(baseline);
     const attachmentIndex = await collectAttachmentIndex(
       this.host.getMessages(),
       attachments,
@@ -446,6 +486,9 @@ export class LocalAgentGenerator implements GenerationBackend {
       outcome = await this.runOnce({
         prompt,
         sessionId,
+        sessionCompatibilityKey: sessionId
+          ? storedSession?.compatibilityKey
+          : undefined,
         bootstrapContext,
         attachmentIndex,
         budget,
@@ -455,6 +498,7 @@ export class LocalAgentGenerator implements GenerationBackend {
         sessionId &&
         error instanceof LocalRunFailure &&
         !error.hadActivity &&
+        !error.failure?.hadHostSideEffect &&
         error.canRetryFresh &&
         !this.abortRequested
       ) {
@@ -479,6 +523,8 @@ export class LocalAgentGenerator implements GenerationBackend {
       const continuation = await this.runOnce({
         prompt: PLAN_CONTINUATION_PROMPT,
         sessionId: outcome.sessionId,
+        sessionCompatibilityKey: outcome.prepared?.compatibilityKey,
+        bootstrapContext,
         attachmentIndex,
         budget,
       });
@@ -499,8 +545,10 @@ export class LocalAgentGenerator implements GenerationBackend {
       !outcome.aborted &&
       !budget.exhausted &&
       outcome.sessionId &&
-      outcome.cliVersion &&
-      this.config.saveSession
+      outcome.prepared?.compatibilityKey &&
+      outcome.prepared.installationFingerprint &&
+      this.config.saveSession &&
+      persistentConversationRun
     ) {
       const current = this.conversationSnapshot();
       const transcriptFingerprint =
@@ -510,7 +558,12 @@ export class LocalAgentGenerator implements GenerationBackend {
         sessionId: outcome.sessionId,
         transcriptFingerprint,
         model: this.config.model || undefined,
-        cliVersion: outcome.cliVersion,
+        compatibilityKey: outcome.prepared?.compatibilityKey,
+        installationFingerprint: outcome.prepared?.installationFingerprint,
+        actualModel: outcome.prepared?.actualModel,
+        actualEffort: outcome.prepared?.actualEffort,
+        cliVersion:
+          outcome.prepared?.cliVersion ?? outcome.cliVersion ?? "unknown",
         updatedAt: Date.now(),
       });
     }
@@ -520,12 +573,14 @@ export class LocalAgentGenerator implements GenerationBackend {
   private async runOnce({
     prompt,
     sessionId,
+    sessionCompatibilityKey,
     bootstrapContext,
     attachmentIndex,
     budget,
   }: {
     prompt: string;
     sessionId?: string;
+    sessionCompatibilityKey?: string;
     bootstrapContext?: string;
     attachmentIndex: Map<string, AttachmentIndexEntry>;
     budget: LocalTurnBudget;
@@ -536,12 +591,9 @@ export class LocalAgentGenerator implements GenerationBackend {
       this.config.nativeSearch &&
       this.nativeSearchAllowed &&
       (runContext.mode === "chat" || runContext.mode === "plan");
-    const toolSpecs = await serializeLocalToolSet(
-      tools,
-      new Set(["screenshot_to_code"]),
-    );
+    const attachmentSpecs: LocalToolSpec[] = [];
     if (attachmentIndex.size > 0) {
-      toolSpecs.push({
+      attachmentSpecs.push({
         name: "read_attachment",
         description:
           "Read an Open Builder attachment by its opaque id. Returns text, an image, or an embedded PDF resource.",
@@ -551,8 +603,24 @@ export class LocalAgentGenerator implements GenerationBackend {
           required: ["id"],
           additionalProperties: false,
         },
+        annotations: {
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false,
+        },
+        hostApproval: "none",
       });
     }
+    const authority = await createLocalToolAuthoritySnapshot({
+      tools,
+      mode: runContext.mode,
+      platform: runContext.platform,
+      allowedMcpAliases: runContext.allowedMcpAliases,
+      annotations: this.localToolAnnotations,
+      extraSpecs: attachmentSpecs,
+    });
+    const toolSpecs = [...authority.specs];
     const attachmentListing = [...attachmentIndex.values()]
       .map(
         (attachment) =>
@@ -575,6 +643,17 @@ export class LocalAgentGenerator implements GenerationBackend {
         : promptWithAttachments,
       bootstrapContext,
       sessionId,
+      sessionCompatibilityKey,
+      scope:
+        runContext.mode === "subagent" || runContext.mode === "auto_qa"
+          ? { kind: "utility", id: this.utilityScopeId }
+          : {
+              kind: "conversation",
+              id:
+                this.config.conversationId ??
+                runContext.conversationId ??
+                "local-agent-ephemeral",
+            },
       tools: toolSpecs,
       nativeSearch,
       maxToolCalls: Math.max(1, budget.maxToolCalls - budget.toolCalls),
@@ -588,8 +667,6 @@ export class LocalAgentGenerator implements GenerationBackend {
     let activeSessionId = sessionId;
     let hadActivity = false;
     let error: Error | null = null;
-    let toolError: Error | null = null;
-    let toolQueue = Promise.resolve();
     let streamedChars = 0;
     const nativeStarted = new Set<string>();
     const nativeRejected = new Set<string>();
@@ -608,10 +685,30 @@ export class LocalAgentGenerator implements GenerationBackend {
 
     const executeTool = async (
       event: Extract<LocalAgentEvent, { type: "toolRequest" }>,
-    ) => {
-      if (this.abortRequested || budget.exhausted || toolError) {
+    ): Promise<LocalCliHostToolOutcome> => {
+      if (!authority.has(event.name)) {
+        const output = normalizeToolExecutionOutput({
+          text: `Error: tool "${event.name}" is not authorized for this local CLI run.`,
+          isError: true,
+        });
+        this.events.onToolResult?.(
+          event.name,
+          event.arguments,
+          output.text,
+          event.callId,
+          output,
+        );
+        return { resolution: toLocalResolution(output), hadSideEffect: false };
+      }
+      if (this.abortRequested || budget.exhausted) {
         await cancelLocalAgent(event.runId).catch(() => false);
-        return;
+        return {
+          resolution: {
+            text: "Error: the local CLI run is stopping.",
+            isError: true,
+          },
+          hadSideEffect: false,
+        };
       }
       hadActivity = true;
       const toolCall: ToolCall = {
@@ -627,6 +724,7 @@ export class LocalAgentGenerator implements GenerationBackend {
 
       let output: ToolExecutionOutput;
       let changes: FileChange[] = [];
+      let hadSideEffect = false;
       const budgetError = consumeToolBudget(budget, event.name);
       if (budgetError) {
         output = normalizeToolExecutionOutput({
@@ -661,8 +759,7 @@ export class LocalAgentGenerator implements GenerationBackend {
           output,
         );
       } else {
-        const validation = await validateLocalToolArguments(
-          tools,
+        const validation = await authority.validate(
           event.name,
           event.arguments,
         );
@@ -688,6 +785,8 @@ export class LocalAgentGenerator implements GenerationBackend {
           });
           output = executed.result;
           changes = executed.changes;
+          hadSideEffect =
+            executed.hadSideEffect && !authority.isReadOnly(event.name);
           if (
             event.name === "exit_plan_mode" &&
             output.text.startsWith(PLAN_APPROVED_PREFIX)
@@ -707,162 +806,195 @@ export class LocalAgentGenerator implements GenerationBackend {
       if (changes.length > 0) {
         this.events.onFileChange?.(this.host.getFiles(), changes);
       }
-      await resolveLocalAgentTool(
-        event.runId,
-        event.callId,
-        toLocalResolution(output),
-      );
       if (budgetError) {
         await cancelLocalAgent(event.runId).catch(() => false);
       }
+      return {
+        resolution: toLocalResolution(output),
+        hadSideEffect,
+      };
     };
 
-    const outcome = await new Promise<RunOutcome>((resolve, reject) => {
-      let settled = false;
-      const finish = (done: Extract<LocalAgentEvent, { type: "done" }>) => {
-        if (settled) return;
-        settled = true;
-        void toolQueue.then(() => {
-          appendAssistant();
-          this.currentRunId = null;
-          if (toolError) {
-            reject(new LocalRunFailure(toolError.message, hadActivity));
-            return;
-          }
-          if (error) {
-            reject(new LocalRunFailure(error.message, hadActivity));
-            return;
-          }
-          resolve({
-            sessionId: done.sessionId ?? activeSessionId,
-            cliVersion,
-            aborted: done.aborted || this.abortRequested,
-            text,
-          });
-        });
-      };
-
-      const onEvent = (event: LocalAgentEvent) => {
-        switch (event.type) {
-          case "session":
-            activeSessionId = event.sessionId;
-            cliVersion = event.cliVersion;
+    const onEvent = (event: LocalAgentEvent) => {
+      switch (event.type) {
+        case "session":
+          activeSessionId = event.sessionId;
+          cliVersion = event.cliVersion;
+          break;
+        case "prepared":
+          cliVersion = event.cliVersion;
+          break;
+        case "textDelta":
+          streamedChars += event.delta.length;
+          if (streamedChars > MAX_LOCAL_STREAM_CHARS) {
+            error = new Error(getT().settings.localCli.outputLimit);
+            this.abortRequested = true;
+            this.host.abort();
+            if (this.currentRunId) void cancelLocalAgent(this.currentRunId);
             break;
-          case "textDelta":
-            streamedChars += event.delta.length;
-            if (streamedChars > MAX_LOCAL_STREAM_CHARS) {
-              error = new Error(
-                "Local CLI output exceeded the renderer limit.",
-              );
-              this.abortRequested = true;
-              this.host.abort();
-              if (this.currentRunId) void cancelLocalAgent(this.currentRunId);
+          }
+          hadActivity = true;
+          text += event.delta;
+          assistantText += event.delta;
+          this.events.onText?.(event.delta);
+          break;
+        case "reasoningDelta":
+          streamedChars += event.delta.length;
+          if (streamedChars > MAX_LOCAL_STREAM_CHARS) {
+            error = new Error(getT().settings.localCli.outputLimit);
+            this.abortRequested = true;
+            this.host.abort();
+            if (this.currentRunId) void cancelLocalAgent(this.currentRunId);
+            break;
+          }
+          hadActivity = true;
+          assistantThinking += event.delta;
+          this.events.onThinking?.(event.delta);
+          break;
+        case "toolRequest":
+          // LocalCliRuntime serializes tool execution and resolves each call
+          // exactly once. The generator retains the host-authority side effects
+          // in executeTool, but no longer owns the transport queue.
+          this.currentRunId = event.runId;
+          break;
+        case "nativeTool": {
+          hadActivity = true;
+          if (event.phase === "started") {
+            const budgetError = consumeToolBudget(budget, event.name);
+            if (budgetError) {
+              nativeRejected.add(event.callId);
+              if (this.currentRunId) {
+                void cancelLocalAgent(this.currentRunId);
+              }
               break;
             }
-            hadActivity = true;
-            text += event.delta;
-            assistantText += event.delta;
-            this.events.onText?.(event.delta);
-            break;
-          case "reasoningDelta":
-            streamedChars += event.delta.length;
-            if (streamedChars > MAX_LOCAL_STREAM_CHARS) {
-              error = new Error(
-                "Local CLI output exceeded the renderer limit.",
-              );
-              this.abortRequested = true;
-              this.host.abort();
-              if (this.currentRunId) void cancelLocalAgent(this.currentRunId);
-              break;
-            }
-            hadActivity = true;
-            assistantThinking += event.delta;
-            this.events.onThinking?.(event.delta);
-            break;
-          case "toolRequest":
-            this.currentRunId = event.runId;
-            toolQueue = toolQueue
-              .then(() => executeTool(event))
-              .catch((cause) => {
-                toolError =
-                  cause instanceof Error ? cause : new Error(String(cause));
-                void cancelLocalAgent(event.runId);
-              });
-            break;
-          case "nativeTool": {
-            hadActivity = true;
-            if (event.phase === "started") {
+            nativeStarted.add(event.callId);
+            this.events.onToolCall?.(event.name, event.callId);
+          } else {
+            if (nativeRejected.delete(event.callId)) break;
+            if (!nativeStarted.has(event.callId)) {
               const budgetError = consumeToolBudget(budget, event.name);
               if (budgetError) {
-                nativeRejected.add(event.callId);
                 if (this.currentRunId) {
                   void cancelLocalAgent(this.currentRunId);
                 }
                 break;
               }
-              nativeStarted.add(event.callId);
               this.events.onToolCall?.(event.name, event.callId);
-            } else {
-              if (nativeRejected.delete(event.callId)) break;
-              if (!nativeStarted.has(event.callId)) {
-                const budgetError = consumeToolBudget(budget, event.name);
-                if (budgetError) {
-                  if (this.currentRunId) {
-                    void cancelLocalAgent(this.currentRunId);
-                  }
-                  break;
-                }
-                this.events.onToolCall?.(event.name, event.callId);
-              }
-              nativeStarted.delete(event.callId);
-              const resultText = event.result
-                ? JSON.stringify(event.result)
-                : "Native CLI search completed.";
-              this.events.onToolResult?.(
-                event.name,
-                event.arguments ?? {},
-                resultText,
-                event.callId,
-                normalizeToolExecutionOutput(resultText),
-              );
             }
-            break;
+            nativeStarted.delete(event.callId);
+            const resultText = event.result
+              ? JSON.stringify(event.result)
+              : "Native CLI search completed.";
+            this.events.onToolResult?.(
+              event.name,
+              event.arguments ?? {},
+              resultText,
+              event.callId,
+              normalizeToolExecutionOutput(resultText),
+            );
           }
-          case "warning":
-            console.warn("Local CLI warning:", event.message);
-            break;
-          case "error":
-            error = new Error(event.message);
-            break;
-          case "done":
-            finish(event);
-            break;
-          case "status":
-          case "usage":
-            break;
+          break;
         }
-      };
+        case "warning":
+          this.events.onLocalCliWarning?.(event.message);
+          break;
+        case "error":
+          break;
+        case "done":
+          break;
+        case "status":
+          this.events.onLocalCliStatus?.({
+            state: event.state,
+            message: event.message,
+          });
+          break;
+        case "usage":
+          this.events.onLocalCliUsage?.({
+            ...(event.inputTokens !== undefined
+              ? { inputTokens: event.inputTokens }
+              : {}),
+            ...(event.outputTokens !== undefined
+              ? { outputTokens: event.outputTokens }
+              : {}),
+            ...(event.cachedInputTokens !== undefined
+              ? { cachedInputTokens: event.cachedInputTokens }
+              : {}),
+          });
+          break;
+      }
+    };
 
-      startLocalAgent(request, onEvent)
-        .then((runId) => {
-          if (!settled) this.currentRunId = runId;
-          if (this.abortRequested || budget.exhausted) {
-            void cancelLocalAgent(runId);
-          }
-        })
-        .catch((cause) => {
-          if (settled) return;
-          settled = true;
-          this.currentRunId = null;
-          reject(
-            new LocalRunFailure(
-              cause instanceof Error ? cause.message : String(cause),
-              hadActivity,
-            ),
-          );
-        });
-    });
-    return outcome;
+    let runtimeResult: LocalCliRunResult;
+    try {
+      runtimeResult = await localCliRuntime.run(
+        request,
+        {
+          onEvent,
+          executeHostTool: async (event) => executeTool(event),
+        },
+        this.activeSignal ?? undefined,
+      );
+    } catch (cause) {
+      this.currentRunId = null;
+      if (isLocalCliRuntimeError(cause)) {
+        const failure = cause.failure;
+        throw new LocalRunFailure(
+          failure.safeMessage,
+          failure.hadActivity || hadActivity,
+          failure,
+        );
+      }
+      throw new LocalRunFailure(
+        cause instanceof Error ? cause.message : String(cause),
+        hadActivity,
+      );
+    }
+
+    appendAssistant();
+    this.attachLocalCliTelemetry(runtimeResult);
+    this.currentRunId = null;
+    const rendererError = error as Error | null;
+    if (rendererError) {
+      throw new LocalRunFailure(rendererError.message, hadActivity);
+    }
+    return {
+      sessionId: runtimeResult.sessionId ?? activeSessionId,
+      cliVersion: runtimeResult.cliVersion ?? cliVersion,
+      prepared: runtimeResult.prepared,
+      usage: runtimeResult.usage,
+      warnings: runtimeResult.warnings,
+      status: runtimeResult.status,
+      aborted: runtimeResult.aborted || this.abortRequested,
+      text,
+    };
+  }
+
+  private attachLocalCliTelemetry(result: LocalCliRunResult): void {
+    if (!result.status && !result.usage && result.warnings.length === 0) {
+      return;
+    }
+    const messages = this.host.getMessages();
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index];
+      if (message.role !== "assistant") continue;
+      messages[index] = {
+        ...message,
+        metadata: {
+          ...message.metadata,
+          localCli: {
+            provider: this.config.provider,
+            ...(result.status ? { status: result.status } : {}),
+            ...(result.usage ? { usage: result.usage } : {}),
+            ...(result.warnings.length > 0
+              ? { warnings: [...result.warnings] }
+              : {}),
+          },
+        },
+      };
+      this.host.syncMessages(messages);
+      return;
+    }
   }
 }
 
@@ -875,6 +1007,7 @@ export function createLocalAgentGenerator(
   extras?: Pick<
     GeneratorOptions,
     | "tools"
+    | "localToolAnnotations"
     | "askUserQuestion"
     | "requestPlanApproval"
     | "onPlanApproved"
@@ -908,6 +1041,7 @@ export function createLocalAgentGenerator(
     host,
     {
       ...config,
+      toolAnnotations: extras?.localToolAnnotations ?? config.toolAnnotations,
       maxToolCalls: extras?.maxIterations ?? config.maxToolCalls,
     },
     events,
@@ -952,7 +1086,10 @@ export async function runLocalUtilityText(
           timeoutId = globalThis.setTimeout(() => {
             generator.abort();
             const error = new Error(
-              `Local utility generation timed out after ${timeoutMs}ms.`,
+              getT().settings.localCli.utilityTimeout.replace(
+                "{timeoutMs}",
+                String(timeoutMs),
+              ),
             );
             error.name = "TimeoutError";
             reject(error);

@@ -91,6 +91,21 @@ describe("settings persistence", () => {
     await expect(
       useSettingsStore.getState().refreshLocalAgentCapability(true),
     ).resolves.toBe("supported");
+    useSettingsStore.getState().setLocalAgentProbe({
+      provider: "codex",
+      availability: "ready",
+      status: "ready",
+      setupCommand: "codex login",
+      models: [],
+      efforts: [],
+      preferenceDecision: { kind: "keep", unverified: false },
+      capabilities: {
+        sessions: true,
+        reasoning: true,
+        tools: true,
+        nativeSearch: true,
+      },
+    });
     expect(useSettingsStore.getState().isAIValid()).toBe(true);
 
     await expect(
@@ -98,6 +113,44 @@ describe("settings persistence", () => {
     ).resolves.toBe("unsupported");
     expect(useSettingsStore.getState().isAIValid()).toBe(false);
     expect(localAgentSupportMocks.reset).toHaveBeenCalledTimes(3);
+  });
+
+  it("uses volatile per-provider readiness and allows verification-required runs", async () => {
+    const { storage } = createMemoryStorage();
+    vi.stubGlobal("localStorage", storage);
+    const { useSettingsStore } = await import("./index");
+    useSettingsStore.setState({ localAgentCapability: "supported" });
+    useSettingsStore.getState().setAI({
+      ...useSettingsStore.getState().ai,
+      runtime: "localCli",
+      localAgent: {
+        ...useSettingsStore.getState().ai.localAgent,
+        provider: "claude",
+      },
+    });
+    expect(useSettingsStore.getState().isAIValid()).toBe(false);
+    useSettingsStore.getState().setLocalAgentProbe({
+      provider: "claude",
+      availability: "ready",
+      status: "verificationRequired",
+      setupCommand: "claude login",
+      models: [],
+      efforts: [],
+      preferenceDecision: { kind: "keep", unverified: true },
+      capabilities: {
+        sessions: true,
+        reasoning: true,
+        tools: true,
+        nativeSearch: true,
+      },
+    });
+    expect(useSettingsStore.getState().localAgentReadiness.claude?.status).toBe(
+      "verificationRequired",
+    );
+    expect(useSettingsStore.getState().isAIValid()).toBe(true);
+    expect(storage.getItem("open-builder-settings")).not.toContain(
+      "verificationRequired",
+    );
   });
 
   it("defaults and resets to keyless Firecrawl while requiring a key for Exa", async () => {

@@ -16,13 +16,14 @@ import {
   BUILTIN_TOOLS,
   TOOL_POLICY_VERSION,
   getToolCapability,
+  isWriteToolName,
+  READONLY_TOOL_NAMES,
   type ExecutionMode,
   type RuntimePlatform,
   type ToolRunContext,
 } from "./tools-schema";
 import { DEFAULT_SYSTEM_PROMPT } from "./system-prompt";
 import { buildProjectGuidelinesSection } from "./project-guidelines";
-import { isWriteToolName } from "./tools-schema";
 import { PLAN_APPROVED_PREFIX, PLAN_REJECTED_PREFIX } from "./plan-mode";
 import { dispatchFsTool } from "../tools/fs-tools";
 import {
@@ -86,6 +87,22 @@ export type {
   InitializedProjectContext,
   InitializedProjectPreparation,
 } from "./generator-types";
+
+function toolExecutionHasSideEffect(name: string): boolean {
+  if (name === "dispatch_subagent") return true;
+  const capability = getToolCapability(name);
+  if (capability) {
+    return capability.effects.some(
+      (effect) =>
+        effect === "write_project" ||
+        effect === "write_runtime" ||
+        effect === "process",
+    );
+  }
+  // Unknown tools are dynamic capabilities. Treat them conservatively until
+  // the local authority snapshot supplies an explicit read-only annotation.
+  return !READONLY_TOOL_NAMES.has(name);
+}
 
 export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
   // ── internal state ──
@@ -305,9 +322,11 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
     this.messages.push({ role: "user", content: userMessage });
   }
 
-  executeToolCall(
-    toolCall: ToolCall,
-  ): Promise<{ result: ToolExecutionOutput; changes: FileChange[] }> {
+  executeToolCall(toolCall: ToolCall): Promise<{
+    result: ToolExecutionOutput;
+    changes: FileChange[];
+    hadSideEffect: boolean;
+  }> {
     return this.executeTool(toolCall);
   }
 
@@ -788,9 +807,11 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
     };
   }
 
-  private async executeTool(
-    toolCall: ToolCall,
-  ): Promise<{ result: ToolExecutionOutput; changes: FileChange[] }> {
+  private async executeTool(toolCall: ToolCall): Promise<{
+    result: ToolExecutionOutput;
+    changes: FileChange[];
+    hadSideEffect: boolean;
+  }> {
     const name = toolCall.function.name;
     const logDecision = (
       decision: "allowed" | "denied" | "requested",
@@ -819,7 +840,7 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
         isError: true,
       });
       this.events.onToolResult?.(name, null, output.text, toolCall.id, output);
-      return { result: output, changes: [] };
+      return { result: output, changes: [], hadSideEffect: false };
     }
 
     if (!Object.prototype.hasOwnProperty.call(this.tools, name)) {
@@ -832,7 +853,7 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
       });
       logDecision("denied", "tool is absent from the current run allowlist");
       this.events.onToolResult?.(name, args, output.text, toolCall.id, output);
-      return { result: output, changes: [] };
+      return { result: output, changes: [], hadSideEffect: false };
     }
 
     const capability = getToolCapability(name);
@@ -853,7 +874,7 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
       });
       logDecision("denied", "tool capability policy rejected execution");
       this.events.onToolResult?.(name, args, output.text, toolCall.id, output);
-      return { result: output, changes: [] };
+      return { result: output, changes: [], hadSideEffect: false };
     }
 
     const activeCtx = this.skillContext.get();
@@ -867,7 +888,7 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
       });
       logDecision("denied", "write tool blocked by Plan Mode");
       this.events.onToolResult?.(name, args, output.text, toolCall.id, output);
-      return { result: output, changes: [] };
+      return { result: output, changes: [], hadSideEffect: false };
     }
 
     if (this.authorizeToolCall) {
@@ -890,7 +911,7 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
           toolCall.id,
           output,
         );
-        return { result: output, changes: [] };
+        return { result: output, changes: [], hadSideEffect: false };
       }
     }
 
@@ -912,7 +933,7 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
       });
       logDecision("denied", "active Skill allowed-tools restriction");
       this.events.onToolResult?.(name, args, output.text, toolCall.id, output);
-      return { result: output, changes: [] };
+      return { result: output, changes: [], hadSideEffect: false };
     }
 
     if (!isAuthorizedMcpAlias) {
@@ -965,7 +986,7 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
             toolCall.id,
             output,
           );
-          return { result: output, changes: [] };
+          return { result: output, changes: [], hadSideEffect: false };
         }
       }
       if (nextFiles) {
@@ -983,7 +1004,7 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
             toolCall.id,
             output,
           );
-          return { result: output, changes: [] };
+          return { result: output, changes: [], hadSideEffect: false };
         }
         this.files = nextFiles;
         onPreparedProjectCommitted?.();
@@ -1000,7 +1021,11 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
       const normalized = normalizeToolResultForModel(resultText);
       const output = normalizeToolExecutionOutput(normalized.result);
       this.events.onToolResult?.(name, args, output.text, toolCall.id, output);
-      return { result: output, changes };
+      return {
+        result: output,
+        changes,
+        hadSideEffect: toolExecutionHasSideEffect(name),
+      };
     }
 
     let result: string | ToolExecutionOutput;
@@ -1164,6 +1189,10 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
 
     const output = normalizeToolExecutionOutput(result);
     this.events.onToolResult?.(name, args, output.text, toolCall.id, output);
-    return { result: output, changes: [] };
+    return {
+      result: output,
+      changes: [],
+      hadSideEffect: toolExecutionHasSideEffect(name),
+    };
   }
 }

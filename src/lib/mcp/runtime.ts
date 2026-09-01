@@ -6,7 +6,11 @@ import type {
 import { TOOL_POLICY_VERSION } from "../ai/tool-policy-version";
 import { buildApprovedMcpInstructions, selectAvailableMcpTools } from "./index";
 import { compileMcpToolInputValidator } from "./tool-input-validator";
-import type { McpServerEntry, McpServerRuntimeState } from "./types";
+import type {
+  McpServerEntry,
+  McpServerRuntimeState,
+  McpToolAnnotations,
+} from "./types";
 
 export interface McpToolCaller {
   callTool(
@@ -22,6 +26,9 @@ export interface McpRuntimeBundle {
   planModeToolNames: Set<string>;
   subagentToolNames: Set<string>;
   aliases: Map<string, { serverId: string; toolName: string }>;
+  /** The annotations belonging to each exposed alias. Kept beside aliases so
+   * local CLI adapters can project the same Host capability snapshot. */
+  annotations: Map<string, McpToolAnnotations>;
   instructions: string;
   warnings: string[];
   handler: (
@@ -42,6 +49,7 @@ export async function buildMcpRuntimeBundle(
   options: BuildMcpRuntimeOptions,
 ): Promise<McpRuntimeBundle> {
   const aliases = new Map<string, { serverId: string; toolName: string }>();
+  const annotations = new Map<string, McpToolAnnotations>();
   const planModeToolNames = new Set<string>();
   const subagentToolNames = new Set<string>();
   const tools: ToolSet = {};
@@ -59,6 +67,11 @@ export async function buildMcpRuntimeBundle(
         serverId: selected.serverId,
         toolName: selected.toolName,
       });
+      if (selected.definition.annotations) {
+        annotations.set(selected.alias, {
+          ...selected.definition.annotations,
+        });
+      }
       tools[selected.alias] = {
         description:
           `[MCP: ${selected.serverName} / ${selected.definition.title || selected.toolName}] ` +
@@ -100,6 +113,7 @@ export async function buildMcpRuntimeBundle(
     planModeToolNames,
     subagentToolNames,
     aliases,
+    annotations,
     instructions: buildApprovedMcpInstructions(
       options.servers,
       options.runtime,

@@ -2,6 +2,26 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_OPENAI_MODEL } from "../../lib/ai/provider-config";
 import { migrateSettings, SETTINGS_VERSION } from "./migrations";
 
+interface MigratedLocalAgentSettings {
+  provider: string;
+  preferences: Record<string, { model: string; effort: string }>;
+}
+
+function asMigratedLocalAgentSettings(value: unknown): {
+  ai: { localAgent: MigratedLocalAgentSettings };
+} {
+  if (!value || typeof value !== "object") {
+    throw new Error("Expected migrated settings object.");
+  }
+  const candidate = value as {
+    ai?: { localAgent?: MigratedLocalAgentSettings };
+  };
+  if (!candidate.ai?.localAgent) {
+    throw new Error("Expected migrated local-agent settings.");
+  }
+  return { ai: { localAgent: candidate.ai.localAgent } };
+}
+
 describe("migrateSettings", () => {
   it("fills only empty OpenAI-family model settings", () => {
     const compatible = migrateSettings(
@@ -63,7 +83,7 @@ describe("migrateSettings", () => {
   });
 
   it("adds custom prompts without overwriting an existing value", () => {
-    expect(SETTINGS_VERSION).toBe(20);
+    expect(SETTINGS_VERSION).toBe(21);
     const missing = migrateSettings({ system: {} }, 17) as Record<string, any>;
     const existing = migrateSettings(
       { system: { customSystemPrompt: "Keep changes surgical." } },
@@ -190,6 +210,7 @@ describe("migrateSettings", () => {
           codex: { model: "", effort: "" },
           claude: { model: "", effort: "" },
           pi: { model: "", effort: "" },
+          antigravity: { model: "", effort: "" },
         },
       },
     });
@@ -218,6 +239,7 @@ describe("migrateSettings", () => {
           codex: { model: "codex-model", effort: "high" },
           claude: { model: "claude-model", effort: "medium" },
           pi: { model: "", effort: "" },
+          antigravity: { model: "", effort: "" },
         },
       },
     });
@@ -236,17 +258,49 @@ describe("migrateSettings", () => {
         },
       },
       19,
-    ) as Record<string, any>;
+    );
+    const migratedSettings = asMigratedLocalAgentSettings(migrated);
 
-    expect(migrated.ai.localAgent).toEqual({
+    expect(migratedSettings.ai.localAgent).toEqual({
       provider: "claude",
       preferences: {
         codex: { model: "gpt-5.6-sol", effort: "high" },
         claude: { model: "claude-opus-4-1", effort: "max" },
         pi: { model: "", effort: "" },
+        antigravity: { model: "", effort: "" },
       },
     });
-    expect(migrated.ai.localAgent).not.toHaveProperty("codex");
-    expect(migrated.ai.localAgent).not.toHaveProperty("claude");
+    expect(migratedSettings.ai.localAgent).not.toHaveProperty("codex");
+    expect(migratedSettings.ai.localAgent).not.toHaveProperty("claude");
+  });
+
+  it("adds Antigravity preferences when upgrading v20 settings", () => {
+    const migrated = migrateSettings(
+      {
+        ai: {
+          runtime: "localCli",
+          localAgent: {
+            provider: "antigravity",
+            preferences: {
+              codex: { model: "codex-model", effort: "high" },
+              claude: { model: "claude-model", effort: "medium" },
+              pi: { model: "pi-model", effort: "low" },
+            },
+          },
+        },
+      },
+      20,
+    );
+    const migratedSettings = asMigratedLocalAgentSettings(migrated);
+
+    expect(migratedSettings.ai.localAgent).toEqual({
+      provider: "antigravity",
+      preferences: {
+        codex: { model: "codex-model", effort: "high" },
+        claude: { model: "claude-model", effort: "medium" },
+        pi: { model: "pi-model", effort: "low" },
+        antigravity: { model: "", effort: "" },
+      },
+    });
   });
 });

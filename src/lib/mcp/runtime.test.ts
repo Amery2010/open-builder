@@ -92,6 +92,12 @@ describe("MCP runtime tool filtering", () => {
     });
 
     expect(Object.keys(bundle.tools)).toHaveLength(2);
+    const readAliasForAnnotations = [...bundle.aliases.entries()].find(
+      ([, target]) => target.toolName === "read_record",
+    )![0];
+    expect(bundle.annotations.get(readAliasForAnnotations)).toEqual(
+      expect.objectContaining({ readOnlyHint: true }),
+    );
     expect(bundle.planModeToolNames).toHaveLength(1);
     expect(bundle.subagentToolNames).toEqual(bundle.planModeToolNames);
     expect(bundle.instructions).toContain(

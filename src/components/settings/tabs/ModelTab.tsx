@@ -255,8 +255,8 @@ export function ModelTab({
       {formData.runtime === "localCli" ? (
         localAgentsSupported ? (
           <LocalAgentSettings
-            formData={formData}
-            setFormData={setFormData}
+            value={formData.localAgent}
+            onChange={(localAgent) => setFormData({ ...formData, localAgent })}
             supported
             runtimeChangeLocked={runtimeChangeLocked}
           />

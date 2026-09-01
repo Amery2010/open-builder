@@ -920,6 +920,9 @@ export function useGenerator({
           ...(classified.status !== undefined
             ? { errorStatus: classified.status }
             : {}),
+          ...(classified.localCliFailure
+            ? { localCliFailure: classified.localCliFailure }
+            : {}),
         },
       ]);
       return classified;
@@ -950,9 +953,7 @@ export function useGenerator({
       }
       const { supportsLocalAgents } = await import("../lib/local-agent/tauri");
       if (!(await supportsLocalAgents())) {
-        throw new Error(
-          "Local CLI agents are available only in the desktop application. Switch the runtime back to API.",
-        );
+        throw new Error(getT().settings.localCli.runtimeUnavailableAction);
       }
     }
 
@@ -1202,6 +1203,8 @@ export function useGenerator({
           generatorRef.current?.getSkillContext().snapshot() ?? null,
         getAdditionalToolNames: () =>
           mcpRuntimeRef.current?.subagentToolNames ?? new Set(),
+        getAdditionalToolAnnotations: () =>
+          mcpRuntimeRef.current?.annotations ?? new Map(),
         createGenerator: isLocalRuntime
           ? async (options, events) => {
               const { createLocalAgentGenerator } =
@@ -1224,6 +1227,7 @@ export function useGenerator({
                   executionMode: options.executionMode,
                   runtimePlatform: options.runtimePlatform,
                   allowedMcpAliases: options.allowedMcpAliases,
+                  localToolAnnotations: options.localToolAnnotations,
                   initialSkillContext: options.initialSkillContext,
                   systemPrompt: options.systemPrompt,
                   maxIterations: options.maxIterations,
@@ -1455,6 +1459,29 @@ export function useGenerator({
           setRunState("error");
           console.error("Generation error:", error);
         },
+        onLocalCliStatus: (status) => {
+          if (!isCurrentGeneratorRun(generatorConversationId)) return;
+          const normalized = status.state.toLowerCase();
+          if (normalized.includes("tool")) {
+            setRunState("executingTool");
+          } else if (
+            normalized.includes("wait") ||
+            normalized.includes("input")
+          ) {
+            setRunState("waitingUser");
+          } else if (
+            normalized.includes("stream") ||
+            normalized.includes("think")
+          ) {
+            setRunState("streaming");
+          } else if (
+            normalized.includes("prepare") ||
+            normalized.includes("start") ||
+            normalized.includes("handshake")
+          ) {
+            setRunState("preparing");
+          }
+        },
         onRetry: (attempt, maxAttempts, error) => {
           if (!isCurrentGeneratorRun(generatorConversationId)) return;
           setIsThinkingStreaming(false);
@@ -1531,6 +1558,9 @@ export function useGenerator({
           const mcpRuntime = await runtime.mcpManager.prepareRuntime();
           if (!isCurrentGeneratorRun(generatorConversationId)) return;
           mcpRuntimeRef.current = mcpRuntime;
+          generatorRef.current?.setLocalToolAnnotations?.(
+            mcpRuntime.annotations,
+          );
           const custom = {
             ...baseCustomToolSetRef.current,
             ...mcpRuntime.tools,
@@ -1790,6 +1820,9 @@ export function useGenerator({
         dynamicOptions.includeMcp === false || isDesignReview
           ? null
           : mcpRuntime;
+      generator.setLocalToolAnnotations?.(
+        isDesignReview ? new Map() : mcpRuntime.annotations,
+      );
       const customToolSet = {
         ...baseCustomToolSetRef.current,
         ...mcpRuntime.tools,
@@ -1927,6 +1960,10 @@ export function useGenerator({
       if (!isCurrentRun()) return;
       setRunState("autoQa");
       useInteractiveStore.getState().rejectAllPending("automatic QA started");
+      const currentMessageIndex = filterMemoryMessages(
+        useConversationStore.getState().conversations[runConversationId]
+          ?.messages ?? [],
+      ).length;
       setMessages((prev) => [
         ...filterMemoryMessages(prev),
         {
@@ -1936,7 +1973,9 @@ export function useGenerator({
         },
       ]);
       try {
-        await generator.generate(AUTO_QA_PROMPT);
+        await generator.generate(AUTO_QA_PROMPT, undefined, {
+          currentMessageIndex,
+        });
       } catch (err: any) {
         if (err?.name === "AbortError") throw err;
         if (!isCurrentRun()) return;
@@ -2114,6 +2153,9 @@ export function useGenerator({
 
       const previousConversation =
         useConversationStore.getState().conversations[runConversationId];
+      const currentMessageIndex = removeErrorMessages(
+        previousConversation?.messages ?? [],
+      ).length;
       const currentRequest: Message = {
         role: "user",
         content,
@@ -2206,6 +2248,7 @@ export function useGenerator({
           const result = await generator.generate(
             agnesManifest ? `${modelPrompt}\n\n${agnesManifest}` : modelPrompt,
             resolvedAttachments.length ? resolvedAttachments : undefined,
+            { currentMessageIndex },
           );
           scheduleAutomaticDesignReview(
             result,

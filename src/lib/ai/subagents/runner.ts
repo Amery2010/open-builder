@@ -7,6 +7,7 @@ import type {
   GeneratorOptions,
   ProjectFiles,
 } from "../generator-types";
+import type { LocalToolAnnotations } from "../../local-agent/types";
 import { BUILTIN_TOOLS, BUILTIN_WRITE_TOOL_NAMES } from "../tools-schema";
 import type { ApiType } from "../provider";
 import { useSubagentStore } from "../../../store/subagent";
@@ -42,6 +43,7 @@ export interface RunSubagentOpts {
   parentForcedSkillsPrompt: string;
   parentSkillContext: SkillActiveContext | null;
   additionalToolNames: ReadonlySet<string>;
+  additionalToolAnnotations?: ReadonlyMap<string, LocalToolAnnotations>;
   createGenerator?: (
     options: GeneratorOptions,
     events: GeneratorEvents,
@@ -59,6 +61,10 @@ export interface CreateDispatcherOpts {
   getSkillContextSnapshot?: () => SkillActiveContext | null;
   /** Explicitly approved read-only external tools (currently MCP). */
   getAdditionalToolNames?: () => ReadonlySet<string>;
+  getAdditionalToolAnnotations?: () => ReadonlyMap<
+    string,
+    LocalToolAnnotations
+  >;
   createGenerator?: RunSubagentOpts["createGenerator"];
 }
 
@@ -230,6 +236,7 @@ export async function runSubagent(
     customToolHandler: wrappedHandler,
     executionMode: "subagent",
     allowedMcpAliases: opts.additionalToolNames,
+    localToolAnnotations: opts.additionalToolAnnotations,
     initialSkillContext: opts.parentSkillContext,
     // Subagents do not get user interaction or plan-mode tools.
     thinking: false,
@@ -332,6 +339,7 @@ export function createSubagentDispatcher(
       parentForcedSkillsPrompt: opts.getForcedSkillsPrompt(),
       parentSkillContext: opts.getSkillContextSnapshot?.() ?? null,
       additionalToolNames: opts.getAdditionalToolNames?.() ?? new Set(),
+      additionalToolAnnotations: opts.getAdditionalToolAnnotations?.(),
       createGenerator: opts.createGenerator,
     });
 }

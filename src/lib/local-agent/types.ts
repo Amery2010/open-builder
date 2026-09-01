@@ -4,6 +4,24 @@ export type { LocalAgentProvider } from "./providers";
 export type LocalAgentAvailability =
   "notFound" | "unsupported" | "needsSetup" | "ready" | "error";
 
+/** The backend's launch-level readiness. Availability is retained for older
+ * persisted responses; callers that decide whether a run may start should use
+ * this status after normalizing a probe. */
+export type LocalCliInspectionStatus =
+  "ready" | "verificationRequired" | "setupRequired" | "unavailable";
+
+export type LocalCliUnavailableReason =
+  "notFound" | "unsupported" | "hostUnsupported" | "probeError";
+
+export type LocalCliCatalogAuthority = "authoritative" | "partial";
+
+export type LocalAgentRunScopeKind = "conversation" | "utility";
+
+export interface LocalAgentRunScope {
+  kind: LocalAgentRunScopeKind;
+  id: string;
+}
+
 export interface LocalAgentModel {
   id: string;
   displayName: string;
@@ -12,15 +30,31 @@ export interface LocalAgentModel {
   efforts: string[];
 }
 
+export interface LocalAgentPreference {
+  model: string;
+  effort: string;
+}
+
+export type PreferenceDecision =
+  | { kind: "keep"; unverified: boolean }
+  | { kind: "replace"; preference: LocalAgentPreference };
+
 export interface LocalAgentProbe {
   provider: LocalAgentProvider;
   availability: LocalAgentAvailability;
+  /** Added by the Verified Local CLI Run wire. Optional for old desktop builds. */
+  status?: LocalCliInspectionStatus;
+  reasonCode?: LocalCliUnavailableReason;
   path?: string;
   pathSource?: "override" | "path" | "common";
   version?: string;
+  installationFingerprint?: string;
+  catalogAuthority?: LocalCliCatalogAuthority;
+  checkedAt?: number;
   setupCommand: string;
   models: LocalAgentModel[];
   efforts: string[];
+  preferenceDecision: PreferenceDecision;
   capabilities: {
     sessions: boolean;
     reasoning: boolean;
@@ -34,7 +68,20 @@ export interface LocalToolSpec {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
+  /** MCP capability hints. These describe a tool; they never grant access. */
+  annotations?: LocalToolAnnotations;
+  /** Host-side authorization metadata projected to the provider. */
+  hostApproval?: LocalToolHostApproval;
 }
+
+export interface LocalToolAnnotations {
+  readOnlyHint?: boolean;
+  destructiveHint?: boolean;
+  idempotentHint?: boolean;
+  openWorldHint?: boolean;
+}
+
+export type LocalToolHostApproval = "none" | "session" | "perCall";
 
 export type LocalToolContent =
   | { type: "text"; text: string }
@@ -72,6 +119,8 @@ export interface LocalAgentStartRequest {
   prompt: string;
   bootstrapContext?: string;
   sessionId?: string;
+  sessionCompatibilityKey?: string;
+  scope: LocalAgentRunScope;
   tools: LocalToolSpec[];
   nativeSearch: boolean;
   maxToolCalls: number;
@@ -81,6 +130,15 @@ export interface LocalAgentStartRequest {
 export type LocalAgentEvent =
   | { type: "status"; state: string; message?: string }
   | { type: "session"; sessionId: string; cliVersion: string }
+  | {
+      type: "prepared";
+      compatibilityKey: string;
+      installationFingerprint: string;
+      cliVersion: string;
+      actualModel?: string | null;
+      actualEffort?: string | null;
+      resumed: boolean;
+    }
   | { type: "textDelta"; delta: string }
   | { type: "reasoningDelta"; delta: string }
   | {
@@ -105,5 +163,85 @@ export type LocalAgentEvent =
       cachedInputTokens?: number;
     }
   | { type: "warning"; message: string }
-  | { type: "error"; message: string; retryable: boolean }
+  | {
+      type: "error";
+      message: string;
+      retryable: boolean;
+      failure?: LocalCliFailure;
+    }
   | { type: "done"; aborted: boolean; sessionId?: string };
+
+export type LocalCliFailureCode =
+  | "executableNotFound"
+  | "cliUnsupported"
+  | "setupRequired"
+  | "selectionRejected"
+  | "installationChanged"
+  | "credentialRejected"
+  | "modelRejected"
+  | "runAlreadyActive"
+  | "providerApprovalRejected"
+  | "spawnFailed"
+  | "inputFailed"
+  | "handshakeFailed"
+  | "sessionUnavailable"
+  | "toolBridgeFailed"
+  | "isolationViolation"
+  | "protocolViolation"
+  | "outputLimit"
+  | "timeout"
+  | "processExit"
+  | "cancelled"
+  | "consumerGone"
+  | "internal";
+
+export type LocalCliFailurePhase =
+  | "inspect"
+  | "prepare"
+  | "spawn"
+  | "input"
+  | "handshake"
+  | "stream"
+  | "tool"
+  | "shutdown";
+
+export type LocalCliRetryPolicy =
+  "none" | "reprobe" | "afterSetup" | "freshSessionSafe" | "manual";
+
+export interface LocalCliFailure {
+  code: LocalCliFailureCode;
+  phase: LocalCliFailurePhase;
+  provider: LocalAgentProvider;
+  safeMessage: string;
+  diagnosticId: string;
+  hadActivity: boolean;
+  hadHostSideEffect: boolean;
+  retryPolicy: LocalCliRetryPolicy;
+}
+
+export interface LocalCliPreparedMetadata {
+  compatibilityKey: string;
+  installationFingerprint: string;
+  cliVersion: string;
+  actualModel?: string;
+  actualEffort?: string;
+  resumed: boolean;
+}
+
+export interface LocalCliUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  cachedInputTokens?: number;
+}
+
+export interface LocalCliRunStatus {
+  state: string;
+  message?: string;
+}
+
+export interface LocalCliHostToolOutcome {
+  resolution: LocalToolResolution;
+  /** True only after the Host execution seam was crossed for a side-effecting
+   * tool. Validation, policy, budget and authorization denials are false. */
+  hadSideEffect: boolean;
+}

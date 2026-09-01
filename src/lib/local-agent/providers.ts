@@ -20,6 +20,13 @@ export const LOCAL_AGENT_PROVIDER_CATALOG = {
     modelName: "Pi",
     nativeSearch: false,
   },
+  antigravity: {
+    id: "antigravity",
+    displayName: "Antigravity",
+    cliName: "agy",
+    modelName: "Antigravity",
+    nativeSearch: true,
+  },
 } as const;
 
 export type LocalAgentProvider = keyof typeof LOCAL_AGENT_PROVIDER_CATALOG;

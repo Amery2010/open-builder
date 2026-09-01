@@ -8,7 +8,10 @@ use sha2::{Digest, Sha256};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
-use crate::local_agent::{LocalAgentEvent, LocalToolResolution, LocalToolSpec};
+use crate::local_agent::{
+    LocalAgentEvent, LocalToolAnnotations, LocalToolHostApproval, LocalToolResolution,
+    LocalToolSpec,
+};
 
 pub(crate) const MAX_ARGUMENT_BYTES: usize = 4 * 1024 * 1024;
 pub(crate) const MAX_RESULT_BYTES: usize = 20 * 1024 * 1024;
@@ -41,6 +44,8 @@ pub(crate) struct BrokerTool {
     pub(crate) name: String,
     pub(crate) description: String,
     pub(crate) input_schema: serde_json::Value,
+    pub(crate) annotations: LocalToolAnnotations,
+    pub(crate) host_approval: LocalToolHostApproval,
 }
 
 impl From<LocalToolSpec> for BrokerTool {
@@ -49,6 +54,8 @@ impl From<LocalToolSpec> for BrokerTool {
             name: value.name,
             description: value.description,
             input_schema: value.input_schema,
+            annotations: value.annotations,
+            host_approval: value.host_approval,
         }
     }
 }
@@ -489,16 +496,25 @@ impl ToolBroker {
 
 fn validate_tools(tools: Vec<LocalToolSpec>) -> Result<Vec<BrokerTool>, String> {
     let mut names = HashSet::with_capacity(tools.len());
-    let mut validated = Vec::with_capacity(tools.len());
+    let mut validated: Vec<BrokerTool> = Vec::with_capacity(tools.len());
     for tool in tools {
         if tool.name.is_empty() || !tool.input_schema.is_object() {
             return Err("invalid local agent tool definition".to_string());
+        }
+        if tool.annotations.read_only_hint == Some(true)
+            && tool.annotations.destructive_hint == Some(true)
+        {
+            return Err(format!(
+                "invalid local agent tool annotations: {}",
+                tool.name
+            ));
         }
         if !names.insert(tool.name.clone()) {
             return Err(format!("duplicate local agent tool: {}", tool.name));
         }
         validated.push(tool.into());
     }
+    validated.sort_by(|left, right| left.name.cmp(&right.name));
     Ok(validated)
 }
 
@@ -531,6 +547,8 @@ mod tests {
             name: name.to_string(),
             description: format!("{name} description"),
             input_schema: json!({"type": "object"}),
+            annotations: Default::default(),
+            host_approval: Default::default(),
         }
     }
 
@@ -757,6 +775,23 @@ mod tests {
         let error = caller.await.unwrap().unwrap_err();
         assert_eq!(error.kind(), BrokerErrorKind::PendingCancelled);
         assert!(cancellation.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn closed_run_authority_rejects_late_tool_calls_without_emitting_events() {
+        let broker = ToolBroker::with_limits(128, 128);
+        let (token, cancellation, mut events) = register(&broker, 1);
+        cancellation.cancel();
+        let error = broker
+            .call(
+                Some(&format!("Bearer {token}")),
+                "allowed".to_string(),
+                json!({}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), BrokerErrorKind::RunCancelled);
+        assert!(events.try_recv().is_err());
     }
 
     #[tokio::test]

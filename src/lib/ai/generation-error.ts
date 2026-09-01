@@ -3,6 +3,16 @@ import type {
   StructuredGenerationErrorKind,
 } from "./generator-types";
 import type { Translations } from "../../i18n";
+import {
+  isLocalCliFailure,
+  isLocalCliRuntimeError,
+  redactLocalCliMessage,
+} from "../local-agent/runtime";
+import { LOCAL_AGENT_PROVIDER_CATALOG } from "../local-agent/providers";
+import type {
+  LocalCliFailure,
+  LocalCliFailureCode,
+} from "../local-agent/types";
 
 const KIND_PATTERNS: Array<{
   kind: StructuredGenerationErrorKind;
@@ -64,6 +74,80 @@ function getExplicitRetryable(err: unknown): boolean | undefined {
     : undefined;
 }
 
+function getLocalCliFailure(err: unknown): LocalCliFailure | undefined {
+  if (isLocalCliRuntimeError(err)) return sanitizeLocalCliFailure(err.failure);
+  if (!err || typeof err !== "object") return undefined;
+  const candidate = err as {
+    failure?: unknown;
+  };
+  if (!candidate.failure || typeof candidate.failure !== "object") {
+    return undefined;
+  }
+  return isLocalCliFailure(candidate.failure)
+    ? sanitizeLocalCliFailure(candidate.failure)
+    : undefined;
+}
+
+function sanitizeLocalCliFailure(failure: LocalCliFailure): LocalCliFailure {
+  return {
+    ...failure,
+    safeMessage: redactLocalCliMessage(failure.safeMessage),
+  };
+}
+
+function localFailureKind(
+  code: LocalCliFailureCode,
+): StructuredGenerationErrorKind {
+  switch (code) {
+    case "credentialRejected":
+    case "setupRequired":
+      return "auth";
+    case "modelRejected":
+    case "selectionRejected":
+    case "cliUnsupported":
+      return "model";
+    case "toolBridgeFailed":
+    case "providerApprovalRejected":
+    case "isolationViolation":
+      return "tool";
+    case "executableNotFound":
+    case "installationChanged":
+    case "spawnFailed":
+    case "inputFailed":
+    case "handshakeFailed":
+    case "sessionUnavailable":
+    case "timeout":
+    case "processExit":
+    case "consumerGone":
+    case "runAlreadyActive":
+    case "protocolViolation":
+    case "outputLimit":
+    case "internal":
+      return "local_cli";
+    case "cancelled":
+      return "aborted";
+    default:
+      return "unknown";
+  }
+}
+
+function localFailureRetryable(failure: LocalCliFailure): boolean {
+  if (failure.code === "cancelled") return false;
+  if (
+    failure.code === "credentialRejected" ||
+    failure.code === "setupRequired" ||
+    failure.code === "modelRejected" ||
+    failure.code === "selectionRejected" ||
+    failure.code === "cliUnsupported" ||
+    failure.code === "providerApprovalRejected" ||
+    failure.code === "installationChanged" ||
+    failure.code === "executableNotFound"
+  ) {
+    return false;
+  }
+  return failure.retryPolicy !== "none";
+}
+
 function retryableFromMetadata(
   err: unknown,
   status: number | undefined,
@@ -97,6 +181,17 @@ export function classifyGenerationError(
   const message = getErrorMessage(err);
   const status = getGenerationErrorStatus(err);
   const metadataRetryable = retryableFromMetadata(err, status);
+  const localFailure = getLocalCliFailure(err);
+
+  if (localFailure) {
+    return {
+      kind: localFailureKind(localFailure.code),
+      message: localFailure.safeMessage,
+      retryable: localFailureRetryable(localFailure),
+      status,
+      localCliFailure: localFailure,
+    };
+  }
 
   if (
     err &&
@@ -152,18 +247,38 @@ export function formatGenerationErrorMessage(
   error: StructuredGenerationError,
   t: Translations,
 ): string {
-  const label = t.message.generationError.kinds[error.kind];
-  const action = t.message.generationError.actions[error.kind];
+  const label = error.localCliFailure
+    ? t.message.generationError.kinds.local_cli
+    : t.message.generationError.kinds[error.kind];
+  const action = error.localCliFailure
+    ? t.message.generationError.actions.local_cli
+    : t.message.generationError.actions[error.kind];
   const status = error.status
     ? `\n\n${t.message.generationError.status.replace("{status}", String(error.status))}`
     : "";
   const retryHint = error.retryable
     ? `\n\n${t.message.generationError.retryable}`
     : "";
+  const detailMessage = error.localCliFailure
+    ? t.message.generationError.localCli.failureCodes[
+        error.localCliFailure.code
+      ]
+    : error.message;
 
-  return [
+  const localDetails = error.localCliFailure
+    ? [
+        `**${t.message.generationError.localCli.provider}:** ${LOCAL_AGENT_PROVIDER_CATALOG[error.localCliFailure.provider]?.displayName ?? error.localCliFailure.provider}`,
+        `**${t.message.generationError.localCli.phase}:** ${t.message.generationError.localCli.phases[error.localCliFailure.phase]}`,
+        `**${t.message.generationError.localCli.retryPolicy}:** ${t.message.generationError.localCli.retryPolicies[error.localCliFailure.retryPolicy]}`,
+        `**${t.message.generationError.localCli.diagnosticId}:** \`${error.localCliFailure.diagnosticId}\``,
+      ].join("\n")
+    : "";
+
+  const sections = [
     `⚠️ **${label}**`,
     action,
-    `${t.message.generationError.detail}\n\n\`${error.message}\`${status}${retryHint}`,
-  ].join("\n\n");
+    `${t.message.generationError.detail}\n\n\`${detailMessage}\`${status}${retryHint}`,
+  ];
+  if (localDetails) sections.push(localDetails);
+  return sections.join("\n\n");
 }

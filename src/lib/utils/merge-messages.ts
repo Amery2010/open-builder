@@ -283,6 +283,8 @@ export function mergeMessages(
       let errorKind: MergedMessage["errorKind"] | undefined;
       let errorRetryable: boolean | undefined;
       let errorStatus: number | undefined;
+      let localCliFailure: MergedMessage["localCliFailure"];
+      let localCli: MergedMessage["localCli"];
       let j = i;
       let bi = 0;
 
@@ -297,6 +299,8 @@ export function mergeMessages(
             errorKind = errorKind ?? cur.errorKind;
             errorRetryable = errorRetryable ?? cur.errorRetryable;
             errorStatus = errorStatus ?? cur.errorStatus;
+            localCliFailure = localCliFailure ?? cur.localCliFailure;
+            localCli = localCli ?? cur.metadata?.localCli;
           }
           if (cur.thinking) {
             otherBlocks.push({
@@ -428,6 +432,8 @@ export function mergeMessages(
           ...(errorKind ? { errorKind } : {}),
           ...(errorRetryable !== undefined ? { errorRetryable } : {}),
           ...(errorStatus !== undefined ? { errorStatus } : {}),
+          ...(localCliFailure ? { localCliFailure } : {}),
+          ...(localCli ? { localCli } : {}),
         });
       }
       i = j - 1;

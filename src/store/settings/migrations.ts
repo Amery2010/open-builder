@@ -8,7 +8,7 @@ import {
   type LocalAgentProvider,
 } from "../../lib/local-agent/providers";
 
-export const SETTINGS_VERSION = 20;
+export const SETTINGS_VERSION = 21;
 
 interface PersistedLocalAgentPreferences {
   model: string;
@@ -156,6 +156,16 @@ export function migrateSettings(persisted: unknown, version: number): unknown {
     }
   }
   if (version < 20) {
+    if (!state.ai) state.ai = {};
+    const localAgent = state.ai.localAgent ?? {};
+    state.ai.localAgent = {
+      provider: isLocalAgentProvider(localAgent.provider)
+        ? localAgent.provider
+        : "codex",
+      preferences: migrateLocalAgentPreferences(localAgent),
+    };
+  }
+  if (version < 21) {
     if (!state.ai) state.ai = {};
     const localAgent = state.ai.localAgent ?? {};
     state.ai.localAgent = {

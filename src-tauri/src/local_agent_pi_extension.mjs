@@ -202,6 +202,13 @@ function canonicalTools(tools) {
       name: tool.name,
       description: tool.description,
       inputSchema: tool.inputSchema,
+      annotations: {
+        readOnlyHint: tool.annotations.readOnlyHint ?? null,
+        destructiveHint: tool.annotations.destructiveHint ?? null,
+        idempotentHint: tool.annotations.idempotentHint ?? null,
+        openWorldHint: tool.annotations.openWorldHint ?? null,
+      },
+      hostApproval: tool.hostApproval,
     }))
     .sort((left, right) =>
       left.name < right.name ? -1 : left.name > right.name ? 1 : 0,
@@ -257,6 +264,14 @@ function validateCatalog(body, config) {
       !tool.name ||
       typeof tool.description !== "string" ||
       !isPlainObject(tool.inputSchema) ||
+      !isPlainObject(tool.annotations) ||
+      !["none", "session", "perCall"].includes(tool.hostApproval) ||
+      [
+        tool.annotations.readOnlyHint,
+        tool.annotations.destructiveHint,
+        tool.annotations.idempotentHint,
+        tool.annotations.openWorldHint,
+      ].some((value) => value !== null && typeof value !== "boolean") ||
       names.has(tool.name)
     ) {
       fail("invalid broker tool definition");

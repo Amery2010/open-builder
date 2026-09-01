@@ -12,6 +12,7 @@ describe("local-agent provider catalog", () => {
       "codex",
       "claude",
       "pi",
+      "antigravity",
     ]);
     expect(new Set(LOCAL_AGENT_PROVIDERS.map(({ id }) => id)).size).toBe(
       LOCAL_AGENT_PROVIDERS.length,
@@ -21,12 +22,18 @@ describe("local-agent provider catalog", () => {
       cliName: "pi",
       nativeSearch: false,
     });
+    expect(LOCAL_AGENT_PROVIDER_CATALOG.antigravity).toMatchObject({
+      displayName: "Antigravity",
+      cliName: "agy",
+      nativeSearch: true,
+    });
   });
 
   it("validates persisted and native provider ids", () => {
     expect(isLocalAgentProvider("codex")).toBe(true);
     expect(isLocalAgentProvider("claude")).toBe(true);
     expect(isLocalAgentProvider("pi")).toBe(true);
+    expect(isLocalAgentProvider("antigravity")).toBe(true);
     expect(isLocalAgentProvider("deepseek")).toBe(false);
     expect(isLocalAgentProvider("toString")).toBe(false);
     expect(isLocalAgentProvider(null)).toBe(false);
@@ -36,5 +43,6 @@ describe("local-agent provider catalog", () => {
     expect(localAgentSupportsNativeSearch("codex")).toBe(true);
     expect(localAgentSupportsNativeSearch("claude")).toBe(true);
     expect(localAgentSupportsNativeSearch("pi")).toBe(false);
+    expect(localAgentSupportsNativeSearch("antigravity")).toBe(true);
   });
 });

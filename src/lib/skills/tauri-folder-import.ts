@@ -3,47 +3,16 @@ import { importFromStaged, type ImportResult } from "./importer";
 import { createSkillImportBudget } from "./import-limits";
 import { assertSafePath } from "./paths";
 
-const DIALOG_MODULE_ID = "@tauri-apps/plugin-dialog";
-const FS_MODULE_ID = "@tauri-apps/plugin-fs";
-const PATH_MODULE_ID = "@tauri-apps/api/path";
-
-interface DialogModule {
-  open: (options: {
-    directory: boolean;
-    multiple: boolean;
-  }) => Promise<string | null>;
+async function loadDialog() {
+  return import("@tauri-apps/plugin-dialog");
 }
 
-interface FsModule {
-  readTextFile: (path: string) => Promise<string>;
-  readDir: (
-    path: string,
-  ) => Promise<
-    Array<{
-      name: string;
-      isFile: boolean;
-      isDirectory: boolean;
-      isSymlink: boolean;
-    }>
-  >;
-  stat: (path: string) => Promise<{ size: number }>;
+async function loadFs() {
+  return import("@tauri-apps/plugin-fs");
 }
 
-interface PathModule {
-  join: (...parts: string[]) => Promise<string>;
-  basename: (path: string) => Promise<string>;
-}
-
-async function loadDialog(): Promise<DialogModule> {
-  return import(/* @vite-ignore */ DIALOG_MODULE_ID);
-}
-
-async function loadFs(): Promise<FsModule> {
-  return import(/* @vite-ignore */ FS_MODULE_ID);
-}
-
-async function loadPath(): Promise<PathModule> {
-  return import(/* @vite-ignore */ PATH_MODULE_ID);
+async function loadPath() {
+  return import("@tauri-apps/api/path");
 }
 
 export async function importFolderViaTauri(
@@ -83,15 +52,8 @@ export async function importFolderViaTauri(
   return importFromStaged(registry, proposedId, files);
 }
 
-const OPENER_MODULE_ID = "@tauri-apps/plugin-opener";
-
-interface OpenerModule {
-  openPath: (path: string) => Promise<void>;
-  revealItemInDir?: (path: string) => Promise<void>;
-}
-
-async function loadOpener(): Promise<OpenerModule> {
-  return import(/* @vite-ignore */ OPENER_MODULE_ID);
+async function loadOpener() {
+  return import("@tauri-apps/plugin-opener");
 }
 
 export async function revealSkillsRoot(): Promise<void> {

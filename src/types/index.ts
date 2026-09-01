@@ -4,6 +4,7 @@ import type {
   StructuredGenerationErrorKind as _StructuredGenerationErrorKind,
   ToolExecutionOutput as _ToolExecutionOutput,
   AttachmentRef as _AttachmentRef,
+  MessageMetadata as _MessageMetadata,
 } from "../lib/ai/generator-types";
 import type { LocalAgentProvider } from "../lib/local-agent/providers";
 
@@ -148,6 +149,8 @@ export interface MergedMessage {
   errorKind?: _StructuredGenerationErrorKind;
   errorRetryable?: boolean;
   errorStatus?: number;
+  localCliFailure?: _Message["localCliFailure"];
+  localCli?: _MessageMetadata["localCli"];
 }
 
 // ─── Snapshot types ─────────────────────────────────────────────────────────
@@ -209,12 +212,34 @@ export interface CompressedContext {
 }
 
 export type { LocalAgentProvider } from "../lib/local-agent/providers";
+export type {
+  LocalAgentRunScope,
+  LocalAgentRunScopeKind,
+  LocalCliCatalogAuthority,
+  LocalCliFailure,
+  LocalCliFailureCode,
+  LocalCliFailurePhase,
+  LocalCliInspectionStatus,
+  LocalCliPreparedMetadata,
+  LocalCliRetryPolicy,
+  LocalCliRunStatus,
+  LocalCliUnavailableReason,
+  LocalCliUsage,
+  LocalCliHostToolOutcome,
+  LocalToolAnnotations,
+  LocalToolHostApproval,
+} from "../lib/local-agent/types";
 
 export interface LocalAgentSessionRef {
   provider: LocalAgentProvider;
   sessionId: string;
   transcriptFingerprint: string;
   model?: string;
+  /** Compatibility material captured by the backend before a run starts. */
+  compatibilityKey?: string;
+  installationFingerprint?: string;
+  actualModel?: string;
+  actualEffort?: string;
   cliVersion: string;
   updatedAt: number;
 }

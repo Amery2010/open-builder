@@ -1,5 +1,5 @@
 import { useState, useEffect, memo } from "react";
-import type { ComponentType } from "react";
+import type { ComponentType, ReactNode } from "react";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import {
   ChevronDown,
@@ -369,39 +369,34 @@ function ErrorActions({
   const t = useT();
   const kind = message.errorKind;
   const retryable = message.errorRetryable !== false;
+  let action: ReactNode = null;
 
   if (kind === "auth" && onOpenSettings) {
-    return (
+    action = (
       <MessageActionButton
         icon={Settings}
         label={t.warning.openSettings}
         onClick={onOpenSettings}
       />
     );
-  }
-
-  if (kind === "context_length" && onCompressContext) {
-    return (
+  } else if (kind === "context_length" && onCompressContext) {
+    action = (
       <MessageActionButton
         icon={Archive}
         label={t.compress.button}
         onClick={onCompressContext}
       />
     );
-  }
-
-  if (kind === "runtime_check" && onHealthCheck) {
-    return (
+  } else if (kind === "runtime_check" && onHealthCheck) {
+    action = (
       <MessageActionButton
         icon={Activity}
         label={t.message.runHealthCheck}
         onClick={onHealthCheck}
       />
     );
-  }
-
-  if (retryable && onRetry) {
-    return (
+  } else if (retryable && onRetry) {
+    action = (
       <MessageActionButton
         icon={RefreshCw}
         label={t.message.retry}
@@ -410,7 +405,17 @@ function ErrorActions({
     );
   }
 
-  return null;
+  if (!message.localCliFailure && !action) return null;
+  return (
+    <>
+      {message.localCliFailure && (
+        <CopyDiagnosticIdButton
+          diagnosticId={message.localCliFailure.diagnosticId}
+        />
+      )}
+      {action}
+    </>
+  );
 }
 
 function MessageActionButton({
@@ -452,6 +457,31 @@ function CopyMessageButton({ text }: { text: string }) {
         <Copy className="w-3.5 h-3.5" />
       )}
       <span>{copied ? t.message.copied : t.message.copy}</span>
+    </button>
+  );
+}
+
+function CopyDiagnosticIdButton({ diagnosticId }: { diagnosticId: string }) {
+  const t = useT();
+  const [copied, copy] = useCopyToClipboard();
+
+  return (
+    <button
+      type="button"
+      onClick={() => copy(diagnosticId)}
+      aria-label={t.message.generationError.localCli.copyDiagnosticId}
+      className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
+    >
+      {copied ? (
+        <Check className="w-3.5 h-3.5" />
+      ) : (
+        <Copy className="w-3.5 h-3.5" />
+      )}
+      <span>
+        {copied
+          ? t.message.copied
+          : t.message.generationError.localCli.copyDiagnosticId}
+      </span>
     </button>
   );
 }

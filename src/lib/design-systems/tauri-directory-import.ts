@@ -4,15 +4,11 @@ import {
   type StagedDesignSystemImport,
 } from "./importer";
 
-const DIALOG_MODULE_ID = "@tauri-apps/plugin-dialog";
-const FS_MODULE_ID = "@tauri-apps/plugin-fs";
-const PATH_MODULE_ID = "@tauri-apps/api/path";
-
 export async function stageDesignSystemTauriDirectory(): Promise<StagedDesignSystemImport | null> {
   const [dialog, fs, pathModule] = await Promise.all([
-    import(/* @vite-ignore */ DIALOG_MODULE_ID),
-    import(/* @vite-ignore */ FS_MODULE_ID),
-    import(/* @vite-ignore */ PATH_MODULE_ID),
+    import("@tauri-apps/plugin-dialog"),
+    import("@tauri-apps/plugin-fs"),
+    import("@tauri-apps/api/path"),
   ]);
   const selected = await dialog.open({ directory: true, multiple: false });
   if (typeof selected !== "string") return null;

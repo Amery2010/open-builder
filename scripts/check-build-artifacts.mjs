@@ -6,6 +6,23 @@ const assets = new URL("assets/", dist);
 const html = readFileSync(new URL("index.html", dist), "utf8");
 const files = readdirSync(assets);
 const failures = [];
+const forbiddenTauriSpecifiers = [
+  "@tauri-apps/plugin-dialog",
+  "@tauri-apps/plugin-fs",
+  "@tauri-apps/plugin-opener",
+  "@tauri-apps/api/path",
+];
+
+for (const file of files.filter((name) => name.endsWith(".js"))) {
+  const source = readFileSync(new URL(file, assets), "utf8");
+  for (const specifier of forbiddenTauriSpecifiers) {
+    if (source.includes(specifier)) {
+      failures.push(
+        `Production chunk ${file} contains unresolved Tauri module specifier ${specifier}.`,
+      );
+    }
+  }
+}
 
 const preloadHrefs = [
   ...html.matchAll(/rel="modulepreload"[^>]+href="([^"]+)"/g),

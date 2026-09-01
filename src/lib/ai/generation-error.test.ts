@@ -6,6 +6,8 @@ import {
   isRetryableGenerationError,
 } from "./generation-error";
 import { en } from "../../i18n/en";
+import { zh } from "../../i18n/zh";
+import { LocalCliRuntimeError } from "../local-agent/runtime";
 
 describe("generation error helpers", () => {
   it("classifies common recoverable and non-recoverable errors", () => {
@@ -76,5 +78,129 @@ describe("generation error helpers", () => {
       retryable: false,
     });
     expect(isRetryableGenerationError(permanent)).toBe(false);
+  });
+
+  it("maps typed local CLI failures without parsing provider prose", () => {
+    const error = new LocalCliRuntimeError({
+      code: "credentialRejected",
+      phase: "handshake",
+      provider: "claude",
+      safeMessage: "The local CLI rejected its configured credentials.",
+      diagnosticId: "diag-1",
+      hadActivity: false,
+      hadHostSideEffect: false,
+      retryPolicy: "afterSetup",
+    });
+
+    expect(classifyGenerationError(error)).toMatchObject({
+      kind: "auth",
+      retryable: false,
+      message: "The local CLI rejected its configured credentials.",
+    });
+  });
+
+  it("maps cancelled local runs to the non-retryable aborted kind", () => {
+    const error = new LocalCliRuntimeError({
+      code: "cancelled",
+      phase: "shutdown",
+      provider: "pi",
+      safeMessage: "The local CLI run was cancelled.",
+      diagnosticId: "diag-2",
+      hadActivity: true,
+      hadHostSideEffect: false,
+      retryPolicy: "none",
+    });
+
+    expect(classifyGenerationError(error)).toMatchObject({
+      kind: "aborted",
+      retryable: false,
+    });
+  });
+
+  it("keeps local runtime diagnostics out of the network category", () => {
+    const error = new LocalCliRuntimeError({
+      code: "providerApprovalRejected",
+      phase: "tool",
+      provider: "codex",
+      safeMessage: "The local CLI cannot invoke the approved Host tool.",
+      diagnosticId: "diag-approval",
+      hadActivity: true,
+      hadHostSideEffect: false,
+      retryPolicy: "none",
+    });
+
+    const classified = classifyGenerationError(error);
+    expect(classified).toMatchObject({
+      kind: "tool",
+      retryable: false,
+      localCliFailure: {
+        code: "providerApprovalRejected",
+        provider: "codex",
+        phase: "tool",
+        diagnosticId: "diag-approval",
+      },
+    });
+    expect(classified.kind).not.toBe("network");
+    const message = formatGenerationErrorMessage(classified, en);
+    expect(message).toContain("Provider:** Codex");
+    expect(message).toContain("Phase:** Host tool");
+    expect(message).toContain("Retry policy:** Do not retry automatically");
+    expect(message).toContain("Diagnostic ID:** `diag-approval`");
+    expect(message).toContain(
+      "The headless CLI rejected a Host tool at its provider approval layer.",
+    );
+    expect(message).not.toContain(
+      "The local CLI cannot invoke the approved Host tool.",
+    );
+    expect(message).not.toContain("stderr");
+
+    const chineseMessage = formatGenerationErrorMessage(classified, zh);
+    expect(chineseMessage).toContain(
+      "无界面的 CLI 在服务商授权层拒绝了 Host 工具。",
+    );
+    expect(chineseMessage).not.toContain(
+      "The local CLI cannot invoke the approved Host tool.",
+    );
+  });
+
+  it("rejects malformed local CLI failure objects at the UI boundary", () => {
+    const classified = classifyGenerationError({
+      message: "opaque failure",
+      failure: {
+        code: "futureFailure",
+        phase: "tool",
+        provider: "codex",
+        safeMessage: "must not be trusted",
+        diagnosticId: "diag-malformed",
+        hadActivity: "yes",
+        hadHostSideEffect: false,
+        retryPolicy: "automatic",
+      },
+    });
+
+    expect(classified.kind).toBe("unknown");
+    expect(classified.localCliFailure).toBeUndefined();
+  });
+
+  it("redacts bearer and whitespace-delimited API credentials", () => {
+    const bearer = "bearer-secret-sentinel";
+    const apiKey = "api-key-secret-sentinel";
+    const classified = classifyGenerationError({
+      message: "local failure",
+      failure: {
+        code: "credentialRejected",
+        phase: "handshake",
+        provider: "claude",
+        safeMessage: `Authorization: Bearer ${bearer}; API key ${apiKey}`,
+        diagnosticId: "diag-redaction",
+        hadActivity: false,
+        hadHostSideEffect: false,
+        retryPolicy: "afterSetup",
+      },
+    });
+
+    expect(classified.message).not.toContain(bearer);
+    expect(classified.message).not.toContain(apiKey);
+    expect(classified.message).toContain("[redacted]");
   });
 });

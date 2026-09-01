@@ -50,6 +50,11 @@ const localAgentClaude = readFileSync(
   new URL("../src-tauri/src/local_agent_claude.rs", import.meta.url),
   "utf8",
 );
+const localAgentClaudeRuntime = localAgentClaude.split("#[cfg(test)]", 1)[0];
+const localAgentAntigravity = readFileSync(
+  new URL("../src-tauri/src/local_agent_antigravity.rs", import.meta.url),
+  "utf8",
+);
 const failures = [];
 
 async function listen(server) {
@@ -150,6 +155,13 @@ async function checkPiAdapterConformance() {
         required: ["value"],
         additionalProperties: false,
       },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+      hostApproval: "session",
     },
   ];
   const canonicalTools = [...tools].sort((left, right) =>
@@ -612,30 +624,115 @@ if (
 }
 
 if (
-  !localAgentCodex.includes("features.shell_tool=false") ||
-  !localAgentCodex.includes("features.hooks=false") ||
-  !localAgentCodex.includes("agents.enabled=false") ||
-  !localAgentCodex.includes('"--strict-config"') ||
-  !localAgentCodex.includes('model_provider=\\"openai\\"') ||
-  !localAgentCodex.includes("validate_effective_config") ||
-  !localAgentCodex.includes("HANDSHAKE_TIMEOUT")
+  !localAgentClaudeRuntime.includes("CLAUDE_PROVIDER_ENV_KEYS") ||
+  !localAgentClaudeRuntime.includes("provider_environment_from_sources") ||
+  !localAgentClaudeRuntime.includes(
+    "provider_environment.apply(&mut command)",
+  ) ||
+  !localAgentClaudeRuntime.includes("MAX_CLAUDE_PROVIDER_ENV_BYTES") ||
+  !localAgentClaudeRuntime.includes(
+    "Claude gateway URL must use HTTPS or loopback HTTP",
+  ) ||
+  !localAgentClaudeRuntime.includes(
+    "Claude gateway configuration requires an explicit credential",
+  ) ||
+  localAgentClaudeRuntime.includes('"--settings".to_string()') ||
+  /"--setting-sources"[\s\S]{0,120}"(?:user|project|local)"/.test(
+    localAgentClaudeRuntime,
+  ) ||
+  localAgentProtocol.includes("ANTHROPIC_")
 ) {
   failures.push(
-    "The Codex adapter must disable native execution and attest its effective configuration before input.",
+    "The Claude adapter must import only an explicit, bounded provider allowlist without loading full user settings or widening the shared environment.",
   );
 }
 
 if (
-  !localAgentClaude.includes("pre-input structured isolation handshake") ||
-  !localAgentClaude.includes(
-    "availability: LocalAgentAvailability::Unsupported",
+  !localAgentCodex.includes('"exec".to_string()') ||
+  !localAgentCodex.includes('"--json".to_string()') ||
+  !localAgentCodex.includes('"--ignore-user-config".to_string()') ||
+  !localAgentCodex.includes('"--ignore-rules".to_string()') ||
+  !localAgentCodex.includes('"read-only".to_string()') ||
+  !localAgentCodex.includes('"shell_tool"') ||
+  !localAgentCodex.includes('"unified_exec"') ||
+  !localAgentCodex.includes("shell_environment_policy.exclude") ||
+  !localAgentCodex.includes("validate_item_kind") ||
+  !localAgentCodex.includes("HANDSHAKE_TIMEOUT") ||
+  !localAgentCodex.includes("provider_config_from_sources") ||
+  !localAgentCodex.includes("provider_config.apply(&mut command)") ||
+  !localAgentCodex.includes(
+    "Codex static provider credentials are not allowed",
   ) ||
-  !/pub\(crate\) async fn run[\s\S]*?Err\(isolation_error\(\)\)/.test(
+  !localAgentCodex.includes(
+    "Codex command-backed provider authentication is not allowed",
+  ) ||
+  !localAgentCodex.includes(
+    "Codex provider URL must use HTTPS or loopback HTTP",
+  ) ||
+  localAgentProtocol.includes("OPENAI_API_KEY")
+) {
+  failures.push(
+    "The Codex adapter must use isolated JSON exec, import only sanitized provider configuration, disable native execution, and reject unauthorized runtime items.",
+  );
+}
+
+if (
+  !localAgentClaude.includes("run_isolation_preflight") ||
+  localAgentClaude.includes('"--safe-mode".to_string()') ||
+  !localAgentClaude.includes('"--restricted".to_string()') ||
+  !localAgentClaude.includes('"--strict-mcp-config".to_string()') ||
+  !localAgentClaude.includes('"--setting-sources".to_string()') ||
+  !localAgentClaude.includes('"--system-prompt-file".to_string()') ||
+  !localAgentClaude.includes('"stream-json".to_string()') ||
+  !localAgentClaude.includes('"alwaysLoad": true') ||
+  !localAgentClaude.includes('"--allowedTools".to_string()') ||
+  !localAgentClaude.includes("validate_init_inventory") ||
+  !/pub\(crate\) async fn probe[\s\S]*?run_isolation_preflight\(executable\)[\s\S]*?\["auth", "status", "--json"\]/.test(
+    localAgentClaude,
+  ) ||
+  !/async fn run_claude_protocol[\s\S]*?send_user[\s\S]*?wait_for_init/.test(
     localAgentClaude,
   )
 ) {
   failures.push(
-    "The Claude adapter must remain fail-closed until it has a pre-input isolation handshake.",
+    "The Claude adapter must use restricted mode, empty setting sources, strict eager MCP loading, exact allowed tools, and init attestation; safe mode would disable the explicit run-scoped MCP bridge.",
+  );
+}
+
+if (
+  !localAgentAntigravity.includes('"--input-format".to_string()') ||
+  !localAgentAntigravity.includes('"--output-format".to_string()') ||
+  !localAgentAntigravity.includes('"--agent".to_string()') ||
+  !localAgentAntigravity.includes('"--sandbox".to_string()') ||
+  !localAgentAntigravity.includes("prepare_run_files") ||
+  !localAgentAntigravity.includes("attest_init") ||
+  !localAgentAntigravity.includes('"read_file(*)"') ||
+  !localAgentAntigravity.includes('"write_file(*)"') ||
+  !localAgentAntigravity.includes('"command(*)"') ||
+  !localAgentAntigravity.includes('"serverUrl"') ||
+  !localAgentAntigravity.includes("isolated_home") ||
+  !localAgentAntigravity.includes("antigravity-scope-homes-v1") ||
+  !localAgentAntigravity.includes("LocalAgentRunScopeKind::Conversation") ||
+  !localAgentAntigravity.includes("LocalAgentRunScopeKind::Utility") ||
+  !localAgentAntigravity.includes("reject_private_customizations") ||
+  !localAgent.includes("is_conversation_scope_conflict") ||
+  localAgentAntigravity.includes("RUNTIME_LOCK") ||
+  !localAgentAntigravity.includes("provider_environment_from_sources") ||
+  !localAgentAntigravity.includes("provider_environment.apply(&mut command)") ||
+  !localAgentAntigravity.includes(
+    "Antigravity Gemini endpoint must use HTTPS or loopback HTTP",
+  ) ||
+  !localAgentAntigravity.includes(
+    "Antigravity Gemini API-key mode requires GEMINI_API_KEY",
+  ) ||
+  localAgentProtocol.includes("GEMINI_API_KEY") ||
+  localAgentProtocol.includes("GOOGLE_GEMINI_BASE_URL") ||
+  !/async fn run_protocol[\s\S]*?attest_init[\s\S]*?write_json/.test(
+    localAgentAntigravity,
+  )
+) {
+  failures.push(
+    "The Antigravity adapter must remain structured-only and attest its private sandbox before writing user input.",
   );
 }
 
