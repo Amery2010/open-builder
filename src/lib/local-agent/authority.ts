@@ -10,6 +10,7 @@ import type {
   LocalToolHostApproval,
   LocalToolSpec,
 } from "./types";
+import type { HostToolRun } from "../ai/host-tool-catalog";
 
 const OMITTED_LOCAL_TOOL_NAMES = new Set(["screenshot_to_code"]);
 
@@ -75,6 +76,8 @@ export interface LocalToolAuthorityOptions {
   annotations?: ReadonlyMap<string, LocalToolAnnotations>;
   extraSpecs?: readonly LocalToolSpec[];
   omittedNames?: ReadonlySet<string>;
+  /** Reuse the Web Host's immutable run instead of reconstructing policy. */
+  hostRun?: HostToolRun;
 }
 
 function isReadOnlyCapability(name: string): boolean {
@@ -164,12 +167,20 @@ export async function createLocalToolAuthoritySnapshot(
   ]);
   const entries = new Map<string, LocalToolAuthorityEntry>();
 
-  for (const [name, definition] of Object.entries(options.tools).sort(
+  const tools = options.hostRun?.modelTools ?? options.tools;
+  for (const [name, definition] of Object.entries(tools).sort(
     ([left], [right]) => left.localeCompare(right),
   )) {
     if (
       omittedNames.has(name) ||
-      !isAllowedTool(name, options.mode, options.platform, allowedMcpAliases)
+      (options.hostRun
+        ? !options.hostRun.authority.has(name)
+        : !isAllowedTool(
+            name,
+            options.mode,
+            options.platform,
+            allowedMcpAliases,
+          ))
     ) {
       continue;
     }
@@ -202,7 +213,12 @@ export async function createLocalToolAuthoritySnapshot(
   }
 
   for (const extra of options.extraSpecs ?? []) {
-    if (omittedNames.has(extra.name) || entries.has(extra.name)) continue;
+    if (omittedNames.has(extra.name)) continue;
+    if (entries.has(extra.name)) {
+      throw new Error(
+        `Local adapter name collision for "${extra.name}" in the immutable Host run.`,
+      );
+    }
     const annotations = defaultAnnotations(extra.name, extra.annotations);
     const readOnly = isReadOnlyCapability(extra.name);
     const hostApproval =
@@ -247,6 +263,9 @@ export async function createLocalToolAuthoritySnapshot(
       return entries.get(name)?.readOnly === true;
     },
     async validate(name: string, value: unknown) {
+      if (options.hostRun?.authority.has(name)) {
+        return options.hostRun.authority.validate(name, value);
+      }
       const definition = entries.get(name)?.definition;
       if (!definition) {
         return {

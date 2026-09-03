@@ -58,6 +58,21 @@ export interface DesignPreviewSemanticElement {
     fontSize?: string;
     fontWeight?: string;
   };
+  accessibility?: {
+    interactive: boolean;
+    focusable: boolean;
+    disabled: boolean;
+    tabIndex: number;
+    nameSource:
+      | "aria-label"
+      | "aria-labelledby"
+      | "label"
+      | "alt"
+      | "placeholder"
+      | "text"
+      | "none";
+    imageAlt?: "missing" | "empty" | "named";
+  };
 }
 
 export interface DesignPreviewSemanticSnapshot {
@@ -69,6 +84,7 @@ export interface DesignPreviewSemanticSnapshot {
     scrollHeight: number;
     horizontalOverflow: boolean;
     fonts: "ready" | "loading" | "unsupported";
+    language?: string;
   };
   designTokens?: {
     computed: Record<string, string>;
@@ -78,6 +94,7 @@ export interface DesignPreviewSemanticSnapshot {
 }
 
 export interface DesignBridgeCaptureResult {
+  generation: string;
   dataUrl: string;
   mimeType: "image/webp";
   viewport: {
@@ -92,6 +109,7 @@ export interface DesignBridgeCaptureResult {
 }
 
 export interface DesignBridgeCaptureExpectation {
+  generation: string;
   nonce: string;
   requestId: string;
   viewportName: DesignReviewViewportName;
@@ -107,6 +125,7 @@ export type DesignBridgeParentMessage =
   | {
       type: "open-builder:design-bridge-ready";
       version: number;
+      generation: string;
       captureRuntimeAvailable: boolean;
     }
   | {
@@ -123,6 +142,7 @@ export type DesignBridgeParentMessage =
   | {
       type: "open-builder:design-bridge-capture-result";
       version: number;
+      generation: string;
       nonce: string;
       requestId: string;
       payload: unknown;
@@ -130,15 +150,20 @@ export type DesignBridgeParentMessage =
   | {
       type: "open-builder:design-bridge-capture-error";
       version: number;
+      generation: string;
       nonce: string;
       requestId: string;
       error: unknown;
     };
 
-function previewBridgeClientSource(captureRuntimeAvailable: boolean): string {
+function previewBridgeClientSource(
+  captureRuntimeAvailable: boolean,
+  generation: string,
+): string {
   return `(function () {
   "use strict";
   var VERSION = ${DESIGN_BRIDGE_PROTOCOL_VERSION};
+  var GENERATION = ${JSON.stringify(generation)};
   var CAPTURE_RUNTIME_AVAILABLE = ${JSON.stringify(captureRuntimeAvailable)};
   var MAX_BYTES = ${DESIGN_BRIDGE_PAYLOAD_MAX_BYTES};
   var SEMANTIC_MAX_BYTES = ${DESIGN_BRIDGE_SEMANTIC_MAX_BYTES};
@@ -388,7 +413,7 @@ function previewBridgeClientSource(captureRuntimeAvailable: boolean): string {
     });
     return captureLibraryPromise;
   }
-  function accessibleName(element) {
+  function accessibleNameInfo(element) {
     var labelledBy = clean(element.getAttribute("aria-labelledby"), 160);
     var labelledText = "";
     if (labelledBy) {
@@ -397,12 +422,57 @@ function previewBridgeClientSource(captureRuntimeAvailable: boolean): string {
         return label ? clean(label.textContent || "", 80) : "";
       }).filter(Boolean).join(" ");
     }
-    return clean(
-      element.getAttribute("aria-label") || labelledText ||
-      element.getAttribute("alt") || element.getAttribute("placeholder") ||
-      element.innerText || element.textContent || "",
-      180
-    );
+    var associatedLabel = element.labels ? Array.prototype.map.call(element.labels, function (label) {
+      return clean(label.textContent || "", 80);
+    }).filter(Boolean).join(" ") : "";
+    var candidates = [
+      ["aria-label", element.getAttribute("aria-label")],
+      ["aria-labelledby", labelledText],
+      ["label", associatedLabel],
+      ["alt", element.getAttribute("alt")],
+      ["placeholder", element.getAttribute("placeholder")],
+      ["text", element.innerText || element.textContent || ""]
+    ];
+    for (var index = 0; index < candidates.length; index += 1) {
+      var value = clean(candidates[index][1], 180);
+      if (value) return { name: value, source: candidates[index][0] };
+    }
+    return { name: "", source: "none" };
+  }
+  function accessibleName(element) {
+    return accessibleNameInfo(element).name;
+  }
+  function accessibilityInfo(element) {
+    var tagName = element.tagName.toLowerCase();
+    var role = clean(element.getAttribute("role"), 80).toLowerCase();
+    var inputType = clean(element.getAttribute("type"), 40).toLowerCase();
+    var nativeInteractive =
+      tagName === "button" || tagName === "select" || tagName === "textarea" ||
+      tagName === "summary" || (tagName === "input" && inputType !== "hidden") ||
+      ((tagName === "a" || tagName === "area") && element.hasAttribute("href"));
+    var interactiveRoles = [
+      "button", "link", "checkbox", "radio", "switch", "tab", "menuitem",
+      "option", "slider", "spinbutton", "textbox", "combobox"
+    ];
+    var contentEditable = element.getAttribute("contenteditable") === "true";
+    var interactive = nativeInteractive || contentEditable || interactiveRoles.indexOf(role) >= 0;
+    var disabled = element.hasAttribute("disabled") || element.getAttribute("aria-disabled") === "true";
+    var tabIndex = typeof element.tabIndex === "number" ? element.tabIndex : -1;
+    var explicitTabIndex = element.hasAttribute("tabindex");
+    var focusable = !disabled && (tabIndex >= 0 || (!explicitTabIndex && (nativeInteractive || contentEditable)));
+    var nameInfo = accessibleNameInfo(element);
+    var imageAlt;
+    if (tagName === "img") {
+      imageAlt = !element.hasAttribute("alt") ? "missing" : clean(element.getAttribute("alt"), 180) ? "named" : "empty";
+    }
+    return {
+      interactive: interactive,
+      focusable: focusable,
+      disabled: disabled,
+      tabIndex: tabIndex,
+      nameSource: nameInfo.source,
+      imageAlt: imageAlt
+    };
   }
   function semanticElement(element) {
     var rect = element.getBoundingClientRect();
@@ -427,6 +497,7 @@ function previewBridgeClientSource(captureRuntimeAvailable: boolean): string {
       fontSize: clean(style.fontSize, 32),
       fontWeight: clean(style.fontWeight, 32)
     };
+    value.accessibility = accessibilityInfo(element);
     return value;
   }
   function semanticSnapshot() {
@@ -440,7 +511,7 @@ function previewBridgeClientSource(captureRuntimeAvailable: boolean): string {
       if (inline) designTokens.inline[name] = inline;
     });
     var candidates = Array.prototype.slice.call(document.querySelectorAll(
-      "main,header,nav,footer,section,h1,h2,h3,h4,h5,h6,button,a,input,select,textarea,[role],[data-ob-id]"
+      "main,header,nav,footer,section,h1,h2,h3,h4,h5,h6,button,a,area,input,select,textarea,summary,img,[role],[tabindex],[contenteditable='true'],[data-ob-id]"
     ), 0, 120);
     var snapshot = {
       route: clean(window.location.pathname || "/", 256) || "/",
@@ -454,7 +525,8 @@ function previewBridgeClientSource(captureRuntimeAvailable: boolean): string {
         scrollWidth: Math.max(1, Math.round(root.scrollWidth)),
         scrollHeight: Math.max(1, Math.round(root.scrollHeight)),
         horizontalOverflow: root.scrollWidth > window.innerWidth + 1,
-        fonts: document.fonts ? document.fonts.status === "loaded" ? "ready" : "loading" : "unsupported"
+        fonts: document.fonts ? document.fonts.status === "loaded" ? "ready" : "loading" : "unsupported",
+        language: clean(root.getAttribute("lang"), 35) || undefined
       },
       designTokens: designTokens,
       elements: candidates.map(semanticElement).filter(Boolean)
@@ -469,6 +541,7 @@ function previewBridgeClientSource(captureRuntimeAvailable: boolean): string {
     var viewport = data.viewport;
     var base = {
       version: VERSION,
+      generation: GENERATION,
       nonce: captureNonce,
       requestId: requestId
     };
@@ -526,6 +599,7 @@ function previewBridgeClientSource(captureRuntimeAvailable: boolean): string {
       var resultMessage = {
         type: "open-builder:design-bridge-capture-result",
         version: base.version,
+        generation: base.generation,
         nonce: base.nonce,
         requestId: base.requestId,
         payload: {
@@ -552,6 +626,7 @@ function previewBridgeClientSource(captureRuntimeAvailable: boolean): string {
     sendCapture({
       type: "open-builder:design-bridge-capture-error",
       version: VERSION,
+      generation: GENERATION,
       nonce: data.nonce,
       requestId: data.requestId,
       error: clean(error && error.message ? error.message : String(error), 400) || "Preview capture failed."
@@ -566,7 +641,7 @@ function previewBridgeClientSource(captureRuntimeAvailable: boolean): string {
     if (!data || data.version !== VERSION || byteLength(data) > MAX_BYTES || !validId(data.nonce)) return;
     var eventOrigin = event.origin && event.origin !== "null" ? event.origin : "*";
     if (data.type === "open-builder:design-bridge-capture") {
-      if (!validId(data.requestId) || !data.viewport ||
+      if (data.generation !== GENERATION || !validId(data.requestId) || !data.viewport ||
           ["desktop", "tablet", "mobile"].indexOf(data.viewport.name) < 0 ||
           !Number.isInteger(data.viewport.width) || data.viewport.width < 240 || data.viewport.width > 2000) return;
       if (!Number.isInteger(data.viewport.height) || data.viewport.height < 240 || data.viewport.height > 2000) return;
@@ -583,6 +658,7 @@ function previewBridgeClientSource(captureRuntimeAvailable: boolean): string {
   window.parent.postMessage({
     type: "open-builder:design-bridge-ready",
     version: VERSION,
+    generation: GENERATION,
     captureRuntimeAvailable: CAPTURE_RUNTIME_AVAILABLE
   }, "*");
 })();\n`;
@@ -593,6 +669,7 @@ export function injectDesignBridge(
   template: string,
   previewEnabled = true,
   captureRuntimeSource?: string,
+  generation = "unversioned",
 ): DesignBridgeInjectionResult {
   if (!previewEnabled) {
     return { supported: false, files, reason: "code-only" };
@@ -624,6 +701,7 @@ export function injectDesignBridge(
     [indexPath]: index,
     [DESIGN_BRIDGE_VIRTUAL_PATH]: previewBridgeClientSource(
       Boolean(captureRuntimeSource),
+      generation,
     ),
   };
   if (captureRuntimeSource) {
@@ -943,6 +1021,56 @@ function sanitizeSemanticSnapshot(
       ] as const,
       120,
     );
+    let accessibility: DesignPreviewSemanticElement["accessibility"];
+    if (element.accessibility !== undefined) {
+      if (
+        !element.accessibility ||
+        typeof element.accessibility !== "object" ||
+        Array.isArray(element.accessibility)
+      ) {
+        return null;
+      }
+      const rawAccessibility = element.accessibility as Record<string, unknown>;
+      const tabIndex = safeFiniteNumber(
+        rawAccessibility.tabIndex,
+        -1,
+        32_767,
+        true,
+      );
+      const nameSource = String(rawAccessibility.nameSource);
+      const imageAlt = rawAccessibility.imageAlt;
+      if (
+        typeof rawAccessibility.interactive !== "boolean" ||
+        typeof rawAccessibility.focusable !== "boolean" ||
+        typeof rawAccessibility.disabled !== "boolean" ||
+        tabIndex === null ||
+        ![
+          "aria-label",
+          "aria-labelledby",
+          "label",
+          "alt",
+          "placeholder",
+          "text",
+          "none",
+        ].includes(nameSource) ||
+        (imageAlt !== undefined &&
+          imageAlt !== "missing" &&
+          imageAlt !== "empty" &&
+          imageAlt !== "named")
+      ) {
+        return null;
+      }
+      accessibility = {
+        interactive: rawAccessibility.interactive,
+        focusable: rawAccessibility.focusable,
+        disabled: rawAccessibility.disabled,
+        tabIndex,
+        nameSource: nameSource as NonNullable<
+          DesignPreviewSemanticElement["accessibility"]
+        >["nameSource"],
+        ...(imageAlt ? { imageAlt } : {}),
+      };
+    }
     elements.push({
       tagName,
       ...(cleanText(element.role, 80)
@@ -959,10 +1087,16 @@ function sanitizeSemanticSnapshot(
         : {}),
       bounds: { x, y, width, height },
       ...(styles ? { styles } : {}),
+      ...(accessibility ? { accessibility } : {}),
     });
   }
 
   const routeValue = cleanText(raw.route, 256)?.split(/[?#]/, 1)[0] ?? "/";
+  const languageValue = cleanText(documentState.language, 35);
+  const language =
+    languageValue && /^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$/.test(languageValue)
+      ? languageValue
+      : undefined;
   let designTokens: DesignPreviewSemanticSnapshot["designTokens"];
   if (raw.designTokens !== undefined) {
     if (
@@ -1009,6 +1143,7 @@ function sanitizeSemanticSnapshot(
       fonts: String(
         documentState.fonts,
       ) as DesignPreviewSemanticSnapshot["document"]["fonts"],
+      ...(language ? { language } : {}),
     },
     ...(designTokens ? { designTokens } : {}),
     elements,
@@ -1076,6 +1211,7 @@ export function parseDesignBridgeCaptureResponse(
   const raw = value as Record<string, unknown>;
   if (
     raw.version !== DESIGN_BRIDGE_PROTOCOL_VERSION ||
+    raw.generation !== expected.generation ||
     raw.nonce !== expected.nonce ||
     raw.requestId !== expected.requestId
   ) {
@@ -1148,6 +1284,7 @@ export function parseDesignBridgeCaptureResponse(
   return {
     ok: true,
     result: {
+      generation: expected.generation,
       dataUrl: payload.dataUrl,
       mimeType: "image/webp",
       viewport: {

@@ -4,6 +4,7 @@ import type {
   ProjectFiles,
   ProjectTemplate,
 } from "../../types";
+import { normalizePreviewView } from "../../types";
 import { inspectDesignTokenContract } from "../design/tokens";
 import { isOpenBuilderTemplateName } from "../tools/sandpack-template-manifest";
 import {
@@ -48,6 +49,7 @@ interface ProjectTemplateSource {
   files: ProjectFiles;
   template: string;
   previewMode?: Conversation["previewMode"];
+  defaultPreviewView?: Conversation["defaultPreviewView"];
   activeFile?: string;
   designState?: ConversationDesignState;
   sourceConversationId?: string;
@@ -74,6 +76,7 @@ export async function prepareProjectTemplateFromConversation(
       files: conversation.files,
       template: conversation.template,
       previewMode: conversation.previewMode,
+      defaultPreviewView: conversation.defaultPreviewView,
       activeFile: conversation.activeFile,
       designState: conversation.designState,
       sourceConversationId: conversation.id,
@@ -93,6 +96,7 @@ export async function prepareProjectTemplateUpgrade(
       files: template.files,
       template: template.template,
       previewMode: template.previewMode,
+      defaultPreviewView: template.defaultPreviewView,
       activeFile: template.activeFile,
       designState: template.designState,
       sourceConversationId: template.sourceConversationId,
@@ -150,6 +154,7 @@ async function prepareProjectTemplateSource(
   const designState = getVerifiedTemplateDesignState(source.designState, files);
   const analysis = analyzeProjectTemplate(files, designState);
   const previewMode = source.previewMode ?? "sandpack";
+  const defaultPreviewView = normalizePreviewView(source.defaultPreviewView);
   const contentDigest = await digestTemplateContent({
     files,
     template: source.template,
@@ -167,6 +172,7 @@ async function prepareProjectTemplateSource(
       files,
       template: source.template,
       previewMode,
+      defaultPreviewView,
       sourceConversationId: source.sourceConversationId,
       sourceUpdatedAt: source.sourceUpdatedAt,
       tags: normalizeTemplateTags(input.tags ?? []),
@@ -216,6 +222,7 @@ export async function createConversationFromProjectTemplate(
     files: cloneProjectFiles(template.files),
     template: template.template,
     previewMode: template.previewMode ?? "sandpack",
+    defaultPreviewView: normalizePreviewView(template.defaultPreviewView),
     workspaceMode: "auto",
     activeFile:
       template.activeFile && template.activeFile in template.files

@@ -49,7 +49,7 @@ const DESIGN_GATED_WRITE_TOOLS = new Set([
   "install_component",
   "screenshot_to_code",
   "apply_design_style",
-  "apply_design_system",
+  "update_design_tokens",
   "execute_skill_script",
   // A full-write subagent can reconcile its entire file tree into the parent.
   "dispatch_subagent",

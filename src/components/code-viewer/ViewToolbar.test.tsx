@@ -33,7 +33,7 @@ describe("ViewToolbar preview availability", () => {
       screen.queryByRole("button", { name: "Preview" }),
     ).not.toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "Desktop" }),
+      screen.queryByRole("button", { name: "Web" }),
     ).not.toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Download" }),
@@ -301,7 +301,7 @@ describe("ViewToolbar preview availability", () => {
     const zoomGroup = screen.getByRole("group", {
       name: "Preview zoom level",
     });
-    const desktopButton = screen.getByRole("button", { name: "Desktop" });
+    const desktopButton = screen.getByRole("button", { name: "Web" });
     const deviceGroup = desktopButton.parentElement;
 
     expect(zoomGroup.nextElementSibling).toBe(deviceGroup);

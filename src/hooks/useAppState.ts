@@ -19,6 +19,7 @@ export function useAppState() {
   const messages = activeConv?.messages ?? EMPTY_MESSAGES;
   const template = activeConv?.template ?? DEFAULT_TEMPLATE;
   const previewMode = activeConv?.previewMode ?? "sandpack";
+  const defaultPreviewView = activeConv?.defaultPreviewView ?? "desktop";
   const isProjectInitialized = activeConv?.isProjectInitialized ?? false;
 
   const setMessages = useConversationStore((s) => s.setMessages);
@@ -123,6 +124,7 @@ export function useAppState() {
     handleSaveSystemSettings,
     template,
     previewMode,
+    defaultPreviewView,
     setTemplate,
     sandpackKey,
     restartSandpack,

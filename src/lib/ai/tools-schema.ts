@@ -8,8 +8,26 @@ import type { ToolSet } from "ai";
 import { z } from "zod";
 import { ASK_USER_QUESTION_CONTRACT } from "./ask-user-question-contract";
 import { PLAN_OUTPUT_CONTRACT } from "./plan-mode";
+import { SEARCH_TOOLS, WEB_READER_TOOL } from "../tools/search";
+import { ASSET_SEARCH_TOOLS } from "../tools/asset-search";
+import { NPM_SEARCH_TOOLS } from "../tools/npm-search";
+import { MEMORY_TOOLS } from "../tools/memory";
+import { DISPATCH_SUBAGENT_TOOL } from "../tools/subagent-tool";
+import { INSTALL_COMPONENT_TOOL } from "../tools/install-component";
+import { SCREENSHOT_TO_CODE_TOOL } from "../tools/screenshot-to-code";
+import { APPLY_DESIGN_STYLE_TOOL } from "../tools/design-styles";
+import { PROJECT_HEALTH_CHECK_TOOL } from "../tools/project-health-tool";
+import { SUBMIT_DESIGN_REVIEW_TOOL } from "../design/review-tool";
+import { SUBMIT_DESIGN_CONTRACT_TOOL } from "../design/run-contract-tool";
+import { BASE_SKILL_TOOLS, SCRIPT_SKILL_TOOL } from "../skills/tools";
+import {
+  HostToolCatalog,
+  type HostToolRecord,
+  type ToolOutputRetention,
+} from "./host-tool-catalog";
+import { TOOL_POLICY_VERSION } from "./tool-policy-version";
 
-export { TOOL_POLICY_VERSION } from "./tool-policy-version";
+export { TOOL_POLICY_VERSION };
 
 /**
  * 内置工具定义（Zod 格式）
@@ -298,20 +316,6 @@ export type ToolEffect =
   | "conversation";
 export type ToolApproval = "none" | "session" | "per_call";
 
-/**
- * The single policy record used by both tool presentation and execution.
- * Dynamic MCP entries are evaluated by the MCP runtime, but must still be
- * present in the current run's immutable alias allowlist.
- */
-export interface ToolCapability {
-  readonly name: string;
-  readonly source: ToolSource;
-  readonly effects: readonly ToolEffect[];
-  readonly platforms: readonly RuntimePlatform[];
-  readonly modes: readonly ExecutionMode[];
-  readonly approval: ToolApproval;
-}
-
 export interface ToolRunContext {
   readonly runId: string;
   readonly conversationId?: string;
@@ -323,176 +327,504 @@ export interface ToolRunContext {
   readonly policyVersion: string;
 }
 
-/** Compatibility projection for older callers while they migrate. */
-export interface ToolPolicy {
-  readonly name: string;
-  readonly access: "read" | "write";
-  readonly planModeVisible: boolean;
-  readonly subagentVisible: boolean;
-}
-
-// Tool names that mutate project files or generated project state. This covers
-// both BUILTIN_TOOLS and custom tools registered by handler-factory.
-export const WRITE_TOOL_NAMES: ReadonlySet<string> = new Set([
-  "init_project",
-  "manage_dependencies",
-  "write_file",
-  "patch_file",
-  "delete_file",
-  "rename_file",
-  "move_file",
-  "manage_env",
-  "install_component",
-  "screenshot_to_code",
-  "apply_design_style",
-  "apply_design_system",
-  "execute_skill_script",
-]);
-
-export const READONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
-  "list_files",
-  "read_files",
-  "search_in_files",
-  "read_env_schema",
-  "get_console_logs",
-  "compact_context",
-  "ask_user_question",
-  "exit_plan_mode",
-  "dispatch_subagent",
-  "web_search",
-  "web_search_preview",
-  "google_search",
-  "web_reader",
-  "image_search",
-  "search_npm_packages",
-  "get_npm_package_detail",
-  "list_skills",
-  "read_skill",
-  "memory",
-  "project_health_check",
-  "submit_design_review",
-  "submit_design_contract",
-]);
-
 const ALL_PLATFORMS = ["web", "desktop", "mobile"] as const;
 const ALL_READ_MODES = ["chat", "plan", "auto_qa", "subagent"] as const;
 const CHAT_ONLY = ["chat"] as const;
 const CHAT_AND_PLAN = ["chat", "plan"] as const;
+const STANDARD_PROFILES = ["default", "design"] as const;
 
-function capability(
+const EDITABLE_TOKEN_NAMES = [
+  "--bg",
+  "--surface",
+  "--fg",
+  "--muted",
+  "--border",
+  "--accent",
+  "--accent-on",
+  "--success",
+  "--warn",
+  "--danger",
+  "--font-display",
+  "--font-body",
+  "--radius-md",
+  "--section-y-desktop",
+  "--container-max",
+  "--motion-base",
+] as const;
+
+const previewViewportsSchema = z
+  .array(z.enum(["desktop", "tablet", "mobile"]))
+  .min(1)
+  .max(3)
+  .superRefine((viewports, context) => {
+    if (new Set(viewports).size !== viewports.length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Preview viewports must be unique.",
+      });
+    }
+  });
+
+export const DESIGN_DIAGNOSTIC_TOOLS = {
+  inspect_design_consistency: tool({
+    description:
+      "Inspect Design-system state, semantic Token use, runtime Token resolution, and sampled component style variants. Omit viewports for a static-only inspection.",
+    inputSchema: z
+      .object({
+        viewports: previewViewportsSchema.optional(),
+      })
+      .strict(),
+  }),
+  measure_preview_layout: tool({
+    description:
+      "Measure bounded layout evidence for explicit preview viewports, including document overflow, capture height, sampled off-canvas elements, and sampled control target sizes.",
+    inputSchema: z.object({ viewports: previewViewportsSchema }).strict(),
+  }),
+  audit_accessibility_tree: tool({
+    description:
+      "Audit bounded DOM-derived accessibility evidence for explicit preview viewports. Reports labels, keyboard reachability, headings, landmarks, image alt state, and target size; it is not a WCAG conformance claim.",
+    inputSchema: z.object({ viewports: previewViewportsSchema }).strict(),
+  }),
+  compare_preview_states: tool({
+    description:
+      "Compare current preview image digests and bounded metadata with a prior capture_preview_evidence result in this Conversation. Omit baseline_generation to use the latest baseline.",
+    inputSchema: z
+      .object({
+        baseline_generation: z
+          .string()
+          .regex(/^[a-f0-9]{64}$/)
+          .optional(),
+        viewports: previewViewportsSchema,
+      })
+      .strict(),
+  }),
+  trace_design_provenance: tool({
+    description:
+      "Trace the current Design-system selection and digest markers through the Token contract and static Token usage sites. Historical actors and runtime-element source mapping are not inferred.",
+    inputSchema: z.object({}).strict(),
+  }),
+};
+
+/** Definitions are exported so runtime adapters can attach an implementation
+ * without re-declaring a parallel schema. */
+export const DESIGN_HOST_TOOLS = {
+  set_default_preview_view: tool({
+    description:
+      "Set the project's preferred preview device for future preview mounts. Use only when a project type clearly benefits from a tablet or mobile-first default.",
+    inputSchema: z.object({
+      view: z.enum(["desktop", "tablet", "mobile"]),
+    }),
+  }),
+  update_design_tokens: tool({
+    description:
+      "Atomically update one or more editable semantic design tokens. Prefer this over directly editing tokens.css during an accepted Design run.",
+    inputSchema: z.object({
+      changes: z
+        .array(
+          z.object({
+            token: z.enum(EDITABLE_TOKEN_NAMES),
+            value: z.string(),
+          }),
+        )
+        .min(1)
+        .max(16)
+        .superRefine((changes, context) => {
+          const seen = new Set<string>();
+          for (const change of changes) {
+            if (seen.has(change.token)) {
+              context.addIssue({
+                code: z.ZodIssueCode.custom,
+                message: `Duplicate token "${change.token}".`,
+              });
+            }
+            seen.add(change.token);
+          }
+        }),
+    }),
+  }),
+  capture_preview_evidence: tool({
+    description:
+      "Capture bounded screenshot and semantic evidence for explicitly selected preview viewports on the current route.",
+    inputSchema: z.object({
+      viewports: previewViewportsSchema,
+    }),
+  }),
+  ...DESIGN_DIAGNOSTIC_TOOLS,
+};
+
+export const STATIC_TOOL_DEFINITIONS: ToolSet = {
+  ...BUILTIN_TOOLS,
+  ...SEARCH_TOOLS,
+  ...WEB_READER_TOOL,
+  ...ASSET_SEARCH_TOOLS,
+  ...NPM_SEARCH_TOOLS,
+  ...MEMORY_TOOLS,
+  ...DISPATCH_SUBAGENT_TOOL,
+  ...INSTALL_COMPONENT_TOOL,
+  ...SCREENSHOT_TO_CODE_TOOL,
+  ...APPLY_DESIGN_STYLE_TOOL,
+  ...PROJECT_HEALTH_CHECK_TOOL,
+  ...SUBMIT_DESIGN_REVIEW_TOOL,
+  ...SUBMIT_DESIGN_CONTRACT_TOOL,
+  ...BASE_SKILL_TOOLS,
+  ...SCRIPT_SKILL_TOOL,
+  ...DESIGN_HOST_TOOLS,
+};
+
+const TOOL_ZH_NAMES: Readonly<Record<string, string>> = Object.freeze({
+  init_project: "初始化项目",
+  manage_dependencies: "管理依赖",
+  list_files: "列出文件",
+  read_files: "读取文件",
+  write_file: "写入文件",
+  patch_file: "修改文件",
+  search_in_files: "搜索文件",
+  delete_file: "删除文件",
+  rename_file: "重命名文件",
+  move_file: "移动文件",
+  read_env_schema: "读取环境变量结构",
+  manage_env: "管理环境变量",
+  get_console_logs: "读取控制台日志",
+  compact_context: "压缩上下文",
+  ask_user_question: "询问用户",
+  exit_plan_mode: "提交计划",
+  dispatch_subagent: "委派子代理",
+  web_search: "网页搜索",
+  web_search_preview: "网页搜索",
+  google_search: "谷歌搜索",
+  web_reader: "读取网页",
+  image_search: "图片搜索",
+  search_npm_packages: "搜索 NPM 包",
+  get_npm_package_detail: "读取 NPM 包信息",
+  list_skills: "列出技能",
+  read_skill: "读取技能",
+  execute_skill_script: "执行技能脚本",
+  manage_memories: "管理记忆",
+  project_health_check: "项目健康检查",
+  install_component: "安装组件",
+  screenshot_to_code: "截图转代码",
+  apply_design_style: "应用设计风格",
+  submit_design_review: "提交设计审查",
+  submit_design_contract: "提交设计契约",
+  set_default_preview_view: "设置默认预览视图",
+  update_design_tokens: "更新设计令牌",
+  capture_preview_evidence: "捕获预览证据",
+  inspect_design_consistency: "检查设计一致性",
+  measure_preview_layout: "测量预览布局",
+  audit_accessibility_tree: "审计无障碍语义树",
+  compare_preview_states: "比较预览状态",
+  trace_design_provenance: "追踪设计来源",
+});
+
+const TOOL_ICON_KEYS: Readonly<Record<string, string>> = Object.freeze({
+  list_files: "folder-open",
+  read_files: "files",
+  write_file: "file-pen",
+  patch_file: "patch",
+  delete_file: "delete",
+  search_in_files: "project-search",
+  web_search: "web-search",
+  web_search_preview: "web-search",
+  google_search: "web-search",
+  web_reader: "web-reader",
+  image_search: "image-search",
+  search_npm_packages: "package",
+  get_npm_package_detail: "package",
+  get_console_logs: "terminal",
+  list_skills: "skill",
+  read_skill: "skill",
+  execute_skill_script: "skill-run",
+  rename_file: "file-move",
+  move_file: "file-move",
+  install_component: "component",
+  screenshot_to_code: "screenshot",
+  apply_design_style: "design-style",
+  submit_design_review: "design",
+  submit_design_contract: "design-contract",
+  set_default_preview_view: "preview",
+  update_design_tokens: "design",
+  capture_preview_evidence: "evidence",
+  inspect_design_consistency: "design",
+  measure_preview_layout: "preview",
+  audit_accessibility_tree: "accessibility",
+  compare_preview_states: "evidence",
+  trace_design_provenance: "design-contract",
+  read_env_schema: "env-read",
+  manage_env: "env-write",
+});
+
+function englishName(name: string): string {
+  return name
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function summarizeArguments(args: unknown): string {
+  if (!args || typeof args !== "object") return "";
+  const safeScalarKeys = new Set([
+    "key",
+    "baseline_generation",
+    "max_results",
+    "name",
+    "new_path",
+    "old_path",
+    "overwrite",
+    "path",
+    "reference_path",
+    "script_path",
+    "skill_name",
+    "style",
+    "target_dir",
+    "template",
+    "view",
+  ]);
+  const safeArrayKeys = new Set(["paths", "viewports"]);
+  const summaries: string[] = [];
+  for (const [key, value] of Object.entries(args)) {
+    if (key === "changes" && Array.isArray(value)) {
+      const tokens = value
+        .map((item) =>
+          item && typeof item === "object" && "token" in item
+            ? String(item.token)
+            : "?",
+        )
+        .slice(0, 16);
+      summaries.push(`${key}=${tokens.join(",")}`);
+      continue;
+    }
+    if (Array.isArray(value)) {
+      const primitiveValues = value.filter(
+        (item) => typeof item === "string" || typeof item === "number",
+      );
+      summaries.push(
+        safeArrayKeys.has(key) &&
+          primitiveValues.length === value.length &&
+          value.length <= 3
+          ? `${key}=${primitiveValues.join(",")}`
+          : `${key}[${value.length}]`,
+      );
+      continue;
+    }
+    if (
+      safeScalarKeys.has(key) &&
+      (typeof value === "string" ||
+        typeof value === "number" ||
+        typeof value === "boolean")
+    ) {
+      const normalized = String(value).replace(/\s+/g, " ");
+      summaries.push(
+        `${key}=${normalized.length > 80 ? `${normalized.slice(0, 77)}...` : normalized}`,
+      );
+    }
+  }
+  return summaries.join("; ").slice(0, 240);
+}
+
+interface RecordOptions {
+  definition?: ToolSet[string];
+  profiles?: readonly ToolProfile[];
+  platforms?: readonly RuntimePlatform[];
+  approval?: ToolApproval;
+  retention?: ToolOutputRetention;
+  providerOwned?: boolean;
+  providerAlternative?: boolean;
+  iconKey?: string;
+}
+
+function hostRecord(
   name: string,
   source: ToolSource,
   effects: readonly ToolEffect[],
   modes: readonly ExecutionMode[],
-  options: {
-    platforms?: readonly RuntimePlatform[];
-    approval?: ToolApproval;
-  } = {},
-): ToolCapability {
+  options: RecordOptions = {},
+): HostToolRecord {
+  const writes = effects.some(
+    (effect) =>
+      effect === "write_project" ||
+      effect === "write_runtime" ||
+      effect === "process",
+  );
   return Object.freeze({
     name,
+    definition: options.definition ?? STATIC_TOOL_DEFINITIONS[name],
     source,
     effects,
     modes,
+    profiles: options.profiles ?? STANDARD_PROFILES,
     platforms: options.platforms ?? ALL_PLATFORMS,
-    approval: options.approval ?? "none",
+    approval: options.approval ?? (writes ? "session" : "none"),
+    outputRetention: options.retention ?? "full",
+    presentation: Object.freeze({
+      name: Object.freeze({
+        en: englishName(name),
+        zh: TOOL_ZH_NAMES[name] ?? name,
+      }),
+      iconKey: options.iconKey ?? TOOL_ICON_KEYS[name] ?? source,
+      summarizeArguments,
+    }),
+    implementation: Object.freeze(
+      options.providerOwned
+        ? { kind: "provider" as const }
+        : {
+            kind: "host" as const,
+            key: name,
+            ...(options.providerAlternative
+              ? { providerAlternative: true }
+              : {}),
+          },
+    ),
   });
 }
 
-const STATIC_CAPABILITIES: ToolCapability[] = [
-  capability("init_project", "project", ["write_project"], CHAT_ONLY),
-  capability("manage_dependencies", "project", ["write_project"], CHAT_ONLY),
-  capability("list_files", "project", ["read_project"], ALL_READ_MODES),
-  capability("read_files", "project", ["read_project"], ALL_READ_MODES),
-  capability("write_file", "project", ["write_project"], ["chat", "auto_qa"]),
-  capability("patch_file", "project", ["write_project"], ["chat", "auto_qa"]),
-  capability("search_in_files", "project", ["read_project"], ALL_READ_MODES),
-  capability("delete_file", "project", ["write_project"], CHAT_ONLY),
-  capability("rename_file", "project", ["write_project"], CHAT_ONLY),
-  capability("move_file", "project", ["write_project"], CHAT_ONLY),
-  capability("read_env_schema", "project", ["read_project"], CHAT_AND_PLAN),
-  capability("manage_env", "project", ["write_project"], CHAT_ONLY),
-  capability("get_console_logs", "builtin", ["read_runtime"], CHAT_ONLY),
-  capability("compact_context", "builtin", ["conversation"], CHAT_AND_PLAN),
-  capability("ask_user_question", "builtin", ["conversation"], CHAT_AND_PLAN),
-  capability("exit_plan_mode", "builtin", ["conversation"], ["plan"]),
-  capability("dispatch_subagent", "builtin", ["conversation"], CHAT_AND_PLAN),
-  capability("web_search", "network", ["network"], CHAT_AND_PLAN),
-  capability("web_search_preview", "network", ["network"], CHAT_AND_PLAN),
-  capability("google_search", "network", ["network"], CHAT_AND_PLAN),
-  capability("web_reader", "network", ["network"], CHAT_AND_PLAN),
-  capability("image_search", "network", ["network"], CHAT_ONLY),
-  capability("search_npm_packages", "network", ["network"], CHAT_AND_PLAN),
-  capability("get_npm_package_detail", "network", ["network"], CHAT_AND_PLAN),
-  capability("list_skills", "skill", ["read_runtime"], CHAT_AND_PLAN),
-  capability("read_skill", "skill", ["read_runtime"], CHAT_AND_PLAN),
-  capability(
+export const HOST_TOOL_RECORDS: readonly HostToolRecord[] = Object.freeze([
+  hostRecord("init_project", "project", ["write_project"], CHAT_ONLY),
+  hostRecord("manage_dependencies", "project", ["write_project"], CHAT_ONLY),
+  hostRecord("list_files", "project", ["read_project"], ALL_READ_MODES, {
+    profiles: ["default", "design", "design_review"],
+  }),
+  hostRecord("read_files", "project", ["read_project"], ALL_READ_MODES, {
+    profiles: ["default", "design", "design_review"],
+  }),
+  hostRecord("write_file", "project", ["write_project"], ["chat", "auto_qa"]),
+  hostRecord("patch_file", "project", ["write_project"], ["chat", "auto_qa"]),
+  hostRecord("search_in_files", "project", ["read_project"], ALL_READ_MODES, {
+    profiles: ["default", "design", "design_review"],
+  }),
+  hostRecord("delete_file", "project", ["write_project"], CHAT_ONLY),
+  hostRecord("rename_file", "project", ["write_project"], CHAT_ONLY),
+  hostRecord("move_file", "project", ["write_project"], CHAT_ONLY),
+  hostRecord("read_env_schema", "project", ["read_project"], CHAT_AND_PLAN),
+  hostRecord("manage_env", "project", ["write_project"], CHAT_ONLY),
+  hostRecord("get_console_logs", "builtin", ["read_runtime"], CHAT_ONLY),
+  hostRecord("compact_context", "builtin", ["conversation"], CHAT_AND_PLAN),
+  hostRecord("ask_user_question", "builtin", ["conversation"], CHAT_AND_PLAN),
+  hostRecord("exit_plan_mode", "builtin", ["conversation"], ["plan"]),
+  hostRecord("dispatch_subagent", "builtin", ["conversation"], CHAT_AND_PLAN),
+  hostRecord("web_search", "network", ["network"], CHAT_AND_PLAN, {
+    providerAlternative: true,
+  }),
+  hostRecord("web_search_preview", "network", ["network"], CHAT_AND_PLAN, {
+    providerOwned: true,
+    retention: "full",
+  }),
+  hostRecord("google_search", "network", ["network"], CHAT_AND_PLAN, {
+    providerOwned: true,
+    retention: "full",
+  }),
+  hostRecord("web_reader", "network", ["network"], CHAT_AND_PLAN),
+  hostRecord("image_search", "network", ["network"], CHAT_ONLY),
+  hostRecord("search_npm_packages", "network", ["network"], CHAT_AND_PLAN),
+  hostRecord("get_npm_package_detail", "network", ["network"], CHAT_AND_PLAN),
+  hostRecord("list_skills", "skill", ["read_runtime"], CHAT_AND_PLAN),
+  hostRecord("read_skill", "skill", ["read_runtime"], CHAT_AND_PLAN),
+  hostRecord(
     "execute_skill_script",
     "skill",
     ["process", "read_runtime"],
     CHAT_ONLY,
     { platforms: ["desktop"], approval: "per_call" },
   ),
-  capability("memory", "builtin", ["read_runtime"], CHAT_ONLY),
-  capability(
+  hostRecord(
+    "manage_memories",
+    "builtin",
+    ["read_runtime", "write_runtime"],
+    CHAT_ONLY,
+  ),
+  hostRecord(
     "project_health_check",
     "project",
     ["read_project", "read_runtime"],
     ALL_READ_MODES,
   ),
-  capability(
+  hostRecord(
     "install_component",
     "registry",
     ["network", "write_project"],
     CHAT_ONLY,
   ),
-  capability(
+  hostRecord(
     "screenshot_to_code",
     "network",
     ["network", "write_project"],
     CHAT_ONLY,
   ),
-  capability(
+  hostRecord(
     "apply_design_style",
     "registry",
     ["network", "write_project"],
     CHAT_ONLY,
+    { profiles: ["default"] },
   ),
-  capability("apply_design_system", "registry", ["write_project"], CHAT_ONLY),
-  capability("submit_design_review", "builtin", ["conversation"], CHAT_ONLY),
-  capability("submit_design_contract", "builtin", ["conversation"], CHAT_ONLY),
-];
-
-const DESIGN_REVIEW_TOOL_NAMES: ReadonlySet<string> = new Set([
-  "list_files",
-  "read_files",
-  "search_in_files",
-  "submit_design_review",
+  hostRecord("submit_design_review", "builtin", ["conversation"], CHAT_ONLY, {
+    profiles: ["design_review"],
+  }),
+  hostRecord("submit_design_contract", "builtin", ["conversation"], CHAT_ONLY, {
+    profiles: ["design"],
+  }),
+  hostRecord(
+    "set_default_preview_view",
+    "project",
+    ["write_runtime", "conversation"],
+    CHAT_ONLY,
+  ),
+  hostRecord(
+    "update_design_tokens",
+    "project",
+    ["write_project", "conversation"],
+    CHAT_ONLY,
+    { profiles: ["design"], retention: "summary-only" },
+  ),
+  hostRecord(
+    "capture_preview_evidence",
+    "builtin",
+    ["read_runtime"],
+    CHAT_ONLY,
+    { profiles: ["design"], retention: "summary-only" },
+  ),
+  hostRecord(
+    "inspect_design_consistency",
+    "project",
+    ["read_project", "read_runtime"],
+    CHAT_ONLY,
+    { profiles: ["design"], retention: "summary-only" },
+  ),
+  hostRecord(
+    "measure_preview_layout",
+    "builtin",
+    ["read_project", "read_runtime"],
+    CHAT_ONLY,
+    { profiles: ["design"], retention: "summary-only" },
+  ),
+  hostRecord(
+    "audit_accessibility_tree",
+    "builtin",
+    ["read_project", "read_runtime"],
+    CHAT_ONLY,
+    { profiles: ["design"], retention: "summary-only" },
+  ),
+  hostRecord(
+    "compare_preview_states",
+    "builtin",
+    ["read_project", "read_runtime"],
+    CHAT_ONLY,
+    { profiles: ["design"], retention: "summary-only" },
+  ),
+  hostRecord(
+    "trace_design_provenance",
+    "project",
+    ["read_project", "read_runtime"],
+    CHAT_ONLY,
+    { profiles: ["design"], retention: "summary-only" },
+  ),
 ]);
 
-function isToolAllowedInProfile(
-  name: string,
-  profile: ToolProfile,
-  allowDesignSystemApply: boolean,
-): boolean {
-  if (profile === "design_review") return DESIGN_REVIEW_TOOL_NAMES.has(name);
-  if (name === "submit_design_review") return false;
-  if (name === "submit_design_contract") return profile === "design";
-  if (name === "apply_design_system") {
-    return profile === "design" && allowDesignSystemApply;
-  }
-  if (name === "apply_design_style") return profile !== "design";
-  return true;
-}
+export type ToolCapability = HostToolRecord;
 
-export const TOOL_CAPABILITY_REGISTRY: Readonly<
-  Record<string, ToolCapability>
-> = Object.freeze(
-  Object.fromEntries(STATIC_CAPABILITIES.map((entry) => [entry.name, entry])),
-);
+export const HOST_TOOL_CATALOG = new HostToolCatalog(HOST_TOOL_RECORDS);
 
 export function getToolCapability(name: string): ToolCapability | undefined {
-  return TOOL_CAPABILITY_REGISTRY[name];
+  return HOST_TOOL_CATALOG.get(name);
 }
 
 export function isToolAllowedInMode(
@@ -515,41 +847,52 @@ export function buildToolSetForRun({
   platform,
   allowedDynamicNames = new Set(),
   profile = "default",
-  allowDesignSystemApply = false,
+  providerOwnedNames = new Set(),
 }: {
   custom: ToolSet;
   mode: ExecutionMode;
   platform: RuntimePlatform;
   allowedDynamicNames?: ReadonlySet<string>;
   profile?: ToolProfile;
-  allowDesignSystemApply?: boolean;
+  providerOwnedNames?: ReadonlySet<string>;
 }): ToolSet {
-  const isAllowed = (name: string) =>
-    isToolAllowedInProfile(name, profile, allowDesignSystemApply) &&
-    (isToolAllowedInMode(name, mode, platform) ||
-      (!getToolCapability(name) &&
-        profile !== "design_review" &&
-        allowedDynamicNames.has(name)));
-
-  return Object.fromEntries(
-    Object.entries({ ...BUILTIN_TOOLS, ...custom }).filter(([name]) =>
-      isAllowed(name),
-    ),
-  );
+  const requested: ToolSet = { ...BUILTIN_TOOLS };
+  for (const [name, definition] of Object.entries(custom)) {
+    if (
+      name in BUILTIN_TOOLS &&
+      (BUILTIN_TOOLS as ToolSet)[name] !== definition
+    ) {
+      throw new Error(
+        `Host tool name collision for "${name}": custom tools cannot replace a builtin.`,
+      );
+    }
+    requested[name] = definition;
+  }
+  return HOST_TOOL_CATALOG.openRun({
+    tools: requested,
+    context: Object.freeze({
+      runId: "projection",
+      mode,
+      platform,
+      allowedMcpAliases: new Set(allowedDynamicNames),
+      activeSkillIds: new Set<string>(),
+      approvedSkillScriptHashes: new Set<string>(),
+      policyVersion: TOOL_POLICY_VERSION,
+    }),
+    profile,
+    allowedDynamicNames,
+    providerOwnedNames,
+  }).modelTools;
 }
 
-export const TOOL_POLICIES: Record<string, ToolPolicy> = Object.fromEntries(
-  Object.values(TOOL_CAPABILITY_REGISTRY).map((entry) => [
-    entry.name,
-    {
-      name: entry.name,
-      access: entry.effects.some((effect) => effect.startsWith("write_"))
-        ? "write"
-        : "read",
-      planModeVisible: entry.modes.includes("plan"),
-      subagentVisible: entry.modes.includes("subagent"),
-    } satisfies ToolPolicy,
-  ]),
+// Compatibility projections. They are derived from the Catalog rather than
+// maintained as independent policy/name tables.
+export const WRITE_TOOL_NAMES: ReadonlySet<string> = new Set(
+  HOST_TOOL_RECORDS.filter((record) =>
+    record.effects.some(
+      (effect) => effect === "write_project" || effect === "process",
+    ),
+  ).map((record) => record.name),
 );
 
 export function isWriteToolName(name: string): boolean {
@@ -557,7 +900,11 @@ export function isWriteToolName(name: string): boolean {
 }
 
 export function isPlanModeToolVisible(name: string): boolean {
-  return TOOL_CAPABILITY_REGISTRY[name]?.modes.includes("plan") ?? false;
+  const record = HOST_TOOL_CATALOG.get(name);
+  return (
+    (record?.modes.includes("plan") && record.profiles.includes("default")) ??
+    false
+  );
 }
 
 // Backward-compatible alias while callers migrate to WRITE_TOOL_NAMES.

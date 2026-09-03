@@ -10,6 +10,7 @@ import type {
   RuntimePlatform,
   ToolRunContext,
 } from "./tools-schema";
+import type { ToolOutputRetention } from "./host-tool-catalog";
 import type {
   SkillActiveContext,
   SkillActiveContextController,
@@ -159,6 +160,9 @@ export interface ToolExecutionOutput {
   /** AI SDK representation used when the active provider accepts rich tool
    * results. It is derived locally and is safe to recreate after hydration. */
   modelOutput?: ToolResultPart["output"];
+  /** Run-local Catalog policy. The persistence sanitizer consumes and removes
+   * this marker; it is never part of saved Conversation data. */
+  retention?: ToolOutputRetention;
 }
 
 export interface ToolExecutionContext {

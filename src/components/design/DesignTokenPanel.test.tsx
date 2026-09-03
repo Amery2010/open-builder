@@ -98,8 +98,9 @@ describe("DesignTokenPanel", () => {
 
     await user.click(screen.getByRole("button", { name: "Save tokens" }));
     expect(onCommit).toHaveBeenCalledOnce();
-    expect(onCommit.mock.calls[0][0]).toBe("tokens.css");
-    expect(onCommit.mock.calls[0][1]).toContain("--accent: #112233;");
+    expect(onCommit.mock.calls[0][0]).toEqual([
+      { token: "--accent", value: "#112233" },
+    ]);
   });
 
   it("discards unsaved input when cancelled", async () => {

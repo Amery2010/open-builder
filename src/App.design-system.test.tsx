@@ -152,6 +152,14 @@ const stripe = {
   digest: "a".repeat(64),
 };
 
+const quietWorkshop = {
+  id: "quiet-workshop",
+  name: "Quiet Workshop",
+  source: "custom" as const,
+  version: "1.0.0",
+  digest: "b".repeat(64),
+};
+
 const designPackage: DesignSystemPackage = {
   manifest: {
     schemaVersion: "open-builder-design-system/v1",
@@ -252,6 +260,66 @@ describe("App Design system application", () => {
       designExpectedChangeModes: ["migrate"],
       prepareRun: expect.any(Function),
     });
+  });
+
+  it("preserves a manual selection made while automatic selection is running", async () => {
+    useConversationStore.getState().setDesignState(undefined);
+    runtime.generateUtilityText.mockImplementationOnce(async () => {
+      const state = useConversationStore.getState();
+      state.setDesignStateForConversation(state.activeId!, {
+        selectedSystem: quietWorkshop,
+        autoSelectionError: false,
+      });
+      return JSON.stringify({
+        action: "apply",
+        systemId: "stripe",
+        reason: "The stale decision preferred Stripe.",
+      });
+    });
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "Generate design" }));
+    await waitFor(() => expect(runtime.generate).toHaveBeenCalledOnce());
+
+    const state = useConversationStore.getState();
+    expect(
+      state.conversations[state.activeId!].designState?.selectedSystem,
+    ).toEqual(quietWorkshop);
+    // The decision utility resolves the candidate reference once, but the
+    // stale result is not applied through the transaction a second time.
+    expect(runtime.loadPackage).toHaveBeenCalledOnce();
+    expect(state.conversations[state.activeId!].files).not.toHaveProperty(
+      "DESIGN.md",
+    );
+  });
+
+  it("preserves a manual selection made while the automatic package is loading", async () => {
+    useConversationStore.getState().setDesignState(undefined);
+    runtime.loadPackage
+      .mockResolvedValueOnce(designPackage)
+      .mockImplementationOnce(async () => {
+        const state = useConversationStore.getState();
+        state.setDesignStateForConversation(state.activeId!, {
+          selectedSystem: quietWorkshop,
+          autoSelectionError: false,
+        });
+        throw new Error("stale automatic package");
+      });
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "Generate design" }));
+    await waitFor(() => expect(runtime.generate).toHaveBeenCalledOnce());
+
+    const state = useConversationStore.getState();
+    expect(
+      state.conversations[state.activeId!].designState?.selectedSystem,
+    ).toEqual(quietWorkshop);
+    expect(
+      state.conversations[state.activeId!].designState?.autoSelectionError,
+    ).toBe(false);
+    expect(runtime.loadPackage).toHaveBeenCalledTimes(2);
   });
 
   it("keeps an automatic selection deferred for an empty project", async () => {

@@ -13,13 +13,15 @@ import type {
   WorkspaceMode,
   ProjectPreviewMode,
   ProjectFiles,
+  PreviewView,
 } from "../types";
+import { normalizePreviewView } from "../types";
 import { validateProjectFiles } from "../lib/utils/project-files";
 import { deleteAttachmentsForMessages } from "../lib/attachments/store";
 import { normalizeCompressedSummary } from "../lib/utils/compress-context";
 import { findWithdrawableUserMessageIndex } from "../lib/utils/merge-messages";
 
-const CONVERSATION_STORE_VERSION = 4;
+const CONVERSATION_STORE_VERSION = 5;
 const DEFAULT_PROJECT_TEMPLATE = "vite-react-ts";
 
 export function normalizeConversationProjectState<T extends Conversation>(
@@ -33,6 +35,9 @@ export function normalizeConversationProjectState<T extends Conversation>(
   const isProjectInitialized = paths.length > 0;
   const previewMode: ProjectPreviewMode =
     conversation.previewMode === "code-only" ? "code-only" : "sandpack";
+  const defaultPreviewView = normalizePreviewView(
+    conversation.defaultPreviewView,
+  );
   const workspaceMode: WorkspaceMode =
     conversation.workspaceMode === "plan" ||
     conversation.workspaceMode === "design"
@@ -70,6 +75,7 @@ export function normalizeConversationProjectState<T extends Conversation>(
     conversation.activeFile === activeFile &&
     conversation.isProjectInitialized === isProjectInitialized &&
     conversation.previewMode === previewMode &&
+    conversation.defaultPreviewView === defaultPreviewView &&
     conversation.workspaceMode === workspaceMode &&
     conversation.planReturnMode === planReturnMode &&
     conversation.designState === designState
@@ -81,6 +87,7 @@ export function normalizeConversationProjectState<T extends Conversation>(
     ...conversation,
     activeFile,
     previewMode,
+    defaultPreviewView,
     isProjectInitialized,
     workspaceMode,
     planReturnMode,
@@ -106,6 +113,7 @@ export function normalizePersistedConversationProjects<T>(state: T): T {
 
 const conversationMigrations: MigrationStep[] = [
   (state) => state,
+  normalizePersistedConversationProjects,
   normalizePersistedConversationProjects,
   normalizePersistedConversationProjects,
   normalizePersistedConversationProjects,
@@ -177,6 +185,8 @@ interface ConversationState {
   deleteConversation: (id: string) => void;
   switchConversation: (id: string) => void;
   setWorkspaceMode: (mode: WorkspaceMode) => void;
+  setDefaultPreviewView: (view: PreviewView) => void;
+  setDefaultPreviewViewForConversation: (id: string, view: PreviewView) => void;
   returnFromPlan: (id?: string) => Exclude<WorkspaceMode, "plan">;
   setDesignState: (
     updater: Updater<ConversationDesignState | undefined>,
@@ -241,6 +251,7 @@ export const useConversationStore = create<ConversationState>()(
           files: {},
           template: DEFAULT_PROJECT_TEMPLATE,
           previewMode: "sandpack",
+          defaultPreviewView: "desktop",
           isProjectInitialized: false,
           workspaceMode: "auto",
           createdAt: Date.now(),
@@ -291,6 +302,7 @@ export const useConversationStore = create<ConversationState>()(
           activeFile: src?.activeFile,
           template: src?.template ?? DEFAULT_PROJECT_TEMPLATE,
           previewMode: src?.previewMode ?? "sandpack",
+          defaultPreviewView: normalizePreviewView(src?.defaultPreviewView),
           isProjectInitialized: src?.isProjectInitialized ?? false,
           workspaceMode: src?.workspaceMode ?? "auto",
           planReturnMode: src?.planReturnMode,
@@ -379,6 +391,35 @@ export const useConversationStore = create<ConversationState>()(
                       : "auto"
                     : undefined,
                 updatedAt: Date.now(),
+              },
+            },
+          };
+        });
+      },
+
+      setDefaultPreviewView: (view) => {
+        const activeId = get().activeId;
+        if (activeId)
+          get().setDefaultPreviewViewForConversation(activeId, view);
+      },
+
+      setDefaultPreviewViewForConversation: (id, view) => {
+        const normalizedView = normalizePreviewView(view);
+        set((state) => {
+          const conversation = state.conversations[id];
+          if (
+            !conversation ||
+            conversation.defaultPreviewView === normalizedView
+          ) {
+            return state;
+          }
+          return {
+            conversations: {
+              ...state.conversations,
+              [id]: {
+                ...conversation,
+                defaultPreviewView: normalizedView,
+                updatedAt: Math.max(Date.now(), conversation.updatedAt + 1),
               },
             },
           };
@@ -585,6 +626,7 @@ export const useConversationStore = create<ConversationState>()(
                 files: { ...files },
                 template,
                 previewMode,
+                defaultPreviewView: "desktop",
                 activeFile: nextActiveFile,
                 isProjectInitialized: paths.length > 0,
                 localAgentSessions: undefined,
@@ -648,6 +690,7 @@ export const useConversationStore = create<ConversationState>()(
                 files: {},
                 template: DEFAULT_PROJECT_TEMPLATE,
                 previewMode: "sandpack",
+                defaultPreviewView: "desktop",
                 isProjectInitialized: false,
                 compressedContext: undefined,
                 localAgentSessions: undefined,
@@ -835,6 +878,11 @@ export const useConversationStore = create<ConversationState>()(
                 convs[id].compressedContext?.fromIndex
             ) {
               convs[id] = { ...convs[id], compressedContext };
+              changed = true;
+            }
+            const normalized = normalizeConversationProjectState(convs[id]);
+            if (normalized !== convs[id]) {
+              convs[id] = normalized;
               changed = true;
             }
           }

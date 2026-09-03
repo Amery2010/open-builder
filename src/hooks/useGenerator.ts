@@ -264,7 +264,6 @@ interface GenerateRunOptions {
   skipAutoQa?: boolean;
   forcedSkillIds?: string[];
   designSelection?: DesignSelectionContext;
-  allowDesignSystemApply?: boolean;
   designExpectedChangeModes?: readonly DesignChangeMode[];
   reusableDesignContract?: DesignContract;
   automaticDesignReviewPhase?: AutomaticDesignReviewPhase;
@@ -449,8 +448,8 @@ interface GeneratorRuntime {
     mode?: ExecutionMode;
     runtimePlatform: RuntimePlatform;
     allowedDynamicNames?: ReadonlySet<string>;
+    providerOwnedNames?: ReadonlySet<string>;
     profile?: ToolProfile;
-    allowDesignSystemApply?: boolean;
   }) => ToolSet;
 }
 
@@ -485,24 +484,24 @@ function loadGeneratorRuntime(): Promise<GeneratorRuntime> {
         mode = planMode ? "plan" : "chat",
         runtimePlatform,
         allowedDynamicNames = new Set(),
+        providerOwnedNames = new Set(),
         profile = "default",
-        allowDesignSystemApply = false,
       }: {
         custom: ToolSet;
         planMode: boolean;
         mode?: ExecutionMode;
         runtimePlatform: RuntimePlatform;
         allowedDynamicNames?: ReadonlySet<string>;
+        providerOwnedNames?: ReadonlySet<string>;
         profile?: ToolProfile;
-        allowDesignSystemApply?: boolean;
       }): ToolSet =>
         toolsSchema.buildToolSetForRun({
           custom,
           mode,
           platform: runtimePlatform,
           allowedDynamicNames,
+          providerOwnedNames,
           profile,
-          allowDesignSystemApply,
         });
 
       return {
@@ -588,6 +587,7 @@ export function useGenerator({
   const customSystemPromptRef = useRef("");
   const requestPromptContextRef = useRef("");
   const baseCustomToolSetRef = useRef<ToolSet>({});
+  const providerToolNamesRef = useRef<string[]>([]);
   const mcpRuntimeRef = useRef<McpRuntimeBundle | null>(null);
   const activeToolProfileRef = useRef<ToolProfile>("default");
   const designContractControllerRef = useRef(createDesignContractController());
@@ -647,6 +647,7 @@ export function useGenerator({
     customSystemPromptRef.current = "";
     requestPromptContextRef.current = "";
     baseCustomToolSetRef.current = {};
+    providerToolNamesRef.current = [];
     mcpRuntimeRef.current = null;
     activeToolProfileRef.current = "default";
     designContractControllerRef.current.reset({ enabled: false });
@@ -670,6 +671,7 @@ export function useGenerator({
     customSystemPromptRef.current = "";
     requestPromptContextRef.current = "";
     baseCustomToolSetRef.current = {};
+    providerToolNamesRef.current = [];
     mcpRuntimeRef.current = null;
     activeToolProfileRef.current = "default";
     designContractControllerRef.current.reset({ enabled: false });
@@ -989,6 +991,7 @@ export function useGenerator({
       generatorConfigRef.current = null;
       runConversationIdRef.current = null;
       baseCustomToolSetRef.current = {};
+      providerToolNamesRef.current = [];
       mcpRuntimeRef.current = null;
       activeToolProfileRef.current = "default";
       clearOutputBuffers();
@@ -1014,6 +1017,7 @@ export function useGenerator({
       generatorRef.current = null;
       generatorConfigRef.current = null;
       baseCustomToolSetRef.current = {};
+      providerToolNamesRef.current = [];
       mcpRuntimeRef.current = null;
       activeToolProfileRef.current = "default";
     }
@@ -1109,20 +1113,132 @@ export function useGenerator({
           });
           return approved;
         },
-        onDesignSystemApplied: (reference) => {
-          if (!isCurrentGeneratorRun(generatorConversationId)) return;
-          useConversationStore.getState().setDesignState((current) => ({
-            ...current,
-            selectedSystem: reference,
-            appliedSystem: reference,
-          }));
+        setDefaultPreviewView: async (_name, args, context) => {
+          if (
+            !context ||
+            context.run.conversationId !== generatorConversationId ||
+            !isCurrentGeneratorRun(generatorConversationId)
+          ) {
+            throw new DOMException("conversation switched", "AbortError");
+          }
+          const { setConversationDefaultPreviewView } =
+            await import("../lib/design/preview-preference");
+          const result = setConversationDefaultPreviewView({
+            conversationId: generatorConversationId,
+            view: (args as { view?: unknown })?.view,
+          });
+          return {
+            text: JSON.stringify(result),
+            structuredContent: result,
+            isError: !result.ok,
+          };
         },
-        getSelectedDesignSystemId: () =>
-          generatorConversationId
-            ? useConversationStore.getState().conversations[
-                generatorConversationId
-              ]?.designState?.selectedSystem?.id
-            : undefined,
+        updateDesignTokens: async (_name, args, context) => {
+          if (
+            !context ||
+            context.run.conversationId !== generatorConversationId ||
+            !isCurrentGeneratorRun(generatorConversationId)
+          ) {
+            throw new DOMException("conversation switched", "AbortError");
+          }
+          const { mutateConversationDesignTokens } =
+            await import("../lib/design/token-mutation-host");
+          const result = await mutateConversationDesignTokens({
+            conversationId: generatorConversationId,
+            changes:
+              (
+                args as {
+                  changes?: import("../lib/design/token-mutation").DesignTokenChange[];
+                }
+              ).changes ?? [],
+            principal: "model",
+            acceptedDesignContract:
+              designContractControllerRef.current.getContract(),
+            snapshotLabel: getT().designTokens.snapshotLabel,
+            onProjectFilesChanged: (nextFiles) => {
+              if (!isCurrentGeneratorRun(generatorConversationId)) {
+                throw new DOMException("conversation switched", "AbortError");
+              }
+              generatorRef.current?.setFiles(nextFiles);
+            },
+          });
+          const summary = result.ok
+            ? {
+                ok: true as const,
+                status: result.status,
+                conversationId: result.conversationId,
+                revision: result.revision,
+                snapshotId: result.snapshotId,
+                changedTokens: result.changedTokens,
+              }
+            : result;
+          return {
+            text: JSON.stringify(summary),
+            structuredContent: summary,
+            isError: !result.ok,
+          };
+        },
+        capturePreviewEvidence: async (_name, args, context) => {
+          if (
+            !context ||
+            context.run.conversationId !== generatorConversationId ||
+            !isCurrentGeneratorRun(generatorConversationId)
+          ) {
+            throw new DOMException("conversation switched", "AbortError");
+          }
+          const conversation =
+            useConversationStore.getState().conversations[
+              generatorConversationId
+            ];
+          if (!conversation) {
+            throw new DOMException("conversation switched", "AbortError");
+          }
+          const { capturePreviewEvidence } =
+            await import("../lib/design/preview-evidence");
+          return capturePreviewEvidence({
+            conversationId: generatorConversationId,
+            files: generatorRef.current?.getFiles() ?? conversation.files,
+            template: conversation.template,
+            previewMode: conversation.previewMode ?? "sandpack",
+            viewports:
+              (args as { viewports?: import("../types").PreviewView[] })
+                .viewports ?? [],
+            signal: context.signal,
+          });
+        },
+        designDiagnostics: async (name, args, context) => {
+          if (
+            !context ||
+            context.run.conversationId !== generatorConversationId ||
+            !isCurrentGeneratorRun(generatorConversationId)
+          ) {
+            throw new DOMException("conversation switched", "AbortError");
+          }
+          const conversation =
+            useConversationStore.getState().conversations[
+              generatorConversationId
+            ];
+          if (!conversation) {
+            throw new DOMException("conversation switched", "AbortError");
+          }
+          const { executeDesignDiagnostic } =
+            await import("../lib/design/diagnostics");
+          return executeDesignDiagnostic(
+            name as import("../lib/design/diagnostics").DesignDiagnosticToolName,
+            args,
+            {
+              conversationId: generatorConversationId,
+              files: generatorRef.current?.getFiles() ?? conversation.files,
+              beforeFiles: designRunInitialFilesRef.current,
+              template: conversation.template,
+              previewMode: conversation.previewMode ?? "sandpack",
+              designState: conversation.designState,
+              contract: designContractControllerRef.current.getContract(),
+              history: conversation.messages,
+              signal: context.signal,
+            },
+          );
+        },
         onDesignReviewSubmitted: (report) => {
           if (!isCurrentGeneratorRun(generatorConversationId)) return;
           useDesignReviewStore.getState().complete(report);
@@ -1266,6 +1382,7 @@ export function useGenerator({
         mode: initialWorkspace.mode,
         profile: initialWorkspace.profile,
         runtimePlatform,
+        providerOwnedNames: new Set(providerToolNames),
       });
 
       const initialFiles =
@@ -1609,6 +1726,7 @@ export function useGenerator({
             profile,
             runtimePlatform,
             allowedDynamicNames: new Set(mcpRuntime.aliases.keys()),
+            providerOwnedNames: new Set(providerToolNames),
           });
         },
         dispatchSubagent: async (...args) => {
@@ -1636,64 +1754,53 @@ export function useGenerator({
             ]?.designState?.selectedSystem;
           if (!selectedAtStart || selectedAtStart.source === "legacy") return;
 
-          const [applyModule, projectFilesModule] = await Promise.all([
-            import("../lib/design-systems/apply"),
-            import("../lib/utils/project-files"),
-          ]);
-          const pkg = await applyModule.loadDesignSystemPackage(
-            selectedAtStart.id,
+          const { prepareInitializedDesignSystem } =
+            await import("../lib/design-systems/application");
+          const prepared = await prepareInitializedDesignSystem(
+            {
+              conversationId: generatorConversationId,
+              initializedFiles,
+              expectedReference: selectedAtStart,
+              requireSelected: true,
+              signal: context.signal,
+            },
+            {
+              conversation: {
+                read: (conversationId) => {
+                  const state = useConversationStore.getState();
+                  const conversation = state.conversations[conversationId];
+                  if (!conversation) return undefined;
+                  return {
+                    conversationId,
+                    revision: conversation,
+                    isCurrent:
+                      state.activeId === conversationId &&
+                      isCurrentGeneratorRun(conversationId),
+                    files: conversation.files,
+                    designState: conversation.designState,
+                  };
+                },
+              },
+            },
           );
-          if (
-            context.signal.aborted ||
-            !isCurrentGeneratorRun(generatorConversationId)
-          ) {
-            throw new DOMException("conversation switched", "AbortError");
-          }
-          const selectedNow =
-            useConversationStore.getState().conversations[
-              generatorConversationId
-            ]?.designState?.selectedSystem;
-          if (
-            !selectedNow ||
-            selectedNow.id !== selectedAtStart.id ||
-            selectedNow.digest !== selectedAtStart.digest
-          ) {
-            throw new Error(
-              "The selected Design system changed during project initialization. Retry the request.",
-            );
-          }
-          if (
-            selectedAtStart.digest &&
-            pkg.reference.digest !== selectedAtStart.digest
-          ) {
-            throw new Error(
-              "The selected Design system package changed. Select it again before retrying.",
-            );
-          }
-          const applied = applyModule.applyDesignSystemPackage(
-            initializedFiles,
-            pkg,
-          );
-          const validation = projectFilesModule.validateProjectFiles(
-            applied.files,
-          );
-          if (!validation.ok) throw new Error(validation.error);
 
           return {
-            files: applied.files,
-            changes: applied.changes,
-            resultNote: `applied selected design system "${pkg.reference.id}" and wrote root DESIGN.md and tokens.css`,
+            files: prepared.files,
+            changes: [...prepared.changes],
+            resultNote: prepared.resultNote,
             onCommitted: () => {
-              useConversationStore
-                .getState()
-                .setDesignStateForConversation(
-                  generatorConversationId,
-                  (current) => ({
-                    ...current,
-                    selectedSystem: pkg.reference,
-                    appliedSystem: pkg.reference,
-                  }),
-                );
+              const state = useConversationStore.getState();
+              const current = state.conversations[generatorConversationId];
+              if (
+                state.activeId !== generatorConversationId ||
+                current !== prepared.expectedRevision
+              ) {
+                throw new DOMException("conversation switched", "AbortError");
+              }
+              state.setDesignStateForConversation(
+                generatorConversationId,
+                prepared.designState,
+              );
             },
           };
         },
@@ -1790,6 +1897,7 @@ export function useGenerator({
       }
 
       baseCustomToolSetRef.current = customToolSet;
+      providerToolNamesRef.current = [...providerToolNames];
       generatorRef.current = candidate;
       generatorConfigRef.current = nextConfig;
     }
@@ -1821,7 +1929,6 @@ export function useGenerator({
         mode?: ExecutionMode;
         workspaceMode?: WorkspaceMode;
         profile?: ToolProfile;
-        allowDesignSystemApply?: boolean;
         customSystemPromptSnapshot?: string;
       } = {},
     ) => {
@@ -1877,9 +1984,7 @@ export function useGenerator({
                 ? mcpRuntime.planModeToolNames
                 : new Set(),
           profile,
-          allowDesignSystemApply:
-            profile === "design" &&
-            dynamicOptions.allowDesignSystemApply === true,
+          providerOwnedNames: new Set(providerToolNamesRef.current),
         }),
       );
       if (mcpRuntime.warnings.length > 0) {
@@ -2265,7 +2370,6 @@ export function useGenerator({
             options.forcedSkillIds ?? [],
             {
               customSystemPromptSnapshot,
-              allowDesignSystemApply: options.allowDesignSystemApply,
             },
           );
         }
@@ -2378,6 +2482,7 @@ export function useGenerator({
     customSystemPromptRef.current = "";
     requestPromptContextRef.current = "";
     baseCustomToolSetRef.current = {};
+    providerToolNamesRef.current = [];
     mcpRuntimeRef.current = null;
     activeToolProfileRef.current = "default";
     designContractControllerRef.current.reset({ enabled: false });

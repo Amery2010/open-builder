@@ -88,6 +88,26 @@ describe("Design preview capture sequence", () => {
     expect(restore).toHaveBeenCalledOnce();
   });
 
+  it("captures an explicit subset in caller order", async () => {
+    const captured: string[] = [];
+    const requested = [DESIGN_REVIEW_VIEWPORTS[2], DESIGN_REVIEW_VIEWPORTS[0]];
+    const result = await collectDesignReviewCaptures({
+      viewports: requested,
+      prepareViewport: async () => undefined,
+      captureViewport: async (viewport) => {
+        captured.push(viewport.name);
+        return capture(viewport.name);
+      },
+      restore: () => undefined,
+    });
+
+    expect(captured).toEqual(["mobile", "desktop"]);
+    expect(result.captures.map((item) => item.viewport.name)).toEqual([
+      "mobile",
+      "desktop",
+    ]);
+  });
+
   it("restores after cancellation", async () => {
     const controller = new AbortController();
     const restore = vi.fn();

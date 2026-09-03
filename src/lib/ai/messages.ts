@@ -265,14 +265,19 @@ export function messagesToModelMessages(
         // OpenAI-compatible endpoints vary widely in their accepted tool-result
         // parts, so keep their replay deterministic and text-only. First-party
         // providers receive the richer AI SDK output when one was persisted.
+        const transientPreviewOutput =
+          toolName === "capture_preview_evidence"
+            ? msg.toolOutput?.modelOutput
+            : undefined;
         const output =
           apiType && apiType !== "openai-compatible" && safeToolOutput
-            ? safeToolOutput.source?.kind === "mcp"
-              ? mcpToolExecutionOutputToModelOutput(safeToolOutput)
-              : safeToolOutput.modelOutput || {
-                  type: "text" as const,
-                  value: normalizedText,
-                }
+            ? (transientPreviewOutput ??
+              (safeToolOutput.source?.kind === "mcp"
+                ? mcpToolExecutionOutputToModelOutput(safeToolOutput)
+                : safeToolOutput.modelOutput || {
+                    type: "text" as const,
+                    value: normalizedText,
+                  }))
             : { type: "text" as const, value: normalizedText };
         const toolResult: ToolResultPart = {
           type: "tool-result",

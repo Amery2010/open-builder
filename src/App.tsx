@@ -18,7 +18,6 @@ import { discardPendingSandpackFileChanges } from "./components/code-viewer/sand
 import type { StagedProjectImport } from "./lib/utils/project-import";
 import type {
   Attachment,
-  ConversationDesignState,
   DesignRecommendation,
   DesignSelectionContext,
   DesignSystemRef,
@@ -31,6 +30,7 @@ import {
 } from "./lib/design-systems/ai";
 import type { StagedDesignSystemImport } from "./lib/design-systems/importer";
 import type { DesignReviewFinding } from "./lib/design/review";
+import { sameDesignSystemReference } from "./lib/design/tokens";
 
 const CodeViewer = lazy(() =>
   import("./components/CodeViewer").then((module) => ({
@@ -173,6 +173,7 @@ export default function App() {
     handleSaveSystemSettings,
     template,
     previewMode,
+    defaultPreviewView,
     setTemplate,
     sandpackKey,
     restartSandpack,
@@ -287,110 +288,109 @@ export default function App() {
       recommendation?: DesignRecommendation;
       requireSelected?: boolean;
     }): Promise<{ changed: boolean; reference: DesignSystemRef }> => {
-      const [applyModule, tokensModule, projectFilesModule] = await Promise.all(
-        [
-          import("./lib/design-systems/apply"),
-          import("./lib/design/tokens"),
-          import("./lib/utils/project-files"),
-        ],
-      );
-      const pkg = await applyModule.loadDesignSystemPackage(
-        input.expectedReference.id,
-      );
-      if (
-        input.expectedReference.digest &&
-        pkg.reference.digest !== input.expectedReference.digest
-      ) {
-        throw new Error(
-          "The selected Design system package changed. Select it again before retrying.",
-        );
-      }
-
-      const state = useConversationStore.getState();
-      const current = state.conversations[input.conversationId];
-      if (state.activeId !== input.conversationId || !current) {
-        throw new DOMException("conversation switched", "AbortError");
-      }
-      if (
-        input.requireSelected &&
-        !tokensModule.sameDesignSystemReference(
-          current.designState?.selectedSystem,
-          pkg.reference,
-        )
-      ) {
-        throw new Error(
-          "The selected Design system changed before it could be applied.",
-        );
-      }
-
-      const nextDesignState: ConversationDesignState = {
-        ...current.designState,
-        selectedSystem: pkg.reference,
-        appliedSystem: pkg.reference,
-        ...(input.recommendation
-          ? { recommendation: input.recommendation }
-          : {}),
-        autoSelectionError: false,
+      const { applyDesignSystemToConversation } =
+        await import("./lib/design-systems/application");
+      const snapshot = (conversationId: string) => {
+        const state = useConversationStore.getState();
+        const conversation = state.conversations[conversationId];
+        if (!conversation) return undefined;
+        return {
+          conversationId,
+          revision: conversation,
+          isCurrent: state.activeId === conversationId,
+          files: conversation.files,
+          designState: conversation.designState,
+        };
       };
-      if (
-        tokensModule.sameDesignSystemReference(
-          current.designState?.appliedSystem,
-          pkg.reference,
-        ) &&
-        tokensModule.inspectDesignTokenContract(current.files, nextDesignState)
-          .status === "ready"
-      ) {
-        useConversationStore
-          .getState()
-          .setDesignStateForConversation(input.conversationId, nextDesignState);
-        return { changed: false, reference: pkg.reference };
-      }
-
-      const beforeFiles = current.files;
-      const beforeDesignState = current.designState;
-      const applied = applyModule.applyDesignSystemPackage(beforeFiles, pkg);
-      const validation = projectFilesModule.validateProjectFiles(applied.files);
-      if (!validation.ok) throw new Error(validation.error);
-      if (
-        tokensModule.inspectDesignTokenContract(applied.files, nextDesignState)
-          .status !== "ready"
-      ) {
-        throw new Error(
-          "Applied Design system did not produce a ready token contract.",
-        );
-      }
-
-      try {
-        setFilesForConversation(input.conversationId, applied.files);
-        useConversationStore
-          .getState()
-          .setDesignStateForConversation(input.conversationId, nextDesignState);
-        const committed =
-          useConversationStore.getState().conversations[input.conversationId];
-        if (
-          !committed ||
-          tokensModule.inspectDesignTokenContract(
-            committed.files,
-            committed.designState,
-          ).status !== "ready"
-        ) {
-          throw new Error(
-            "Applied Design system token contract was not saved to the project.",
-          );
-        }
-      } catch (error) {
-        setFilesForConversation(input.conversationId, beforeFiles);
-        useConversationStore
-          .getState()
-          .setDesignStateForConversation(
-            input.conversationId,
-            beforeDesignState,
-          );
-        throw error;
-      }
-      return { changed: true, reference: pkg.reference };
+      const application = await applyDesignSystemToConversation(input, {
+        conversation: {
+          read: snapshot,
+          commit: (mutation) => {
+            let committed: ReturnType<typeof snapshot>;
+            useConversationStore.setState((state) => {
+              const current = state.conversations[mutation.conversationId];
+              if (
+                !current ||
+                state.activeId !== mutation.conversationId ||
+                current !== mutation.expectedRevision
+              ) {
+                return state;
+              }
+              const next = {
+                ...current,
+                files: { ...mutation.files },
+                designState: mutation.designState,
+                isProjectInitialized: Object.keys(mutation.files).length > 0,
+                updatedAt: Math.max(Date.now(), current.updatedAt + 1),
+              };
+              committed = {
+                conversationId: mutation.conversationId,
+                revision: next,
+                isCurrent: true,
+                files: next.files,
+                designState: next.designState,
+              };
+              return {
+                conversations: {
+                  ...state.conversations,
+                  [mutation.conversationId]: next,
+                },
+              };
+            });
+            if (!committed) {
+              throw new Error(
+                "The Conversation changed before the Design system commit.",
+              );
+            }
+            return committed;
+          },
+          restore: (mutation) => {
+            let restored: ReturnType<typeof snapshot>;
+            useConversationStore.setState((state) => {
+              const current = state.conversations[mutation.conversationId];
+              if (
+                !current ||
+                state.activeId !== mutation.conversationId ||
+                current !== mutation.expectedRevision
+              ) {
+                return state;
+              }
+              const next = {
+                ...current,
+                files: { ...mutation.files },
+                designState: mutation.designState,
+                isProjectInitialized: Object.keys(mutation.files).length > 0,
+                updatedAt: Math.max(Date.now(), current.updatedAt + 1),
+              };
+              restored = {
+                conversationId: mutation.conversationId,
+                revision: next,
+                isCurrent: true,
+                files: next.files,
+                designState: next.designState,
+              };
+              return {
+                conversations: {
+                  ...state.conversations,
+                  [mutation.conversationId]: next,
+                },
+              };
+            });
+            if (!restored) {
+              throw new Error(
+                "The Conversation changed before Design system rollback.",
+              );
+            }
+            return restored;
+          },
+        },
+      });
+      return {
+        changed: application.changed,
+        reference: application.reference,
+      };
     },
-    [setFilesForConversation],
+    [],
   );
 
   const handleGenerate = useCallback(
@@ -425,6 +425,7 @@ export default function App() {
           ? async () => {
               const designStateBeforeSelection =
                 selectionConversation.designState;
+              let attemptedAutoSelection: DesignSystemRef | undefined;
               try {
                 const systemLanguage =
                   useSettingsStore.getState().system.language;
@@ -455,6 +456,11 @@ export default function App() {
                 const latest =
                   useConversationStore.getState().conversations[conversationId];
                 if (!latest) return;
+                if (latest.designState !== designStateBeforeSelection) {
+                  // A manual selection made while the automatic decision was
+                  // running wins without being rewritten by stale model output.
+                  return;
+                }
                 if (result.action === "keep") {
                   useConversationStore
                     .getState()
@@ -485,6 +491,7 @@ export default function App() {
                   return;
                 }
 
+                attemptedAutoSelection = result.selectedSystem;
                 useConversationStore
                   .getState()
                   .setDesignStateForConversation(conversationId, (current) => ({
@@ -513,10 +520,29 @@ export default function App() {
                 ) {
                   useConversationStore
                     .getState()
-                    .setDesignStateForConversation(conversationId, {
-                      ...designStateBeforeSelection,
-                      autoSelectionError: true,
-                    });
+                    .setDesignStateForConversation(
+                      conversationId,
+                      (current) => {
+                        if (
+                          attemptedAutoSelection &&
+                          (!sameDesignSystemReference(
+                            current?.selectedSystem,
+                            attemptedAutoSelection,
+                          ) ||
+                            current?.selectedSystem?.source !==
+                              attemptedAutoSelection.source)
+                        ) {
+                          // A user selected or cleared a different system while
+                          // the automatic package was loading. Their choice is
+                          // authoritative and must survive this failed attempt.
+                          return current;
+                        }
+                        return {
+                          ...designStateBeforeSelection,
+                          autoSelectionError: true,
+                        };
+                      },
+                    );
                 }
               }
             }
@@ -658,6 +684,7 @@ export default function App() {
         onMoveFile={moveFile}
         template={template}
         previewMode={previewMode}
+        defaultPreviewView={defaultPreviewView}
         sandpackKey={sandpackKey}
         onReloadPreview={restartSandpack}
         onApplyDesignSystem={handleApplyDesignSystem}

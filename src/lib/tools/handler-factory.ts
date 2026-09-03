@@ -33,17 +33,12 @@ import {
   APPLY_DESIGN_STYLE_TOOL,
   createApplyDesignStyleHandler,
 } from "./design-styles";
-import {
-  APPLY_DESIGN_SYSTEM_TOOL,
-  createApplyDesignSystemHandler,
-} from "../design-systems/apply";
 import { createProjectHealthCheckHandler } from "./project-health";
 import { PROJECT_HEALTH_CHECK_TOOL } from "./project-health-tool";
 import { formatConsoleLogs, type ConsoleLog } from "./console-log-format";
 import { getBuiltinSearchConfig } from "../ai/provider";
 import type { ApiType } from "../ai/provider";
 import type {
-  DesignSystemRef,
   WebSearchSettings,
   AssetSearchSettings,
   ProjectFiles,
@@ -52,10 +47,16 @@ import type {
   FileChange,
   GeneratorOptions,
   ToolExecutionContext,
+  ToolExecutionOutput,
 } from "../ai/generator-types";
 import { validateProjectFiles } from "../utils/project-files";
 import { detectRuntimePlatform } from "../runtime/platform";
-import type { RuntimePlatform } from "../ai/tools-schema";
+import {
+  DESIGN_DIAGNOSTIC_TOOLS,
+  DESIGN_HOST_TOOLS,
+  type RuntimePlatform,
+} from "../ai/tools-schema";
+import type { DesignDiagnosticToolName } from "../design/diagnostics";
 import {
   createSubmitDesignReviewHandler,
   type DesignReviewReport,
@@ -97,8 +98,6 @@ export interface BuildToolHandlersArgs {
     origin: string,
     context: ToolExecutionContext,
   ) => Promise<boolean>;
-  onDesignSystemApplied?: (reference: DesignSystemRef) => void;
-  getSelectedDesignSystemId?: () => string | undefined;
   onDesignReviewSubmitted?: (report: DesignReviewReport) => void;
   submitDesignContract?: (
     args: unknown,
@@ -106,6 +105,10 @@ export interface BuildToolHandlersArgs {
   ) => string;
   getDesignHealthContext?: () =>
     Omit<DesignAdherenceInput, "files"> | undefined;
+  setDefaultPreviewView?: NonNullable<GeneratorOptions["customToolHandler"]>;
+  updateDesignTokens?: NonNullable<GeneratorOptions["customToolHandler"]>;
+  capturePreviewEvidence?: NonNullable<GeneratorOptions["customToolHandler"]>;
+  designDiagnostics?: NonNullable<GeneratorOptions["customToolHandler"]>;
 }
 
 export interface BuiltToolHandlers {
@@ -128,11 +131,13 @@ export async function buildToolHandlers(
     filesBridge,
     developerSkillScriptsEnabled,
     requestRegistryOriginApproval,
-    onDesignSystemApplied,
-    getSelectedDesignSystemId,
     onDesignReviewSubmitted,
     submitDesignContract,
     getDesignHealthContext,
+    setDefaultPreviewView,
+    updateDesignTokens,
+    capturePreviewEvidence,
+    designDiagnostics,
   } = args;
   const runtimePlatform = await detectRuntimePlatform();
 
@@ -182,13 +187,6 @@ export async function buildToolHandlers(
   const applyDesignStyleHandler = guardedFilesBridge
     ? createApplyDesignStyleHandler(guardedFilesBridge)
     : null;
-  const applyDesignSystemHandler = guardedFilesBridge
-    ? createApplyDesignSystemHandler({
-        ...guardedFilesBridge,
-        getSelectedSystemId: getSelectedDesignSystemId,
-        onApplied: onDesignSystemApplied,
-      })
-    : null;
   const projectHealthCheckHandler = filesBridge
     ? createProjectHealthCheckHandler({
         getFiles: filesBridge.getFiles,
@@ -216,55 +214,115 @@ export async function buildToolHandlers(
         scriptExecutionEnabled,
       })
     : null;
+  type RuntimeHandler = (
+    handlerArgs: unknown,
+    context?: Parameters<NonNullable<GeneratorOptions["customToolHandler"]>>[2],
+  ) => string | ToolExecutionOutput | Promise<string | ToolExecutionOutput>;
+  const runtimeHandlers = new Map<string, RuntimeHandler>();
+  runtimeHandlers.set("get_console_logs", (_handlerArgs, context) => {
+    if (context?.run.mode === "auto_qa" || context?.run.mode === "subagent") {
+      return "Error: runtime console logs are unavailable in isolated runs.";
+    }
+    return formatConsoleLogs(getConsoleLogs());
+  });
+  runtimeHandlers.set(MEMORY_TOOL_NAME, (handlerArgs) =>
+    memoryHandler(MEMORY_TOOL_NAME, handlerArgs),
+  );
+  for (const name of SKILL_TOOL_NAME_SET) {
+    if (skillToolHandler) {
+      runtimeHandlers.set(name, (handlerArgs, context) =>
+        skillToolHandler(name, handlerArgs, context),
+      );
+    }
+  }
+  for (const name of ["search_npm_packages", "get_npm_package_detail"]) {
+    runtimeHandlers.set(name, (handlerArgs) =>
+      npmSearchHandler(name, handlerArgs),
+    );
+  }
+  if (installComponentHandler) {
+    runtimeHandlers.set("install_component", (handlerArgs, context) =>
+      installComponentHandler("install_component", handlerArgs, context),
+    );
+  }
+  if (screenshotToCodeHandler) {
+    runtimeHandlers.set("screenshot_to_code", (handlerArgs) =>
+      screenshotToCodeHandler("screenshot_to_code", handlerArgs),
+    );
+  }
+  if (applyDesignStyleHandler) {
+    runtimeHandlers.set("apply_design_style", (handlerArgs) =>
+      applyDesignStyleHandler("apply_design_style", handlerArgs),
+    );
+  }
+  if (projectHealthCheckHandler) {
+    runtimeHandlers.set("project_health_check", (handlerArgs, context) =>
+      projectHealthCheckHandler("project_health_check", handlerArgs, context),
+    );
+  }
+  if (submitDesignReviewHandler) {
+    runtimeHandlers.set("submit_design_review", (handlerArgs) =>
+      submitDesignReviewHandler("submit_design_review", handlerArgs),
+    );
+  }
+  if (submitDesignContract) {
+    runtimeHandlers.set("submit_design_contract", (handlerArgs, context) =>
+      context
+        ? submitDesignContract(handlerArgs, context)
+        : "Error: submit_design_contract is unavailable outside a Host run.",
+    );
+  }
+  if (assetSearchHandler) {
+    runtimeHandlers.set("image_search", (handlerArgs) =>
+      assetSearchHandler("image_search", handlerArgs),
+    );
+  }
+  if (jinaReaderHandler) {
+    runtimeHandlers.set("web_reader", (handlerArgs) =>
+      jinaReaderHandler("web_reader", handlerArgs),
+    );
+  }
+  if (searchHandler) {
+    for (const name of Object.keys(SEARCH_TOOLS)) {
+      runtimeHandlers.set(name, (handlerArgs) =>
+        searchHandler(name, handlerArgs),
+      );
+    }
+  }
+  if (setDefaultPreviewView) {
+    runtimeHandlers.set("set_default_preview_view", (handlerArgs, context) =>
+      setDefaultPreviewView("set_default_preview_view", handlerArgs, context),
+    );
+  }
+  if (updateDesignTokens) {
+    runtimeHandlers.set("update_design_tokens", (handlerArgs, context) =>
+      updateDesignTokens("update_design_tokens", handlerArgs, context),
+    );
+  }
+  if (capturePreviewEvidence) {
+    runtimeHandlers.set("capture_preview_evidence", (handlerArgs, context) =>
+      capturePreviewEvidence("capture_preview_evidence", handlerArgs, context),
+    );
+  }
+  if (designDiagnostics) {
+    for (const name of Object.keys(
+      DESIGN_DIAGNOSTIC_TOOLS,
+    ) as DesignDiagnosticToolName[]) {
+      runtimeHandlers.set(name, (handlerArgs, context) =>
+        designDiagnostics(name, handlerArgs, context),
+      );
+    }
+  }
+
   const combinedToolHandler = async (
     name: string,
     handlerArgs: unknown,
     context?: Parameters<NonNullable<GeneratorOptions["customToolHandler"]>>[2],
-  ): Promise<string> => {
-    if (name === "get_console_logs") {
-      if (context?.run.mode === "auto_qa" || context?.run.mode === "subagent") {
-        return "Error: runtime console logs are unavailable in isolated runs.";
-      }
-      return formatConsoleLogs(getConsoleLogs());
-    }
-    if (name === MEMORY_TOOL_NAME) {
-      return memoryHandler(name, handlerArgs);
-    }
-    if (skillToolHandler && SKILL_TOOL_NAME_SET.has(name)) {
-      return skillToolHandler(name, handlerArgs, context);
-    }
-    if (name === "search_npm_packages" || name === "get_npm_package_detail") {
-      return npmSearchHandler(name, handlerArgs);
-    }
-    if (name === "install_component" && installComponentHandler) {
-      return installComponentHandler(name, handlerArgs, context);
-    }
-    if (name === "screenshot_to_code" && screenshotToCodeHandler) {
-      return screenshotToCodeHandler(name, handlerArgs);
-    }
-    if (name === "apply_design_style" && applyDesignStyleHandler) {
-      return applyDesignStyleHandler(name, handlerArgs);
-    }
-    if (name === "apply_design_system" && applyDesignSystemHandler) {
-      return applyDesignSystemHandler(name, handlerArgs);
-    }
-    if (name === "project_health_check" && projectHealthCheckHandler) {
-      return projectHealthCheckHandler(name, handlerArgs, context);
-    }
-    if (name === "submit_design_review" && submitDesignReviewHandler) {
-      return submitDesignReviewHandler(name, handlerArgs);
-    }
-    if (name === "submit_design_contract" && submitDesignContract && context) {
-      return submitDesignContract(handlerArgs, context);
-    }
-    if (name === "image_search" && assetSearchHandler) {
-      return assetSearchHandler(name, handlerArgs);
-    }
-    if (name === "web_reader" && jinaReaderHandler) {
-      return jinaReaderHandler(name, handlerArgs);
-    }
-    if (searchHandler) return searchHandler(name, handlerArgs);
-    return `Error: unknown tool "${name}"`;
+  ): Promise<string | ToolExecutionOutput> => {
+    const handler = runtimeHandlers.get(name);
+    return handler
+      ? handler(handlerArgs, context)
+      : `Error: unknown tool "${name}"`;
   };
 
   const customToolSet: ToolSet = {
@@ -277,12 +335,25 @@ export async function buildToolHandlers(
     ...DISPATCH_SUBAGENT_TOOL,
     ...(onDesignReviewSubmitted ? SUBMIT_DESIGN_REVIEW_TOOL : {}),
     ...(submitDesignContract ? SUBMIT_DESIGN_CONTRACT_TOOL : {}),
+    ...(setDefaultPreviewView
+      ? {
+          set_default_preview_view: DESIGN_HOST_TOOLS.set_default_preview_view,
+        }
+      : {}),
+    ...(updateDesignTokens
+      ? { update_design_tokens: DESIGN_HOST_TOOLS.update_design_tokens }
+      : {}),
+    ...(capturePreviewEvidence
+      ? {
+          capture_preview_evidence: DESIGN_HOST_TOOLS.capture_preview_evidence,
+        }
+      : {}),
+    ...(designDiagnostics ? DESIGN_DIAGNOSTIC_TOOLS : {}),
     ...(filesBridge
       ? {
           ...INSTALL_COMPONENT_TOOL,
           ...(features.localAgent ? {} : SCREENSHOT_TO_CODE_TOOL),
           ...APPLY_DESIGN_STYLE_TOOL,
-          ...APPLY_DESIGN_SYSTEM_TOOL,
           ...PROJECT_HEALTH_CHECK_TOOL,
         }
       : {}),

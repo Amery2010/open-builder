@@ -1,7 +1,12 @@
 import { tool, type ToolSet } from "ai";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { BUILTIN_TOOLS, TOOL_CAPABILITY_REGISTRY } from "../ai/tools-schema";
+import {
+  BUILTIN_TOOLS,
+  DESIGN_HOST_TOOLS,
+  HOST_TOOL_CATALOG,
+  HOST_TOOL_RECORDS,
+} from "../ai/tools-schema";
 import { createLocalToolAuthoritySnapshot } from "./authority";
 
 const tools: ToolSet = {
@@ -24,16 +29,108 @@ const tools: ToolSet = {
 };
 
 describe("local Host Tool Authority", () => {
+  it("serializes the exact Web Host run authority", async () => {
+    const context = {
+      runId: "parity-run",
+      mode: "chat" as const,
+      platform: "desktop" as const,
+      allowedMcpAliases: new Set<string>(),
+      activeSkillIds: new Set<string>(),
+      approvedSkillScriptHashes: new Set<string>(),
+      policyVersion: "test",
+    };
+    const hostRun = HOST_TOOL_CATALOG.openRun({
+      tools: {
+        list_files: BUILTIN_TOOLS.list_files,
+        write_file: BUILTIN_TOOLS.write_file,
+      },
+      context,
+    });
+    const local = await createLocalToolAuthoritySnapshot({
+      tools: hostRun.modelTools,
+      mode: context.mode,
+      platform: context.platform,
+      hostRun,
+    });
+
+    expect([...local.names].sort()).toEqual(
+      [...hostRun.authority.names].sort(),
+    );
+    expect(local.has("write_file")).toBe(hostRun.authority.has("write_file"));
+  });
+
+  it("keeps all Design Host tools equivalent across Web and Local authority", async () => {
+    const context = {
+      runId: "design-parity-run",
+      mode: "chat" as const,
+      platform: "desktop" as const,
+      allowedMcpAliases: new Set<string>(),
+      activeSkillIds: new Set<string>(),
+      approvedSkillScriptHashes: new Set<string>(),
+      policyVersion: "test",
+    };
+    const hostRun = HOST_TOOL_CATALOG.openRun({
+      tools: {
+        list_files: BUILTIN_TOOLS.list_files,
+        ...DESIGN_HOST_TOOLS,
+      },
+      context,
+      profile: "design",
+    });
+    const local = await createLocalToolAuthoritySnapshot({
+      tools: hostRun.modelTools,
+      mode: context.mode,
+      platform: context.platform,
+      hostRun,
+    });
+
+    expect([...local.names].sort()).toEqual(
+      [...hostRun.authority.names].sort(),
+    );
+    expect(local.isReadOnly("set_default_preview_view")).toBe(false);
+    expect(local.isReadOnly("update_design_tokens")).toBe(false);
+    expect(local.isReadOnly("capture_preview_evidence")).toBe(true);
+    for (const name of [
+      "inspect_design_consistency",
+      "measure_preview_layout",
+      "audit_accessibility_tree",
+      "compare_preview_states",
+      "trace_design_provenance",
+    ]) {
+      expect(local.isReadOnly(name)).toBe(true);
+    }
+    await expect(
+      local.validate("capture_preview_evidence", {
+        viewports: ["mobile", "desktop"],
+      }),
+    ).resolves.toMatchObject({ success: true });
+    await expect(
+      local.validate("audit_accessibility_tree", {
+        viewports: ["mobile", "mobile"],
+      }),
+    ).resolves.toMatchObject({ success: false });
+    await expect(
+      hostRun.authority.validate("compare_preview_states", {
+        baseline_generation: "not-a-digest",
+        viewports: ["mobile"],
+      }),
+    ).resolves.toMatchObject({ success: false });
+    await expect(
+      hostRun.authority.validate("capture_preview_evidence", {
+        viewports: ["mobile", "desktop"],
+      }),
+    ).resolves.toMatchObject({ success: true });
+  });
+
   it("projects every eligible Host project write in Chat and none in Plan", async () => {
-    const expectedProjectWrites = Object.values(TOOL_CAPABILITY_REGISTRY)
-      .filter(
-        (capability) =>
-          capability.effects.includes("write_project") &&
-          capability.modes.includes("chat") &&
-          capability.platforms.includes("desktop") &&
-          capability.name in BUILTIN_TOOLS &&
-          capability.name !== "screenshot_to_code",
-      )
+    const expectedProjectWrites = HOST_TOOL_RECORDS.filter(
+      (capability) =>
+        capability.effects.includes("write_project") &&
+        capability.modes.includes("chat") &&
+        capability.platforms.includes("desktop") &&
+        capability.name in BUILTIN_TOOLS &&
+        capability.name !== "screenshot_to_code",
+    )
       .map((capability) => capability.name)
       .sort();
 

@@ -388,4 +388,76 @@ describe("CodeViewer preview scale", () => {
     expect(previewSurface.style.width).toBe("375px");
     expect(previewSurface.style.height).toBe("667px");
   });
+
+  it("initializes from the project preference and keeps manual device changes local", async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(
+      <CodeViewer
+        conversationId="conversation-a"
+        defaultPreviewView="tablet"
+        {...baseProps}
+      />,
+    );
+
+    expect(screen.getByTestId("device-size")).toHaveTextContent("tablet");
+    await user.click(screen.getByRole("button", { name: "Zoom out" }));
+    expect(screen.getByTestId("preview-scale")).toHaveTextContent("90");
+
+    await user.click(screen.getByRole("button", { name: "Mobile device" }));
+    expect(screen.getByTestId("device-size")).toHaveTextContent("mobile");
+    expect(screen.getByTestId("preview-scale")).toHaveTextContent("100");
+
+    // An AI preference update must not override a user's temporary device
+    // choice for this mounted viewer.
+    rerender(
+      <CodeViewer
+        conversationId="conversation-a"
+        defaultPreviewView="desktop"
+        {...baseProps}
+      />,
+    );
+    await waitFor(() => {
+      expect(screen.getByTestId("device-size")).toHaveTextContent("mobile");
+    });
+
+    // A remount/reload starts from the persisted project preference again.
+    rerender(
+      <CodeViewer
+        conversationId="conversation-a"
+        defaultPreviewView="desktop"
+        {...baseProps}
+        sandpackKey={2}
+      />,
+    );
+    await waitFor(() => {
+      expect(screen.getByTestId("device-size")).toHaveTextContent("desktop");
+      expect(screen.getByTestId("preview-scale")).toHaveTextContent("100");
+    });
+  });
+
+  it("syncs an AI default update when there is no manual override and resets zoom", async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(
+      <CodeViewer
+        conversationId="conversation-a"
+        defaultPreviewView="desktop"
+        {...baseProps}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Zoom out" }));
+    expect(screen.getByTestId("preview-scale")).toHaveTextContent("90");
+
+    rerender(
+      <CodeViewer
+        conversationId="conversation-a"
+        defaultPreviewView="mobile"
+        {...baseProps}
+      />,
+    );
+    await waitFor(() => {
+      expect(screen.getByTestId("device-size")).toHaveTextContent("mobile");
+      expect(screen.getByTestId("preview-scale")).toHaveTextContent("100");
+    });
+  });
 });

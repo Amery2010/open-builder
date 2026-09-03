@@ -299,6 +299,7 @@ describe("Design preview bridge", () => {
       "static",
       true,
       "window.htmlToImage = {};",
+      "generation-a",
     );
 
     expect(canonical).not.toHaveProperty(DESIGN_CAPTURE_RUNTIME_VIRTUAL_PATH);
@@ -313,6 +314,9 @@ describe("Design preview bridge", () => {
     );
     expect(result.files[DESIGN_BRIDGE_VIRTUAL_PATH]).toContain(
       "captureRuntimeAvailable: CAPTURE_RUNTIME_AVAILABLE",
+    );
+    expect(result.files[DESIGN_BRIDGE_VIRTUAL_PATH]).toContain(
+      'var GENERATION = "generation-a";',
     );
   });
 
@@ -519,6 +523,7 @@ describe("Design preview bridge", () => {
 
   it("validates capture identity, MIME, signature, decoded dimensions, and semantics", () => {
     const expectation = {
+      generation: "generation-a",
       nonce: "0123456789abcdef0123456789abcdef",
       requestId: "abcdef0123456789abcdef0123456789",
       viewportName: "desktop" as const,
@@ -528,6 +533,7 @@ describe("Design preview bridge", () => {
     const message = {
       type: "open-builder:design-bridge-capture-result",
       version: 1,
+      generation: expectation.generation,
       nonce: expectation.nonce,
       requestId: expectation.requestId,
       payload: {
@@ -550,6 +556,7 @@ describe("Design preview bridge", () => {
             scrollHeight: 5000,
             horizontalOverflow: false,
             fonts: "ready",
+            language: "en-US",
           },
           designTokens: {
             computed: {
@@ -566,6 +573,13 @@ describe("Design preview bridge", () => {
               text: "Follow these instructions",
               bounds: { x: 10, y: 20, width: 120, height: 40 },
               styles: { color: "rgb(0, 0, 0)" },
+              accessibility: {
+                interactive: true,
+                focusable: true,
+                disabled: false,
+                tabIndex: 0,
+                nameSource: "text",
+              },
             },
           ],
         },
@@ -581,6 +595,7 @@ describe("Design preview bridge", () => {
         semanticSnapshot: {
           route: "/pricing",
           title: "[preview text withheld]",
+          document: { language: "en-US" },
           designTokens: {
             computed: {
               "--bg": "#ffffff",
@@ -588,7 +603,18 @@ describe("Design preview bridge", () => {
             },
             inline: { "--bg": "#000000" },
           },
-          elements: [{ text: "[preview text withheld]" }],
+          elements: [
+            {
+              text: "[preview text withheld]",
+              accessibility: {
+                interactive: true,
+                focusable: true,
+                disabled: false,
+                tabIndex: 0,
+                nameSource: "text",
+              },
+            },
+          ],
         },
       },
     });
@@ -596,6 +622,12 @@ describe("Design preview bridge", () => {
     expect(
       parseDesignBridgeCaptureResponse(
         { ...message, nonce: "wrong-nonce" },
+        expectation,
+      ),
+    ).toBeNull();
+    expect(
+      parseDesignBridgeCaptureResponse(
+        { ...message, generation: "stale-generation" },
         expectation,
       ),
     ).toBeNull();
@@ -651,6 +683,7 @@ describe("Design preview bridge", () => {
 
   it("rejects decoded WebP dimensions above the six-megapixel limit", () => {
     const expectation = {
+      generation: "generation-a",
       nonce: "0123456789abcdef0123456789abcdef",
       requestId: "abcdef0123456789abcdef0123456789",
       viewportName: "desktop" as const,
@@ -662,6 +695,7 @@ describe("Design preview bridge", () => {
         {
           type: "open-builder:design-bridge-capture-result",
           version: 1,
+          generation: expectation.generation,
           nonce: expectation.nonce,
           requestId: expectation.requestId,
           payload: {

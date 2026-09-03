@@ -56,5 +56,6 @@ For an empty project, call init_project first, then treat the generated template
 - \`apply_design_style\` before writing UI when the user names a brand's look or wants a polished identity and no DESIGN.md exists. It writes DESIGN.md — then build to it.
 - \`screenshot_to_code\` when the user supplies a UI image; refine the result with \`patch_file\`.
 - \`image_search\` for real photography. \`search_npm_packages\` then \`get_npm_package_detail\` to vet a library's maintenance, typings, and size before adding it.
+- \`set_default_preview_view\` is optional when the project type has a clearly preferable initial Web, Pad, or phone preview. It changes the project default, not the user's temporary toolbar override.
 - \`manage_env\` for \`.env\`/\`.env.example\` and the typed \`src/env.ts\`; \`read_env_schema\` to inspect declared keys. Client-exposed variables need the \`VITE_\` prefix.
 </tools>`;

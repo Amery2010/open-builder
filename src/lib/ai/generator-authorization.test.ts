@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
-import type { ToolSet } from "ai";
+import { tool, type ToolSet } from "ai";
+import { z } from "zod";
 import { WebAppGenerator } from "./generator";
-import { BUILTIN_TOOLS } from "./tools-schema";
+import {
+  BUILTIN_TOOLS,
+  DESIGN_DIAGNOSTIC_TOOLS,
+  DESIGN_HOST_TOOLS,
+} from "./tools-schema";
 import { DISPATCH_SUBAGENT_TOOL } from "../tools/subagent-tool";
 import type {
   GeneratorEvents,
@@ -13,10 +18,22 @@ import type {
 import type { SkillEntry } from "../skills/types";
 import { createDesignContractController } from "../design/run-contract";
 import { SUBMIT_DESIGN_CONTRACT_TOOL } from "../design/run-contract-tool";
+import { SCRIPT_SKILL_TOOL } from "../skills/tools";
+import { SEARCH_TOOLS } from "../tools/search";
+import { ASSET_SEARCH_TOOLS } from "../tools/asset-search";
+
+const EMPTY_TEST_TOOL = tool({
+  description: "Test dynamic tool",
+  inputSchema: z.object({}),
+});
 
 type ToolInvoker = {
   executeTool(toolCall: ToolCall): Promise<{
-    result: { text: string; isError?: boolean };
+    result: {
+      text: string;
+      isError?: boolean;
+      retention?: "full" | "summary-only" | "run-only";
+    };
     changes: unknown[];
     hadSideEffect: boolean;
   }>;
@@ -124,6 +141,143 @@ describe("generator execution authorization", () => {
     expect(outcome.result.isError).not.toBe(true);
     expect(outcome.result.text).toContain("empty project");
     expect(outcome.hadSideEffect).toBe(false);
+  });
+
+  it("validates and dispatches the default-preview Host tool through the run snapshot", async () => {
+    const handler = vi.fn(() =>
+      JSON.stringify({ ok: true, status: "updated", view: "mobile" }),
+    );
+    const { generator } = createGenerator(
+      {
+        set_default_preview_view: DESIGN_HOST_TOOLS.set_default_preview_view,
+      },
+      handler,
+    );
+    const harness = generator as unknown as ToolInvoker;
+
+    const updated = await harness.executeTool(
+      call("set_default_preview_view", { view: "mobile" }),
+    );
+    expect(updated.result).toMatchObject({ retention: "full" });
+    expect(updated.hadSideEffect).toBe(true);
+    expect(handler).toHaveBeenCalledWith(
+      "set_default_preview_view",
+      { view: "mobile" },
+      expect.objectContaining({
+        run: expect.objectContaining({ mode: "chat" }),
+      }),
+    );
+
+    handler.mockClear();
+    const invalid = await harness.executeTool(
+      call("set_default_preview_view", { view: "watch" }),
+    );
+    expect(invalid.result).toMatchObject({ isError: true });
+    expect(invalid.result.text).toContain("Invalid arguments");
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("stamps summary-only retention on Design mutation and evidence outputs", async () => {
+    const handler = vi.fn(() => ({
+      text: "bounded result",
+      structuredContent: { ok: true },
+      content: [{ type: "text" as const, text: "bounded result" }],
+    }));
+    const { generator } = createGenerator(
+      {
+        update_design_tokens: DESIGN_HOST_TOOLS.update_design_tokens,
+        capture_preview_evidence: DESIGN_HOST_TOOLS.capture_preview_evidence,
+        ...DESIGN_DIAGNOSTIC_TOOLS,
+      },
+      handler,
+    );
+    const harness = generator as unknown as ToolInvoker;
+
+    const mutation = await harness.executeTool(
+      call("update_design_tokens", {
+        changes: [{ token: "--accent", value: "#0f766e" }],
+      }),
+    );
+    const evidence = await harness.executeTool(
+      call("capture_preview_evidence", { viewports: ["mobile"] }),
+    );
+    const diagnostic = await harness.executeTool(
+      call("measure_preview_layout", { viewports: ["mobile"] }),
+    );
+
+    expect(mutation.result.retention).toBe("summary-only");
+    expect(evidence.result.retention).toBe("summary-only");
+    expect(diagnostic.result.retention).toBe("summary-only");
+    expect(diagnostic.hadSideEffect).toBe(false);
+  });
+
+  it("keeps rich evidence for the active loop and scrubs it at the run boundary", async () => {
+    const imageSentinel = "run-only-image-bytes";
+    const semanticSentinel = "run-only-semantic-text";
+    const summary = {
+      kind: "preview_evidence_v1",
+      status: "complete",
+      generation: "a".repeat(64),
+      evidence: [],
+      errors: [],
+      placeholder: "run only",
+    };
+    const { generator } = createGenerator(
+      {
+        capture_preview_evidence: DESIGN_HOST_TOOLS.capture_preview_evidence,
+      },
+      vi.fn(() => ({
+        text: JSON.stringify(summary),
+        structuredContent: summary,
+        content: [
+          { type: "text" as const, text: semanticSentinel },
+          {
+            type: "image" as const,
+            data: imageSentinel,
+            mimeType: "image/webp",
+          },
+        ],
+        modelOutput: {
+          type: "content" as const,
+          value: [{ type: "text" as const, text: semanticSentinel }],
+        },
+      })),
+    );
+    const harness = generator as unknown as GeneratorRunHarness;
+    let requestCount = 0;
+    let activeLoopSawRichEvidence = false;
+    vi.spyOn(harness, "requestWithRetry").mockImplementation(
+      async (messages) => {
+        requestCount += 1;
+        if (requestCount === 1) {
+          return {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              call(
+                "capture_preview_evidence",
+                { viewports: ["mobile"] },
+                "capture-run-only",
+              ),
+            ],
+          };
+        }
+        activeLoopSawRichEvidence =
+          JSON.stringify(messages).includes(imageSentinel);
+        return { role: "assistant", content: "Done" };
+      },
+    );
+
+    const result = await generator.generate("Inspect the mobile preview");
+    const persisted = result.messages.find(
+      (message) =>
+        message.role === "tool" && message.tool_call_id === "capture-run-only",
+    );
+
+    expect(activeLoopSawRichEvidence).toBe(true);
+    expect(JSON.stringify(persisted)).not.toContain(imageSentinel);
+    expect(JSON.stringify(persisted)).not.toContain(semanticSentinel);
+    expect(persisted?.toolOutput?.retention).toBeUndefined();
   });
 
   it("enforces a run-local write authorization hook before mutation", async () => {
@@ -359,7 +513,7 @@ describe("generator execution authorization", () => {
   it("denies an advertised custom tool with no registered capability", async () => {
     const handler = vi.fn(async () => "should not run");
     const { generator } = createGenerator(
-      { custom_unknown: {} as ToolSet[string] },
+      { custom_unknown: EMPTY_TEST_TOOL },
       handler,
     );
 
@@ -376,7 +530,7 @@ describe("generator execution authorization", () => {
     const alias = "mcp_demo_lookup_abcd";
     const handler = vi.fn(async () => "mcp ok");
     const { generator } = createGenerator(
-      { [alias]: {} as ToolSet[string] },
+      { [alias]: EMPTY_TEST_TOOL },
       handler,
       { allowedMcpAliases: new Set([alias]) },
     );
@@ -393,7 +547,7 @@ describe("generator execution authorization", () => {
     const alias = "mcp_demo_lookup_abcd";
     const handler = vi.fn(async () => "must not run");
     const { generator } = createGenerator(
-      { [alias]: {} as ToolSet[string] },
+      { [alias]: EMPTY_TEST_TOOL },
       handler,
       { executionMode: "auto_qa", allowedMcpAliases: new Set([alias]) },
     );
@@ -475,13 +629,13 @@ describe("generator execution authorization", () => {
       generatorHolder.current!.setSystemPromptSuffix("\nCHAT MODE ACTIVE");
       return {
         write_file: BUILTIN_TOOLS.write_file,
-        [mcpAlias]: {} as ToolSet[string],
+        [mcpAlias]: EMPTY_TEST_TOOL,
       };
     });
     const { generator } = createGenerator(
       {
         exit_plan_mode: BUILTIN_TOOLS.exit_plan_mode,
-        [mcpAlias]: {} as ToolSet[string],
+        [mcpAlias]: EMPTY_TEST_TOOL,
       },
       customHandler,
       {
@@ -588,7 +742,7 @@ describe("generator execution authorization", () => {
     async (runtimePlatform) => {
       const handler = vi.fn(async () => "must not run");
       const { generator } = createGenerator(
-        { execute_skill_script: {} as ToolSet[string] },
+        { execute_skill_script: SCRIPT_SKILL_TOOL.execute_skill_script },
         handler,
         { executionMode: "chat", runtimePlatform },
       );
@@ -607,8 +761,8 @@ describe("generator execution authorization", () => {
     const toolA = "web_search";
     const toolB = "image_search";
     const tools = {
-      [toolA]: {} as ToolSet[string],
-      [toolB]: {} as ToolSet[string],
+      [toolA]: SEARCH_TOOLS.web_search,
+      [toolB]: ASSET_SEARCH_TOOLS.image_search,
     };
     const first = createGenerator(
       tools,
@@ -638,8 +792,12 @@ describe("generator execution authorization", () => {
     second.generator.getSkillContext().activate(skillB);
 
     const [blocked, allowed] = await Promise.all([
-      (first.generator as unknown as ToolInvoker).executeTool(call(toolB)),
-      (second.generator as unknown as ToolInvoker).executeTool(call(toolB)),
+      (first.generator as unknown as ToolInvoker).executeTool(
+        call(toolB, { query: "reference" }),
+      ),
+      (second.generator as unknown as ToolInvoker).executeTool(
+        call(toolB, { query: "reference" }),
+      ),
     ]);
 
     expect(blocked.result.text).toContain("not in the active skills");

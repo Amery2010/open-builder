@@ -246,6 +246,18 @@ export interface LocalAgentSessionRef {
 
 export type ProjectPreviewMode = "sandpack" | "code-only";
 
+/** Canonical preview device used for persisted preferences and evidence. */
+export type PreviewView = "desktop" | "tablet" | "mobile";
+
+export function isPreviewView(value: unknown): value is PreviewView {
+  return value === "desktop" || value === "tablet" || value === "mobile";
+}
+
+/** Normalizes persisted or adapter-provided preview values fail-closed. */
+export function normalizePreviewView(value: unknown): PreviewView {
+  return isPreviewView(value) ? value : "desktop";
+}
+
 /** User-facing workflow mode. It is intentionally separate from the lower-level
  * execution modes used by the generator and local-agent protocol. */
 export type WorkspaceMode = "auto" | "plan" | "design";
@@ -288,6 +300,9 @@ export interface Conversation {
   files: _ProjectFiles;
   template: string;
   previewMode?: ProjectPreviewMode;
+  /** Project preference for the initial preview device. Manual device changes
+   * are intentionally kept as a mount-local UI override. */
+  defaultPreviewView?: PreviewView;
   isProjectInitialized: boolean;
   workspaceMode?: WorkspaceMode;
   /** Where approval should return when Plan was entered from another mode. */
@@ -320,6 +335,8 @@ export interface ProjectTemplate {
   files: _ProjectFiles;
   template: string;
   previewMode?: ProjectPreviewMode;
+  /** Presentation metadata only; intentionally excluded from contentDigest. */
+  defaultPreviewView?: PreviewView;
   sourceConversationId?: string;
   tags: string[];
   /** Records without this field are retained v1 templates. */

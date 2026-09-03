@@ -475,6 +475,7 @@ export class LocalAgentGenerator implements GenerationBackend {
         baselineOverride,
       );
     } catch (error) {
+      this.host.finishExternalRun();
       // One reporting point for every phase: first run, fresh-session rebuild,
       // and plan continuation.
       this.events.onError?.(
@@ -568,6 +569,7 @@ export class LocalAgentGenerator implements GenerationBackend {
       fullText += continuation.text;
     }
 
+    this.host.finishExternalRun();
     const result: GenerateResult = {
       files: this.host.getFiles(),
       messages: this.host.getMessages(),
@@ -621,7 +623,8 @@ export class LocalAgentGenerator implements GenerationBackend {
     attachmentIndex: Map<string, AttachmentIndexEntry>;
     budget: LocalTurnBudget;
   }): Promise<RunOutcome> {
-    const tools = this.host.getTools();
+    const hostRun = this.host.getHostToolRun();
+    const tools = hostRun.modelTools;
     const runContext = this.host.getRunContext();
     const nativeSearch =
       this.config.nativeSearch &&
@@ -655,6 +658,7 @@ export class LocalAgentGenerator implements GenerationBackend {
       allowedMcpAliases: runContext.allowedMcpAliases,
       annotations: this.localToolAnnotations,
       extraSpecs: attachmentSpecs,
+      hostRun,
     });
     const toolSpecs = [...authority.specs];
     const attachmentListing = [...attachmentIndex.values()]

@@ -103,6 +103,7 @@ describe("conversation store", () => {
 
   it("clears conversation context without deleting project files or snapshots", () => {
     const id = useConversationStore.getState().createConversation();
+    useConversationStore.getState().setDefaultPreviewView("mobile");
     useConversationStore.setState((state) => ({
       conversations: {
         ...state.conversations,
@@ -144,6 +145,7 @@ describe("conversation store", () => {
     expect(conversation.activeFile).toBe("src/App.tsx");
     expect(conversation.template).toBe("react-ts");
     expect(conversation.isProjectInitialized).toBe(true);
+    expect(conversation.defaultPreviewView).toBe("mobile");
     expect(useSnapshotStore.getState().snapshots[id]).toHaveLength(1);
   });
 
@@ -164,6 +166,7 @@ describe("conversation store", () => {
         },
       },
     }));
+    useConversationStore.getState().setDefaultPreviewView("tablet");
     useSnapshotStore.setState({
       snapshots: {
         [first]: [],
@@ -188,6 +191,7 @@ describe("conversation store", () => {
       messages: [],
       files: {},
       template: "vite-react-ts",
+      defaultPreviewView: "desktop",
       isProjectInitialized: false,
     });
     expect(conversation.compressedContext).toBeUndefined();
@@ -246,6 +250,7 @@ describe("conversation store", () => {
       files: { "README.md": "imported" },
       template: "static",
       previewMode: "code-only",
+      defaultPreviewView: "desktop",
       activeFile: "README.md",
       isProjectInitialized: true,
     });
@@ -456,6 +461,28 @@ describe("conversation store", () => {
     });
   });
 
+  it("persists default preview view, treats same-value updates as no-ops, and forks it", () => {
+    const original = useConversationStore.getState().createConversation();
+    const initialUpdatedAt =
+      useConversationStore.getState().conversations[original].updatedAt;
+
+    useConversationStore.getState().setDefaultPreviewView("tablet");
+    const updated = useConversationStore.getState().conversations[original];
+    expect(updated.defaultPreviewView).toBe("tablet");
+    const afterUpdate = updated.updatedAt;
+
+    useConversationStore.getState().setDefaultPreviewView("tablet");
+    expect(
+      useConversationStore.getState().conversations[original].updatedAt,
+    ).toBe(afterUpdate);
+    expect(afterUpdate).toBeGreaterThanOrEqual(initialUpdatedAt);
+
+    const fork = useConversationStore.getState().forkConversation();
+    expect(
+      useConversationStore.getState().conversations[fork].defaultPreviewView,
+    ).toBe("tablet");
+  });
+
   it("keeps workspace mode per conversation and returns approved plans to Design", () => {
     const designConversation = useConversationStore
       .getState()
@@ -532,6 +559,43 @@ describe("conversation store", () => {
       designState: {
         appliedSystem: { id: "legacy-design-md", source: "legacy" },
       },
+    });
+  });
+
+  it("normalizes missing and invalid persisted preview preferences to desktop", () => {
+    const persisted = {
+      activeId: "invalid-preview",
+      conversations: {
+        "missing-preview": {
+          id: "missing-preview",
+          title: "Missing",
+          messages: [],
+          files: {},
+          template: "vite-react-ts",
+          isProjectInitialized: false,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+        "invalid-preview": {
+          id: "invalid-preview",
+          title: "Invalid",
+          messages: [],
+          files: {},
+          template: "vite-react-ts",
+          defaultPreviewView: "phone",
+          isProjectInitialized: false,
+          createdAt: 2,
+          updatedAt: 2,
+        },
+      },
+    };
+
+    const migrated = migrateConversationState(persisted, 4);
+    expect(migrated.conversations["missing-preview"]).toMatchObject({
+      defaultPreviewView: "desktop",
+    });
+    expect(migrated.conversations["invalid-preview"]).toMatchObject({
+      defaultPreviewView: "desktop",
     });
   });
 

@@ -18,7 +18,7 @@ import { Button } from "@/components/ui/button";
 import JSZip from "jszip";
 import { saveAs } from "file-saver";
 import { useT } from "../../i18n";
-import type { ProjectFiles } from "@/types";
+import type { PreviewView, ProjectFiles } from "@/types";
 import type { ReactNode } from "react";
 import {
   Tooltip,
@@ -27,7 +27,7 @@ import {
 } from "@/components/ui/tooltip";
 
 export type ViewMode = "preview" | "code";
-export type DeviceSize = "desktop" | "tablet" | "mobile";
+export type DeviceSize = PreviewView;
 
 export const MIN_PREVIEW_SCALE = 0.25;
 export const MAX_PREVIEW_SCALE = 1.5;

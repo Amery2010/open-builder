@@ -14,14 +14,15 @@ import {
 } from "./messages";
 import {
   BUILTIN_TOOLS,
+  DESIGN_DIAGNOSTIC_TOOLS,
+  HOST_TOOL_CATALOG,
   TOOL_POLICY_VERSION,
   getToolCapability,
-  isWriteToolName,
-  READONLY_TOOL_NAMES,
   type ExecutionMode,
   type RuntimePlatform,
   type ToolRunContext,
 } from "./tools-schema";
+import { HostToolDispatchError, type HostToolRun } from "./host-tool-catalog";
 import { DEFAULT_SYSTEM_PROMPT } from "./system-prompt";
 import { buildProjectGuidelinesSection } from "./project-guidelines";
 import { PLAN_APPROVED_PREFIX, PLAN_REJECTED_PREFIX } from "./plan-mode";
@@ -48,6 +49,7 @@ import type { SkillActiveContextController } from "../skills/active-context";
 import { recordPermissionActivity } from "../security/activity-log";
 import { isRetryableGenerationError } from "./generation-error";
 import { attachmentPartsForModel } from "../attachments/model-context";
+import { sanitizeToolExecutionOutputForHistory } from "../utils/message-security";
 import type {
   Message,
   ToolCall,
@@ -100,9 +102,9 @@ function toolExecutionHasSideEffect(name: string): boolean {
         effect === "process",
     );
   }
-  // Unknown tools are dynamic capabilities. Treat them conservatively until
-  // the local authority snapshot supplies an explicit read-only annotation.
-  return !READONLY_TOOL_NAMES.has(name);
+  // Unknown tools are dynamic adapters. Treat them conservatively until the
+  // immutable run authority supplies a static declaration.
+  return true;
 }
 
 export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
@@ -121,6 +123,7 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
   private readonly maxIterations: number;
   private readonly useStream: boolean;
   private tools: ToolSet;
+  private toolRun!: HostToolRun;
   private customToolSet: ToolSet;
   private readonly customToolHandler?: GeneratorOptions["customToolHandler"];
   private readonly authorizeToolCall?: GeneratorOptions["authorizeToolCall"];
@@ -180,6 +183,7 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
     this.files = { ...(options.initialFiles ?? {}) };
     this.messages = [];
     this.events = events;
+    this.rebuildToolRun();
   }
 
   // ═══════════════════════════ public API ═════════════════════════════════
@@ -201,7 +205,11 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
   }
 
   getTools(): ToolSet {
-    return this.tools;
+    return this.toolRun.modelTools;
+  }
+
+  getHostToolRun(): HostToolRun {
+    return this.toolRun;
   }
 
   getSystemContent(): string {
@@ -233,6 +241,7 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
    *  The provided set is used as-is — the caller is responsible for including any builtins it wants. */
   setTools(tools: ToolSet): void {
     this.tools = tools;
+    this.rebuildToolRun();
   }
 
   setReadOnlyMode(readOnly: boolean): void {
@@ -240,15 +249,18 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
     if (this.executionMode !== "subagent" && this.executionMode !== "auto_qa") {
       this.executionMode = readOnly ? "plan" : "chat";
     }
+    this.rebuildToolRun();
   }
 
   setExecutionMode(mode: ExecutionMode): void {
     this.executionMode = mode;
     this.readOnlyMode = mode === "plan" || mode === "subagent";
+    this.rebuildToolRun();
   }
 
   setAllowedMcpAliases(aliases: ReadonlySet<string>): void {
     this.allowedMcpAliases = new Set(aliases);
+    this.rebuildToolRun();
   }
 
   getSkillContext(): SkillActiveContextController {
@@ -287,8 +299,16 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
   beginExternalRun(): AbortSignal {
     this.ctrl?.abort();
     this.runId = this.createRunId();
+    this.rebuildToolRun();
     this.ctrl = new AbortController();
     return this.ctrl.signal;
+  }
+
+  /** Drop summary-only/run-only payloads after an adapter-owned run has
+   * finished. Web runs do this automatically; Local CLI calls this at its
+   * outer run boundary after every continuation has consumed the result. */
+  finishExternalRun(): void {
+    this.applyOutputRetentionAfterRun();
   }
 
   appendUserMessage(
@@ -318,6 +338,7 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
   /** Retry the loop without adding a new user message (user message is already in history). */
   async retry(): Promise<GenerateResult> {
     this.runId = this.createRunId();
+    this.rebuildToolRun();
     return this._runGenerateLoop();
   }
 
@@ -326,6 +347,7 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
     attachments?: ResolvedAttachment[],
   ): Promise<GenerateResult> {
     this.runId = this.createRunId();
+    this.rebuildToolRun();
     this.appendUserMessage(userMessage, attachments);
 
     return this._runGenerateLoop();
@@ -380,7 +402,7 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
           (toolCall) =>
             this.executionMode === "plan" &&
             toolCall.function.name === "exit_plan_mode" &&
-            !this.providerToolNames.has(toolCall.function.name),
+            !this.toolRun.providerOwnedNames.has(toolCall.function.name),
         );
         if (exitPlanCall) {
           const barrierContext = this.getRunContext();
@@ -398,7 +420,7 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
           for (const siblingCall of assistantMsg.tool_calls) {
             if (
               siblingCall === exitPlanCall ||
-              this.providerToolNames.has(siblingCall.function.name)
+              this.toolRun.providerOwnedNames.has(siblingCall.function.name)
             ) {
               continue;
             }
@@ -464,7 +486,7 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
         }
 
         for (const toolCall of regularCalls) {
-          if (this.providerToolNames.has(toolCall.function.name)) {
+          if (this.toolRun.providerOwnedNames.has(toolCall.function.name)) {
             continue;
           }
 
@@ -520,10 +542,12 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
         aborted = true;
       } else {
         this.events.onError?.(err);
+        this.applyOutputRetentionAfterRun();
         throw err;
       }
     }
 
+    this.applyOutputRetentionAfterRun();
     const result: GenerateResult = {
       files: this.getFiles(),
       messages: this.getMessages(),
@@ -534,6 +558,29 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
 
     this.events.onComplete?.(result);
     return result;
+  }
+
+  private applyOutputRetentionAfterRun(): void {
+    const calls = new Map<string, ToolCall>();
+    for (const message of this.messages) {
+      if (message.role !== "assistant") continue;
+      for (const call of message.tool_calls ?? []) calls.set(call.id, call);
+    }
+    this.messages = this.messages.map((message) => {
+      if (message.role !== "tool" || !message.toolOutput?.retention) {
+        return message;
+      }
+      const call = message.tool_call_id
+        ? calls.get(message.tool_call_id)
+        : undefined;
+      const safe = sanitizeToolExecutionOutputForHistory(
+        call?.function.name ?? "unknown",
+        call?.function.arguments ?? "{}",
+        message.toolOutput,
+      );
+      if (!safe) return { ...message, toolOutput: undefined };
+      return { ...message, content: safe.text, toolOutput: safe };
+    });
   }
 
   private isRetryableError(err: any): boolean {
@@ -628,7 +675,7 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
       model,
       instructions,
       messages: coreMessages,
-      tools: this.tools,
+      tools: this.toolRun.modelTools,
       maxRetries: 0,
       abortSignal: this.ctrl!.signal,
       providerOptions: providerOptions as any,
@@ -696,13 +743,13 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
           break;
 
         case "tool-input-start":
-          if (!this.providerToolNames.has(part.toolName)) {
+          if (!this.toolRun.providerOwnedNames.has(part.toolName)) {
             this.events.onToolCall?.(part.toolName, part.id);
           }
           break;
 
         case "tool-call":
-          if (!this.providerToolNames.has(part.toolName)) {
+          if (!this.toolRun.providerOwnedNames.has(part.toolName)) {
             toolCallsAccum.push({
               id: part.toolCallId,
               type: "function",
@@ -756,7 +803,7 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
       model,
       instructions,
       messages: coreMessages,
-      tools: this.tools,
+      tools: this.toolRun.modelTools,
       maxRetries: 0,
       abortSignal: this.ctrl!.signal,
       providerOptions: providerOptions as any,
@@ -792,30 +839,147 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
     };
   }
 
+  private inferToolProfile(): "default" | "design" | "design_review" {
+    if (
+      Object.prototype.hasOwnProperty.call(this.tools, "submit_design_review")
+    ) {
+      return "design_review";
+    }
+    if (
+      Object.prototype.hasOwnProperty.call(
+        this.tools,
+        "submit_design_contract",
+      ) ||
+      Object.prototype.hasOwnProperty.call(
+        this.tools,
+        "update_design_tokens",
+      ) ||
+      Object.prototype.hasOwnProperty.call(
+        this.tools,
+        "capture_preview_evidence",
+      ) ||
+      Object.keys(DESIGN_DIAGNOSTIC_TOOLS).some((name) =>
+        Object.prototype.hasOwnProperty.call(this.tools, name),
+      )
+    ) {
+      return "design";
+    }
+    return "default";
+  }
+
+  private rebuildToolRun(): void {
+    const runContext = this.getRunContext();
+    this.toolRun = HOST_TOOL_CATALOG.openRun({
+      tools: this.tools,
+      context: runContext,
+      profile: this.inferToolProfile(),
+      allowedDynamicNames: this.allowedMcpAliases,
+      providerOwnedNames: this.providerToolNames,
+      guard: async (call, record) => {
+        const hasWriteEffect = record.effects.some(
+          (effect) =>
+            effect === "write_project" ||
+            effect === "write_runtime" ||
+            effect === "process",
+        );
+        if (this.readOnlyMode && hasWriteEffect) {
+          return (
+            `Tool "${call.name}" is not available while Plan Mode is active. ` +
+            "Submit or revise the plan first; write tools are enabled only after approval."
+          );
+        }
+        const active = this.skillContext.get();
+        if (
+          active?.restrictTools &&
+          !ALWAYS_ALLOWED_TOOL_NAMES.has(call.name) &&
+          !active.allowedTools.includes(call.name)
+        ) {
+          const activeNames = active.skills
+            .map((skill) => `"${skill.skillName}"`)
+            .join(", ");
+          return (
+            `Tool "${call.name}" is not in the active skills ${activeNames} ` +
+            `allowed-tools. Available now: ${active.allowedTools.join(", ")}. ` +
+            "Work within these tools, call read_skill on a different skill, or wait for the next user message."
+          );
+        }
+        return this.authorizeToolCall?.(call.name, call.input, {
+          signal: this.ctrl?.signal ?? new AbortController().signal,
+          toolCallId: call.callId ?? "host-tool",
+          run: runContext,
+          skillContext: this.skillContext,
+        });
+      },
+      requestApproval: () => undefined,
+      hostDispatcher: (call) =>
+        this.executeAuthorizedTool(
+          call.name,
+          call.input,
+          call.callId ?? "host-tool",
+        ),
+      validateState: () => {
+        const validation = validateProjectFiles(this.files);
+        return validation.ok ? undefined : validation.error;
+      },
+      // The active model receives the full run-local result. Stamp the Catalog
+      // policy so the persistence boundary can enforce it without importing
+      // the executable tool schema (which also keeps that boundary lightweight).
+      retainOutput: (result, retention) => {
+        const outcome = result as {
+          result: ToolExecutionOutput;
+          changes: FileChange[];
+          hadSideEffect: boolean;
+        };
+        return {
+          ...outcome,
+          result: { ...outcome.result, retention },
+        };
+      },
+      audit: (call, record) => {
+        // Dynamic MCP adapters already record their authoritative lifecycle,
+        // drift, approval, target, and outcome details. Avoid adding a second
+        // generic entry that could contradict an adapter-level denial.
+        if (record.source === "mcp") return;
+        recordPermissionActivity({
+          conversationId: this.conversationId,
+          tool: call.name,
+          source: record.source,
+          mode: this.executionMode,
+          platform: this.runtimePlatform,
+          decision: record.approval === "per_call" ? "requested" : "allowed",
+        });
+      },
+    });
+  }
+
   private async executeTool(toolCall: ToolCall): Promise<{
     result: ToolExecutionOutput;
     changes: FileChange[];
     hadSideEffect: boolean;
   }> {
     const name = toolCall.function.name;
-    const logDecision = (
-      decision: "allowed" | "denied" | "requested",
-      reason?: string,
-    ) => {
+    const authorityRecord = this.toolRun.authority.get(name);
+    if (!authorityRecord) {
+      const output = normalizeToolExecutionOutput({
+        text:
+          `Error: tool "${name}" is not authorized for the current ` +
+          `${this.executionMode} run; it is not permitted by policy.`,
+        isError: true,
+      });
       recordPermissionActivity({
         conversationId: this.conversationId,
         tool: name,
-        source: this.allowedMcpAliases.has(name)
-          ? "mcp"
-          : (getToolCapability(name)?.source ?? "unknown"),
+        source: this.allowedMcpAliases.has(name) ? "mcp" : "unknown",
         mode: this.executionMode,
         platform: this.runtimePlatform,
-        decision,
-        reason,
+        decision: "denied",
+        reason: "tool is absent from the immutable run authority",
       });
-    };
+      this.events.onToolResult?.(name, null, output.text, toolCall.id, output);
+      return { result: output, changes: [], hadSideEffect: false };
+    }
 
-    let args: any;
+    let args: unknown;
     try {
       args = JSON.parse(toolCall.function.arguments);
     } catch {
@@ -828,106 +992,58 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
       return { result: output, changes: [], hadSideEffect: false };
     }
 
-    if (!Object.prototype.hasOwnProperty.call(this.tools, name)) {
-      const errMsg =
-        `Error: tool "${name}" is not authorized for the current ` +
-        `${this.executionMode} run.`;
-      const output = normalizeToolExecutionOutput({
-        text: errMsg,
-        isError: true,
-      });
-      logDecision("denied", "tool is absent from the current run allowlist");
-      this.events.onToolResult?.(name, args, output.text, toolCall.id, output);
-      return { result: output, changes: [], hadSideEffect: false };
-    }
-
-    const capability = getToolCapability(name);
-    const isAuthorizedMcpAlias =
-      this.executionMode !== "auto_qa" && this.allowedMcpAliases.has(name);
-    if (
-      (!capability && !isAuthorizedMcpAlias) ||
-      (capability &&
-        (!capability.modes.includes(this.executionMode) ||
-          !capability.platforms.includes(this.runtimePlatform)))
-    ) {
-      const errMsg =
-        `Error: tool "${name}" is not permitted by policy for ` +
-        `${this.executionMode} on ${this.runtimePlatform}.`;
-      const output = normalizeToolExecutionOutput({
-        text: errMsg,
-        isError: true,
-      });
-      logDecision("denied", "tool capability policy rejected execution");
-      this.events.onToolResult?.(name, args, output.text, toolCall.id, output);
-      return { result: output, changes: [], hadSideEffect: false };
-    }
-
-    const activeCtx = this.skillContext.get();
-    if (this.readOnlyMode && isWriteToolName(name)) {
-      const errMsg =
-        `Error: tool "${name}" is not available while Plan Mode is active. ` +
-        "Submit or revise the plan first; write tools are enabled only after approval.";
-      const output = normalizeToolExecutionOutput({
-        text: errMsg,
-        isError: true,
-      });
-      logDecision("denied", "write tool blocked by Plan Mode");
-      this.events.onToolResult?.(name, args, output.text, toolCall.id, output);
-      return { result: output, changes: [], hadSideEffect: false };
-    }
-
-    if (this.authorizeToolCall) {
-      const denial = await this.authorizeToolCall(name, args, {
-        signal: this.ctrl?.signal ?? new AbortController().signal,
-        toolCallId: toolCall.id,
-        run: this.getRunContext(),
-        skillContext: this.skillContext,
-      });
-      if (denial) {
-        const output = normalizeToolExecutionOutput({
-          text: `Error: ${denial}`,
-          isError: true,
-        });
-        logDecision("denied", denial);
-        this.events.onToolResult?.(
-          name,
-          args,
-          output.text,
-          toolCall.id,
-          output,
-        );
-        return { result: output, changes: [], hadSideEffect: false };
+    try {
+      return (await this.toolRun.dispatch({
+        name,
+        input: args,
+        callId: toolCall.id,
+      })) as {
+        result: ToolExecutionOutput;
+        changes: FileChange[];
+        hadSideEffect: boolean;
+      };
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        throw error;
       }
-    }
-
-    if (
-      activeCtx?.restrictTools &&
-      !ALWAYS_ALLOWED_TOOL_NAMES.has(name) &&
-      !activeCtx.allowedTools.includes(name)
-    ) {
-      const activeNames = activeCtx.skills
-        .map((skill) => `"${skill.skillName}"`)
-        .join(", ");
-      const errMsg =
-        `Tool "${name}" is not in the active skills ${activeNames} ` +
-        `allowed-tools. Available now: ${activeCtx.allowedTools.join(", ")}. ` +
-        `Work within these tools, or call read_skill on a different skill, or wait for the next user message to clear the restriction.`;
+      const reason =
+        error instanceof Error ? error.message : "Host tool dispatch failed.";
       const output = normalizeToolExecutionOutput({
-        text: errMsg,
+        text: `Error: ${reason}`,
         isError: true,
       });
-      logDecision("denied", "active Skill allowed-tools restriction");
+      recordPermissionActivity({
+        conversationId: this.conversationId,
+        tool: name,
+        source: authorityRecord.source,
+        mode: this.executionMode,
+        platform: this.runtimePlatform,
+        decision: "denied",
+        reason:
+          error instanceof HostToolDispatchError
+            ? `${error.stage}: ${error.message}`
+            : reason,
+      });
       this.events.onToolResult?.(name, args, output.text, toolCall.id, output);
       return { result: output, changes: [], hadSideEffect: false };
     }
+  }
 
-    if (!isAuthorizedMcpAlias) {
-      logDecision(
-        getToolCapability(name)?.approval === "per_call"
-          ? "requested"
-          : "allowed",
-      );
-    }
+  private async executeAuthorizedTool(
+    name: string,
+    input: unknown,
+    toolCallId: string,
+  ): Promise<{
+    result: ToolExecutionOutput;
+    changes: FileChange[];
+    hadSideEffect: boolean;
+  }> {
+    const args = input as any;
+    const toolCall: ToolCall = {
+      id: toolCallId,
+      type: "function",
+      function: { name, arguments: JSON.stringify(args) },
+    };
 
     // File-system tools go through the shared dispatcher.
     const fsOutcome = await dispatchFsTool(name, args, this.files);
@@ -1142,6 +1258,7 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
             // Approval changes the capability boundary. Rotate the run identity
             // so expanded tools can only execute in the next provider iteration.
             this.runId = this.createRunId();
+            this.rebuildToolRun();
             result = `${PLAN_APPROVED_PREFIX} by the user. Plan mode is now exited — proceed to implement the plan using the available write tools.`;
           } else {
             result = decision.feedback
@@ -1165,7 +1282,11 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
               skillContext: this.skillContext,
             });
           } catch (err: any) {
-            result = `Error in custom tool "${name}": ${err.message}`;
+            if (err?.name === "AbortError") throw err;
+            result = {
+              text: `Error in custom tool "${name}": ${err?.message ?? String(err)}`,
+              isError: true,
+            };
           }
         } else {
           result = `Error: unknown tool "${name}"`;

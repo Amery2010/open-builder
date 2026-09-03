@@ -1,9 +1,6 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import type { DesignSystemPackage } from "./validation";
-import {
-  applyDesignSystemPackage,
-  createApplyDesignSystemHandler,
-} from "./apply";
+import { applyDesignSystemPackage } from "./apply";
 
 const designPackage: DesignSystemPackage = {
   manifest: {
@@ -25,7 +22,7 @@ const designPackage: DesignSystemPackage = {
   },
 };
 
-describe("apply_design_system", () => {
+describe("applyDesignSystemPackage", () => {
   it("builds canonical contract changes without mutating the input", () => {
     const files = {
       "src/App.tsx": "export default () => null",
@@ -44,64 +41,9 @@ describe("apply_design_system", () => {
     ]);
   });
 
-  it("requires project initialization", async () => {
-    const handler = createApplyDesignSystemHandler({
-      getFiles: () => ({}),
-      onFilesChanged: vi.fn(),
-      loadPackage: async () => designPackage,
-    });
-    const result = JSON.parse(
-      await handler("apply_design_system", { system_id: "stripe" }),
+  it("requires project initialization", () => {
+    expect(() => applyDesignSystemPackage({}, designPackage)).toThrow(
+      /initialized project files/,
     );
-    expect(result).toMatchObject({ ok: false });
-    expect(result.error).toContain("init_project");
-  });
-
-  it("writes only canonical contracts and returns compact metadata", async () => {
-    const onFilesChanged = vi.fn();
-    const onApplied = vi.fn();
-    const handler = createApplyDesignSystemHandler({
-      getFiles: () => ({ "src/App.tsx": "export default () => null" }),
-      onFilesChanged,
-      onApplied,
-      loadPackage: async () => designPackage,
-    });
-    const resultText = await handler("apply_design_system", {
-      system_id: "stripe",
-    });
-    const result = JSON.parse(resultText);
-
-    expect(result).toMatchObject({
-      ok: true,
-      system: { id: "stripe", digest: "a".repeat(64) },
-      files: ["DESIGN.md", "tokens.css"],
-    });
-    expect(resultText).not.toContain("# Stripe reference");
-    expect(onFilesChanged).toHaveBeenCalledOnce();
-    const [files, changes] = onFilesChanged.mock.calls[0];
-    expect(files["src/App.tsx"]).toContain("export default");
-    expect(files["DESIGN.md"]).toContain("Unofficial reference");
-    expect(files["tokens.css"]).toContain("--accent: #533afd");
-    expect(changes).toEqual([
-      { path: "DESIGN.md", action: "created" },
-      { path: "tokens.css", action: "created" },
-    ]);
-    expect(onApplied).toHaveBeenCalledWith(designPackage.reference);
-  });
-
-  it("cannot apply a system other than the user's current selection", async () => {
-    const onFilesChanged = vi.fn();
-    const handler = createApplyDesignSystemHandler({
-      getFiles: () => ({ "src/App.tsx": "export default () => null" }),
-      onFilesChanged,
-      getSelectedSystemId: () => "linear",
-      loadPackage: async () => designPackage,
-    });
-    const result = JSON.parse(
-      await handler("apply_design_system", { system_id: "stripe" }),
-    );
-    expect(result).toMatchObject({ ok: false });
-    expect(result.error).toMatch(/currently selected/i);
-    expect(onFilesChanged).not.toHaveBeenCalled();
   });
 });

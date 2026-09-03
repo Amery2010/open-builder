@@ -157,6 +157,29 @@ describe("project template utilities", () => {
     expect(next.files).not.toBe(template.files);
   });
 
+  it("stores a normalized default preview view without changing the content digest", async () => {
+    const mobile = await prepareProjectTemplateFromConversation(
+      { ...conversation, defaultPreviewView: "mobile" },
+      { id: "mobile", name: "Mobile", now: 1 },
+    );
+    const desktop = await prepareProjectTemplateFromConversation(
+      { ...conversation, defaultPreviewView: "desktop" },
+      { id: "desktop", name: "Desktop", now: 2 },
+    );
+
+    expect(mobile.template).toMatchObject({
+      schemaVersion: 2,
+      defaultPreviewView: "mobile",
+    });
+    expect(mobile.template.contentDigest).toBe(desktop.template.contentDigest);
+
+    const next = await createConversationFromProjectTemplate(mobile.template, {
+      id: "mobile-conversation",
+      now: 3,
+    });
+    expect(next.defaultPreviewView).toBe("mobile");
+  });
+
   it("materializes only project authority and verified applied Design state", async () => {
     const designSystem = {
       id: "graphite",
@@ -322,6 +345,7 @@ describe("project template utilities", () => {
       description: legacy.description,
       files: { "src/App.tsx": "legacy app" },
       schemaVersion: 2,
+      defaultPreviewView: "desktop",
       safety: { status: "safe", excludedPaths: [".env.local"] },
     });
     expect(isProjectTemplateUsable(upgraded.template)).toBe(true);

@@ -57,9 +57,11 @@ const projectFiles = {
   "tokens.css": initialTokens,
 };
 
-async function seedDesignProject(page: import("@playwright/test").Page) {
+async function seedDesignProject(
+  page: import("@playwright/test").Page,
+): Promise<string> {
   await page.goto("/");
-  await page.evaluate(
+  const conversationId = await page.evaluate(
     async ({ files, tokens }) => {
       const conversationUrl = "/src/store/conversation.ts";
       const settingsUrl = "/src/store/settings/index.ts";
@@ -111,6 +113,7 @@ async function seedDesignProject(page: import("@playwright/test").Page) {
   await expect(
     page.getByRole("button", { name: "Preview", exact: true }),
   ).toBeVisible();
+  return conversationId;
 }
 
 test("point-selects a real Sandpack element, keeps token edits pending until saved, and keeps Bridge out of export", async ({
@@ -201,8 +204,8 @@ test("point-selects a real Sandpack element, keeps token edits pending until sav
   );
   await expect(page.getByText("icon-action", { exact: true })).toBeVisible();
 
-  await page.getByRole("button", { name: "Tablet" }).click();
-  await expect(page.getByRole("button", { name: "Tablet" })).toHaveAttribute(
+  await page.getByRole("button", { name: "Pad" }).click();
+  await expect(page.getByRole("button", { name: "Pad" })).toHaveAttribute(
     "aria-pressed",
     "true",
   );
@@ -211,7 +214,7 @@ test("point-selects a real Sandpack element, keeps token edits pending until sav
     "aria-pressed",
     "true",
   );
-  await page.getByRole("button", { name: "Desktop" }).click();
+  await page.getByRole("button", { name: "Web" }).click();
   const initialHeadingColor = await heading.evaluate(
     (node) => getComputedStyle(node).color,
   );
@@ -268,6 +271,279 @@ test("point-selects a real Sandpack element, keeps token edits pending until sav
   expect(names).not.toContain("__open_builder_design_bridge__.js");
   const exportedIndex = await zip.file("index.html")!.async("string");
   expect(exportedIndex).not.toContain("open-builder-design-bridge");
+});
+
+test("keeps the project default separate from a manual override while token and evidence Host tools use the live preview", async ({
+  page,
+}) => {
+  test.slow();
+  const conversationId = await seedDesignProject(page);
+  const frame = page.frameLocator("iframe").first();
+  const heading = frame.locator('[data-ob-id="hero-title"]');
+  await expect(heading).toBeVisible({ timeout: 60_000 });
+  await expect(page.getByRole("button", { name: "Web" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+
+  await page.getByRole("button", { name: "Pad" }).click();
+  const preference = await page.evaluate(async (id) => {
+    const preferenceUrl = "/src/lib/design/preview-preference.ts";
+    const conversationUrl = "/src/store/conversation.ts";
+    const { setConversationDefaultPreviewView } = await import(preferenceUrl);
+    const { useConversationStore } = await import(conversationUrl);
+    const result = setConversationDefaultPreviewView({
+      conversationId: id,
+      view: "mobile",
+    });
+    return {
+      result,
+      stored:
+        useConversationStore.getState().conversations[id].defaultPreviewView,
+    };
+  }, conversationId);
+  expect(preference).toMatchObject({
+    result: { ok: true, status: "updated", view: "mobile" },
+    stored: "mobile",
+  });
+  await expect(page.getByRole("button", { name: "Pad" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+
+  const tokenMutation = await page.evaluate(async (id) => {
+    const mutationUrl = "/src/lib/design/token-mutation-host.ts";
+    const snapshotsUrl = "/src/store/snapshot.ts";
+    const { mutateConversationDesignTokens } = await import(mutationUrl);
+    const { useSnapshotStore } = await import(snapshotsUrl);
+    const result = await mutateConversationDesignTokens({
+      conversationId: id,
+      principal: "model",
+      acceptedDesignContract: {
+        surface_mode: "operate",
+        change_mode: "extend",
+        target: "Design fixture",
+        audience: "Preview users",
+        primary_goal: "Verify the semantic accent",
+        concept: "A precise test fixture",
+        system_id: "stripe",
+        translation: {
+          foundations: "Retain the semantic token contract.",
+          composition: "Preserve the centered fixture.",
+          components: "Use the accent token for the heading.",
+        },
+        preserve: ["Existing structure and behavior"],
+        acceptance: ["The live preview uses the updated accent"],
+      },
+      changes: [{ token: "--accent", value: "#0f766e" }],
+      snapshotLabel: "Design token update",
+    });
+    return {
+      ok: result.ok,
+      status: result.ok ? result.status : result.code,
+      snapshotCount: useSnapshotStore.getState().getSnapshots(id).length,
+    };
+  }, conversationId);
+  expect(tokenMutation).toEqual({
+    ok: true,
+    status: "updated",
+    snapshotCount: 2,
+  });
+  await expect
+    .poll(() => heading.evaluate((node) => getComputedStyle(node).color))
+    .toBe("rgb(15, 118, 110)");
+
+  const evidence = await page.evaluate(async (id) => {
+    const conversationUrl = "/src/store/conversation.ts";
+    const evidenceUrl = "/src/lib/design/preview-evidence.ts";
+    const diagnosticsUrl = "/src/lib/design/diagnostics.ts";
+    const securityUrl = "/src/lib/utils/message-security.ts";
+    const { useConversationStore } = await import(conversationUrl);
+    const { capturePreviewEvidence } = await import(evidenceUrl);
+    const { executeDesignDiagnostic } = await import(diagnosticsUrl);
+    const { sanitizeToolExecutionOutputForHistory } = await import(securityUrl);
+    const conversation = useConversationStore.getState().conversations[id];
+    const output = await capturePreviewEvidence({
+      conversationId: id,
+      files: conversation.files,
+      template: conversation.template,
+      previewMode: conversation.previewMode ?? "sandpack",
+      viewports: ["mobile", "desktop"],
+    });
+    const persisted = sanitizeToolExecutionOutputForHistory(
+      "capture_preview_evidence",
+      { viewports: ["mobile", "desktop"] },
+      output,
+    );
+    const summary = output.structuredContent as {
+      status: string;
+      evidence: Array<{
+        view: string;
+        viewport: { width: number; height: number };
+      }>;
+    };
+    const rawSemantic = output.content?.find((part) => part.type === "text");
+    const persistedJson = JSON.stringify(persisted);
+    const diagnosticContext = {
+      conversationId: id,
+      files: conversation.files,
+      beforeFiles: conversation.files,
+      template: conversation.template,
+      previewMode: conversation.previewMode ?? "sandpack",
+      designState: conversation.designState,
+    };
+    const consistency = await executeDesignDiagnostic(
+      "inspect_design_consistency",
+      {},
+      diagnosticContext,
+    );
+    const layout = await executeDesignDiagnostic(
+      "measure_preview_layout",
+      { viewports: ["mobile"] },
+      diagnosticContext,
+    );
+    const accessibility = await executeDesignDiagnostic(
+      "audit_accessibility_tree",
+      { viewports: ["mobile"] },
+      diagnosticContext,
+    );
+    const comparison = await executeDesignDiagnostic(
+      "compare_preview_states",
+      { viewports: ["mobile"] },
+      {
+        ...diagnosticContext,
+        history: [
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "e2e-baseline",
+                type: "function",
+                function: {
+                  name: "capture_preview_evidence",
+                  arguments: '{"viewports":["mobile","desktop"]}',
+                },
+              },
+            ],
+          },
+          {
+            role: "tool",
+            content: persisted?.text ?? "",
+            tool_call_id: "e2e-baseline",
+            toolOutput: persisted,
+          },
+        ],
+      },
+    );
+    const provenance = await executeDesignDiagnostic(
+      "trace_design_provenance",
+      {},
+      diagnosticContext,
+    );
+    const diagnosticJson = JSON.stringify({
+      consistency: consistency.structuredContent,
+      layout: layout.structuredContent,
+      accessibility: accessibility.structuredContent,
+      comparison: comparison.structuredContent,
+      provenance: provenance.structuredContent,
+    });
+    return {
+      isError: output.isError === true,
+      contentTypes: output.content?.map((part) => part.type),
+      status: summary.status,
+      evidence: summary.evidence.map((item) => ({
+        view: item.view,
+        width: item.viewport.width,
+        height: item.viewport.height,
+      })),
+      rawSemanticIncludesHeading:
+        rawSemantic?.type === "text" && rawSemantic.text.includes("Hero title"),
+      persistedHasImageBlock: persistedJson.includes('"type":"image"'),
+      persistedIncludesHeading: persistedJson.includes("Hero title"),
+      persistedPlaceholderCount: persisted?.content?.filter(
+        (part) => part.type === "placeholder",
+      ).length,
+      storedDefault:
+        useConversationStore.getState().conversations[id].defaultPreviewView,
+      diagnostics: {
+        consistencyKind: (consistency.structuredContent as { kind?: string })
+          ?.kind,
+        layoutStatus: (layout.structuredContent as { status?: string })?.status,
+        accessibilityStatus: (
+          accessibility.structuredContent as { status?: string }
+        )?.status,
+        accessibilityConformance: (
+          accessibility.structuredContent as { conformance?: string }
+        )?.conformance,
+        comparisonSucceeded: ["same", "changed"].includes(
+          (comparison.structuredContent as { status?: string })?.status ?? "",
+        ),
+        provenanceKind: (provenance.structuredContent as { kind?: string })
+          ?.kind,
+        containsBase64: diagnosticJson.includes("data:image"),
+      },
+    };
+  }, conversationId);
+  expect(evidence).toEqual({
+    isError: false,
+    contentTypes: ["text", "image", "image"],
+    status: "complete",
+    evidence: [
+      { view: "mobile", width: 375, height: 667 },
+      { view: "desktop", width: 1440, height: 900 },
+    ],
+    rawSemanticIncludesHeading: true,
+    persistedHasImageBlock: false,
+    persistedIncludesHeading: false,
+    persistedPlaceholderCount: 2,
+    storedDefault: "mobile",
+    diagnostics: {
+      consistencyKind: "design_consistency_v1",
+      layoutStatus: "complete",
+      accessibilityStatus: "complete",
+      accessibilityConformance: "not_assessed",
+      comparisonSucceeded: true,
+      provenanceKind: "design_provenance_v1",
+      containsBase64: false,
+    },
+  });
+  await expect(page.getByRole("button", { name: "Pad" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+
+  const otherConversationId = await page.evaluate(async () => {
+    const conversationUrl = "/src/store/conversation.ts";
+    const { useConversationStore } = await import(conversationUrl);
+    const state = useConversationStore.getState();
+    const id = state.createConversation();
+    state.switchConversation(id);
+    return id;
+  });
+  expect(otherConversationId).not.toBe(conversationId);
+  await expect(
+    page.getByRole("button", { name: "Preview", exact: true }),
+  ).toHaveCount(0);
+  await page.evaluate(async (id) => {
+    const conversationUrl = "/src/store/conversation.ts";
+    const { useConversationStore } = await import(conversationUrl);
+    useConversationStore.getState().switchConversation(id);
+  }, conversationId);
+  await expect(page.getByRole("button", { name: "Mobile" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+
+  await page.evaluate(async (id) => {
+    const preferenceUrl = "/src/lib/design/preview-preference.ts";
+    const { setConversationDefaultPreviewView } = await import(preferenceUrl);
+    setConversationDefaultPreviewView({ conversationId: id, view: "desktop" });
+  }, conversationId);
+  await expect(page.getByRole("button", { name: "Web" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
 });
 
 test("keeps Design Review read-only until selected fixes are explicitly applied", async ({

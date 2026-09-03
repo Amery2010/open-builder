@@ -3,7 +3,7 @@ import type { Message } from "../ai/generator-types";
 import { en } from "../../i18n/en";
 import { zh } from "../../i18n/zh";
 import type { ThinkingBlock } from "../../types";
-import { TOOL_CAPABILITY_REGISTRY } from "../ai/tools-schema";
+import { HOST_TOOL_RECORDS } from "../ai/tools-schema";
 import { AGNES_TOOL_ALIASES } from "../mcp/agnes/aliases";
 import { AGNES_MCP_SERVER_ID, AGNES_MCP_SERVER_NAME } from "../mcp/agnes/types";
 
@@ -228,10 +228,8 @@ describe("mergeMessages", () => {
   });
 
   it("covers every registered visible tool and local-provider tool with both locales", () => {
-    const registeredVisibleTools = Object.keys(TOOL_CAPABILITY_REGISTRY).filter(
-      // `memory` is the known policy-name mismatch; the real
-      // `manage_memories` call remains intentionally hidden in this UI.
-      (name) => name !== "memory",
+    const registeredVisibleTools = HOST_TOOL_RECORDS.map(
+      (record) => record.name,
     );
     const providerAndLegacyTools = [
       "read_file",

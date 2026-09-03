@@ -20,13 +20,14 @@ import {
   writeEditableTokenValues,
   type EditableTokenValues,
 } from "../../lib/design/tokens";
+import type { DesignTokenChange } from "../../lib/design/token-mutation";
 
 interface DesignTokenPanelProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   files: ProjectFiles;
   designState?: ConversationDesignState;
-  onCommit: (path: string, content: string) => void;
+  onCommit: (changes: readonly DesignTokenChange[]) => Promise<void> | void;
   onUpgrade: () => void;
   isGenerating: boolean;
 }
@@ -55,6 +56,7 @@ export function DesignTokenPanel({
   const [values, setValues] = useState<EditableTokenValues>(initialValues);
   const [error, setError] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -86,14 +88,27 @@ export function DesignTokenPanel({
     setError(null);
   };
 
-  const save = () => {
+  const save = async () => {
     if (!source || !tokensPath || error) return;
     try {
-      const content = writeEditableTokenValues(source, values);
-      onCommit(tokensPath, content);
+      writeEditableTokenValues(source, values);
+      const changes = EDITABLE_DESIGN_TOKENS.flatMap(({ property }) => {
+        const value = values[property];
+        return value !== undefined && value.trim() !== initialValues[property]
+          ? [{ token: property, value }]
+          : [];
+      });
+      if (!changes.length) {
+        onOpenChange(false);
+        return;
+      }
+      setSaving(true);
+      await onCommit(changes);
       onOpenChange(false);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -209,19 +224,24 @@ export function DesignTokenPanel({
               variant="ghost"
               className="mr-auto"
               onClick={reset}
-              disabled={!dirty || isGenerating}
+              disabled={!dirty || isGenerating || saving}
             >
               <RotateCcw size={14} /> {t.designTokens.reset}
             </Button>
           )}
-          <Button type="button" variant="outline" onClick={close}>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={close}
+            disabled={saving}
+          >
             {t.designTokens.cancel}
           </Button>
           {editable && (
             <Button
               type="button"
-              onClick={save}
-              disabled={!dirty || !!error || isGenerating}
+              onClick={() => void save()}
+              disabled={!dirty || !!error || isGenerating || saving}
             >
               {t.designTokens.save}
             </Button>

@@ -250,4 +250,55 @@ describe("messagesToModelMessages", () => {
       value: "[Image returned by MCP tool]",
     });
   });
+
+  it("keeps preview images transient for the active first-party run", () => {
+    const generation = "a".repeat(64);
+    const summary = {
+      kind: "preview_evidence_v1",
+      status: "complete",
+      generation,
+      evidence: [],
+      errors: [],
+      placeholder: "omitted",
+    };
+    const messages: Message[] = [
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "capture-call",
+            type: "function",
+            function: { name: "capture_preview_evidence", arguments: "{}" },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        tool_call_id: "capture-call",
+        content: JSON.stringify(summary),
+        toolOutput: {
+          text: JSON.stringify(summary),
+          structuredContent: summary,
+          modelOutput: {
+            type: "content",
+            value: [
+              {
+                type: "file",
+                mediaType: "image/webp",
+                data: { type: "data", data: "transient-image" },
+              },
+            ],
+          },
+        },
+      },
+    ];
+
+    const active = messagesToModelMessages(messages, "openai");
+    expect((active[1].content as any[])[0].output).toMatchObject({
+      type: "content",
+    });
+    const compatible = messagesToModelMessages(messages, "openai-compatible");
+    expect((compatible[1].content as any[])[0].output.type).toBe("text");
+  });
 });

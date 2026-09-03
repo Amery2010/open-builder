@@ -80,6 +80,10 @@ describe("WebAppGenerator streaming failures", () => {
                       label: "Browser (Recommended)",
                       description: "Use the browser runtime.",
                     },
+                    {
+                      label: "Desktop",
+                      description: "Use the desktop runtime.",
+                    },
                   ],
                 },
               ],

@@ -42,6 +42,7 @@ export interface DesignReviewCaptureCollection {
 }
 
 interface CollectDesignReviewCapturesOptions {
+  viewports?: readonly DesignReviewViewport[];
   prepareViewport: (viewport: DesignReviewViewport) => Promise<void>;
   captureViewport: (
     viewport: DesignReviewViewport,
@@ -60,6 +61,7 @@ function errorMessage(error: unknown): string {
 }
 
 export async function collectDesignReviewCaptures({
+  viewports = DESIGN_REVIEW_VIEWPORTS,
   prepareViewport,
   captureViewport,
   restore,
@@ -70,9 +72,9 @@ export async function collectDesignReviewCaptures({
   const errors: string[] = [];
 
   try {
-    for (const [index, viewport] of DESIGN_REVIEW_VIEWPORTS.entries()) {
+    for (const [index, viewport] of viewports.entries()) {
       signal?.throwIfAborted();
-      onProgress?.(index, DESIGN_REVIEW_VIEWPORTS.length, viewport);
+      onProgress?.(index, viewports.length, viewport);
       try {
         await prepareViewport(viewport);
         signal?.throwIfAborted();
@@ -81,7 +83,7 @@ export async function collectDesignReviewCaptures({
         signal?.throwIfAborted();
         errors.push(`${viewport.name}: ${errorMessage(error)}`);
       }
-      onProgress?.(index + 1, DESIGN_REVIEW_VIEWPORTS.length, viewport);
+      onProgress?.(index + 1, viewports.length, viewport);
     }
   } finally {
     await restore();

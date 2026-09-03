@@ -3,9 +3,10 @@
 import type { ToolSet } from "ai";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Conversation } from "../../types";
-import { BUILTIN_TOOLS } from "../ai/tools-schema";
-import type { GeneratorEvents } from "../ai/generator-types";
+import { BUILTIN_TOOLS, DESIGN_HOST_TOOLS } from "../ai/tools-schema";
+import type { GeneratorEvents, GeneratorOptions } from "../ai/generator-types";
 import { DISPATCH_SUBAGENT_TOOL } from "../tools/subagent-tool";
+import { SCREENSHOT_TO_CODE_TOOL } from "../tools/screenshot-to-code";
 import { computeConversationFingerprint } from "./context";
 import { createLocalAgentGenerator, runLocalUtilityText } from "./generator";
 import type { LocalAgentEvent, LocalAgentStartRequest } from "./types";
@@ -56,7 +57,7 @@ function generator(
   onText = vi.fn(),
   options: {
     tools?: ToolSet;
-    customToolHandler?: (name: string, args: unknown) => Promise<string>;
+    customToolHandler?: NonNullable<GeneratorOptions["customToolHandler"]>;
     maxIterations?: number;
     dispatchSubagent?: (
       name: string,
@@ -352,6 +353,68 @@ describe("LocalAgentGenerator", () => {
     );
   });
 
+  it("returns rich preview evidence to Local CLI and scrubs it after the run", async () => {
+    const imageSentinel = "local-run-image-bytes";
+    const semanticSentinel = "local-run-semantic-text";
+    const summary = {
+      kind: "preview_evidence_v1",
+      status: "complete",
+      generation: "a".repeat(64),
+      evidence: [],
+      errors: [],
+      placeholder: "run only",
+    };
+    localAgentMocks.start.mockImplementation(
+      async (
+        _request: LocalAgentStartRequest,
+        onEvent: (event: LocalAgentEvent) => void,
+      ) => {
+        queueMicrotask(() => {
+          onEvent({
+            type: "toolRequest",
+            runId: "run-preview-evidence",
+            callId: "capture-preview",
+            name: "capture_preview_evidence",
+            arguments: { viewports: ["mobile"] },
+          });
+          onEvent({ type: "done", aborted: false });
+        });
+        return "run-preview-evidence";
+      },
+    );
+    const { instance } = generator(baseConversation(), vi.fn(), vi.fn(), {
+      tools: {
+        capture_preview_evidence: DESIGN_HOST_TOOLS.capture_preview_evidence,
+      },
+      customToolHandler: async () => ({
+        text: JSON.stringify(summary),
+        structuredContent: summary,
+        content: [
+          { type: "text", text: semanticSentinel },
+          { type: "image", data: imageSentinel, mimeType: "image/webp" },
+        ],
+      }),
+    });
+
+    const result = await instance.generate("Capture the mobile preview");
+
+    expect(localAgentMocks.resolve).toHaveBeenCalledWith(
+      "run-preview-evidence",
+      "capture-preview",
+      expect.objectContaining({
+        content: expect.arrayContaining([
+          expect.objectContaining({ type: "image", data: imageSentinel }),
+        ]),
+      }),
+    );
+    const persisted = result.messages.find(
+      (message) =>
+        message.role === "tool" && message.tool_call_id === "capture-preview",
+    );
+    expect(JSON.stringify(persisted)).not.toContain(imageSentinel);
+    expect(JSON.stringify(persisted)).not.toContain(semanticSentinel);
+  });
+
   it("dispatches a registered read-only subagent before a Design contract", async () => {
     const controller = createDesignContractController();
     controller.reset({ enabled: true });
@@ -433,7 +496,7 @@ describe("LocalAgentGenerator", () => {
       },
     );
     const { instance } = generator(baseConversation(), vi.fn(), vi.fn(), {
-      tools: { screenshot_to_code: BUILTIN_TOOLS.write_file },
+      tools: SCREENSHOT_TO_CODE_TOOL,
       customToolHandler,
     });
 
@@ -1227,7 +1290,7 @@ describe("LocalAgentGenerator", () => {
       onPlanApproved: () => ({
         list_files: BUILTIN_TOOLS.list_files,
         write_file: BUILTIN_TOOLS.write_file,
-        screenshot_to_code: BUILTIN_TOOLS.write_file,
+        screenshot_to_code: SCREENSHOT_TO_CODE_TOOL.screenshot_to_code,
       }),
     });
 
