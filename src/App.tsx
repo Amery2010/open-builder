@@ -160,7 +160,8 @@ export default function App() {
     isGenerating,
     setIsGenerating,
     settings,
-    hasValidSettings,
+    hasConfiguredModelRuntime,
+    localCliStatusNotice,
     isSettingsOpen,
     setIsSettingsOpen,
     handleSaveSettings,
@@ -612,7 +613,8 @@ export default function App() {
       messages={messages}
       isGenerating={isGenerating}
       isThinkingStreaming={isThinkingStreaming}
-      hasValidSettings={hasValidSettings}
+      hasConfiguredModelRuntime={hasConfiguredModelRuntime}
+      localCliStatusNotice={localCliStatusNotice}
       onGenerate={handleGenerate}
       onStop={stop}
       onOpenSettings={() => setIsSettingsOpen(true)}

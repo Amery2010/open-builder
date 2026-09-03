@@ -71,6 +71,44 @@ pub struct LocalCliFailure {
     pub retry_policy: LocalCliRetryPolicy,
 }
 
+/// A provider adapter failure. Adapters that already know the failure
+/// category attach its code so the substring classifier is bypassed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AdapterError {
+    pub code: Option<LocalCliFailureCode>,
+    pub message: String,
+}
+
+impl AdapterError {
+    pub fn coded(code: LocalCliFailureCode, message: impl Into<String>) -> Self {
+        Self {
+            code: Some(code),
+            message: message.into(),
+        }
+    }
+}
+
+impl From<String> for AdapterError {
+    fn from(message: String) -> Self {
+        Self {
+            code: None,
+            message,
+        }
+    }
+}
+
+impl From<&str> for AdapterError {
+    fn from(message: &str) -> Self {
+        Self::from(message.to_string())
+    }
+}
+
+impl fmt::Display for AdapterError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 impl LocalCliFailure {
     pub fn new(
         provider: LocalAgentProvider,
@@ -89,6 +127,25 @@ impl LocalCliFailure {
             had_host_side_effect: false,
             retry_policy,
         }
+    }
+
+    /// Uses the adapter's own category when it attached one; otherwise falls
+    /// back to substring classification of the message.
+    pub fn from_adapter(
+        provider: LocalAgentProvider,
+        phase: LocalCliFailurePhase,
+        error: &AdapterError,
+        attempted_resume: bool,
+        cancelled: bool,
+    ) -> Self {
+        if !cancelled {
+            if let Some(code) = error.code {
+                if let Some((safe_message, retry_policy)) = coded_failure(code, attempted_resume) {
+                    return Self::new(provider, code, phase, safe_message, retry_policy);
+                }
+            }
+        }
+        Self::classified(provider, phase, &error.message, attempted_resume, cancelled)
     }
 
     pub fn classified(
@@ -156,6 +213,10 @@ impl LocalCliFailure {
         } else if message.contains("credential")
             || message.contains("api key")
             || message.contains("authentication")
+            || ((message.contains("unauthorized") || message.contains("401"))
+                && !message.contains("attempted")
+                && !message.contains("native")
+                && !message.contains("capability"))
         {
             (
                 LocalCliFailureCode::CredentialRejected,
@@ -299,6 +360,45 @@ impl LocalCliFailure {
         };
 
         Self::new(provider, code, phase, safe_message, retry_policy)
+    }
+}
+
+/// Safe text for the codes adapters attach today. A code without an entry
+/// falls back to substring classification of the message.
+fn coded_failure(
+    code: LocalCliFailureCode,
+    attempted_resume: bool,
+) -> Option<(&'static str, LocalCliRetryPolicy)> {
+    match code {
+        LocalCliFailureCode::CredentialRejected => Some((
+            "The local CLI rejected its configured credentials.",
+            LocalCliRetryPolicy::AfterSetup,
+        )),
+        LocalCliFailureCode::ModelRejected => Some((
+            "The local CLI rejected the selected model or reasoning effort.",
+            LocalCliRetryPolicy::Manual,
+        )),
+        LocalCliFailureCode::SessionUnavailable => Some((
+            "The saved local CLI session is no longer available.",
+            if attempted_resume {
+                LocalCliRetryPolicy::FreshSessionSafe
+            } else {
+                LocalCliRetryPolicy::Manual
+            },
+        )),
+        LocalCliFailureCode::ProviderApprovalRejected => Some((
+            "The local CLI rejected an Open Builder tool before it reached Host authorization.",
+            LocalCliRetryPolicy::None,
+        )),
+        LocalCliFailureCode::IsolationViolation => Some((
+            "The local CLI attempted to use a capability outside the Open Builder sandbox.",
+            LocalCliRetryPolicy::None,
+        )),
+        LocalCliFailureCode::ProcessExit => Some((
+            "The local CLI provider rate limit prevented this request from completing.",
+            LocalCliRetryPolicy::Manual,
+        )),
+        _ => None,
     }
 }
 
@@ -635,6 +735,15 @@ mod tests {
         assert!(!failure.safe_message.contains(sentinel));
         assert!(!serde_json::to_string(&failure).unwrap().contains(sentinel));
 
+        let unauthorized = LocalCliFailure::classified(
+            LocalAgentProvider::Claude,
+            LocalCliFailurePhase::Stream,
+            "gateway returned HTTP 401 Unauthorized",
+            false,
+            false,
+        );
+        assert_eq!(unauthorized.code, LocalCliFailureCode::CredentialRejected);
+
         let isolation = LocalCliFailure::classified(
             LocalAgentProvider::Codex,
             LocalCliFailurePhase::Stream,
@@ -696,5 +805,83 @@ mod tests {
             unsupported_installation.code,
             LocalCliFailureCode::CliUnsupported
         );
+    }
+
+    #[test]
+    fn coded_adapter_errors_bypass_substring_classification() {
+        let coded = AdapterError::coded(
+            LocalCliFailureCode::CredentialRejected,
+            "thread not found while resuming",
+        );
+        let failure = LocalCliFailure::from_adapter(
+            LocalAgentProvider::Codex,
+            LocalCliFailurePhase::Stream,
+            &coded,
+            true,
+            false,
+        );
+        assert_eq!(failure.code, LocalCliFailureCode::CredentialRejected);
+        assert_eq!(failure.retry_policy, LocalCliRetryPolicy::AfterSetup);
+        assert!(!failure.safe_message.contains("thread"));
+
+        let cancelled = LocalCliFailure::from_adapter(
+            LocalAgentProvider::Codex,
+            LocalCliFailurePhase::Stream,
+            &coded,
+            true,
+            true,
+        );
+        assert_eq!(cancelled.code, LocalCliFailureCode::Cancelled);
+
+        let session = AdapterError::coded(
+            LocalCliFailureCode::SessionUnavailable,
+            "Codex exec exited unsuccessfully; CLI session is unavailable",
+        );
+        let not_resumed = LocalCliFailure::from_adapter(
+            LocalAgentProvider::Codex,
+            LocalCliFailurePhase::Shutdown,
+            &session,
+            false,
+            false,
+        );
+        assert_ne!(
+            not_resumed.retry_policy,
+            LocalCliRetryPolicy::FreshSessionSafe
+        );
+
+        let rate_limit = LocalCliFailure::from_adapter(
+            LocalAgentProvider::Claude,
+            LocalCliFailurePhase::Stream,
+            &AdapterError::coded(
+                LocalCliFailureCode::ProcessExit,
+                "thread not found while resuming",
+            ),
+            true,
+            false,
+        );
+        assert_eq!(rate_limit.code, LocalCliFailureCode::ProcessExit);
+        assert!(rate_limit.safe_message.contains("rate limit"));
+
+        let isolation = LocalCliFailure::from_adapter(
+            LocalAgentProvider::Pi,
+            LocalCliFailurePhase::Tool,
+            &AdapterError::coded(
+                LocalCliFailureCode::IsolationViolation,
+                "authentication failed",
+            ),
+            false,
+            false,
+        );
+        assert_eq!(isolation.code, LocalCliFailureCode::IsolationViolation);
+        assert_eq!(isolation.retry_policy, LocalCliRetryPolicy::None);
+
+        let uncoded = LocalCliFailure::from_adapter(
+            LocalAgentProvider::Claude,
+            LocalCliFailurePhase::Stream,
+            &AdapterError::from("Claude request was rate limited"),
+            false,
+            false,
+        );
+        assert_eq!(uncoded.code, LocalCliFailureCode::ProcessExit);
     }
 }

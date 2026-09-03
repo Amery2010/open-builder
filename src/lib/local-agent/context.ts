@@ -5,8 +5,11 @@ import {
   messagesForConversationContinuation,
 } from "../ai/conversation-context";
 import { filterMemoryMessages } from "../utils/memory-filter";
+import { legacyAttachmentTextForModel } from "../attachments/model-context";
 
 const MAX_BOOTSTRAP_CHARS = 512 * 1024;
+const OMITTED_HISTORY_NOTICE =
+  "[Earlier application history omitted to fit the local CLI context.]";
 
 function stableValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(stableValue);
@@ -74,27 +77,61 @@ async function fingerprintFiles(files: ProjectFiles): Promise<unknown[]> {
   );
 }
 
+/**
+ * Automatic QA runs in a mode that never resumes or saves a CLI session, so
+ * the resumable thread has not seen the QA exchange. Dropping it keeps the
+ * saved fingerprint valid; QA file edits still invalidate it via file hashes.
+ */
+function withoutAutoQaExchanges<
+  T extends Pick<Conversation, "messages" | "compressedContext">,
+>(conversation: T): T {
+  const boundary = conversation.compressedContext?.fromIndex ?? 0;
+  const messages: Message[] = [];
+  let droppedBeforeBoundary = 0;
+  let inQaExchange = false;
+  conversation.messages.forEach((message, index) => {
+    if (message.role === "user") {
+      inQaExchange = message.metadata?.origin === "auto_qa";
+    }
+    if (!inQaExchange) {
+      messages.push(message);
+      return;
+    }
+    if (index < boundary) droppedBeforeBoundary += 1;
+  });
+  if (messages.length === conversation.messages.length) return conversation;
+  return {
+    ...conversation,
+    messages,
+    compressedContext: conversation.compressedContext && {
+      ...conversation.compressedContext,
+      fromIndex:
+        conversation.compressedContext.fromIndex - droppedBeforeBoundary,
+    },
+  };
+}
+
 export async function computeConversationFingerprint(
   conversation: Pick<
     Conversation,
     "messages" | "files" | "compressedContext" | "template"
   >,
 ): Promise<string> {
-  const compressedContext = conversation.compressedContext
+  const { messages, compressedContext: context } =
+    withoutAutoQaExchanges(conversation);
+  const compressedContext = context
     ? {
-        ...conversation.compressedContext,
+        ...context,
         fromIndex:
-          conversation.compressedContext.fromIndex -
-          conversation.messages
-            .slice(0, conversation.compressedContext.fromIndex)
-            .filter(isUiOnlyMessage).length,
+          context.fromIndex -
+          messages.slice(0, context.fromIndex).filter(isUiOnlyMessage).length,
       }
     : undefined;
   const payload = {
     version: 1,
     template: conversation.template,
     compressedContext,
-    messages: filterMemoryMessages(conversation.messages)
+    messages: filterMemoryMessages(messages)
       .filter((message) => !isErrorMessage(message))
       .filter((message) => !isUiOnlyMessage(message))
       .map(fingerprintMessage),
@@ -104,11 +141,15 @@ export async function computeConversationFingerprint(
 }
 
 function printableContent(message: Message): string {
-  if (typeof message.content === "string") return message.content;
+  if (typeof message.content === "string") {
+    return legacyAttachmentTextForModel(message.content) ?? message.content;
+  }
   if (!Array.isArray(message.content)) return "";
   return message.content
     .map((part) => {
-      if (part.type === "text") return part.text;
+      if (part.type === "text") {
+        return legacyAttachmentTextForModel(part.text) ?? part.text;
+      }
       if (part.type === "image_url") return "[Image attachment]";
       return `[File attachment: ${part.file.filename} (${part.file.mediaType})]`;
     })
@@ -120,7 +161,9 @@ export function formatConversationBootstrap(
 ): string {
   const sections: string[] = [];
   const canonicalMessages = filterMemoryMessages(
-    messagesForConversationContinuation(conversation as Conversation),
+    messagesForConversationContinuation(
+      withoutAutoQaExchanges(conversation) as Conversation,
+    ),
   );
   for (const message of canonicalMessages) {
     if (isErrorMessage(message)) continue;
@@ -142,7 +185,15 @@ export function formatConversationBootstrap(
   }
   const joined = sections.join("\n\n");
   if (joined.length <= MAX_BOOTSTRAP_CHARS) return joined;
-  return `[Earlier application history omitted to fit the local CLI context.]\n\n${joined.slice(
-    -MAX_BOOTSTRAP_CHARS,
-  )}`;
+  const retained: string[] = [];
+  let remaining = MAX_BOOTSTRAP_CHARS - OMITTED_HISTORY_NOTICE.length - 2;
+  for (let index = sections.length - 1; index >= 0; index--) {
+    const separatorLength = retained.length ? 2 : 0;
+    if (sections[index].length + separatorLength > remaining) continue;
+    retained.unshift(sections[index]);
+    remaining -= sections[index].length + separatorLength;
+  }
+  return retained.length
+    ? `${OMITTED_HISTORY_NOTICE}\n\n${retained.join("\n\n")}`
+    : OMITTED_HISTORY_NOTICE;
 }

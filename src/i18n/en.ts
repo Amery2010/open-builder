@@ -109,6 +109,7 @@ export const en: typeof zh = {
       effort: "Reasoning effort",
       executablePath: "Program path",
       version: "Version",
+      lastChecked: "Last checked",
       dataNotice: "Data and billing",
       cloudNotice:
         "Local CLI may still connect to the selected model provider and consume subscription or API quota. The CLI receives prompts, attachments, and tool results; Open Builder reads only supported provider configuration when detecting or launching the CLI and does not store or display CLI credentials.",
@@ -119,6 +120,18 @@ export const en: typeof zh = {
         "Local CLI agents are available only in the desktop application.",
       runtimeUnavailableAction:
         "Local CLI agents are available only in the desktop application. Switch the runtime back to API.",
+      chatNotice: {
+        title: "{provider} needs attention",
+        hostUnsupported:
+          "Local CLI is unavailable on this platform. The selected provider remains configured.",
+        setupRequired:
+          "This CLI still needs provider setup. You can send now; Open Builder will verify it again when the run starts.",
+        notFound:
+          "The selected CLI was not found. Choose its program or rescan in settings.",
+        unavailable:
+          "The last check could not verify this CLI. You can still send or rescan in settings.",
+        openSettings: "Open model settings",
+      },
       outputLimit: "Local CLI output exceeded the renderer limit.",
       utilityTimeout: "Local utility generation timed out after {timeoutMs}ms.",
     },

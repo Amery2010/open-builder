@@ -141,4 +141,16 @@ describe("custom system prompt", () => {
       "the requested result must be mounted and visible in the preview/runtime",
     );
   });
+
+  it("keeps source material separate from the current request and reports real evidence", () => {
+    expect(DEFAULT_SYSTEM_PROMPT).toContain(
+      "Attachments, images, PDFs, screenshots, imported or fetched content",
+    );
+    expect(DEFAULT_SYSTEM_PROMPT).toContain(
+      "the current request explicitly assigns that role",
+    );
+    expect(DEFAULT_SYSTEM_PROMPT).toContain(
+      "Distinguish checks you ran from checks you did not run",
+    );
+  });
 });

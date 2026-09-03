@@ -14,6 +14,10 @@ import { MessageBubble } from "./chat/MessageBubble";
 import { AskUserQuestionCard } from "./chat/AskUserQuestionCard";
 import { GeneratingIndicator } from "./chat/GeneratingIndicator";
 import { SettingsWarning } from "./chat/SettingsWarning";
+import {
+  LocalCliStatusNotice,
+  type LocalCliStatusNoticeValue,
+} from "./chat/LocalCliStatusNotice";
 import { SessionListOverlay } from "./chat/SessionListOverlay";
 import { ResetProjectConfirmDialog } from "./chat/ResetProjectConfirmDialog";
 import {
@@ -82,7 +86,8 @@ interface ChatInterfaceProps {
   messages: Message[];
   isGenerating: boolean;
   isThinkingStreaming?: boolean;
-  hasValidSettings: boolean;
+  hasConfiguredModelRuntime: boolean;
+  localCliStatusNotice?: LocalCliStatusNoticeValue | null;
   onGenerate: (
     prompt: string,
     attachments?: Attachment[],
@@ -159,7 +164,8 @@ export function ChatInterface({
   messages,
   isGenerating,
   isThinkingStreaming = false,
-  hasValidSettings,
+  hasConfiguredModelRuntime,
+  localCliStatusNotice = null,
   onGenerate,
   onStop,
   onOpenSettings,
@@ -510,7 +516,7 @@ export function ChatInterface({
       isGenerating
     )
       return;
-    if (!hasValidSettings) {
+    if (!hasConfiguredModelRuntime) {
       onOpenSettings();
       return;
     }
@@ -625,11 +631,18 @@ export function ChatInterface({
           onScroll={updateAutoScrollIntent}
           style={{ scrollbarGutter: "stable" }}
         >
-          {!hasValidSettings && (
+          {!hasConfiguredModelRuntime && (
             <SettingsWarning onOpenSettings={onOpenSettings} />
           )}
 
-          {messages.length === 0 && hasValidSettings && (
+          {hasConfiguredModelRuntime && localCliStatusNotice ? (
+            <LocalCliStatusNotice
+              notice={localCliStatusNotice}
+              onOpenSettings={onOpenSettings}
+            />
+          ) : null}
+
+          {messages.length === 0 && hasConfiguredModelRuntime && (
             <EmptyState onSelectSuggestion={setInput} />
           )}
 

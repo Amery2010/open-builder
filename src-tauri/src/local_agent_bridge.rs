@@ -20,7 +20,8 @@ use rmcp::{ErrorData, ServerHandler};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
-use crate::local_agent::{LocalAgentEvent, LocalToolContent, LocalToolResolution, LocalToolSpec};
+use crate::local_agent::TrackedChannel;
+use crate::local_agent::{LocalToolContent, LocalToolResolution, LocalToolSpec};
 
 #[path = "local_agent_bridge_broker.rs"]
 mod broker;
@@ -364,7 +365,7 @@ impl ToolBridge {
         tools: Vec<LocalToolSpec>,
         max_tool_calls: usize,
         cancellation: CancellationToken,
-        channel: tauri::ipc::Channel<LocalAgentEvent>,
+        channel: TrackedChannel,
     ) -> Result<(String, String), String> {
         let mcp_url = self.ensure_started().await?;
         let token = self
@@ -410,6 +411,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
+    use crate::local_agent::LocalAgentEvent;
 
     fn tool(name: &str) -> LocalToolSpec {
         LocalToolSpec {
@@ -490,7 +492,7 @@ mod tests {
                 vec![tool("allowed")],
                 2,
                 CancellationToken::new(),
-                channel,
+                channel.into(),
             )
             .await
             .unwrap();
@@ -586,7 +588,7 @@ mod tests {
                 vec![allowed],
                 1,
                 CancellationToken::new(),
-                channel,
+                channel.into(),
             )
             .await
             .unwrap();
@@ -736,7 +738,7 @@ mod tests {
                 vec![tool("allowed")],
                 1,
                 CancellationToken::new(),
-                channel,
+                channel.into(),
             )
             .await
             .unwrap();

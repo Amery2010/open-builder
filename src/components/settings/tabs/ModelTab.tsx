@@ -55,9 +55,11 @@ export function ModelTab({
   const modelCache = useSettingsStore((s) => s.modelCache);
   const setModelCache = useSettingsStore((s) => s.setModelCache);
   const clearModelCache = useSettingsStore((s) => s.clearModelCache);
-  const localAgentCapability = useSettingsStore((s) => s.localAgentCapability);
-  const refreshLocalAgentCapability = useSettingsStore(
-    (s) => s.refreshLocalAgentCapability,
+  const localCliHostObservation = useSettingsStore(
+    (s) => s.localCliObservationCache.host,
+  );
+  const ensureLocalCliHostObservation = useSettingsStore(
+    (s) => s.ensureLocalCliHostObservation,
   );
 
   const cacheHit =
@@ -73,13 +75,30 @@ export function ModelTab({
   const [isLoading, setIsLoading] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(null);
+  const [isCheckingLocalCliHost, setIsCheckingLocalCliHost] = useState(
+    !localCliHostObservation,
+  );
   const loadingKeyRef = useRef<string>("");
 
+  const inspectLocalCliHost = useCallback(
+    async (forceRefresh = false) => {
+      setIsCheckingLocalCliHost(true);
+      try {
+        await ensureLocalCliHostObservation(forceRefresh);
+      } finally {
+        setIsCheckingLocalCliHost(false);
+      }
+    },
+    [ensureLocalCliHostObservation],
+  );
+
   useEffect(() => {
-    if (localAgentCapability === "loading") {
-      void refreshLocalAgentCapability();
+    if (localCliHostObservation) {
+      setIsCheckingLocalCliHost(false);
+      return;
     }
-  }, [localAgentCapability, refreshLocalAgentCapability]);
+    void inspectLocalCliHost(false);
+  }, [inspectLocalCliHost, localCliHostObservation]);
 
   const fetchModels = useCallback(async () => {
     if (!formData.apiBaseUrl || !formData.apiKey) {
@@ -180,6 +199,9 @@ export function ModelTab({
     showDropdown && formData.model && !models.includes(formData.model)
       ? [formData.model, ...models]
       : models;
+  const localAgentCapability = isCheckingLocalCliHost
+    ? "loading"
+    : (localCliHostObservation?.status ?? "loading");
   const localAgentsSupported = localAgentCapability === "supported";
   const showRuntimeSettings =
     formData.runtime === "localCli" ||
@@ -241,7 +263,7 @@ export function ModelTab({
                   size="sm"
                   variant="ghost"
                   className="h-7 shrink-0 px-2 text-xs"
-                  onClick={() => void refreshLocalAgentCapability(true)}
+                  onClick={() => void inspectLocalCliHost(true)}
                 >
                   <RefreshCw size={13} aria-hidden="true" />
                   {t.settings.localCli.rescan}

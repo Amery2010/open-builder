@@ -6,6 +6,11 @@ import type {
   ResolvedAttachment,
 } from "../ai/generator-types";
 import type { Attachment } from "../../types";
+import {
+  attachmentPartsForModel,
+  legacyAttachmentTextForModel,
+  unavailableAttachmentPartForModel,
+} from "./model-context";
 
 export const ATTACHMENT_STORAGE_DOMAIN = "open-builder-attachments";
 
@@ -117,41 +122,31 @@ export async function hydrateMessageAttachments(
   return Promise.all(
     messages.map(async (message) => {
       const refs = message.metadata?.attachments;
-      if (message.role !== "user" || !refs?.length) return message;
+      if (message.role !== "user") return message;
       const parts: ContentPart[] = [];
+      let wrappedLegacyAttachment = false;
       if (typeof message.content === "string" && message.content) {
-        parts.push({ type: "text", text: message.content });
+        const legacy = legacyAttachmentTextForModel(message.content);
+        parts.push({ type: "text", text: legacy ?? message.content });
+        wrappedLegacyAttachment = legacy !== null;
       } else if (Array.isArray(message.content)) {
-        parts.push(...message.content);
+        parts.push(
+          ...message.content.map((part) => {
+            if (part.type !== "text") return part;
+            const legacy = legacyAttachmentTextForModel(part.text);
+            if (!legacy) return part;
+            wrappedLegacyAttachment = true;
+            return { type: "text" as const, text: legacy };
+          }),
+        );
       }
-      for (const ref of refs) {
+      if (!refs?.length && !wrappedLegacyAttachment) return message;
+      for (const ref of refs ?? []) {
         try {
           const attachment = await resolveAttachmentForModel(ref);
-          if (attachment.type === "image") {
-            parts.push({
-              type: "image_url",
-              image_url: { url: attachment.content },
-            });
-          } else if (attachment.mimeType === "application/pdf") {
-            parts.push({
-              type: "file",
-              file: {
-                data: attachment.content,
-                mediaType: attachment.mimeType,
-                filename: attachment.name,
-              },
-            });
-          } else {
-            parts.push({
-              type: "text",
-              text: `[File: ${attachment.name} | ${attachment.size}]\n${attachment.content}`,
-            });
-          }
+          parts.push(...attachmentPartsForModel(attachment));
         } catch {
-          parts.push({
-            type: "text",
-            text: `[Attachment unavailable: ${ref.name}]`,
-          });
+          parts.push(unavailableAttachmentPartForModel(ref));
         }
       }
       return { ...message, content: parts };

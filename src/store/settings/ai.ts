@@ -7,26 +7,27 @@ import {
   queryLocalAgentSupport,
   resetLocalAgentSupportCache,
 } from "../../lib/local-agent/tauri";
-import type { LocalAgentProvider } from "../../lib/local-agent/providers";
+import { localCliRuntime } from "../../lib/local-agent/runtime";
+import {
+  createEmptyLocalCliObservationCache,
+  createLocalCliObservationCoordinator,
+  type LocalCliObservationCache,
+  type LocalCliObservationCoordinator,
+  type PersistedLocalCliHostObservation,
+  type PersistedLocalCliObservation,
+} from "../../lib/local-agent/observations";
+import {
+  isLocalAgentProvider,
+  type LocalAgentProvider,
+} from "../../lib/local-agent/providers";
 import type {
+  LocalAgentPreference,
   LocalAgentProbe,
-  LocalCliInspectionStatus,
-  LocalCliUnavailableReason,
+  LocalCliFailure,
+  LocalCliPreparedMetadata,
 } from "../../lib/local-agent/types";
 
 export type GenerationRuntime = "api" | "localCli";
-export type LocalAgentCapabilityStatus =
-  "loading" | "supported" | "unsupported" | "error";
-
-/** Per-provider launch readiness. This is deliberately volatile: a CLI can be
- * changed or logged out outside Open Builder, so persisted settings never act
- * as proof that a future run is safe to start. */
-export interface LocalAgentReadiness {
-  status: LocalCliInspectionStatus;
-  reasonCode?: LocalCliUnavailableReason;
-  checkedAt?: number;
-  probe?: LocalAgentProbe;
-}
 
 export interface LocalAgentProviderSettings {
   model: string;
@@ -74,115 +75,136 @@ export interface ModelCache {
 export interface AISlice {
   ai: AISettings;
   modelCache: ModelCache | null;
-  localAgentCapability: LocalAgentCapabilityStatus;
-  localAgentReadiness: Partial<Record<LocalAgentProvider, LocalAgentReadiness>>;
+  /** Persisted display observations; never used as launch authority. */
+  localCliObservationCache: LocalCliObservationCache;
   setAI: (settings: AISettings) => void;
   setModelCache: (cache: ModelCache) => void;
   clearModelCache: () => void;
-  refreshLocalAgentCapability: (
-    force?: boolean,
-  ) => Promise<LocalAgentCapabilityStatus>;
-  setLocalAgentProbe: (probe: LocalAgentProbe | null) => void;
-  clearLocalAgentReadiness: (provider?: LocalAgentProvider) => void;
-  isAIValid: () => boolean;
-}
-
-function readinessStatus(probe: LocalAgentProbe): LocalCliInspectionStatus {
-  if (
-    probe.status === "ready" ||
-    probe.status === "verificationRequired" ||
-    probe.status === "setupRequired" ||
-    probe.status === "unavailable"
-  ) {
-    return probe.status;
-  }
-  switch (probe.availability) {
-    case "ready":
-      return "ready";
-    case "needsSetup":
-      return "setupRequired";
-    case "notFound":
-    case "unsupported":
-    case "error":
-      return "unavailable";
-  }
+  ensureLocalCliHostObservation: (
+    forceRefresh?: boolean,
+  ) => Promise<PersistedLocalCliHostObservation>;
+  ensureLocalCliObservation: (
+    provider: LocalAgentProvider,
+    preference?: LocalAgentPreference,
+    forceRefresh?: boolean,
+  ) => Promise<PersistedLocalCliObservation | undefined>;
+  refreshLocalCliObservation: (
+    provider: LocalAgentProvider,
+    preference?: LocalAgentPreference,
+  ) => Promise<PersistedLocalCliObservation | undefined>;
+  invalidateLocalCliObservation: (provider?: LocalAgentProvider) => void;
+  mergeLocalCliPreparedMetadata: (
+    provider: LocalAgentProvider,
+    metadata: LocalCliPreparedMetadata,
+  ) => void;
+  mergeLocalCliFailure: (failure: LocalCliFailure) => void;
+  recordLocalCliProbe: (
+    probe: LocalAgentProbe,
+    inspectedPreference?: LocalAgentPreference,
+  ) => PersistedLocalCliObservation | undefined;
+  markLocalCliPreferenceVerificationRequired: (
+    provider: LocalAgentProvider,
+  ) => void;
+  isAIConfigured: () => boolean;
 }
 
 export const createAISlice: StateCreator<AISlice, [], [], AISlice> = (
   set,
   get,
 ) => {
-  let capabilityRequestId = 0;
+  const observationCoordinator: LocalCliObservationCoordinator =
+    createLocalCliObservationCoordinator(
+      {
+        get: () => get().localCliObservationCache,
+        set: (cache) => set({ localCliObservationCache: cache }),
+      },
+      {
+        queryHost: queryLocalAgentSupport,
+        resetHostCache: resetLocalAgentSupportCache,
+        inspectProvider: (provider, preference, forceRefresh) =>
+          localCliRuntime.inspect({
+            provider,
+            preference,
+            forceRefresh,
+          }),
+      },
+    );
+
+  const preferenceForProvider = (
+    provider: LocalAgentProvider,
+    settings = get().ai,
+  ): LocalAgentPreference => settings.localAgent.preferences[provider];
 
   return {
     ai: aiDefaults,
     modelCache: null,
-    localAgentCapability: "loading",
-    localAgentReadiness: {},
+    localCliObservationCache: createEmptyLocalCliObservationCache(),
     setAI: (settings) => {
+      const previous = get().ai;
       const normalized = {
         ...settings,
         apiBaseUrl: settings.apiBaseUrl.replace(/\/+$/, ""),
       };
       set({ ai: normalized });
+
+      for (const provider of Object.keys(
+        normalized.localAgent.preferences,
+      ) as LocalAgentProvider[]) {
+        const previousPreference = previous.localAgent.preferences[provider];
+        const nextPreference = normalized.localAgent.preferences[provider];
+        if (
+          previousPreference.model !== nextPreference.model ||
+          previousPreference.effort !== nextPreference.effort
+        ) {
+          observationCoordinator.markPreference(provider);
+        }
+      }
     },
     setModelCache: (cache) => set({ modelCache: cache }),
     clearModelCache: () => set({ modelCache: null }),
-    refreshLocalAgentCapability: async (force = false) => {
-      const requestId = ++capabilityRequestId;
-      if (force) resetLocalAgentSupportCache();
-      set({ localAgentCapability: "loading" });
-      try {
-        const supported = await queryLocalAgentSupport();
-        const status: LocalAgentCapabilityStatus = supported
-          ? "supported"
-          : "unsupported";
-        if (requestId === capabilityRequestId) {
-          set({ localAgentCapability: status });
-        }
-        return status;
-      } catch {
-        if (requestId === capabilityRequestId) {
-          set({ localAgentCapability: "error" });
-        }
-        return "error";
-      }
+    ensureLocalCliHostObservation: (forceRefresh = false) =>
+      observationCoordinator.ensureHost(forceRefresh),
+    ensureLocalCliObservation: async (
+      provider,
+      preference,
+      forceRefresh = false,
+    ) => {
+      const currentPreference = preference ?? preferenceForProvider(provider);
+      const observation = await observationCoordinator.ensureProvider(
+        provider,
+        currentPreference,
+        forceRefresh,
+      );
+      return observation;
     },
-    setLocalAgentProbe: (probe) => {
-      if (!probe) return;
-      const status = readinessStatus(probe);
-      set((state) => ({
-        localAgentReadiness: {
-          ...state.localAgentReadiness,
-          [probe.provider]: {
-            status,
-            reasonCode: probe.reasonCode,
-            checkedAt: probe.checkedAt,
-            probe,
-          },
-        },
-      }));
+    refreshLocalCliObservation: (provider, preference) =>
+      get().ensureLocalCliObservation(provider, preference, true),
+    invalidateLocalCliObservation: (provider) => {
+      observationCoordinator.invalidateProvider(provider);
     },
-    clearLocalAgentReadiness: (provider) => {
-      if (!provider) {
-        set({ localAgentReadiness: {} });
-        return;
-      }
-      set((state) => {
-        const next = { ...state.localAgentReadiness };
-        delete next[provider];
-        return { localAgentReadiness: next };
-      });
+    mergeLocalCliPreparedMetadata: (provider, metadata) => {
+      observationCoordinator.mergePrepared(
+        provider,
+        metadata,
+        preferenceForProvider(provider),
+      );
     },
-    isAIValid: () => {
-      const { ai, localAgentCapability, localAgentReadiness } = get();
+    mergeLocalCliFailure: (failure) => {
+      observationCoordinator.mergeFailure(failure);
+    },
+    recordLocalCliProbe: (probe, inspectedPreference) => {
+      if (!probe || !isLocalAgentProvider(probe.provider)) return undefined;
+      const preference =
+        inspectedPreference ?? preferenceForProvider(probe.provider);
+      return observationCoordinator.recordProbe(probe, preference);
+    },
+    markLocalCliPreferenceVerificationRequired: (provider) => {
+      observationCoordinator.markPreference(provider);
+    },
+    isAIConfigured: () => {
+      const { ai } = get();
       if (ai.runtime === "localCli") {
-        const readiness = localAgentReadiness[ai.localAgent.provider];
-        return (
-          localAgentCapability === "supported" &&
-          (readiness?.status === "ready" ||
-            readiness?.status === "verificationRequired")
-        );
+        return isLocalAgentProvider(ai.localAgent.provider);
       }
       return !!(ai.apiKey && ai.apiBaseUrl && ai.model);
     },

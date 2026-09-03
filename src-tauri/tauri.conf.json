@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "open-builder",
+        "title": "Open Builder",
         "width": 1024,
         "height": 768
       }

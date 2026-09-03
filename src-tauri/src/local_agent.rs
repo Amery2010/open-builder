@@ -17,7 +17,7 @@ use crate::local_agent_adapter::{
 use crate::local_agent_bridge::ToolBridge;
 use crate::local_agent_models::{CatalogAuthority, LaunchValidation, ModelStrategy};
 use crate::local_agent_runtime::{
-    infer_failure_phase, InstallationIdentity, LocalCliFailure, LocalCliFailureCode,
+    infer_failure_phase, AdapterError, InstallationIdentity, LocalCliFailure, LocalCliFailureCode,
     LocalCliFailurePhase, LocalCliRetryPolicy,
 };
 
@@ -511,19 +511,37 @@ impl RunPhaseTracker {
     }
 }
 
-fn tracked_event_channel(
+/// Event channel that records the run phase at the send site, so each event
+/// is serialized once instead of being deserialized and re-sent.
+#[derive(Clone)]
+pub struct TrackedChannel {
     target: tauri::ipc::Channel<LocalAgentEvent>,
-    phase: Arc<RunPhaseTracker>,
-) -> tauri::ipc::Channel<LocalAgentEvent> {
-    tauri::ipc::Channel::new(move |body| {
-        if let tauri::ipc::InvokeResponseBody::Json(json) = body {
-            if let Ok(event) = serde_json::from_str::<LocalAgentEvent>(&json) {
-                phase.observe(&event);
-                return target.send(event);
-            }
+    phase: Option<Arc<RunPhaseTracker>>,
+}
+
+impl TrackedChannel {
+    fn tracked(target: tauri::ipc::Channel<LocalAgentEvent>, phase: Arc<RunPhaseTracker>) -> Self {
+        Self {
+            target,
+            phase: Some(phase),
         }
-        Ok(())
-    })
+    }
+
+    pub fn send(&self, event: LocalAgentEvent) -> tauri::Result<()> {
+        if let Some(phase) = &self.phase {
+            phase.observe(&event);
+        }
+        self.target.send(event)
+    }
+}
+
+impl From<tauri::ipc::Channel<LocalAgentEvent>> for TrackedChannel {
+    fn from(target: tauri::ipc::Channel<LocalAgentEvent>) -> Self {
+        Self {
+            target,
+            phase: None,
+        }
+    }
 }
 
 pub struct LocalAgentState {
@@ -972,18 +990,18 @@ async fn probe(
     }
 }
 
-fn validate_start_request(request: &LocalAgentStartRequest) -> Result<(), String> {
+fn validate_start_request(request: &LocalAgentStartRequest) -> Result<(), AdapterError> {
     let request_bytes = serde_json::to_vec(request)
         .map_err(|_| "failed to serialize local agent request".to_string())?
         .len();
     if request_bytes > MAX_START_REQUEST_BYTES {
-        return Err("local agent request exceeds the request limit".to_string());
+        return Err("local agent request exceeds the request limit".into());
     }
     if !matches!(
         request.mode.as_str(),
         "chat" | "plan" | "auto_qa" | "subagent"
     ) {
-        return Err("invalid local agent execution mode".to_string());
+        return Err("invalid local agent execution mode".into());
     }
     let expected_scope = match request.mode.as_str() {
         "chat" | "plan" => LocalAgentRunScopeKind::Conversation,
@@ -991,38 +1009,39 @@ fn validate_start_request(request: &LocalAgentStartRequest) -> Result<(), String
         _ => unreachable!("execution mode was validated above"),
     };
     if request.scope.kind != expected_scope {
-        return Err("local agent run scope does not match its execution mode".to_string());
+        return Err("local agent run scope does not match its execution mode".into());
     }
     if request.scope.kind == LocalAgentRunScopeKind::Utility
         && (request.session_id.is_some() || request.session_compatibility_key.is_some())
     {
-        return Err("isolated utility runs cannot resume persistent CLI sessions".to_string());
+        return Err("isolated utility runs cannot resume persistent CLI sessions".into());
     }
     if request.native_search && matches!(request.mode.as_str(), "auto_qa" | "subagent") {
-        return Err("native search is not allowed in isolated execution modes".to_string());
+        return Err("native search is not allowed in isolated execution modes".into());
     }
     if request.scope.id.trim().is_empty()
         || request.scope.id.len() > 256
         || request.scope.id.chars().any(char::is_control)
     {
-        return Err("invalid local agent run scope".to_string());
+        return Err("invalid local agent run scope".into());
     }
     if let Some(key) = request.session_compatibility_key.as_deref() {
         if key.len() != 64 || !key.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err("invalid local agent session compatibility key".to_string());
+            return Err("invalid local agent session compatibility key".into());
         }
     }
     validate_adapter_request(request)?;
     if request.prompt.trim().is_empty() {
-        return Err("local agent prompt is required".to_string());
+        return Err("local agent prompt is required".into());
     }
     if request.tools.len() > MAX_TOOL_COUNT {
-        return Err(format!("too many local agent tools (max {MAX_TOOL_COUNT})"));
+        return Err(format!("too many local agent tools (max {MAX_TOOL_COUNT})").into());
     }
     if request.max_tool_calls == 0 || request.max_tool_calls > MAX_TOOL_CALLS_PER_RUN {
         return Err(format!(
             "invalid local agent tool-call budget (expected 1..={MAX_TOOL_CALLS_PER_RUN})"
-        ));
+        )
+        .into());
     }
     for tool in &request.tools {
         if tool.name.is_empty()
@@ -1031,7 +1050,7 @@ fn validate_start_request(request: &LocalAgentStartRequest) -> Result<(), String
             || tool.description.len() > MAX_TOOL_DESCRIPTION_BYTES
             || !tool.input_schema.is_object()
         {
-            return Err("invalid local agent tool definition".to_string());
+            return Err("invalid local agent tool definition".into());
         }
     }
     for value in [
@@ -1043,7 +1062,7 @@ fn validate_start_request(request: &LocalAgentStartRequest) -> Result<(), String
     .flatten()
     {
         if value.len() > 256 || value.chars().any(char::is_control) {
-            return Err("invalid local agent option".to_string());
+            return Err("invalid local agent option".into());
         }
     }
     Ok(())
@@ -1248,8 +1267,15 @@ pub async fn local_agent_start(
     let failure = |phase, message: String| {
         LocalCliFailure::classified(provider, phase, &message, requested_resume, false)
     };
-    validate_start_request(&request)
-        .map_err(|message| failure(LocalCliFailurePhase::Prepare, message))?;
+    validate_start_request(&request).map_err(|error| {
+        LocalCliFailure::from_adapter(
+            provider,
+            LocalCliFailurePhase::Prepare,
+            &error,
+            requested_resume,
+            false,
+        )
+    })?;
     let (executable, _path_source) = resolve_executable(&app, provider)
         .map_err(|message| failure(LocalCliFailurePhase::Inspect, message))?
         .ok_or_else(|| {
@@ -1283,7 +1309,7 @@ pub async fn local_agent_start(
     let run_id = uuid::Uuid::new_v4().to_string();
     let cancellation = CancellationToken::new();
     let phase = Arc::new(RunPhaseTracker::default());
-    let on_event = tracked_event_channel(on_event, phase.clone());
+    let on_event = TrackedChannel::tracked(on_event, phase.clone());
     {
         let mut runs = state.runs.lock().map_err(|_| {
             LocalCliFailure::new(
@@ -1389,7 +1415,7 @@ pub async fn local_agent_start(
         });
         let mut work = Box::pin(async {
             let preparation_result = tokio::select! {
-                _ = cancellation.cancelled() => Err("local agent run cancelled".to_string()),
+                _ = cancellation.cancelled() => Err(AdapterError::from("local agent run cancelled")),
                 result = tokio::time::timeout(
                     adapter_identity(provider).probe_timeout,
                     prepare_adapter_run(
@@ -1407,14 +1433,14 @@ pub async fn local_agent_start(
                         },
                     ),
                 ) => result
-                    .map_err(|_| "local CLI start preflight timed out".to_string())
+                    .map_err(|_| AdapterError::from("local CLI start preflight timed out"))
                     .and_then(|result| result),
             };
-            let preparation = preparation_result.map_err(|message| {
-                LocalCliFailure::classified(
+            let preparation = preparation_result.map_err(|error| {
+                LocalCliFailure::from_adapter(
                     provider,
                     LocalCliFailurePhase::Prepare,
-                    &message,
+                    &error,
                     requested_resume,
                     cancellation.is_cancelled(),
                 )
@@ -1471,12 +1497,12 @@ pub async fn local_agent_start(
                         LocalCliRetryPolicy::None,
                     )
                 })?;
-            preparation.launch().await.map_err(|message| {
-                let phase = infer_failure_phase(&message, LocalCliFailurePhase::Stream);
-                LocalCliFailure::classified(
+            preparation.launch().await.map_err(|error| {
+                let phase = infer_failure_phase(&error.message, LocalCliFailurePhase::Stream);
+                LocalCliFailure::from_adapter(
                     provider,
                     phase,
-                    &message,
+                    &error,
                     resumed,
                     cancellation.is_cancelled(),
                 )
@@ -1693,6 +1719,36 @@ mod tests {
             session_id: Some("session".to_string()),
         });
         assert_eq!(phase.current(), LocalCliFailurePhase::Shutdown);
+    }
+
+    #[test]
+    fn tracked_channel_observes_and_forwards_one_typed_event() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let target = tauri::ipc::Channel::new(move |body| {
+            sender
+                .send(body)
+                .map_err(|_| std::io::Error::other("test receiver is unavailable"))?;
+            Ok(())
+        });
+        let phase = Arc::new(RunPhaseTracker::default());
+        let channel = TrackedChannel::tracked(target, phase.clone());
+
+        channel
+            .send(LocalAgentEvent::ToolRequest {
+                run_id: "run".to_string(),
+                call_id: "call".to_string(),
+                name: "read_file".to_string(),
+                arguments: serde_json::json!({}),
+            })
+            .unwrap();
+
+        assert_eq!(phase.current(), LocalCliFailurePhase::Tool);
+        let tauri::ipc::InvokeResponseBody::Json(body) = receiver.recv().unwrap() else {
+            panic!("tracked channel must forward JSON");
+        };
+        let event: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(event["type"], "toolRequest");
+        assert!(receiver.try_recv().is_err());
     }
 
     #[test]

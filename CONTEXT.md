@@ -12,6 +12,10 @@ _Avoid_: Offline model, shell mode
 A Local CLI Runtime run whose executable identity, launch selection, session compatibility, process lifecycle, and normalized outcome are verified behind one interface before the result reaches a caller.
 _Avoid_: CLI connection, raw subprocess run
 
+**Local CLI Observation**:
+A non-authoritative record of the most recently inspected Provider state, retained to describe what Open Builder last observed without claiming that a future run can start.
+_Avoid_: Readiness proof, cached authorization
+
 **Host Tool Authority**:
 The immutable decision for one Verified Local CLI Run that defines exactly which Open Builder tools exist and what Host authorization each tool requires.
 _Avoid_: Provider permission, CLI allowlist

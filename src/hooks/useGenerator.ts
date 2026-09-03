@@ -817,16 +817,31 @@ export function useGenerator({
       const preferences = settings.localAgent.preferences[provider];
       const { runLocalUtilityText } =
         await import("../lib/local-agent/generator");
-      return runLocalUtilityText(
-        {
-          provider,
-          model: preferences.model,
-          effort: preferences.effort,
-        },
-        instructions,
-        prompt,
-        options,
-      );
+      try {
+        return await runLocalUtilityText(
+          {
+            provider,
+            model: preferences.model,
+            effort: preferences.effort,
+          },
+          instructions,
+          prompt,
+          {
+            ...options,
+            onPrepared: (preparedProvider, metadata) => {
+              useSettingsStore
+                .getState()
+                .mergeLocalCliPreparedMetadata(preparedProvider, metadata);
+            },
+          },
+        );
+      } catch (error) {
+        const failure = classifyGenerationError(error).localCliFailure;
+        if (failure) {
+          useSettingsStore.getState().mergeLocalCliFailure(failure);
+        }
+        throw error;
+      }
     },
     [settings.localAgent],
   );
@@ -907,6 +922,11 @@ export function useGenerator({
       flushOutputBuffers();
       setIsThinkingStreaming(false);
       const classified = classifyGenerationError(err);
+      if (classified.localCliFailure) {
+        useSettingsStore
+          .getState()
+          .mergeLocalCliFailure(classified.localCliFailure);
+      }
       setLastError(classified);
       setRunState(classified.kind === "aborted" ? "aborted" : "error");
       setMessages((prev) => [
@@ -1458,6 +1478,11 @@ export function useGenerator({
           setLastError(classifyGenerationError(error));
           setRunState("error");
           console.error("Generation error:", error);
+        },
+        onLocalCliPrepared: (provider, metadata) => {
+          useSettingsStore
+            .getState()
+            .mergeLocalCliPreparedMetadata(provider, metadata);
         },
         onLocalCliStatus: (status) => {
           if (!isCurrentGeneratorRun(generatorConversationId)) return;

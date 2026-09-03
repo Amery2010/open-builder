@@ -20,6 +20,7 @@ use crate::local_agent_protocol::{
     read_capped_line, turn_prompt, FrozenProcessSpec, PreparedPrivateFile, ProtocolContext,
     ProtocolOutcome, ProtocolOutputBudget, RunSupervisor,
 };
+use crate::local_agent_runtime::{AdapterError, LocalCliFailureCode};
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_PROBE_OUTPUT_BYTES: usize = 256 * 1024;
@@ -1620,7 +1621,7 @@ fn is_pre_turn_diagnostic(event_type: &str, item: &Value) -> bool {
     })
 }
 
-fn classify_stream_failure(value: &Value, attempted_resume: bool) -> String {
+fn classify_stream_failure(value: &Value, attempted_resume: bool) -> AdapterError {
     let message = value
         .pointer("/error/message")
         .or_else(|| value.get("message"))
@@ -1648,21 +1649,44 @@ fn classify_stream_failure(value: &Value, attempted_resume: bool) -> String {
     .iter()
     .any(|needle| message.contains(needle));
     if is_provider_approval_rejection(&message) {
-        MCP_APPROVAL_REJECTION_ERROR.to_string()
+        AdapterError::coded(
+            LocalCliFailureCode::ProviderApprovalRejected,
+            MCP_APPROVAL_REJECTION_ERROR,
+        )
     } else if attempted_resume && mentions_session && unavailable {
-        "Codex session is unavailable".to_string()
+        AdapterError::coded(
+            LocalCliFailureCode::SessionUnavailable,
+            "Codex session is unavailable",
+        )
+    } else if ["native", "tool", "capability", "mcp"]
+        .iter()
+        .any(|needle| message.contains(needle))
+        && ["unauthorized", "unexpected", "disabled"]
+            .iter()
+            .any(|needle| message.contains(needle))
+    {
+        AdapterError::coded(
+            LocalCliFailureCode::IsolationViolation,
+            "Codex attempted to use an unavailable capability",
+        )
     } else if ["unauthorized", "authentication", "credential", "api key"]
         .iter()
         .any(|needle| message.contains(needle))
     {
-        "Codex credentials were rejected".to_string()
+        AdapterError::coded(
+            LocalCliFailureCode::CredentialRejected,
+            "Codex credentials were rejected",
+        )
     } else if ["unknown model", "model not found", "invalid model"]
         .iter()
         .any(|needle| message.contains(needle))
     {
-        "Codex selected model was rejected".to_string()
+        AdapterError::coded(
+            LocalCliFailureCode::ModelRejected,
+            "Codex selected model was rejected",
+        )
     } else {
-        RUN_ERROR.to_string()
+        RUN_ERROR.into()
     }
 }
 
@@ -1723,12 +1747,14 @@ fn prepare_process(
     Ok((instructions_file, process_spec))
 }
 
-pub(crate) fn prepare_run(context: ProtocolContext) -> Result<PreparedCodexRun, String> {
+pub(crate) fn prepare_run(context: ProtocolContext) -> Result<PreparedCodexRun, AdapterError> {
     let provider_config = load_provider_config()?;
-    prepare_with_config(context, provider_config)
+    Ok(prepare_with_config(context, provider_config)?)
 }
 
-pub(crate) async fn launch_prepared(prepared: PreparedCodexRun) -> Result<ProtocolOutcome, String> {
+pub(crate) async fn launch_prepared(
+    prepared: PreparedCodexRun,
+) -> Result<ProtocolOutcome, AdapterError> {
     let PreparedCodexRun {
         context,
         process_spec,
@@ -1760,7 +1786,7 @@ fn frozen_process_spec(
 async fn run_once(
     context: &ProtocolContext,
     provider_config: &CodexProviderConfig,
-) -> Result<ProtocolOutcome, String> {
+) -> Result<ProtocolOutcome, AdapterError> {
     let (instructions_file, process_spec) = prepare_process(context, provider_config)?;
     instructions_file
         .verify_unchanged()
@@ -1771,7 +1797,7 @@ async fn run_once(
 async fn run_prepared(
     context: &ProtocolContext,
     process_spec: FrozenProcessSpec,
-) -> Result<ProtocolOutcome, String> {
+) -> Result<ProtocolOutcome, AdapterError> {
     let process = RunSupervisor::spawn(process_spec, context.cancellation.clone())?;
     let supervisor = process.supervisor;
     let mut stdin = process.stdin;
@@ -1818,7 +1844,7 @@ async fn run_prepared(
             let event_result: Result<Result<Value, String>, String> = if awaiting_thread {
                 match tokio::time::timeout(HANDSHAKE_TIMEOUT, io.read_value()).await {
                     Ok(result) => Ok(result),
-                    Err(_) => return Err(HANDSHAKE_TIMEOUT_ERROR.to_string()),
+                    Err(_) => return Err(HANDSHAKE_TIMEOUT_ERROR.into()),
                 }
             } else {
                 Ok(io.read_value().await)
@@ -1831,8 +1857,8 @@ async fn run_prepared(
                         aborted: true,
                     });
                 }
-                Ok(Err(error)) => return Err(error),
-                Err(error) => return Err(error),
+                Ok(Err(error)) => return Err(error.into()),
+                Err(error) => return Err(error.into()),
             };
             let event_type = event.get("type").and_then(Value::as_str).unwrap_or("");
             match event_type {
@@ -1841,7 +1867,7 @@ async fn run_prepared(
                         "Codex exec did not return a valid session id".to_string()
                     })?;
                     if thread_id.is_some() {
-                        return Err("Codex emitted duplicate session start events".to_string());
+                        return Err("Codex emitted duplicate session start events".into());
                     }
                     if let Some(expected) = context
                         .request
@@ -1850,7 +1876,7 @@ async fn run_prepared(
                         .filter(|expected| !expected.is_empty())
                     {
                         if expected != id {
-                            return Err("Codex resumed an unexpected session".to_string());
+                            return Err("Codex resumed an unexpected session".into());
                         }
                     }
                     thread_id = Some(id.to_string());
@@ -1872,7 +1898,7 @@ async fn run_prepared(
                 }
                 "turn.started" => {
                     if thread_id.is_none() {
-                        return Err("Codex emitted a turn before starting a session".to_string());
+                        return Err("Codex emitted a turn before starting a session".into());
                     }
                     saw_turn_started = true;
                 }
@@ -1884,7 +1910,10 @@ async fn run_prepared(
                         && mcp_item_error_message(item)
                             .is_some_and(is_provider_approval_rejection)
                     {
-                        return Err(MCP_APPROVAL_REJECTION_ERROR.to_string());
+                        return Err(AdapterError::coded(
+                            LocalCliFailureCode::ProviderApprovalRejected,
+                            MCP_APPROVAL_REJECTION_ERROR,
+                        ));
                     }
                     if thread_id.is_some()
                         && !saw_turn_started
@@ -1905,7 +1934,8 @@ async fn run_prepared(
                             .unwrap_or("unknown");
                         return Err(format!(
                             "Codex emitted a {item_kind} item before the turn started"
-                        ));
+                        )
+                        .into());
                     }
                     for item_event in item_events(
                         event_type,
@@ -1944,7 +1974,7 @@ async fn run_prepared(
                             session_id: Some(id),
                             aborted: true,
                         }),
-                        _ => Err(RUN_ERROR.to_string()),
+                        _ => Err(RUN_ERROR.into()),
                     };
                 }
                 "turn.failed" | "error" => {
@@ -1964,7 +1994,7 @@ async fn run_prepared(
                 metadata
                     if is_allowlisted_metadata_event(metadata)
                         && !contains_capability_semantics(&event) => {}
-                _ => return Err("Codex emitted an unsupported event type".to_string()),
+                _ => return Err("Codex emitted an unsupported event type".into()),
             }
         }
         })
@@ -2050,7 +2080,7 @@ mod tests {
             bridge_url: "http://127.0.0.1:34567/mcp".to_string(),
             bridge_token: "secret-bridge-token".to_string(),
             cancellation: CancellationToken::new(),
-            channel,
+            channel: channel.into(),
             cli_version: "0.151.0-test".to_string(),
         }
     }
@@ -2638,35 +2668,56 @@ enabled = true
 
     #[test]
     fn classifies_only_explicit_stream_failure_categories() {
-        assert_eq!(
-            classify_stream_failure(
-                &json!({"type":"error","message":"MCP tool call requires approval, but approval policy is never"}),
-                false
-            ),
-            MCP_APPROVAL_REJECTION_ERROR
+        let approval = classify_stream_failure(
+            &json!({"type":"error","message":"MCP tool call requires approval, but approval policy is never"}),
+            false,
         );
         assert_eq!(
-            classify_stream_failure(
-                &json!({"type":"turn.failed","error":{"message":"Thread not found"}}),
-                true
-            ),
-            "Codex session is unavailable"
+            approval.code,
+            Some(LocalCliFailureCode::ProviderApprovalRejected)
+        );
+        assert_eq!(approval.message, MCP_APPROVAL_REJECTION_ERROR);
+
+        let session = classify_stream_failure(
+            &json!({"type":"turn.failed","error":{"message":"Thread not found"}}),
+            true,
+        );
+        assert_eq!(session.code, Some(LocalCliFailureCode::SessionUnavailable));
+        assert_eq!(session.message, "Codex session is unavailable");
+
+        let credential = classify_stream_failure(
+            &json!({"type":"error","message":"HTTP 401 unauthorized"}),
+            false,
         );
         assert_eq!(
-            classify_stream_failure(
-                &json!({"type":"error","message":"invalid model selection"}),
-                false
-            ),
-            "Codex selected model was rejected"
+            credential.code,
+            Some(LocalCliFailureCode::CredentialRejected)
+        );
+
+        let isolation = classify_stream_failure(
+            &json!({"type":"error","message":"attempted an unauthorized native tool"}),
+            false,
         );
         assert_eq!(
-            classify_stream_failure(&json!({"type":"error","message":"thread not found"}), false),
-            RUN_ERROR
+            isolation.code,
+            Some(LocalCliFailureCode::IsolationViolation)
         );
-        assert_eq!(
-            classify_stream_failure(&json!({"type":"error","message":"secret-sentinel"}), false),
-            RUN_ERROR
+
+        let model = classify_stream_failure(
+            &json!({"type":"error","message":"invalid model selection"}),
+            false,
         );
+        assert_eq!(model.code, Some(LocalCliFailureCode::ModelRejected));
+        assert_eq!(model.message, "Codex selected model was rejected");
+
+        for value in [
+            json!({"type":"error","message":"thread not found"}),
+            json!({"type":"error","message":"secret-sentinel"}),
+        ] {
+            let generic = classify_stream_failure(&value, false);
+            assert_eq!(generic.code, None);
+            assert_eq!(generic.message, RUN_ERROR);
+        }
     }
 
     #[test]
@@ -2710,10 +2761,12 @@ enabled = true
             .await
             .expect_err("tampered instructions must fail before spawn");
 
-        assert_eq!(error, PREPARED_INSTRUCTIONS_CHANGED_ERROR);
-        assert!(!error.contains(secret));
-        assert!(!error.contains("tampered-system-prompt-secret"));
-        assert!(!error.contains(instructions_path.to_string_lossy().as_ref()));
+        assert_eq!(error.message, PREPARED_INSTRUCTIONS_CHANGED_ERROR);
+        assert!(!error.message.contains(secret));
+        assert!(!error.message.contains("tampered-system-prompt-secret"));
+        assert!(!error
+            .message
+            .contains(instructions_path.to_string_lossy().as_ref()));
         assert!(!root.join("provider-invocation.log").exists());
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -2730,10 +2783,12 @@ enabled = true
             .await
             .expect_err("replaced instructions must fail before spawn");
 
-        assert_eq!(error, PREPARED_INSTRUCTIONS_CHANGED_ERROR);
-        assert!(!error.contains("replacement-original-secret"));
-        assert!(!error.contains("replacement-system-prompt-secret"));
-        assert!(!error.contains(instructions_path.to_string_lossy().as_ref()));
+        assert_eq!(error.message, PREPARED_INSTRUCTIONS_CHANGED_ERROR);
+        assert!(!error.message.contains("replacement-original-secret"));
+        assert!(!error.message.contains("replacement-system-prompt-secret"));
+        assert!(!error
+            .message
+            .contains(instructions_path.to_string_lossy().as_ref()));
         assert!(!root.join("provider-invocation.log").exists());
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -2760,7 +2815,7 @@ enabled = true
                     request.tools.clone(),
                     request.max_tool_calls,
                     cancellation.clone(),
-                    channel.clone(),
+                    channel.clone().into(),
                 )
                 .await
                 .unwrap();
@@ -2865,7 +2920,7 @@ enabled = true
             Ok(_) => panic!("unknown Codex capability event must fail closed"),
             Err(error) => error,
         };
-        assert!(error.contains("unsupported event type"), "{error}");
+        assert!(error.message.contains("unsupported event type"), "{error}");
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -2885,16 +2940,19 @@ enabled = true
                 .await
                 .expect_err("Codex failure fixture must not complete");
             match mode {
-                "malformed" => assert!(error.contains("malformed JSON"), "{error}"),
-                "oversized" => assert!(error.contains("line limit"), "{error}"),
+                "malformed" => assert!(error.message.contains("malformed JSON"), "{error}"),
+                "oversized" => assert!(error.message.contains("line limit"), "{error}"),
                 "stderr-approval" => {
-                    assert!(error.contains("provider approval rejected"), "{error}")
+                    assert!(
+                        error.message.contains("provider approval rejected"),
+                        "{error}"
+                    )
                 }
-                "stdout-approval" => assert_eq!(error, MCP_APPROVAL_REJECTION_ERROR),
+                "stdout-approval" => assert_eq!(error.message, MCP_APPROVAL_REJECTION_ERROR),
                 _ => assert!(
-                    error.contains("failed to write")
-                        || error.contains("closed unexpectedly")
-                        || error.contains("closed before"),
+                    error.message.contains("failed to write")
+                        || error.message.contains("closed unexpectedly")
+                        || error.message.contains("closed before"),
                     "{error}"
                 ),
             }

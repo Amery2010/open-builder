@@ -1,6 +1,7 @@
 import { tool, type ToolSet } from "ai";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
+import { BUILTIN_TOOLS, TOOL_CAPABILITY_REGISTRY } from "../ai/tools-schema";
 import { createLocalToolAuthoritySnapshot } from "./authority";
 
 const tools: ToolSet = {
@@ -23,6 +24,43 @@ const tools: ToolSet = {
 };
 
 describe("local Host Tool Authority", () => {
+  it("projects every eligible Host project write in Chat and none in Plan", async () => {
+    const expectedProjectWrites = Object.values(TOOL_CAPABILITY_REGISTRY)
+      .filter(
+        (capability) =>
+          capability.effects.includes("write_project") &&
+          capability.modes.includes("chat") &&
+          capability.platforms.includes("desktop") &&
+          capability.name in BUILTIN_TOOLS &&
+          capability.name !== "screenshot_to_code",
+      )
+      .map((capability) => capability.name)
+      .sort();
+
+    const chat = await createLocalToolAuthoritySnapshot({
+      tools: BUILTIN_TOOLS,
+      mode: "chat",
+      platform: "desktop",
+    });
+    const plan = await createLocalToolAuthoritySnapshot({
+      tools: BUILTIN_TOOLS,
+      mode: "plan",
+      platform: "desktop",
+    });
+
+    expect(
+      chat.specs
+        .filter((spec) => expectedProjectWrites.includes(spec.name))
+        .map((spec) => spec.name),
+    ).toEqual(expectedProjectWrites);
+    for (const name of expectedProjectWrites) {
+      expect(chat.isReadOnly(name)).toBe(false);
+    }
+    expect(
+      plan.specs.some((spec) => expectedProjectWrites.includes(spec.name)),
+    ).toBe(false);
+  });
+
   it("uses one filtered snapshot for visibility and execution", async () => {
     const snapshot = await createLocalToolAuthoritySnapshot({
       tools,
@@ -52,7 +90,6 @@ describe("local Host Tool Authority", () => {
       expect.objectContaining({ readOnlyHint: true }),
     );
     expect(snapshot.get("mcp_read")?.spec.hostApproval).toBe("session");
-    expect(snapshot.digest).toMatch(/^[a-f0-9]{64}$/);
     expect(snapshot.get("list_files")?.spec.annotations).toEqual(
       expect.objectContaining({ readOnlyHint: true }),
     );
@@ -86,6 +123,28 @@ describe("local Host Tool Authority", () => {
       }),
     ]);
     expect(snapshot.isReadOnly("read_attachment")).toBe(true);
+  });
+
+  it("keeps attachment access alongside ordinary Host project writes", async () => {
+    const snapshot = await createLocalToolAuthoritySnapshot({
+      tools: { write_file: BUILTIN_TOOLS.write_file },
+      mode: "chat",
+      platform: "desktop",
+      extraSpecs: [
+        {
+          name: "read_attachment",
+          description: "Read an attachment",
+          inputSchema: { type: "object" },
+        },
+      ],
+    });
+
+    expect(snapshot.specs.map((spec) => spec.name)).toEqual([
+      "read_attachment",
+      "write_file",
+    ]);
+    expect(snapshot.isReadOnly("read_attachment")).toBe(true);
+    expect(snapshot.isReadOnly("write_file")).toBe(false);
   });
 
   it("does not expose dynamic tools without this run's MCP allowlist", async () => {

@@ -4,6 +4,7 @@ import type { ToolSet } from "ai";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Conversation } from "../../types";
 import { BUILTIN_TOOLS } from "../ai/tools-schema";
+import type { GeneratorEvents } from "../ai/generator-types";
 import { DISPATCH_SUBAGENT_TOOL } from "../tools/subagent-tool";
 import { computeConversationFingerprint } from "./context";
 import { createLocalAgentGenerator, runLocalUtilityText } from "./generator";
@@ -22,6 +23,8 @@ const attachmentMocks = vi.hoisted(() => ({
 }));
 
 vi.mock("./tauri", () => ({
+  queryLocalAgentSupport: vi.fn(async () => true),
+  resetLocalAgentSupportCache: vi.fn(),
   supportsLocalAgents: vi.fn(async () => true),
   startLocalAgent: localAgentMocks.start,
   cancelLocalAgent: localAgentMocks.cancel,
@@ -64,6 +67,9 @@ function generator(
     executionMode?: "chat" | "plan";
     nativeSearch?: boolean;
     provider?: LocalAgentProvider;
+    onFileChange?: NonNullable<GeneratorEvents["onFileChange"]>;
+    onLocalCliPrepared?: NonNullable<GeneratorEvents["onLocalCliPrepared"]>;
+    onError?: NonNullable<GeneratorEvents["onError"]>;
   } = {},
 ) {
   const tools = options.tools ?? {};
@@ -75,7 +81,12 @@ function generator(
       getConversation: () => conversation,
       saveSession,
     },
-    { onText },
+    {
+      onText,
+      onFileChange: options.onFileChange,
+      onLocalCliPrepared: options.onLocalCliPrepared,
+      onError: options.onError,
+    },
     conversation.files,
     tools,
     options.customToolHandler,
@@ -219,6 +230,79 @@ describe("LocalAgentGenerator", () => {
     });
   });
 
+  it("reports prepared metadata so the observation cache can be refreshed", async () => {
+    const onLocalCliPrepared = vi.fn();
+    localAgentMocks.start.mockImplementation(
+      async (
+        _request: LocalAgentStartRequest,
+        onEvent: (event: LocalAgentEvent) => void,
+      ) => {
+        queueMicrotask(() => completeRun(onEvent, "run-prepared"));
+        return "run-prepared";
+      },
+    );
+    const { instance } = generator(baseConversation(), vi.fn(), vi.fn(), {
+      onLocalCliPrepared,
+    });
+
+    await instance.generate("Build with the local CLI");
+
+    expect(onLocalCliPrepared).toHaveBeenCalledWith("codex", {
+      compatibilityKey: "compat-thread-1",
+      installationFingerprint: "install-1",
+      cliVersion: "codex-cli 1.0.0",
+      actualModel: "gpt-5.6-sol",
+      actualEffort: "high",
+      resumed: false,
+    });
+  });
+
+  it("writes project files through the Host bridge and reports FileChange", async () => {
+    const onFileChange = vi.fn();
+    localAgentMocks.start.mockImplementation(
+      async (
+        _request: LocalAgentStartRequest,
+        onEvent: (event: LocalAgentEvent) => void,
+      ) => {
+        queueMicrotask(() => {
+          onEvent({
+            type: "toolRequest",
+            runId: "run-write",
+            callId: "write-file",
+            name: "write_file",
+            arguments: {
+              path: "src/App.tsx",
+              content: "export default function App() { return null; }",
+            },
+          });
+          onEvent({ type: "done", aborted: false });
+        });
+        return "run-write";
+      },
+    );
+    const { instance } = generator(baseConversation(), vi.fn(), vi.fn(), {
+      tools: { write_file: BUILTIN_TOOLS.write_file },
+      onFileChange,
+    });
+
+    await instance.generate("Create the app entrypoint");
+
+    expect(instance.getFiles()).toEqual({
+      "src/App.tsx": "export default function App() { return null; }",
+    });
+    expect(onFileChange).toHaveBeenCalledWith(
+      expect.objectContaining({
+        "src/App.tsx": "export default function App() { return null; }",
+      }),
+      [expect.objectContaining({ path: "src/App.tsx", action: "created" })],
+    );
+    expect(localAgentMocks.resolve).toHaveBeenCalledWith(
+      "run-write",
+      "write-file",
+      expect.objectContaining({ isError: undefined }),
+    );
+  });
+
   it("enforces host write authorization for local CLI tool requests", async () => {
     const authorizeToolCall = vi.fn((name: string) =>
       name === "write_file" ? "Design contract required." : undefined,
@@ -328,6 +412,35 @@ describe("LocalAgentGenerator", () => {
     await instance.generate("Build it");
 
     expect(request?.systemPrompt).toContain("[custom-local-cli]");
+    expect(request?.systemPrompt).toContain("not the user's ProjectFiles");
+    expect(request?.systemPrompt).toContain(
+      "does not make the Open Builder project read-only",
+    );
+  });
+
+  it("reports prepared metadata from Local CLI utility runs", async () => {
+    const onPrepared = vi.fn();
+    localAgentMocks.start.mockImplementation(
+      async (
+        _request: LocalAgentStartRequest,
+        onEvent: (event: LocalAgentEvent) => void,
+      ) => {
+        queueMicrotask(() => completeRun(onEvent, "run-utility-prepared"));
+        return "run-utility-prepared";
+      },
+    );
+
+    await runLocalUtilityText(
+      { provider: "codex", model: "", effort: "" },
+      "Create a title",
+      "Original request",
+      { onPrepared },
+    );
+
+    expect(onPrepared).toHaveBeenCalledWith(
+      "codex",
+      expect.objectContaining({ installationFingerprint: "install-1" }),
+    );
   });
 
   it("aborts a local utility title call when its timeout expires", async () => {
@@ -680,6 +793,79 @@ describe("LocalAgentGenerator", () => {
     expect(calls).toBe(1);
   });
 
+  it("reports a fresh-session retry failure through onError exactly once", async () => {
+    const messages: Conversation["messages"] = [
+      { role: "user", content: "Earlier request" },
+      { role: "assistant", content: "Earlier response" },
+    ];
+    const fingerprint = await computeConversationFingerprint({
+      messages,
+      files: {},
+      compressedContext: undefined,
+      template: "vite-react-ts",
+    });
+    const conversation = baseConversation({
+      messages,
+      localAgentSessions: {
+        codex: {
+          provider: "codex",
+          sessionId: "missing-thread",
+          transcriptFingerprint: fingerprint,
+          compatibilityKey: "compat-missing-thread",
+          cliVersion: "codex-cli 1.0.0",
+          updatedAt: 1,
+        },
+      },
+    });
+    let calls = 0;
+    localAgentMocks.start.mockImplementation(
+      async (
+        _request: LocalAgentStartRequest,
+        onEvent: (event: LocalAgentEvent) => void,
+      ) => {
+        calls += 1;
+        queueMicrotask(() => {
+          if (calls === 1) {
+            onEvent({
+              type: "error",
+              message: "thread not found while resuming",
+              retryable: false,
+              failure: {
+                code: "sessionUnavailable",
+                phase: "handshake",
+                provider: "codex",
+                safeMessage:
+                  "The saved local CLI session is no longer available.",
+                diagnosticId: "diag-session-missing",
+                hadActivity: false,
+                hadHostSideEffect: false,
+                retryPolicy: "freshSessionSafe",
+              },
+            });
+          } else {
+            onEvent({
+              type: "error",
+              message: "fresh launch failed",
+              retryable: false,
+            });
+          }
+          onEvent({ type: "done", aborted: false });
+        });
+        return `run-${calls}`;
+      },
+    );
+    const onError = vi.fn();
+
+    await expect(
+      generator(conversation, vi.fn(), vi.fn(), { onError }).instance.generate(
+        "Next request",
+      ),
+    ).rejects.toThrow("The local CLI reported an error.");
+
+    expect(calls).toBe(2);
+    expect(onError).toHaveBeenCalledOnce();
+  });
+
   it("keeps approved MCP instructions in explicitly untrusted user context", async () => {
     let request: LocalAgentStartRequest | undefined;
     localAgentMocks.start.mockImplementation(
@@ -705,6 +891,42 @@ describe("LocalAgentGenerator", () => {
     expect(request?.prompt).toContain(
       "[Current user request]\nFind one record",
     );
+  });
+
+  it("does not hydrate historical attachments until read_attachment is called", async () => {
+    const attachment = {
+      id: "attachment-unused",
+      type: "image" as const,
+      name: "unused.png",
+      mimeType: "image/png",
+      size: 12,
+    };
+    const conversation = baseConversation({
+      messages: [
+        {
+          role: "user",
+          content: "Keep this image for later",
+          metadata: { attachments: [attachment] },
+        },
+      ],
+    });
+    attachmentMocks.resolve.mockResolvedValue({
+      ...attachment,
+      content: "data:image/png;base64,VU5VU0VE",
+    });
+    localAgentMocks.start.mockImplementation(
+      async (
+        _request: LocalAgentStartRequest,
+        onEvent: (event: LocalAgentEvent) => void,
+      ) => {
+        queueMicrotask(() => completeRun(onEvent, "run-no-attachment-read"));
+        return "run-no-attachment-read";
+      },
+    );
+
+    await generator(conversation).instance.generate("Continue without it");
+
+    expect(attachmentMocks.resolve).not.toHaveBeenCalled();
   });
 
   it("resolves historical attachments by opaque id instead of hydrated part position", async () => {
@@ -943,7 +1165,11 @@ describe("LocalAgentGenerator", () => {
       executionMode: "plan",
       maxIterations: 2,
       requestPlanApproval: async () => ({ approved: true }),
-      onPlanApproved: () => ({ list_files: BUILTIN_TOOLS.list_files }),
+      onPlanApproved: () => ({
+        list_files: BUILTIN_TOOLS.list_files,
+        write_file: BUILTIN_TOOLS.write_file,
+        screenshot_to_code: BUILTIN_TOOLS.write_file,
+      }),
     });
 
     const result = await instance.generate("Plan and build");
@@ -951,6 +1177,13 @@ describe("LocalAgentGenerator", () => {
     expect(starts).toHaveLength(2);
     expect(starts[1].mode).toBe("chat");
     expect(starts.map((request) => request.maxToolCalls)).toEqual([2, 1]);
+    expect(starts[0].tools.map((tool) => tool.name)).toEqual([
+      "exit_plan_mode",
+    ]);
+    expect(starts[1].tools.map((tool) => tool.name)).toEqual([
+      "list_files",
+      "write_file",
+    ]);
     expect(result.maxIterationsReached).toBe(true);
     expect(result.aborted).toBe(false);
     expect(localAgentMocks.resolve).toHaveBeenCalledWith(
@@ -1141,6 +1374,45 @@ describe("LocalAgentGenerator", () => {
     await expect(pending).resolves.toMatchObject({ aborted: true });
     expect(instance.getFiles()).toEqual({});
     expect(localAgentMocks.resolve).not.toHaveBeenCalled();
+  });
+
+  it("stops the run when native tool calls exhaust the budget before any host tool", async () => {
+    let emit: ((event: LocalAgentEvent) => void) | undefined;
+    localAgentMocks.start.mockImplementation(
+      async (
+        _request: LocalAgentStartRequest,
+        onEvent: (event: LocalAgentEvent) => void,
+      ) => {
+        emit = onEvent;
+        return "run-native-budget";
+      },
+    );
+    const { instance } = generator(baseConversation(), vi.fn(), vi.fn(), {
+      maxIterations: 1,
+      nativeSearch: true,
+    });
+    const pending = instance.generate("Search the web twice");
+    await vi.waitFor(() => expect(emit).toBeTypeOf("function"));
+
+    emit!({
+      type: "nativeTool",
+      callId: "search-1",
+      name: "web_search",
+      phase: "started",
+    });
+    expect(localAgentMocks.cancel).not.toHaveBeenCalled();
+    emit!({
+      type: "nativeTool",
+      callId: "search-2",
+      name: "web_search",
+      phase: "started",
+    });
+    expect(localAgentMocks.cancel).toHaveBeenCalledWith("run-native-budget");
+    emit!({ type: "done", aborted: true });
+
+    await expect(pending).resolves.toMatchObject({
+      maxIterationsReached: true,
+    });
   });
 
   it("cancels when cumulative renderer output exceeds its limit", async () => {

@@ -21,6 +21,7 @@ use crate::local_agent_protocol::{
     spawn_stderr_drain, spawn_wrapped, turn_prompt, write_json, FrozenProcessSpec,
     PreparedPrivateFile, ProtocolContext, ProtocolOutcome, ProtocolOutputBudget, RunSupervisor,
 };
+use crate::local_agent_runtime::{AdapterError, LocalCliFailureCode};
 
 const PI_MINIMUM_VERSION: (u64, u64, u64) = (0, 84, 4);
 const PI_MAXIMUM_VERSION: (u64, u64, u64) = (0, 85, 0);
@@ -1009,13 +1010,10 @@ async fn probe_runtime(executable: &Path) -> Result<PiProbeResult, String> {
 
     drop(io.stdin);
     let process_result = finish_process(child, stderr_task, tree_guard).await;
-    let result = probe_result.map_err(|error| provider_error(&error, &stderr_capture))?;
-    let status = process_result.map_err(|error| provider_error(&error, &stderr_capture))?;
+    let result = probe_result.map_err(|error| provider_error(&error, &stderr_capture).message)?;
+    let status = process_result.map_err(|error| provider_error(&error, &stderr_capture).message)?;
     if status.is_some_and(|status| !status.success()) {
-        return Err(provider_error(
-            "Pi RPC probe exited unsuccessfully",
-            &stderr_capture,
-        ));
+        return Err(provider_error("Pi RPC probe exited unsuccessfully", &stderr_capture).message);
     }
     Ok(result)
 }
@@ -2134,15 +2132,63 @@ fn validate_tool_call_event<'a>(
     Ok(())
 }
 
+fn classify_pi_failure(message: String, attempted_resume: bool) -> AdapterError {
+    let lower = message.to_ascii_lowercase();
+    let session_unavailable = [
+        "session is unavailable",
+        "session not found",
+        "invalid session",
+        "expired session",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle));
+    if attempted_resume && session_unavailable {
+        AdapterError::coded(LocalCliFailureCode::SessionUnavailable, message)
+    } else if [
+        "unknown model",
+        "model not found",
+        "invalid model",
+        "selected model",
+        "reasoning effort",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+    {
+        AdapterError::coded(LocalCliFailureCode::ModelRejected, message)
+    } else if ["approval", "permission denied", "permission required"]
+        .iter()
+        .any(|needle| lower.contains(needle))
+    {
+        AdapterError::coded(LocalCliFailureCode::ProviderApprovalRejected, message)
+    } else if ["native", "tool", "capability"]
+        .iter()
+        .any(|needle| lower.contains(needle))
+        && ["unauthorized", "unexpected", "disabled", "forbidden"]
+            .iter()
+            .any(|needle| lower.contains(needle))
+    {
+        AdapterError::coded(LocalCliFailureCode::IsolationViolation, message)
+    } else if ["auth", "login", "unauthorized", "credential", "api key"]
+        .iter()
+        .any(|needle| lower.contains(needle))
+    {
+        AdapterError::coded(LocalCliFailureCode::CredentialRejected, message)
+    } else {
+        message.into()
+    }
+}
+
 async fn run_pi_protocol(
     context: &ProtocolContext,
     io: &mut PiIo,
     files: &PiRunFiles,
-) -> Result<ProtocolOutcome, String> {
+) -> Result<ProtocolOutcome, AdapterError> {
+    let attempted_resume = context.request.session_id.is_some();
     let models = io.request("get_available_models", json!({})).await?;
     let initial_state = io.request("get_state", json!({})).await?;
     let selected_model =
-        select_runtime_model(&models, &initial_state, context.request.model.as_deref())?;
+        select_runtime_model(&models, &initial_state, context.request.model.as_deref())
+            .map_err(|message| classify_pi_failure(message, attempted_resume))?;
     io.request(
         "set_model",
         json!({"provider":selected_model.provider,"modelId":selected_model.id}),
@@ -2159,7 +2205,10 @@ async fn run_pi_protocol(
         .filter(|value| !value.is_empty())
     {
         if !levels.iter().any(|level| level == effort) {
-            return Err("the selected reasoning effort is not available in Pi".to_string());
+            return Err(AdapterError::coded(
+                LocalCliFailureCode::ModelRejected,
+                "the selected reasoning effort is not available in Pi",
+            ));
         }
         io.request("set_thinking_level", json!({"level":effort}))
             .await?;
@@ -2178,7 +2227,8 @@ async fn run_pi_protocol(
             .session_id
             .as_deref()
             .filter(|value| !value.is_empty()),
-    )?;
+    )
+    .map_err(|message| classify_pi_failure(message, attempted_resume))?;
     let thinking = state.thinking;
     let session_id = state.session_id;
 
@@ -2188,7 +2238,9 @@ async fn run_pi_protocol(
     );
     io.request("prompt", json!({"message":attest_prompt}))
         .await?;
-    wait_for_attestation(io, files, &selected_model, &thinking).await?;
+    wait_for_attestation(io, files, &selected_model, &thinking)
+        .await
+        .map_err(|message| classify_pi_failure(message, attempted_resume))?;
     context
         .channel
         .send(LocalAgentEvent::Session {
@@ -2229,7 +2281,7 @@ async fn run_pi_protocol(
             PiRuntimeEvent::AssistantMessageStart => {
                 if !active_tool_calls.is_empty() {
                     return Err(
-                        "Pi started a new assistant message with an active tool call".to_string(),
+                        "Pi started a new assistant message with an active tool call".into(),
                     );
                 }
                 saw_text_delta = false;
@@ -2260,9 +2312,7 @@ async fn run_pi_protocol(
             | PiRuntimeEvent::ToolActivity(_) => {}
             PiRuntimeEvent::MessageEnd(message) => {
                 if !active_tool_calls.is_empty() {
-                    return Err(
-                        "Pi ended an assistant message with an active tool call".to_string()
-                    );
+                    return Err("Pi ended an assistant message with an active tool call".into());
                 }
                 emit_final_assistant_content(
                     context,
@@ -2274,31 +2324,39 @@ async fn run_pi_protocol(
                 if message.get("role").and_then(Value::as_str) == Some("assistant")
                     && message.get("stopReason").and_then(Value::as_str) == Some("error")
                 {
-                    return Err(message
-                        .get("errorMessage")
-                        .and_then(Value::as_str)
-                        .unwrap_or("Pi model request failed")
-                        .to_string());
+                    return Err(classify_pi_failure(
+                        message
+                            .get("errorMessage")
+                            .and_then(Value::as_str)
+                            .unwrap_or("Pi model request failed")
+                            .to_string(),
+                        attempted_resume,
+                    ));
                 }
             }
             PiRuntimeEvent::Settled => {
                 if !saw_agent_start {
-                    return Err("Pi settled without starting the requested agent run".to_string());
+                    return Err("Pi settled without starting the requested agent run".into());
                 }
                 if !active_tool_calls.is_empty() {
-                    return Err("Pi settled with an active tool call".to_string());
+                    return Err("Pi settled with an active tool call".into());
                 }
                 return Ok(ProtocolOutcome {
                     session_id: Some(session_id),
                     aborted: false,
                 });
             }
-            PiRuntimeEvent::Error(error) => return Err(error),
+            PiRuntimeEvent::Error(error) => {
+                return Err(classify_pi_failure(error, attempted_resume))
+            }
             PiRuntimeEvent::ForbiddenNative => {
-                return Err("Pi attempted an unexpected native capability".to_string())
+                return Err(AdapterError::coded(
+                    LocalCliFailureCode::IsolationViolation,
+                    "Pi attempted an unexpected native capability",
+                ))
             }
             PiRuntimeEvent::UnmatchedResponse => {
-                return Err("Pi emitted an unmatched RPC response".to_string())
+                return Err("Pi emitted an unmatched RPC response".into())
             }
         }
     }
@@ -2317,14 +2375,16 @@ impl PreparedPiRun {
     }
 }
 
-pub(crate) fn prepare_run(context: ProtocolContext) -> Result<PreparedPiRun, String> {
+pub(crate) fn prepare_run(context: ProtocolContext) -> Result<PreparedPiRun, AdapterError> {
     if context.request.native_search {
-        return Err("Pi does not provide an isolated native search capability".to_string());
+        return Err("Pi does not provide an isolated native search capability".into());
     }
     if context.cancellation.is_cancelled() {
-        return Err("local agent run cancelled".to_string());
+        return Err("local agent run cancelled".into());
     }
-    let files = prepare_run_files(&context)?;
+    let attempted_resume = context.request.session_id.is_some();
+    let files = prepare_run_files(&context)
+        .map_err(|message| classify_pi_failure(message, attempted_resume))?;
     let args = pi_run_args(&files);
     let private_files = vec![
         PreparedPrivateFile::capture(&files.extension_path, &context.run_dir)?,
@@ -2357,9 +2417,11 @@ fn frozen_process_spec(
     FrozenProcessSpec::capture(&command).map(|spec| spec.redact_value(&context.bridge_token))
 }
 
-pub(crate) async fn launch_prepared(prepared: PreparedPiRun) -> Result<ProtocolOutcome, String> {
+pub(crate) async fn launch_prepared(
+    prepared: PreparedPiRun,
+) -> Result<ProtocolOutcome, AdapterError> {
     if prepared.configuration_fingerprint().is_empty() {
-        return Err("Pi prepared configuration fingerprint is unavailable".to_string());
+        return Err("Pi prepared configuration fingerprint is unavailable".into());
     }
     let PreparedPiRun {
         context,
@@ -2414,7 +2476,7 @@ pub(crate) async fn launch_prepared(prepared: PreparedPiRun) -> Result<ProtocolO
 }
 
 #[cfg(test)]
-async fn run(context: ProtocolContext) -> Result<ProtocolOutcome, String> {
+async fn run(context: ProtocolContext) -> Result<ProtocolOutcome, AdapterError> {
     launch_prepared(prepare_run(context)?).await
 }
 
@@ -2525,7 +2587,7 @@ mod tests {
             bridge_url: "http://127.0.0.1:34567/mcp".to_string(),
             bridge_token: "secret-bridge-token".to_string(),
             cancellation: CancellationToken::new(),
-            channel,
+            channel: channel.into(),
             cli_version: "0.84.4-test".to_string(),
         }
     }
@@ -3221,6 +3283,27 @@ mod tests {
     }
 
     #[test]
+    fn classifies_known_pi_adapter_failures_at_the_provider_seam() {
+        let session = classify_pi_failure("Pi session not found".to_string(), true);
+        assert_eq!(session.code, Some(LocalCliFailureCode::SessionUnavailable));
+
+        let model = classify_pi_failure("the selected model is unavailable".to_string(), false);
+        assert_eq!(model.code, Some(LocalCliFailureCode::ModelRejected));
+
+        let isolation = classify_pi_failure(
+            "Pi attempted an unauthorized native capability".to_string(),
+            false,
+        );
+        assert_eq!(
+            isolation.code,
+            Some(LocalCliFailureCode::IsolationViolation)
+        );
+
+        let generic = classify_pi_failure("Pi emitted malformed JSON".to_string(), false);
+        assert_eq!(generic.code, None);
+    }
+
+    #[test]
     fn derives_only_the_registered_loopback_broker_routes() {
         assert_eq!(
             pi_endpoint_urls("http://127.0.0.1:43210/mcp").unwrap(),
@@ -3435,7 +3518,7 @@ mod tests {
                     request.tools.clone(),
                     request.max_tool_calls,
                     cancellation.clone(),
-                    channel.clone(),
+                    channel.clone().into(),
                 )
                 .await
                 .unwrap();
@@ -3533,7 +3616,7 @@ mod tests {
             Ok(_) => panic!("unknown Pi capability event must fail closed"),
             Err(error) => error,
         };
-        assert!(error.contains("unsupported event type"), "{error}");
+        assert!(error.message.contains("unsupported event type"), "{error}");
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -3547,15 +3630,18 @@ mod tests {
                 .await
                 .expect_err("Pi failure fixture must not complete");
             match mode {
-                "malformed" => assert!(error.contains("malformed JSON"), "{error}"),
-                "oversized" => assert!(error.contains("line limit"), "{error}"),
+                "malformed" => assert!(error.message.contains("malformed JSON"), "{error}"),
+                "oversized" => assert!(error.message.contains("line limit"), "{error}"),
                 "stderr-approval" => {
-                    assert!(error.contains("provider approval rejected"), "{error}")
+                    assert!(
+                        error.message.contains("provider approval rejected"),
+                        "{error}"
+                    )
                 }
                 _ => assert!(
-                    error.contains("failed to write")
-                        || error.contains("closed unexpectedly")
-                        || error.contains("closed before"),
+                    error.message.contains("failed to write")
+                        || error.message.contains("closed unexpectedly")
+                        || error.message.contains("closed before"),
                     "{error}"
                 ),
             }

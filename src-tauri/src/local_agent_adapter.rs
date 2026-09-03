@@ -12,7 +12,7 @@ use crate::local_agent_models::{
 };
 use crate::local_agent_protocol::{ProtocolContext, ProtocolOutcome};
 use crate::local_agent_runtime::{
-    compatibility_key, CompatibilityKeyMaterial, InstallationIdentity,
+    compatibility_key, AdapterError, CompatibilityKeyMaterial, InstallationIdentity,
 };
 
 #[derive(Clone, Copy)]
@@ -80,7 +80,7 @@ pub(crate) struct PreparedRunResources {
     pub bridge_url: String,
     pub bridge_token: String,
     pub cancellation: tokio_util::sync::CancellationToken,
-    pub channel: tauri::ipc::Channel<crate::local_agent::LocalAgentEvent>,
+    pub channel: crate::local_agent::TrackedChannel,
 }
 
 enum PreparedProviderRun {
@@ -100,7 +100,7 @@ impl PreparedProviderRun {
         }
     }
 
-    async fn launch(self) -> Result<ProtocolOutcome, String> {
+    async fn launch(self) -> Result<ProtocolOutcome, AdapterError> {
         match self {
             Self::Codex(prepared) => crate::local_agent_codex::launch_prepared(prepared).await,
             Self::Claude(prepared) => crate::local_agent_claude::launch_prepared(prepared).await,
@@ -145,11 +145,11 @@ impl PreparedCliRun {
         self.session_id.clone()
     }
 
-    pub(crate) async fn launch(self) -> Result<ProtocolOutcome, String> {
+    pub(crate) async fn launch(self) -> Result<ProtocolOutcome, AdapterError> {
         self.installation.verify_unchanged()?;
         let current_configuration = provider_configuration_fingerprint(self.provider())?;
         if current_configuration != self.configuration_fingerprint {
-            return Err("local CLI configuration changed during preparation".to_string());
+            return Err("local CLI configuration changed during preparation".into());
         }
         self.provider_run.launch().await
     }
@@ -364,15 +364,15 @@ pub(crate) async fn probe(
     }
 }
 
-pub(crate) fn validate_request(request: &LocalAgentStartRequest) -> Result<(), String> {
-    match request.provider {
+pub(crate) fn validate_request(request: &LocalAgentStartRequest) -> Result<(), AdapterError> {
+    Ok(match request.provider {
         LocalAgentProvider::Codex => crate::local_agent_codex::validate_request(request),
         LocalAgentProvider::Claude => crate::local_agent_claude::validate_request(request),
         LocalAgentProvider::Pi => crate::local_agent_pi::validate_request(request),
         LocalAgentProvider::Antigravity => {
             crate::local_agent_antigravity::validate_request(request)
         }
-    }
+    }?)
 }
 
 pub(crate) async fn prepare_run(
@@ -380,7 +380,7 @@ pub(crate) async fn prepare_run(
     mut request: LocalAgentStartRequest,
     strategy: &ModelStrategy,
     resources: PreparedRunResources,
-) -> Result<PreparedCliRun, String> {
+) -> Result<PreparedCliRun, AdapterError> {
     let installation = InstallationIdentity::capture(&executable)?;
     let preference = LocalAgentPreference {
         model: request.model.clone().unwrap_or_default(),
@@ -409,7 +409,8 @@ pub(crate) async fn prepare_run(
                 format!("the installed local CLI is unsupported: {message}")
             }
             _ => format!("the local CLI is unavailable: {message}"),
-        });
+        }
+        .into());
     }
     let actual = match resolved.launch_validation {
         LaunchValidation::Allowed {
@@ -424,7 +425,7 @@ pub(crate) async fn prepare_run(
             request.effort = actual.effort.clone();
             actual
         }
-        LaunchValidation::Rejected { message } => return Err(message),
+        LaunchValidation::Rejected { message } => return Err(message.into()),
     };
     installation.verify_unchanged()?;
     let configuration_fingerprint = provider_configuration_fingerprint(request.provider)?;
@@ -457,7 +458,7 @@ pub(crate) async fn prepare_run(
             .unwrap_or_else(|| "unknown".to_string()),
     })?;
     if provider_run.configuration_fingerprint() != configuration_fingerprint {
-        return Err("local CLI configuration changed during preparation".to_string());
+        return Err("local CLI configuration changed during preparation".into());
     }
     installation.verify_unchanged()?;
     Ok(PreparedCliRun {
@@ -474,7 +475,7 @@ pub(crate) async fn prepare_run(
     })
 }
 
-fn prepare_provider_run(context: ProtocolContext) -> Result<PreparedProviderRun, String> {
+fn prepare_provider_run(context: ProtocolContext) -> Result<PreparedProviderRun, AdapterError> {
     match context.request.provider {
         LocalAgentProvider::Codex => {
             crate::local_agent_codex::prepare_run(context).map(PreparedProviderRun::Codex)
@@ -661,7 +662,7 @@ mod tests {
                 request.tools.clone(),
                 1,
                 cancellation.clone(),
-                channel.clone(),
+                channel.clone().into(),
             )
             .await
             .expect("the manual smoke bridge must start");
@@ -682,7 +683,7 @@ mod tests {
                 bridge_url,
                 bridge_token,
                 cancellation,
-                channel,
+                channel: channel.into(),
             },
         )
         .await

@@ -17,6 +17,7 @@ import type {
 import type {
   LocalCliFailure,
   LocalAgentProvider,
+  LocalCliPreparedMetadata,
   LocalCliRunStatus,
   LocalCliUsage,
   LocalToolAnnotations,
@@ -383,6 +384,10 @@ export interface GeneratorEvents {
   onError?: (error: Error) => void;
   onRetry?: (attempt: number, maxAttempts: number, error: Error) => void;
   onCompact?: () => Promise<Message[] | null>;
+  onLocalCliPrepared?: (
+    provider: LocalAgentProvider,
+    metadata: LocalCliPreparedMetadata,
+  ) => void;
   onLocalCliStatus?: (status: LocalCliRunStatus) => void;
   onLocalCliWarning?: (message: string) => void;
   onLocalCliUsage?: (usage: LocalCliUsage) => void;

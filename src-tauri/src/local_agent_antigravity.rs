@@ -21,6 +21,7 @@ use crate::local_agent_protocol::{
     contains_capability_semantics, read_capped_line, turn_prompt, write_json, FrozenProcessSpec,
     PreparedPrivateFile, ProtocolContext, ProtocolOutcome, ProtocolOutputBudget, RunSupervisor,
 };
+use crate::local_agent_runtime::{AdapterError, LocalCliFailureCode};
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(8);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -1440,7 +1441,7 @@ fn classify_result_error(
     result: &Value,
     uses_gemini_api_key: bool,
     attempted_resume: bool,
-) -> String {
+) -> AdapterError {
     let message = result
         .get("error")
         .and_then(Value::as_str)
@@ -1460,24 +1461,47 @@ fn classify_result_error(
     .iter()
     .any(|needle| message.contains(needle));
     if attempted_resume && mentions_session && unavailable {
-        "Antigravity session is unavailable.".to_string()
-    } else if looks_like_auth_failure(&message) {
-        if uses_gemini_api_key {
-            "Antigravity Gemini API authentication failed; check GEMINI_API_KEY.".to_string()
-        } else {
-            "Antigravity is not signed in; run agy and complete login.".to_string()
-        }
-    } else if message.contains("model") || message.contains("effort") {
-        "Antigravity rejected the selected model or reasoning effort.".to_string()
-    } else if contains_permission_signal(&Value::String(message.clone()))
-        || message.contains("denied")
+        AdapterError::coded(
+            LocalCliFailureCode::SessionUnavailable,
+            "Antigravity session is unavailable.",
+        )
+    } else if ["permission", "approval", "denied"]
+        .iter()
+        .any(|needle| message.contains(needle))
     {
-        "Antigravity provider approval rejected the isolated run (permission/approval denied)."
-            .to_string()
+        AdapterError::coded(
+            LocalCliFailureCode::ProviderApprovalRejected,
+            "Antigravity provider approval rejected the isolated run (permission/approval denied).",
+        )
+    } else if ["native", "tool", "capability", "mcp"]
+        .iter()
+        .any(|needle| message.contains(needle))
+        && ["not authorized", "unauthorized", "unexpected", "disabled"]
+            .iter()
+            .any(|needle| message.contains(needle))
+    {
+        AdapterError::coded(
+            LocalCliFailureCode::IsolationViolation,
+            "Antigravity attempted to use an unavailable capability.",
+        )
+    } else if looks_like_auth_failure(&message) {
+        AdapterError::coded(
+            LocalCliFailureCode::CredentialRejected,
+            if uses_gemini_api_key {
+                "Antigravity Gemini API authentication failed; check GEMINI_API_KEY."
+            } else {
+                "Antigravity is not signed in; run agy and complete login."
+            },
+        )
+    } else if message.contains("model") || message.contains("effort") {
+        AdapterError::coded(
+            LocalCliFailureCode::ModelRejected,
+            "Antigravity rejected the selected model or reasoning effort.",
+        )
     } else if message.contains("not eligible") || message.contains("eligibility") {
-        "Antigravity account eligibility check failed.".to_string()
+        "Antigravity account eligibility check failed.".into()
     } else {
-        "Antigravity run failed.".to_string()
+        "Antigravity run failed.".into()
     }
 }
 
@@ -1564,7 +1588,7 @@ fn pre_init_event(
     value: Value,
     uses_gemini_api_key: bool,
     attempted_resume: bool,
-) -> Result<Option<Value>, String> {
+) -> Result<Option<Value>, AdapterError> {
     match value.get("event").and_then(Value::as_str) {
         Some("init") => Ok(Some(value)),
         Some("result") => {
@@ -1584,7 +1608,7 @@ fn pre_init_event(
         {
             Ok(None)
         }
-        _ => Err("Antigravity did not emit init before requesting user content".to_string()),
+        _ => Err("Antigravity did not emit init before requesting user content".into()),
     }
 }
 
@@ -1594,7 +1618,7 @@ async fn run_protocol(
     uses_gemini_api_key: bool,
     stdin: &mut tokio::process::ChildStdin,
     reader: &mut BufReader<tokio::process::ChildStdout>,
-) -> Result<ProtocolOutcome, String> {
+) -> Result<ProtocolOutcome, AdapterError> {
     let mut budget = ProtocolOutputBudget::default();
     let init = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
         loop {
@@ -1604,7 +1628,7 @@ async fn run_protocol(
                 uses_gemini_api_key,
                 context.request.session_id.is_some(),
             )? {
-                return Ok::<Value, String>(init);
+                return Ok::<Value, AdapterError>(init);
             }
         }
     })
@@ -1645,7 +1669,7 @@ async fn run_protocol(
                     aborted: true,
                 })
             }
-            Err(error) => return Err(error),
+            Err(error) => return Err(error.into()),
         };
         match value.get("event").and_then(Value::as_str) {
             Some("step_update") => {
@@ -1670,15 +1694,15 @@ async fn run_protocol(
                     .unwrap_or("");
                 if status == "SUCCESS" || matches!(status, "CANCELED" | "INTERRUPTED") {
                     if conversation_id.is_empty() {
-                        return Err("Antigravity result omitted its conversation id".to_string());
+                        return Err("Antigravity result omitted its conversation id".into());
                     }
                     if conversation_id != attestation.conversation_id {
-                        return Err("Antigravity result changed conversation ids".to_string());
+                        return Err("Antigravity result changed conversation ids".into());
                     }
                 } else if !conversation_id.is_empty()
                     && conversation_id != attestation.conversation_id
                 {
-                    return Err("Antigravity result changed conversation ids".to_string());
+                    return Err("Antigravity result changed conversation ids".into());
                 }
                 if let Some(event) = result.get("usage").and_then(usage) {
                     send_runtime_event(context, event)?;
@@ -1687,10 +1711,10 @@ async fn run_protocol(
                 if status == "SUCCESS"
                     && result.get("error").is_some_and(contains_permission_signal)
                 {
-                    return Err(
-                        "Antigravity provider approval rejected the Open Builder tool (permission/approval denied)"
-                            .to_string(),
-                    );
+                    return Err(AdapterError::coded(
+                        LocalCliFailureCode::ProviderApprovalRejected,
+                        "Antigravity provider approval rejected the Open Builder tool (permission/approval denied)",
+                    ));
                 }
                 match status {
                     "SUCCESS" => {
@@ -1726,13 +1750,11 @@ async fn run_protocol(
                     }
                 }
             }
-            Some("init") => return Err("Antigravity emitted init more than once".to_string()),
+            Some("init") => return Err("Antigravity emitted init more than once".into()),
             Some(event)
                 if is_allowlisted_stream_metadata_event(event)
                     && !contains_capability_semantics(&value) => {}
-            Some(_) | None => {
-                return Err("Antigravity emitted an unsupported stream event".to_string())
-            }
+            Some(_) | None => return Err("Antigravity emitted an unsupported stream event".into()),
         }
     }
 }
@@ -1775,21 +1797,23 @@ fn prepare_run_with_configuration(
     })
 }
 
-pub(crate) fn prepare_run(context: ProtocolContext) -> Result<PreparedAntigravityRun, String> {
+pub(crate) fn prepare_run(
+    context: ProtocolContext,
+) -> Result<PreparedAntigravityRun, AdapterError> {
     let configuration = load_provider_configuration()?;
-    prepare_run_with_configuration(context, configuration)
+    Ok(prepare_run_with_configuration(context, configuration)?)
 }
 
 async fn launch_prepared_with_prelaunch<F, Fut>(
     prepared: PreparedAntigravityRun,
     prelaunch: F,
-) -> Result<ProtocolOutcome, String>
+) -> Result<ProtocolOutcome, AdapterError>
 where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
     if prepared.configuration_fingerprint().is_empty() {
-        return Err("Antigravity prepared configuration fingerprint is unavailable".to_string());
+        return Err("Antigravity prepared configuration fingerprint is unavailable".into());
     }
     let PreparedAntigravityRun {
         context,
@@ -1842,7 +1866,7 @@ where
 
 pub(crate) async fn launch_prepared(
     prepared: PreparedAntigravityRun,
-) -> Result<ProtocolOutcome, String> {
+) -> Result<ProtocolOutcome, AdapterError> {
     launch_prepared_with_prelaunch(prepared, || std::future::ready(())).await
 }
 
@@ -1851,7 +1875,7 @@ async fn run_with_prelaunch<F, Fut>(
     context: ProtocolContext,
     provider_environment: AntigravityProviderEnvironment,
     prelaunch: F,
-) -> Result<ProtocolOutcome, String>
+) -> Result<ProtocolOutcome, AdapterError>
 where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = ()>,
@@ -1950,12 +1974,12 @@ mod tests {
             bridge_url: "http://127.0.0.1:34567/mcp".to_string(),
             bridge_token: "secret-bridge-token".to_string(),
             cancellation: CancellationToken::new(),
-            channel,
+            channel: channel.into(),
             cli_version: "1.1.23-test".to_string(),
         }
     }
 
-    async fn execute_contract(context: &ProtocolContext) -> Result<ProtocolOutcome, String> {
+    async fn execute_contract(context: &ProtocolContext) -> Result<ProtocolOutcome, AdapterError> {
         let provider_environment = AntigravityProviderEnvironment::default();
         let files = prepare_run_files(context, &provider_environment)?;
         let process_args = process_args(&context.request);
@@ -2672,7 +2696,10 @@ mod tests {
             false,
         )
         .unwrap_err();
-        assert_eq!(error, "Antigravity account eligibility check failed.");
+        assert_eq!(
+            error.message,
+            "Antigravity account eligibility check failed."
+        );
 
         assert!(pre_init_event(
             json!({"event":"telemetry","tool":"write_file"}),
@@ -2732,33 +2759,59 @@ mod tests {
 
     #[test]
     fn redacts_provider_errors_by_category() {
+        let credential = classify_result_error(
+            &json!({"error":"authentication required: token abc"}),
+            false,
+            false,
+        );
         assert_eq!(
-            classify_result_error(
-                &json!({"error":"authentication required: token abc"}),
-                false,
-                false,
-            ),
+            credential.code,
+            Some(LocalCliFailureCode::CredentialRejected)
+        );
+        assert_eq!(
+            credential.message,
             "Antigravity is not signed in; run agy and complete login."
         );
+
+        let model =
+            classify_result_error(&json!({"error":"invalid model secret-model"}), false, false);
+        assert_eq!(model.code, Some(LocalCliFailureCode::ModelRejected));
+
+        let generic = classify_result_error(&json!({"error":"raw sensitive detail"}), false, false);
+        assert_eq!(generic.code, None);
+        assert_eq!(generic.message, "Antigravity run failed.");
+
+        let gemini =
+            classify_result_error(&json!({"error":"unauthorized secret-key"}), true, false);
+        assert_eq!(gemini.code, Some(LocalCliFailureCode::CredentialRejected));
         assert_eq!(
-            classify_result_error(&json!({"error":"invalid model secret-model"}), false, false),
-            "Antigravity rejected the selected model or reasoning effort."
-        );
-        assert_eq!(
-            classify_result_error(&json!({"error":"raw sensitive detail"}), false, false),
-            "Antigravity run failed."
-        );
-        assert_eq!(
-            classify_result_error(&json!({"error":"unauthorized secret-key"}), true, false),
+            gemini.message,
             "Antigravity Gemini API authentication failed; check GEMINI_API_KEY."
         );
+
+        let session =
+            classify_result_error(&json!({"error":"conversation not found"}), false, true);
+        assert_eq!(session.code, Some(LocalCliFailureCode::SessionUnavailable));
+        assert_eq!(session.message, "Antigravity session is unavailable.");
+
+        let approval = classify_result_error(&json!({"error":"approval required"}), false, false);
         assert_eq!(
-            classify_result_error(&json!({"error":"conversation not found"}), false, true,),
-            "Antigravity session is unavailable."
+            approval.code,
+            Some(LocalCliFailureCode::ProviderApprovalRejected)
         );
         assert_eq!(
-            classify_result_error(&json!({"error":"approval required"}), false, false),
+            approval.message,
             "Antigravity provider approval rejected the isolated run (permission/approval denied)."
+        );
+
+        let isolation = classify_result_error(
+            &json!({"error":"attempted an unauthorized native capability"}),
+            false,
+            false,
+        );
+        assert_eq!(
+            isolation.code,
+            Some(LocalCliFailureCode::IsolationViolation)
         );
     }
 
@@ -2781,7 +2834,7 @@ mod tests {
                     request.tools.clone(),
                     request.max_tool_calls,
                     cancellation.clone(),
-                    channel.clone(),
+                    channel.clone().into(),
                 )
                 .await
                 .unwrap();
@@ -3014,7 +3067,10 @@ mod tests {
             Ok(_) => panic!("unknown Antigravity capability event must fail closed"),
             Err(error) => error,
         };
-        assert!(error.contains("provider approval rejected"), "{error}");
+        assert!(
+            error.message.contains("provider approval rejected"),
+            "{error}"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -3028,15 +3084,18 @@ mod tests {
                 .await
                 .expect_err("Antigravity failure fixture must not complete");
             match mode {
-                "malformed" => assert!(error.contains("malformed stream JSON"), "{error}"),
-                "oversized" => assert!(error.contains("line limit"), "{error}"),
+                "malformed" => assert!(error.message.contains("malformed stream JSON"), "{error}"),
+                "oversized" => assert!(error.message.contains("line limit"), "{error}"),
                 "stderr-approval" => {
-                    assert!(error.contains("provider approval rejected"), "{error}")
+                    assert!(
+                        error.message.contains("provider approval rejected"),
+                        "{error}"
+                    )
                 }
                 _ => assert!(
-                    error.contains("failed to write")
-                        || error.contains("closed unexpectedly")
-                        || error.contains("did not emit init"),
+                    error.message.contains("failed to write")
+                        || error.message.contains("closed unexpectedly")
+                        || error.message.contains("did not emit init"),
                     "{error}"
                 ),
             }

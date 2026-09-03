@@ -47,6 +47,7 @@ import {
 import type { SkillActiveContextController } from "../skills/active-context";
 import { recordPermissionActivity } from "../security/activity-log";
 import { isRetryableGenerationError } from "./generation-error";
+import { attachmentPartsForModel } from "../attachments/model-context";
 import type {
   Message,
   ToolCall,
@@ -298,23 +299,7 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
       const parts: ContentPart[] = [];
       if (userMessage) parts.push({ type: "text", text: userMessage });
       for (const att of attachments) {
-        if (att.type === "image") {
-          parts.push({ type: "image_url", image_url: { url: att.content } });
-        } else if (att.mimeType === "application/pdf") {
-          parts.push({
-            type: "file",
-            file: {
-              data: att.content,
-              mediaType: att.mimeType,
-              filename: att.name,
-            },
-          });
-        } else {
-          parts.push({
-            type: "text",
-            text: `[File: ${att.name} | ${att.size}]\n${att.content}`,
-          });
-        }
+        parts.push(...attachmentPartsForModel(att));
       }
       this.messages.push({ role: "user", content: parts });
       return;

@@ -101,6 +101,7 @@ export const zh = {
       effort: "推理强度",
       executablePath: "程序路径",
       version: "版本",
+      lastChecked: "最近检测",
       dataNotice: "数据与费用",
       cloudNotice:
         "本地 CLI 仍可能联网，并消耗所选模型服务商的订阅或 API 额度。提示词、附件和工具结果会交给该 CLI；Open Builder 仅在检测或启动 CLI 时读取受支持的服务商配置，不保存或显示 CLI 凭据。",
@@ -110,6 +111,16 @@ export const zh = {
       runtimeUnavailable: "本地 CLI 代理只能在桌面版中运行。",
       runtimeUnavailableAction:
         "本地 CLI 代理只能在桌面版中运行，请切换回 API。",
+      chatNotice: {
+        title: "{provider} 需要处理",
+        hostUnsupported: "当前平台无法运行本地 CLI，但所选服务商仍视为已配置。",
+        setupRequired:
+          "该 CLI 仍需完成服务商配置。你可以直接发送，Open Builder 会在运行开始时再次验证。",
+        notFound: "未找到所选 CLI，请在模型设置中选择程序或重新检测。",
+        unavailable:
+          "上次检测未能确认该 CLI 可用。你仍可直接发送，或前往设置重新检测。",
+        openSettings: "打开模型设置",
+      },
       outputLimit: "本地 CLI 输出超过了界面可处理的上限。",
       utilityTimeout: "本地 CLI 辅助任务在 {timeoutMs} 毫秒后超时。",
     },

@@ -33,6 +33,18 @@ describe("Design mode design-system context", () => {
     );
   });
 
+  it("grounds content in inspected evidence and keeps exploration opt-in", () => {
+    expect(DESIGN_MODE_SYSTEM_SUFFIX).toContain(
+      "Do not invent filler, proof, assets, or capabilities",
+    );
+    expect(DESIGN_MODE_SYSTEM_SUFFIX).toContain(
+      "Explore alternatives only when the user asks",
+    );
+    expect(DESIGN_MODE_SYSTEM_SUFFIX).toContain(
+      "implement only the chosen direction",
+    );
+  });
+
   it("records an AI none decision without inventing a selected system", () => {
     const context = buildDesignSystemContext({
       recommendation: {

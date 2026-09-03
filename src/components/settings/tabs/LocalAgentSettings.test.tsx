@@ -15,15 +15,23 @@ import { useSettingsStore } from "../../../store/settings";
 import { aiDefaults } from "../../../store/settings/ai";
 import type { AISettings } from "../../../store/settings/ai";
 import { systemDefaults } from "../../../store/settings/system";
+import {
+  createEmptyLocalCliObservationCache,
+  sanitizeLocalCliProbe,
+} from "../../../lib/local-agent/observations";
 import { LocalAgentSettings } from "./LocalAgentSettings";
 
 const localAgentMocks = vi.hoisted(() => ({
+  host: vi.fn(async () => true),
+  resetHost: vi.fn(),
   probe: vi.fn(),
   choose: vi.fn(),
   clear: vi.fn(),
 }));
 
 vi.mock("../../../lib/local-agent/tauri", () => ({
+  queryLocalAgentSupport: localAgentMocks.host,
+  resetLocalAgentSupportCache: localAgentMocks.resetHost,
   supportsLocalAgents: vi.fn(async () => true),
   probeLocalAgent: localAgentMocks.probe,
   chooseLocalAgentExecutable: localAgentMocks.choose,
@@ -93,9 +101,28 @@ function Harness({
   );
 }
 
+async function selectProvider(name: string) {
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("combobox", { name: "CLI provider" }));
+  await user.click(screen.getByRole("option", { name }));
+}
+
 describe("LocalAgentSettings", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    useSettingsStore.getState().invalidateLocalCliObservation();
+    Object.defineProperty(HTMLElement.prototype, "hasPointerCapture", {
+      configurable: true,
+      value: vi.fn(() => false),
+    });
+    Object.defineProperty(HTMLElement.prototype, "setPointerCapture", {
+      configurable: true,
+      value: vi.fn(),
+    });
+    Object.defineProperty(HTMLElement.prototype, "releasePointerCapture", {
+      configurable: true,
+      value: vi.fn(),
+    });
     Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
       configurable: true,
       value: vi.fn(),
@@ -192,27 +219,70 @@ describe("LocalAgentSettings", () => {
     expect((await axe(container)).violations).toEqual([]);
   });
 
-  it("renders the four-provider catalog in a locked two-column chooser", async () => {
+  it("renders the provider catalog in a locked Select", async () => {
     localAgentMocks.probe.mockResolvedValue(probe("ready"));
 
     render(<Harness runtimeChangeLocked />);
 
-    const chooser = screen.getByRole("group", { name: "CLI provider" });
-    expect(chooser).toHaveClass("grid-cols-2");
-    for (const name of ["Codex", "Claude", "Pi", "Antigravity"]) {
-      expect(screen.getByRole("button", { name })).toBeDisabled();
-    }
+    const chooser = screen.getByRole("combobox", { name: "CLI provider" });
+    expect(chooser).toBeDisabled();
+    expect(chooser).toHaveTextContent("Codex");
     expect(await screen.findByText("Installed and ready")).toBeInTheDocument();
   });
 
-  it("probes Antigravity when selected", async () => {
+  it("reuses cached Providers and supports keyboard selection without probing", async () => {
+    const codex = sanitizeLocalCliProbe(
+      probe("ready", "codex"),
+      { model: "", effort: "" },
+      10,
+    )!;
+    const claude = sanitizeLocalCliProbe(
+      probe("ready", "claude"),
+      { model: "", effort: "" },
+      11,
+    )!;
+    useSettingsStore.setState({
+      localCliObservationCache: {
+        ...createEmptyLocalCliObservationCache(),
+        host: { status: "supported", checkedAt: 9 },
+        providers: { codex, claude },
+      },
+    });
     const user = userEvent.setup();
+    render(<Harness />);
+
+    expect(await screen.findByText("Installed and ready")).toBeInTheDocument();
+    expect(localAgentMocks.probe).not.toHaveBeenCalled();
+
+    const providerSelect = screen.getByRole("combobox", {
+      name: "CLI provider",
+    });
+    await user.click(providerSelect);
+    await user.keyboard("{ArrowDown}{Enter}");
+    await waitFor(() =>
+      expect(
+        JSON.parse(screen.getByTestId("local-agent-state").textContent ?? "{}")
+          .provider,
+      ).toBe("claude"),
+    );
+    expect(localAgentMocks.probe).not.toHaveBeenCalled();
+
+    await user.click(providerSelect);
+    await user.keyboard("{Enter}");
+    expect(localAgentMocks.probe).not.toHaveBeenCalled();
+    expect(
+      JSON.parse(screen.getByTestId("local-agent-state").textContent ?? "{}")
+        .provider,
+    ).toBe("claude");
+  });
+
+  it("probes Antigravity when selected", async () => {
     localAgentMocks.probe.mockImplementation(async (provider) =>
       probe("ready", provider),
     );
 
     render(<Harness />);
-    await user.click(screen.getByRole("button", { name: "Antigravity" }));
+    await selectProvider("Antigravity");
 
     await waitFor(() =>
       expect(localAgentMocks.probe).toHaveBeenCalledWith(
@@ -227,7 +297,6 @@ describe("LocalAgentSettings", () => {
   });
 
   it("ignores a late probe result after switching providers", async () => {
-    const user = userEvent.setup();
     let resolveCodex: ((value: ReturnType<typeof probe>) => void) | undefined;
     let resolveClaude: ((value: ReturnType<typeof probe>) => void) | undefined;
     localAgentMocks.probe.mockImplementation(
@@ -239,7 +308,7 @@ describe("LocalAgentSettings", () => {
     );
 
     render(<Harness />);
-    await user.click(screen.getByRole("button", { name: "Claude" }));
+    await selectProvider("Claude");
     await waitFor(() =>
       expect(localAgentMocks.probe).toHaveBeenCalledWith(
         "claude",
@@ -317,7 +386,6 @@ describe("LocalAgentSettings", () => {
   });
 
   it("offers Pi models and explains its in-CLI setup flow", async () => {
-    const user = userEvent.setup();
     localAgentMocks.probe.mockImplementation(
       async (provider: LocalAgentProvider) =>
         provider === "pi"
@@ -333,7 +401,7 @@ describe("LocalAgentSettings", () => {
     );
 
     render(<Harness />);
-    await user.click(screen.getByRole("button", { name: "Pi" }));
+    await selectProvider("Pi");
 
     expect(
       await screen.findByText(
@@ -408,17 +476,21 @@ describe("LocalAgentSettings", () => {
     ).toBeInTheDocument();
   });
 
-  it("keeps probe failures inside the status panel", async () => {
+  it("maps probe failures to a sanitized unavailable observation", async () => {
     localAgentMocks.probe.mockRejectedValue(new Error("Probe failed"));
 
     render(<Harness />);
 
-    const alert = await screen.findByRole("alert");
-    expect(alert).toHaveTextContent("The local CLI capability check failed.");
-    expect(alert.closest("section")).toHaveAttribute(
+    const status = await screen.findByText("CLI unavailable");
+    expect(status.closest("section")).toHaveAttribute(
       "aria-labelledby",
       "local-cli-status-heading",
     );
+    expect(screen.queryByText("Probe failed")).not.toBeInTheDocument();
+    expect(
+      useSettingsStore.getState().localCliObservationCache.providers.codex
+        ?.reasonCode,
+    ).toBe("probeError");
   });
 
   it("preserves Pi preferences when setup is required and models are unavailable", async () => {
@@ -580,7 +652,6 @@ describe("LocalAgentSettings", () => {
   });
 
   it("passes the selected provider's preference to each probe operation", async () => {
-    const user = userEvent.setup();
     localAgentMocks.probe.mockResolvedValue(probe("ready"));
     render(
       <Harness
@@ -607,7 +678,7 @@ describe("LocalAgentSettings", () => {
       ),
     );
 
-    await user.click(screen.getByRole("button", { name: "Claude" }));
+    await selectProvider("Claude");
     await waitFor(() =>
       expect(localAgentMocks.probe).toHaveBeenLastCalledWith(
         "claude",

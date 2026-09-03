@@ -20,6 +20,7 @@ import {
   sanitizeToolResultForHistory,
 } from "../utils/message-security";
 import { formatDesignSelectionContext } from "../design/selection-context";
+import { truncateUntrustedAttachmentText } from "../attachments/model-context";
 
 export const MODEL_MESSAGE_LIMITS = {
   maxTextChars: 160_000,
@@ -57,6 +58,11 @@ export function untrustedReferenceToModelMessages(
 
 function truncateModelText(text: string, label = "message"): string {
   if (text.length <= MODEL_MESSAGE_LIMITS.maxTextChars) return text;
+  const boundedAttachment = truncateUntrustedAttachmentText(
+    text,
+    MODEL_MESSAGE_LIMITS.maxTextChars,
+  );
+  if (boundedAttachment) return boundedAttachment;
   return (
     text.slice(0, MODEL_MESSAGE_LIMITS.maxTextChars) +
     `\n\n[${label} truncated after ${MODEL_MESSAGE_LIMITS.maxTextChars} chars]`

@@ -18,7 +18,8 @@ use tokio::io::{
 use tokio::process::{ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio_util::sync::CancellationToken;
 
-use crate::local_agent::{LocalAgentEvent, LocalAgentStartRequest};
+use crate::local_agent::{LocalAgentStartRequest, TrackedChannel};
+use crate::local_agent_runtime::{AdapterError, LocalCliFailureCode};
 
 const MAX_JSON_LINE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_PROTOCOL_OUTPUT_BYTES: usize = 32 * 1024 * 1024;
@@ -35,7 +36,7 @@ pub struct ProtocolContext {
     pub bridge_url: String,
     pub bridge_token: String,
     pub cancellation: CancellationToken,
-    pub channel: tauri::ipc::Channel<LocalAgentEvent>,
+    pub channel: TrackedChannel,
     pub cli_version: String,
 }
 
@@ -213,13 +214,14 @@ impl RunSupervisor {
         })
     }
 
-    pub(crate) async fn monitor<F, T>(&self, future: F) -> Result<T, String>
+    pub(crate) async fn monitor<F, T, E>(&self, future: F) -> Result<T, AdapterError>
     where
-        F: std::future::Future<Output = Result<T, String>>,
+        F: std::future::Future<Output = Result<T, E>>,
+        E: Into<AdapterError>,
     {
         let terminal = self.stderr_capture.terminal_signal.clone();
         tokio::select! {
-            result = future => result,
+            result = future => result.map_err(Into::into),
             _ = terminal.cancelled() => Err(provider_error(
                 "local CLI tool call was rejected",
                 &self.stderr_capture,
@@ -229,9 +231,9 @@ impl RunSupervisor {
 
     pub(crate) async fn finish(
         self,
-        run_result: Result<ProtocolOutcome, String>,
+        run_result: Result<ProtocolOutcome, AdapterError>,
         failure_context: &str,
-    ) -> Result<ProtocolOutcome, String> {
+    ) -> Result<ProtocolOutcome, AdapterError> {
         // The Provider transcript is terminal now. Close the same run token
         // used by the Host Tool Authority before the first asynchronous
         // shutdown wait, so a lingering headless CLI cannot start a late tool
@@ -249,7 +251,13 @@ impl RunSupervisor {
             return Err(provider_error(failure_context, &self.stderr_capture));
         }
         match run_result {
-            Err(error) => Err(provider_error(&error, &self.stderr_capture)),
+            Err(error) => {
+                // A stderr category is more specific than the protocol error;
+                // otherwise keep whatever code the adapter already attached.
+                let mut wrapped = provider_error(&error.message, &self.stderr_capture);
+                wrapped.code = wrapped.code.or(error.code);
+                Err(wrapped)
+            }
             Ok(outcome) if outcome.aborted => Ok(outcome),
             Ok(outcome) => match process_result {
                 Ok(Some(status)) if status.success() => Ok(outcome),
@@ -548,15 +556,30 @@ fn spawn_stderr_drain_with_redactions(
     (capture, task)
 }
 
-pub(crate) fn provider_error(context: &str, stderr: &StderrCapture) -> String {
+pub(crate) fn provider_error(context: &str, stderr: &StderrCapture) -> AdapterError {
     match stderr.safe_hint() {
-        Some("credential") => format!("{context}; CLI credentials were rejected"),
-        Some("model") => format!("{context}; CLI model selection was rejected"),
-        Some("session") => format!("{context}; CLI session is unavailable"),
-        Some("rateLimit") => format!("{context}; CLI rate limit was reached"),
-        Some("approval") => format!("{context}; provider approval rejected the tool call"),
-        Some(_) => format!("{context}; CLI stderr was redacted"),
-        None => context.to_string(),
+        Some("credential") => AdapterError::coded(
+            LocalCliFailureCode::CredentialRejected,
+            format!("{context}; CLI credentials were rejected"),
+        ),
+        Some("model") => AdapterError::coded(
+            LocalCliFailureCode::ModelRejected,
+            format!("{context}; CLI model selection was rejected"),
+        ),
+        Some("session") => AdapterError::coded(
+            LocalCliFailureCode::SessionUnavailable,
+            format!("{context}; CLI session is unavailable"),
+        ),
+        Some("rateLimit") => AdapterError::coded(
+            LocalCliFailureCode::ProcessExit,
+            format!("{context}; CLI rate limit was reached"),
+        ),
+        Some("approval") => AdapterError::coded(
+            LocalCliFailureCode::ProviderApprovalRejected,
+            format!("{context}; provider approval rejected the tool call"),
+        ),
+        Some(_) => format!("{context}; CLI stderr was redacted").into(),
+        None => context.to_string().into(),
     }
 }
 
@@ -1056,7 +1079,8 @@ mod tests {
         let canonical_run_dir = std::fs::canonicalize(&run_dir).unwrap();
         assert!(invocation.contains(&format!("cwd={}", canonical_run_dir.display())));
         let safe = provider_error("fake CLI exited", &stderr_capture);
-        assert!(!safe.contains("secret-stderr-sentinel"));
+        assert_eq!(safe.code, None);
+        assert!(!safe.message.contains("secret-stderr-sentinel"));
         assert!(!stderr_capture
             .redacted_tail()
             .contains("secret-stderr-sentinel"));
@@ -1278,18 +1302,31 @@ mod tests {
         assert!(!redacted.contains("secret-sentinel"));
         assert!(redacted.contains("[redacted sensitive stderr line]"));
         assert_eq!(
-            provider_error("CLI exited unsuccessfully", &capture),
+            provider_error("CLI exited unsuccessfully", &capture).message,
             "CLI exited unsuccessfully; CLI stderr was redacted"
         );
 
         let credential = StderrCapture::default();
         credential.record(b"authentication failed: invalid API key secret-sentinel");
-        let message = provider_error("CLI exited unsuccessfully", &credential);
+        let error = provider_error("CLI exited unsuccessfully", &credential);
+        assert_eq!(error.code, Some(LocalCliFailureCode::CredentialRejected));
         assert_eq!(
-            message,
+            error.message,
             "CLI exited unsuccessfully; CLI credentials were rejected"
         );
-        assert!(!message.contains("secret-sentinel"));
+        assert!(!error.message.contains("secret-sentinel"));
+
+        let rate_limit = StderrCapture::default();
+        rate_limit.record(b"too many requests: rate limit reached");
+        let rate_limit_error = provider_error("CLI exited unsuccessfully", &rate_limit);
+        assert_eq!(
+            rate_limit_error.code,
+            Some(LocalCliFailureCode::ProcessExit)
+        );
+        assert_eq!(
+            rate_limit_error.message,
+            "CLI exited unsuccessfully; CLI rate limit was reached"
+        );
 
         let opaque_secret = "opaque-bridge-value-123456";
         let explicit = StderrCapture::with_redactions(vec![opaque_secret.to_string()]);
@@ -1301,8 +1338,13 @@ mod tests {
         approval.record(b"MCP tool call requires approval, but approval policy is never");
         assert_eq!(approval.safe_hint(), Some("approval"));
         assert!(approval.terminal_signal.is_cancelled());
+        let approval_error = provider_error("Codex run failed", &approval);
         assert_eq!(
-            provider_error("Codex run failed", &approval),
+            approval_error.code,
+            Some(LocalCliFailureCode::ProviderApprovalRejected)
+        );
+        assert_eq!(
+            approval_error.message,
             "Codex run failed; provider approval rejected the tool call"
         );
 
@@ -1344,18 +1386,18 @@ mod tests {
                 .read_to_string(&mut text)
                 .await
                 .map_err(|error| error.to_string())?;
-            Ok(text)
+            Ok::<_, String>(text)
         });
         let error = tokio::time::timeout(Duration::from_secs(2), monitored)
             .await
             .expect("terminal approval must not wait for the process timeout")
             .unwrap_err();
-        assert!(error.contains("provider approval rejected"));
+        assert!(error.message.contains("provider approval rejected"));
         let outcome = supervisor
             .finish(Err(error), "fixture failed")
             .await
             .unwrap_err();
-        assert!(outcome.contains("provider approval rejected"));
+        assert!(outcome.message.contains("provider approval rejected"));
         assert!(authority_lifetime.is_cancelled());
         let _ = std::fs::remove_dir_all(cwd);
     }

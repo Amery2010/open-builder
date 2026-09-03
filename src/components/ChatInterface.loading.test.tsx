@@ -28,7 +28,7 @@ vi.mock("./chat/EmptyState", () => ({ EmptyState: () => null }));
 const baseProps = {
   messages: [],
   isGenerating: true,
-  hasValidSettings: true,
+  hasConfiguredModelRuntime: true,
   onGenerate: vi.fn(async () => undefined),
   onStop: vi.fn(),
   onOpenSettings: vi.fn(),
@@ -94,6 +94,47 @@ describe("ChatInterface generation loading", () => {
       useInteractiveStore.getState().resolvePlan("plan-1", { approved: true });
     });
     expect(screen.getByRole("status")).toHaveTextContent("Thinking…");
+  });
+
+  it("keeps model configuration warnings separate from Local CLI status", async () => {
+    const user = userEvent.setup();
+    const onOpenSettings = vi.fn();
+    const { rerender } = render(
+      <ChatInterface
+        {...baseProps}
+        isGenerating={false}
+        hasConfiguredModelRuntime={false}
+        onOpenSettings={onOpenSettings}
+      />,
+    );
+
+    expect(
+      screen.getByText("AI Model Configuration Required"),
+    ).toBeInTheDocument();
+
+    rerender(
+      <ChatInterface
+        {...baseProps}
+        isGenerating={false}
+        localCliStatusNotice={{
+          providerName: "Codex",
+          kind: "notFound",
+        }}
+        onOpenSettings={onOpenSettings}
+      />,
+    );
+
+    expect(
+      screen.queryByText("AI Model Configuration Required"),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "The selected CLI was not found",
+    );
+    expect(screen.getByRole("button", { name: "Send message" })).toBeVisible();
+    await user.click(
+      screen.getByRole("button", { name: "Open model settings" }),
+    );
+    expect(onOpenSettings).toHaveBeenCalledOnce();
   });
 
   it("owns the chat pane while a questionnaire is pending", async () => {

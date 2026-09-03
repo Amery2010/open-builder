@@ -2,6 +2,8 @@ import { useState, useCallback, useEffect } from "react";
 import { useSettingsStore } from "../store/settings";
 import { useConversationStore } from "../store/conversation";
 import type { Message, ProjectFiles } from "../types";
+import { LOCAL_AGENT_PROVIDER_CATALOG } from "../lib/local-agent/providers";
+import type { LocalCliStatusNoticeValue } from "../components/chat/LocalCliStatusNotice";
 
 // Stable default references to avoid infinite re-render with useSyncExternalStore
 const EMPTY_FILES: ProjectFiles = {};
@@ -37,23 +39,44 @@ export function useAppState() {
   const setWebSearch = useSettingsStore((s) => s.setWebSearch);
   const setAssetSearch = useSettingsStore((s) => s.setAssetSearch);
   const setSystem = useSettingsStore((s) => s.setSystem);
-  const isAIValid = useSettingsStore((s) => s.isAIValid);
-  const localAgentCapability = useSettingsStore((s) => s.localAgentCapability);
-  // Subscribe to volatile provider readiness so the send gate updates when a
-  // Settings probe completes. The capability flag alone only describes the
-  // desktop host, not the selected CLI's launch contract.
-  const localAgentReadiness = useSettingsStore((s) => s.localAgentReadiness);
-  const refreshLocalAgentCapability = useSettingsStore(
-    (s) => s.refreshLocalAgentCapability,
+  const isAIConfigured = useSettingsStore((s) => s.isAIConfigured);
+  const localCliHostObservation = useSettingsStore(
+    (s) => s.localCliObservationCache.host,
+  );
+  const localCliProviderObservation = useSettingsStore(
+    (s) => s.localCliObservationCache.providers[settings.localAgent.provider],
+  );
+  const ensureLocalCliHostObservation = useSettingsStore(
+    (s) => s.ensureLocalCliHostObservation,
   );
 
   useEffect(() => {
-    if (localAgentCapability === "loading") {
-      void refreshLocalAgentCapability();
-    }
-  }, [localAgentCapability, refreshLocalAgentCapability]);
+    void ensureLocalCliHostObservation();
+  }, [ensureLocalCliHostObservation]);
 
-  const hasValidSettings = isAIValid();
+  const hasConfiguredModelRuntime = isAIConfigured();
+  let localCliStatusNotice: LocalCliStatusNoticeValue | null = null;
+  if (settings.runtime === "localCli") {
+    const providerName =
+      LOCAL_AGENT_PROVIDER_CATALOG[settings.localAgent.provider].displayName;
+    if (localCliHostObservation?.status === "unsupported") {
+      localCliStatusNotice = { providerName, kind: "hostUnsupported" };
+    } else if (localCliHostObservation?.status === "error") {
+      localCliStatusNotice = { providerName, kind: "unavailable" };
+    } else if (localCliProviderObservation?.status === "setupRequired") {
+      localCliStatusNotice = { providerName, kind: "setupRequired" };
+    } else if (localCliProviderObservation?.status === "unavailable") {
+      localCliStatusNotice = {
+        providerName,
+        kind:
+          localCliProviderObservation.reasonCode === "hostUnsupported"
+            ? "hostUnsupported"
+            : localCliProviderObservation.reasonCode === "notFound"
+              ? "notFound"
+              : "unavailable",
+      };
+    }
+  }
 
   const handleSaveSettings = setAI;
   const handleSaveWebSearchSettings = setWebSearch;
@@ -87,8 +110,8 @@ export function useAppState() {
     isGenerating,
     setIsGenerating,
     settings,
-    localAgentReadiness,
-    hasValidSettings,
+    hasConfiguredModelRuntime,
+    localCliStatusNotice,
     isSettingsOpen,
     setIsSettingsOpen,
     handleSaveSettings,

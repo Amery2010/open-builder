@@ -10,6 +10,17 @@ import { systemDefaults } from "../../../store/settings/system";
 import { ModelTab } from "./ModelTab";
 import { DEFAULT_OPENAI_MODEL } from "../../../lib/ai/provider-config";
 
+const defaultEnsureLocalCliHostObservation =
+  useSettingsStore.getState().ensureLocalCliHostObservation;
+
+function hostCache(status: "supported" | "unsupported" | "error" | null) {
+  return {
+    schemaVersion: 1 as const,
+    host: status ? { status, checkedAt: 1 } : null,
+    providers: {},
+  };
+}
+
 describe("ModelTab local-agent capability", () => {
   beforeEach(() => {
     Element.prototype.hasPointerCapture = vi.fn(() => false);
@@ -18,15 +29,20 @@ describe("ModelTab local-agent capability", () => {
     Element.prototype.scrollIntoView = vi.fn();
     useSettingsStore.setState({
       system: { ...systemDefaults, language: "en" },
+      localCliObservationCache: hostCache(null),
+      ensureLocalCliHostObservation: defaultEnsureLocalCliHostObservation,
     });
   });
 
   it("shows capability errors and retries explicitly", async () => {
     const user = userEvent.setup();
-    const refresh = vi.fn(async () => "error" as const);
+    const refresh = vi.fn(async () => ({
+      status: "error" as const,
+      checkedAt: 2,
+    }));
     useSettingsStore.setState({
-      localAgentCapability: "error",
-      refreshLocalAgentCapability: refresh,
+      localCliObservationCache: hostCache("error"),
+      ensureLocalCliHostObservation: refresh,
     });
 
     render(
@@ -44,10 +60,15 @@ describe("ModelTab local-agent capability", () => {
   });
 
   it("distinguishes loading and unsupported platforms", () => {
-    const refresh = vi.fn(() => new Promise<"supported">(() => undefined));
+    const refresh = vi.fn(
+      () =>
+        new Promise<{ status: "supported"; checkedAt: number }>(
+          () => undefined,
+        ),
+    );
     useSettingsStore.setState({
-      localAgentCapability: "loading",
-      refreshLocalAgentCapability: refresh,
+      localCliObservationCache: hostCache(null),
+      ensureLocalCliHostObservation: refresh,
     });
     const { rerender } = render(
       <TooltipProvider>
@@ -61,7 +82,9 @@ describe("ModelTab local-agent capability", () => {
     expect(screen.getByRole("status")).toHaveTextContent("Detecting local CLI");
 
     act(() => {
-      useSettingsStore.setState({ localAgentCapability: "unsupported" });
+      useSettingsStore.setState({
+        localCliObservationCache: hostCache("unsupported"),
+      });
     });
     rerender(
       <TooltipProvider>
@@ -79,7 +102,9 @@ describe("ModelTab local-agent capability", () => {
   it("sets the OpenAI-family default when the API type changes", async () => {
     const user = userEvent.setup();
     const setFormData = vi.fn();
-    useSettingsStore.setState({ localAgentCapability: "unsupported" });
+    useSettingsStore.setState({
+      localCliObservationCache: hostCache("unsupported"),
+    });
     render(
       <TooltipProvider>
         <ModelTab
@@ -109,7 +134,9 @@ describe("ModelTab local-agent capability", () => {
   });
 
   it("hides the runtime setting when web only supports API", () => {
-    useSettingsStore.setState({ localAgentCapability: "unsupported" });
+    useSettingsStore.setState({
+      localCliObservationCache: hostCache("unsupported"),
+    });
 
     render(
       <TooltipProvider>
@@ -124,7 +151,9 @@ describe("ModelTab local-agent capability", () => {
   });
 
   it("keeps the runtime setting when local agents are supported", () => {
-    useSettingsStore.setState({ localAgentCapability: "supported" });
+    useSettingsStore.setState({
+      localCliObservationCache: hostCache("supported"),
+    });
 
     render(
       <TooltipProvider>

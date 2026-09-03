@@ -25,7 +25,6 @@ import {
   chooseLocalAgentExecutable,
   clearLocalAgentExecutable,
 } from "../../../lib/local-agent/tauri";
-import { localCliRuntime } from "../../../lib/local-agent/runtime";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import {
@@ -72,19 +71,22 @@ export function LocalAgentSettings({
   const provider = value.provider;
   const providerDefinition = LOCAL_AGENT_PROVIDER_CATALOG[provider];
   const preferences = value.preferences[provider];
-  const cachedReadiness = useSettingsStore(
-    (state) => state.localAgentReadiness[provider],
+  const observation = useSettingsStore(
+    (state) => state.localCliObservationCache.providers[provider],
   );
-  const setLocalAgentProbe = useSettingsStore(
-    (state) => state.setLocalAgentProbe,
+  const ensureLocalCliObservation = useSettingsStore(
+    (state) => state.ensureLocalCliObservation,
   );
-  const clearLocalAgentReadiness = useSettingsStore(
-    (state) => state.clearLocalAgentReadiness,
+  const refreshLocalCliObservation = useSettingsStore(
+    (state) => state.refreshLocalCliObservation,
   );
-  const [probe, setProbe] = useState<LocalAgentProbe | null>(
-    cachedReadiness?.probe ?? null,
+  const recordLocalCliProbe = useSettingsStore(
+    (state) => state.recordLocalCliProbe,
   );
-  const [isLoading, setIsLoading] = useState(supported);
+  const markPreferenceVerificationRequired = useSettingsStore(
+    (state) => state.markLocalCliPreferenceVerificationRequired,
+  );
+  const [isLoading, setIsLoading] = useState(supported && !observation);
   const [actionError, setActionError] = useState("");
   const [copyFeedback, setCopyFeedback] = useState<"success" | "error" | null>(
     null,
@@ -96,17 +98,13 @@ export function LocalAgentSettings({
   providerRef.current = provider;
   valueRef.current = value;
   onChangeRef.current = onChange;
-  const visibleProbe = probe?.provider === provider ? probe : null;
 
-  const applyPreferenceDecision = useCallback(
+  const applyObservedPreference = useCallback(
     (
       expectedProvider: LocalAgentProvider,
       expectedPreference: LocalAgentPreference,
-      result: LocalAgentProbe,
+      replacement: LocalAgentPreference,
     ) => {
-      const decision = result.preferenceDecision;
-      if (decision?.kind !== "replace") return;
-
       const current = valueRef.current;
       if (current.provider !== expectedProvider) return;
       const currentPreference = current.preferences[expectedProvider];
@@ -117,7 +115,6 @@ export function LocalAgentSettings({
         return;
       }
 
-      const replacement = decision.preference;
       if (
         currentPreference.model === replacement.model &&
         currentPreference.effort === replacement.effort
@@ -138,8 +135,8 @@ export function LocalAgentSettings({
     [],
   );
 
-  const runProbeOperation = useCallback(
-    async (operation: LocalAgentOperation, clearCurrentProbe = false) => {
+  const runInspection = useCallback(
+    async (forceRefresh: boolean) => {
       if (!supported) return;
       const expectedProvider = provider;
       const expectedPreference = {
@@ -149,28 +146,32 @@ export function LocalAgentSettings({
       setIsLoading(true);
       setActionError("");
       setCopyFeedback(null);
-      if (clearCurrentProbe) {
-        setProbe(null);
-        clearLocalAgentReadiness(expectedProvider);
-      }
       try {
-        const result = await operation(expectedProvider, expectedPreference);
+        const result = forceRefresh
+          ? await refreshLocalCliObservation(
+              expectedProvider,
+              expectedPreference,
+            )
+          : await ensureLocalCliObservation(
+              expectedProvider,
+              expectedPreference,
+            );
         if (
           requestId !== requestSequenceRef.current ||
           providerRef.current !== expectedProvider
         ) {
           return;
         }
-        if (result && result.provider !== expectedProvider) {
-          setProbe(null);
-          clearLocalAgentReadiness(expectedProvider);
+        if (!result || result.provider !== expectedProvider) {
           setActionError(t.settings.localCli.probeMismatch);
           return;
         }
-        if (result) {
-          setProbe(result);
-          setLocalAgentProbe(result);
-          applyPreferenceDecision(expectedProvider, expectedPreference, result);
+        if (result.status !== "verificationRequired") {
+          applyObservedPreference(
+            expectedProvider,
+            expectedPreference,
+            result.inspectedPreference,
+          );
         }
       } catch {
         if (
@@ -179,8 +180,6 @@ export function LocalAgentSettings({
         ) {
           return;
         }
-        setProbe(null);
-        clearLocalAgentReadiness(expectedProvider);
         setActionError(t.settings.localCli.probeFailed);
       } finally {
         if (
@@ -192,45 +191,40 @@ export function LocalAgentSettings({
       }
     },
     [
-      applyPreferenceDecision,
+      applyObservedPreference,
+      ensureLocalCliObservation,
       provider,
+      refreshLocalCliObservation,
       supported,
-      clearLocalAgentReadiness,
-      setLocalAgentProbe,
       t.settings.localCli.probeMismatch,
       t.settings.localCli.probeFailed,
     ],
   );
 
-  const refresh = useCallback(
-    (forceRefresh = false) =>
-      runProbeOperation(
-        (expectedProvider, expectedPreference) =>
-          localCliRuntime.inspect({
-            provider: expectedProvider,
-            preference: expectedPreference,
-            forceRefresh,
-          }),
-        true,
-      ),
-    [runProbeOperation],
-  );
-
   useEffect(() => {
     if (!supported) {
       requestSequenceRef.current += 1;
-      setProbe(null);
-      clearLocalAgentReadiness(provider);
       setActionError("");
       setCopyFeedback(null);
       setIsLoading(false);
       return;
     }
-    void refresh(false);
+    const cached =
+      useSettingsStore.getState().localCliObservationCache.providers[provider];
+    if (cached) {
+      setIsLoading(false);
+      setActionError("");
+      setCopyFeedback(null);
+      void ensureLocalCliObservation(provider, {
+        ...valueRef.current.preferences[provider],
+      });
+      return;
+    }
+    void runInspection(false);
     return () => {
       requestSequenceRef.current += 1;
     };
-  }, [clearLocalAgentReadiness, provider, refresh, supported]);
+  }, [ensureLocalCliObservation, provider, runInspection, supported]);
 
   const updatePreferences = (
     patch: Partial<(typeof value.preferences)[typeof provider]>,
@@ -248,17 +242,15 @@ export function LocalAgentSettings({
     };
     valueRef.current = next;
     onChangeRef.current(next);
+    markPreferenceVerificationRequired(provider);
   };
 
   const selectProvider = (nextProvider: LocalAgentProvider) => {
     if (nextProvider === providerRef.current) return;
     requestSequenceRef.current += 1;
     providerRef.current = nextProvider;
-    setProbe(null);
-    clearLocalAgentReadiness(nextProvider);
     setActionError("");
     setCopyFeedback(null);
-    setIsLoading(true);
     const current = valueRef.current;
     const next: LocalAgentSettingsValue = {
       ...current,
@@ -269,35 +261,94 @@ export function LocalAgentSettings({
   };
 
   const efforts = useMemo(() => {
-    if (visibleProbe?.capabilities.reasoning !== true) return [];
+    if (observation?.capabilities.reasoning !== true) return [];
     const selected = preferences.model
-      ? visibleProbe?.models.find((model) => model.id === preferences.model)
-      : visibleProbe?.models.find((model) => model.isDefault);
+      ? observation.models.find((model) => model.id === preferences.model)
+      : observation.models.find((model) => model.isDefault);
     if (preferences.model && !selected) return [];
-    return selected ? selected.efforts : (visibleProbe?.efforts ?? []);
-  }, [preferences.model, visibleProbe]);
+    return selected ? selected.efforts : (observation?.efforts ?? []);
+  }, [preferences.model, observation]);
 
   const hasUnverifiedModel =
-    visibleProbe?.preferenceDecision?.kind === "keep" &&
-    visibleProbe.preferenceDecision?.unverified &&
+    observation?.verificationRequired === true &&
     Boolean(preferences.model) &&
-    !visibleProbe.models.some((model) => model.id === preferences.model);
+    !observation.models.some((model) => model.id === preferences.model);
+
+  const runExecutableOperation = useCallback(
+    async (operation: LocalAgentOperation) => {
+      const expectedProvider = provider;
+      const expectedPreference = {
+        ...valueRef.current.preferences[expectedProvider],
+      };
+      const requestId = ++requestSequenceRef.current;
+      setIsLoading(true);
+      setActionError("");
+      setCopyFeedback(null);
+      try {
+        const result = await operation(expectedProvider, expectedPreference);
+        if (result?.provider === expectedProvider) {
+          // Executable selection mutates backend state even if the user changes
+          // the visible Provider before the dialog resolves.
+          recordLocalCliProbe(result, expectedPreference);
+        }
+        if (
+          requestId !== requestSequenceRef.current ||
+          providerRef.current !== expectedProvider
+        ) {
+          return;
+        }
+        if (!result) return;
+        if (result.provider !== expectedProvider) {
+          setActionError(t.settings.localCli.probeMismatch);
+          return;
+        }
+        if (result.preferenceDecision.kind === "replace") {
+          applyObservedPreference(
+            expectedProvider,
+            expectedPreference,
+            result.preferenceDecision.preference,
+          );
+        }
+      } catch {
+        if (
+          requestId === requestSequenceRef.current &&
+          providerRef.current === expectedProvider
+        ) {
+          setActionError(t.settings.localCli.probeFailed);
+        }
+      } finally {
+        if (
+          requestId === requestSequenceRef.current &&
+          providerRef.current === expectedProvider
+        ) {
+          setIsLoading(false);
+        }
+      }
+    },
+    [
+      applyObservedPreference,
+      provider,
+      recordLocalCliProbe,
+      t.settings.localCli.probeFailed,
+      t.settings.localCli.probeMismatch,
+    ],
+  );
 
   const chooseExecutable = () =>
-    runProbeOperation((expectedProvider, expectedPreference) =>
+    runExecutableOperation((expectedProvider, expectedPreference) =>
       chooseLocalAgentExecutable(expectedProvider, expectedPreference),
     );
 
   const clearExecutable = () =>
-    runProbeOperation((expectedProvider, expectedPreference) =>
+    runExecutableOperation((expectedProvider, expectedPreference) =>
       clearLocalAgentExecutable(expectedProvider, expectedPreference),
     );
 
   const copySetupCommand = async () => {
-    if (!visibleProbe?.setupCommand) return;
+    if (!observation?.setupCommand) return;
     setCopyFeedback(null);
     try {
-      await navigator.clipboard.writeText(visibleProbe.setupCommand);
+      await navigator.clipboard.writeText(observation.setupCommand);
       setCopyFeedback("success");
     } catch {
       setCopyFeedback("error");
@@ -326,18 +377,13 @@ export function LocalAgentSettings({
     );
   }
 
-  const status =
-    visibleProbe?.status ??
-    (visibleProbe?.availability === "ready"
-      ? "ready"
-      : visibleProbe?.availability === "needsSetup"
-        ? "setupRequired"
-        : "unavailable");
+  const status = observation?.status ?? "unavailable";
   const ready = status === "ready";
   const verificationRequired = status === "verificationRequired";
   const needsSetup = status === "setupRequired";
-  const notFound = visibleProbe?.availability === "notFound";
+  const notFound = observation?.reasonCode === "notFound";
   const unavailable = status === "unavailable" || Boolean(actionError);
+  const showLoading = isLoading || (supported && !observation && !actionError);
   const canEditPreferences = ready || verificationRequired || needsSetup;
   const statusLabel = ready
     ? t.settings.localCli.ready
@@ -359,38 +405,28 @@ export function LocalAgentSettings({
   return (
     <div className="space-y-4">
       <div className="space-y-2">
-        <Label>
+        <Label htmlFor="local-agent-provider">
           <TerminalSquare size={16} className="mr-1 inline" />
           {t.settings.localCli.provider}
         </Label>
-        <div
-          role="group"
-          aria-label={t.settings.localCli.provider}
-          className="grid grid-cols-2 gap-1 rounded-lg bg-muted p-1"
+        <Select
+          value={provider}
+          disabled={runtimeChangeLocked}
+          onValueChange={(nextProvider) =>
+            selectProvider(nextProvider as LocalAgentProvider)
+          }
         >
-          {LOCAL_AGENT_PROVIDERS.map((entry) => {
-            const selected = entry.id === provider;
-            return (
-              <button
-                key={entry.id}
-                type="button"
-                aria-pressed={selected}
-                disabled={runtimeChangeLocked}
-                onClick={() => selectProvider(entry.id)}
-                className={cn(
-                  "inline-flex min-h-9 items-center justify-center rounded-md px-3 py-1.5 text-sm font-medium outline-none transition-[color,background-color,border-color,box-shadow,opacity,transform]",
-                  "focus-visible:ring-ring/50 focus-visible:ring-[3px] active:scale-[0.98] motion-reduce:transform-none",
-                  "disabled:cursor-not-allowed disabled:opacity-50",
-                  selected
-                    ? "bg-background text-foreground shadow-sm dark:border dark:border-input dark:bg-input/30"
-                    : "text-foreground/60 hover:bg-background/60 hover:text-foreground dark:text-muted-foreground",
-                )}
-              >
+          <SelectTrigger id="local-agent-provider" className="w-full">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {LOCAL_AGENT_PROVIDERS.map((entry) => (
+              <SelectItem key={entry.id} value={entry.id}>
                 {entry.displayName}
-              </button>
-            );
-          })}
-        </div>
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       </div>
 
       <section
@@ -409,7 +445,7 @@ export function LocalAgentSettings({
       >
         <div className="flex items-start justify-between gap-3">
           <div className="flex min-w-0 flex-1 items-start gap-2.5">
-            {isLoading ? (
+            {showLoading ? (
               <TerminalSquare
                 className="mt-0.5 size-4 shrink-0 text-muted-foreground"
                 aria-hidden="true"
@@ -434,7 +470,7 @@ export function LocalAgentSettings({
               <p id="local-cli-status-heading" className="text-sm font-medium">
                 {providerDefinition.displayName}
               </p>
-              {isLoading ? (
+              {showLoading ? (
                 <div className="mt-1.5 space-y-2" role="status">
                   <span className="sr-only">
                     {t.settings.localCli.scanning}
@@ -457,30 +493,38 @@ export function LocalAgentSettings({
                 </p>
               )}
 
-              {!isLoading && visibleProbe?.path ? (
+              {!showLoading && observation?.path ? (
                 <div className="mt-2 rounded-md bg-background/70 px-2.5 py-2 dark:bg-background/40">
                   <p className="text-[11px] font-medium text-muted-foreground">
                     {t.settings.localCli.executablePath}
                   </p>
                   <code className="mt-0.5 block break-all text-xs text-foreground">
-                    {visibleProbe.path}
+                    {observation.path}
                   </code>
                 </div>
               ) : null}
-              {!isLoading && visibleProbe?.version ? (
+              {!showLoading && observation?.version ? (
                 <p className="mt-1.5 text-xs text-muted-foreground">
                   <span className="font-medium text-foreground/80">
                     {t.settings.localCli.version}:
                   </span>{" "}
-                  {visibleProbe.version}
+                  {observation.version}
                 </p>
               ) : null}
-              {!isLoading && visibleProbe?.message ? (
+              {!showLoading && observation ? (
                 <p className="mt-1.5 text-xs text-muted-foreground">
                   {probeDetail}
                 </p>
               ) : null}
-              {!isLoading && needsSetup && provider === "pi" ? (
+              {!showLoading && observation?.checkedAt ? (
+                <p className="mt-1.5 text-xs text-muted-foreground">
+                  <span className="font-medium text-foreground/80">
+                    {t.settings.localCli.lastChecked}:
+                  </span>{" "}
+                  {new Date(observation.checkedAt).toLocaleString()}
+                </p>
+              ) : null}
+              {!showLoading && needsSetup && provider === "pi" ? (
                 <p className="mt-1.5 text-xs text-muted-foreground">
                   {t.settings.localCli.piSetupHint}
                 </p>
@@ -509,8 +553,8 @@ export function LocalAgentSettings({
             size="sm"
             variant="ghost"
             className="h-8 shrink-0 px-2"
-            onClick={() => void refresh(true)}
-            disabled={isLoading}
+            onClick={() => void runInspection(true)}
+            disabled={showLoading}
           >
             <RefreshCw className="size-3.5" aria-hidden="true" />
             {t.settings.localCli.rescan}
@@ -523,7 +567,7 @@ export function LocalAgentSettings({
               type="button"
               size="sm"
               onClick={() => void copySetupCommand()}
-              disabled={isLoading}
+              disabled={showLoading}
             >
               <Copy className="size-3.5" aria-hidden="true" />
               {t.settings.localCli.copySetup}
@@ -534,18 +578,18 @@ export function LocalAgentSettings({
             size="sm"
             variant={notFound || unavailable ? "default" : "outline"}
             onClick={() => void chooseExecutable()}
-            disabled={isLoading}
+            disabled={showLoading}
           >
             <FolderOpen className="size-3.5" aria-hidden="true" />
             {t.settings.localCli.chooseExecutable}
           </Button>
-          {visibleProbe?.pathSource === "override" ? (
+          {observation?.pathSource === "override" ? (
             <Button
               type="button"
               size="sm"
               variant="ghost"
               onClick={() => void clearExecutable()}
-              disabled={isLoading}
+              disabled={showLoading}
             >
               <RotateCcw className="size-3.5" aria-hidden="true" />
               {t.settings.localCli.useAutoDetect}
@@ -582,7 +626,7 @@ export function LocalAgentSettings({
                   ? encodeOption(MODEL_OPTION_PREFIX, preferences.model)
                   : DEFAULT_OPTION
               }
-              disabled={isLoading || !canEditPreferences}
+              disabled={showLoading || !canEditPreferences}
               onValueChange={(nextValue) =>
                 updatePreferences({
                   model:
@@ -607,7 +651,7 @@ export function LocalAgentSettings({
                     {preferences.model} ({t.settings.localCli.unverified})
                   </SelectItem>
                 ) : null}
-                {(visibleProbe?.models ?? []).map((model) => (
+                {(observation?.models ?? []).map((model) => (
                   <SelectItem
                     key={model.id}
                     value={encodeOption(MODEL_OPTION_PREFIX, model.id)}
@@ -630,7 +674,7 @@ export function LocalAgentSettings({
                     ? encodeOption(EFFORT_OPTION_PREFIX, preferences.effort)
                     : DEFAULT_OPTION
                 }
-                disabled={isLoading || !canEditPreferences}
+                disabled={showLoading || !canEditPreferences}
                 onValueChange={(nextValue) =>
                   updatePreferences({
                     effort:

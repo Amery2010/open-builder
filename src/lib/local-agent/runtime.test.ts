@@ -447,6 +447,93 @@ describe("LocalCliRuntime", () => {
     expect(tauriMocks.cancel).toHaveBeenCalledWith("run-consumer-error");
   });
 
+  it("reports an abort, not a bridge failure, when Stop interrupts a host tool", async () => {
+    let emit!: (event: LocalAgentEvent) => void;
+    tauriMocks.start.mockImplementation(
+      async (
+        _request: LocalAgentStartRequest,
+        onEvent: (event: LocalAgentEvent) => void,
+      ) => {
+        emit = onEvent;
+        return "run-stop-during-tool";
+      },
+    );
+    tauriMocks.resolve.mockRejectedValue(
+      new Error("local agent run is not active"),
+    );
+    const controller = new AbortController();
+    let finishTool!: () => void;
+    const executeHostTool = vi.fn(
+      () =>
+        new Promise<{
+          resolution: LocalToolResolution;
+          hadSideEffect: boolean;
+        }>((resolve) => {
+          finishTool = () =>
+            resolve({ resolution: { text: "late" }, hadSideEffect: false });
+        }),
+    );
+
+    const pending = new LocalCliRuntime().run(
+      request(),
+      { executeHostTool },
+      controller.signal,
+    );
+    await vi.waitFor(() => expect(tauriMocks.start).toHaveBeenCalledOnce());
+    emit({
+      type: "toolRequest",
+      runId: "run-stop-during-tool",
+      callId: "call-slow",
+      name: "list_files",
+      arguments: {},
+    });
+    await vi.waitFor(() => expect(executeHostTool).toHaveBeenCalledOnce());
+    controller.abort();
+    finishTool();
+    emit({ type: "done", aborted: true });
+
+    await expect(pending).resolves.toMatchObject({
+      runId: "run-stop-during-tool",
+      aborted: true,
+    });
+  });
+
+  it("treats an AbortError from an in-flight host tool as an aborted run", async () => {
+    let emit!: (event: LocalAgentEvent) => void;
+    tauriMocks.start.mockImplementation(
+      async (
+        _request: LocalAgentStartRequest,
+        onEvent: (event: LocalAgentEvent) => void,
+      ) => {
+        emit = onEvent;
+        return "run-tool-abort-error";
+      },
+    );
+    const executeHostTool = vi.fn(async () => {
+      throw new DOMException("The tool was cancelled.", "AbortError");
+    });
+
+    const pending = new LocalCliRuntime().run(request(), { executeHostTool });
+    await vi.waitFor(() => expect(tauriMocks.start).toHaveBeenCalledOnce());
+    emit({
+      type: "toolRequest",
+      runId: "run-tool-abort-error",
+      callId: "call-aborted",
+      name: "list_files",
+      arguments: {},
+    });
+    await vi.waitFor(() =>
+      expect(tauriMocks.cancel).toHaveBeenCalledWith("run-tool-abort-error"),
+    );
+    emit({ type: "done", aborted: true });
+
+    await expect(pending).resolves.toMatchObject({
+      runId: "run-tool-abort-error",
+      aborted: true,
+    });
+    expect(tauriMocks.resolve).not.toHaveBeenCalled();
+  });
+
   it("cancels an active run when its AbortSignal fires", async () => {
     let emit!: (event: LocalAgentEvent) => void;
     tauriMocks.start.mockImplementation(

@@ -273,6 +273,7 @@ function inspectionStatus(probe: LocalAgentProbe): LocalCliInspectionStatus {
     case "notFound":
     case "unsupported":
     case "error":
+    default:
       return "unavailable";
   }
 }
@@ -591,6 +592,14 @@ function createAbortError(
   );
 }
 
+function isAbortError(cause: unknown): boolean {
+  return (
+    Boolean(cause) &&
+    typeof cause === "object" &&
+    (cause as { name?: unknown }).name === "AbortError"
+  );
+}
+
 export class LocalCliRuntime {
   private readonly dependencies: LocalCliRuntimeDependencies;
 
@@ -669,6 +678,7 @@ export class LocalCliRuntime {
     let runId: string | undefined;
     let settled = false;
     let abortRequested = false;
+    let externallyAborted = false;
     let hadActivity = false;
     let hadHostSideEffect = false;
     let text = "";
@@ -691,6 +701,26 @@ export class LocalCliRuntime {
       resolveRun = resolve;
       rejectRun = reject;
     });
+
+    const resolveCompletedRun = (
+      done: Extract<LocalAgentEvent, { type: "done" }>,
+    ) => {
+      if (settled || !startResolved) return;
+      settled = true;
+      removeAbortListener?.();
+      resolveRun({
+        runId: runId ?? "unknown",
+        aborted: done.aborted || abortRequested,
+        sessionId: done.sessionId ?? sessionId,
+        cliVersion,
+        prepared,
+        usage,
+        warnings,
+        status,
+        text,
+        reasoning,
+      });
+    };
 
     const rejectWithFailure = (
       nextFailure: LocalCliFailure,
@@ -721,22 +751,16 @@ export class LocalCliRuntime {
             rejectWithFailure(finalFailure);
             return;
           }
-          settled = true;
-          removeAbortListener?.();
-          resolveRun({
-            runId: runId ?? "unknown",
-            aborted: done.aborted || abortRequested,
-            sessionId: done.sessionId ?? sessionId,
-            cliVersion,
-            prepared,
-            usage,
-            warnings,
-            status,
-            text,
-            reasoning,
-          });
+          resolveCompletedRun(done);
         },
         (cause) => {
+          if (
+            startResolved &&
+            (externallyAborted || (done.aborted && !failure))
+          ) {
+            resolveCompletedRun(done);
+            return;
+          }
           const nextFailure = normalizeFailure(cause, request.provider, {
             message: cause instanceof Error ? cause.message : String(cause),
             phase: "tool",
@@ -878,6 +902,14 @@ export class LocalCliRuntime {
                 outcome.resolution,
               );
             } catch (cause) {
+              // A Stop request unregisters the backend bridge immediately, so a
+              // host tool that finishes afterwards cannot deliver its result.
+              // That is the expected aborted outcome, not a bridge failure.
+              if (signal?.aborted || isAbortError(cause)) {
+                abort();
+                return;
+              }
+              if (abortRequested) return;
               const nextFailure = normalizeFailure(cause, request.provider, {
                 message:
                   "The Open Builder tool bridge could not complete the local CLI request.",
@@ -944,7 +976,10 @@ export class LocalCliRuntime {
     };
 
     if (signal) {
-      const listener = () => abort();
+      const listener = () => {
+        externallyAborted = true;
+        abort();
+      };
       signal.addEventListener("abort", listener, { once: true });
       removeAbortListener = () => signal.removeEventListener("abort", listener);
     }

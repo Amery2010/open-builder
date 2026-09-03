@@ -7,6 +7,7 @@ import type {
   GenerationRequestContext,
   GeneratorEvents,
   GeneratorOptions,
+  AttachmentRef,
   Message,
   ProjectFiles,
   ResolvedAttachment,
@@ -21,7 +22,7 @@ import { formatUntrustedReferenceContext } from "../ai/messages";
 import { normalizeToolExecutionOutput } from "../utils/tool-result";
 import { PLAN_APPROVED_PREFIX } from "../ai/plan-mode";
 import { getT } from "../../i18n";
-import { cancelLocalAgent, supportsLocalAgents } from "./tauri";
+import { supportsLocalAgents } from "./tauri";
 import {
   isLocalCliRuntimeError,
   localCliRuntime,
@@ -50,8 +51,10 @@ import { localAgentSupportsNativeSearch } from "./providers";
 const LOCAL_RUNTIME_INSTRUCTIONS = `
 
 ## OPEN BUILDER LOCAL CLI RUNTIME
-Your working directory is a stable, app-private blank scratch directory — not the user's project. Anything written there is outside Open Builder's project state and invisible to the user.
-The Open Builder host tools are the only authority for project files, preview state, Skills, memory, and approved MCP calls. Never route project work through the native shell, filesystem, hooks, plugins, or external MCP configuration.
+Your provider-native working directory, scratch files, and native filesystem APIs are app-private runtime state — they are not the user's ProjectFiles. Anything written there is outside Open Builder's project state and invisible to the user.
+The Open Builder Host tools are the only authority for ProjectFiles, preview state, Skills, memory, and approved MCP calls. Use the Host tools for every project read and write, including initializing, listing, reading, searching, creating, patching, deleting, renaming, moving, and updating project configuration files.
+The provider's native read-only or strict filesystem mode applies only to its native scratch/runtime. It does not make the Open Builder project read-only: in normal Chat, and in the fresh iteration after the user approves Plan Mode, use every authorized Host project tool needed to complete the requested read/write work.
+Never route project work through the native shell, filesystem, hooks, plugins, or external MCP configuration.
 Read listed attachments with read_attachment, using the opaque attachment id.
 screenshot_to_code is deliberately unavailable here: inspect the attachment yourself and build with the normal project tools.
 `;
@@ -109,16 +112,22 @@ interface LocalTurnBudget {
   exhausted: boolean;
 }
 
-interface AttachmentIndexEntry extends ResolvedAttachment {}
+/** Attachment refs are listed to the model; blobs are hydrated only when the
+ * model actually calls read_attachment, and cached for the rest of the run. */
+type AttachmentIndexEntry = AttachmentRef | ResolvedAttachment;
+
+function isResolvedAttachment(
+  entry: AttachmentIndexEntry,
+): entry is ResolvedAttachment {
+  return "content" in entry;
+}
 
 function contentData(value: string): { mimeType?: string; data: string } {
   const match = /^data:([^;,]+);base64,(.*)$/s.exec(value);
   return match ? { mimeType: match[1], data: match[2] } : { data: value };
 }
 
-function attachmentOutput(
-  attachment: AttachmentIndexEntry,
-): ToolExecutionOutput {
+function attachmentOutput(attachment: ResolvedAttachment): ToolExecutionOutput {
   if (attachment.type === "image") {
     const parsed = contentData(attachment.content);
     return normalizeToolExecutionOutput({
@@ -177,32 +186,36 @@ function toLocalResolution(output: ToolExecutionOutput): LocalToolResolution {
   };
 }
 
-async function collectAttachmentIndex(
+function collectAttachmentIndex(
   messages: readonly Message[],
   current: readonly ResolvedAttachment[],
-): Promise<Map<string, AttachmentIndexEntry>> {
-  const index = new Map(
+): Map<string, AttachmentIndexEntry> {
+  const index = new Map<string, AttachmentIndexEntry>(
     current.map((attachment) => [attachment.id, attachment]),
   );
-  const seen = new Set(index.keys());
-  const historical = messages
-    .flatMap((message) => message.metadata?.attachments ?? [])
-    .filter((attachment) => {
-      if (seen.has(attachment.id)) return false;
-      seen.add(attachment.id);
-      return true;
-    });
-
-  await Promise.all(
-    historical.map(async (attachment) => {
-      try {
-        index.set(attachment.id, await resolveAttachmentForModel(attachment));
-      } catch {
-        // Missing attachment data is intentionally unavailable to this run.
-      }
-    }),
-  );
+  for (const message of messages) {
+    for (const attachment of message.metadata?.attachments ?? []) {
+      if (!index.has(attachment.id)) index.set(attachment.id, attachment);
+    }
+  }
   return index;
+}
+
+async function resolveIndexedAttachment(
+  index: Map<string, AttachmentIndexEntry>,
+  id: unknown,
+): Promise<ResolvedAttachment | undefined> {
+  const entry = typeof id === "string" ? index.get(id) : undefined;
+  if (!entry) return undefined;
+  if (isResolvedAttachment(entry)) return entry;
+  try {
+    const resolved = await resolveAttachmentForModel(entry);
+    index.set(entry.id, resolved);
+    return resolved;
+  } catch {
+    // Missing attachment data is intentionally unavailable to this run.
+    return undefined;
+  }
 }
 
 function createTurnBudget(maxToolCalls?: number): LocalTurnBudget {
@@ -243,7 +256,6 @@ export class LocalAgentGenerator implements GenerationBackend {
   private readonly host: WebAppGenerator;
   private readonly config: LocalAgentClientConfig;
   private readonly events: GeneratorEvents;
-  private currentRunId: string | null = null;
   private abortRequested = false;
   private planApproved = false;
   private nativeSearchAllowed = true;
@@ -361,11 +373,15 @@ export class LocalAgentGenerator implements GenerationBackend {
   }
 
   abort(): void {
+    this.stopRun();
+  }
+
+  /** Stops the active run through the host signal. LocalCliRuntime listens to
+   * that signal and owns the backend run id, so this works before the first
+   * host tool request as well as after it. */
+  private stopRun(): void {
     this.abortRequested = true;
     this.host.abort();
-    if (this.currentRunId) {
-      void cancelLocalAgent(this.currentRunId);
-    }
   }
 
   async retry(): Promise<GenerateResult> {
@@ -451,6 +467,29 @@ export class LocalAgentGenerator implements GenerationBackend {
     allowResume: boolean,
     baselineOverride?: Conversation,
   ): Promise<GenerateResult> {
+    try {
+      return await this.executeTurn(
+        prompt,
+        attachments,
+        allowResume,
+        baselineOverride,
+      );
+    } catch (error) {
+      // One reporting point for every phase: first run, fresh-session rebuild,
+      // and plan continuation.
+      this.events.onError?.(
+        error instanceof Error ? error : new Error(String(error)),
+      );
+      throw error;
+    }
+  }
+
+  private async executeTurn(
+    prompt: string,
+    attachments: ResolvedAttachment[],
+    allowResume: boolean,
+    baselineOverride?: Conversation,
+  ): Promise<GenerateResult> {
     this.abortRequested = false;
     if (!(await supportsLocalAgents())) {
       throw new Error(getT().settings.localCli.runtimeUnavailable);
@@ -475,7 +514,7 @@ export class LocalAgentGenerator implements GenerationBackend {
     // a valid resume. Sending it for every request keeps the wire complete and
     // lets a fresh run recover without rebuilding the request object.
     const bootstrapContext = formatConversationBootstrap(baseline);
-    const attachmentIndex = await collectAttachmentIndex(
+    const attachmentIndex = collectAttachmentIndex(
       this.host.getMessages(),
       attachments,
     );
@@ -510,9 +549,6 @@ export class LocalAgentGenerator implements GenerationBackend {
           budget,
         });
       } else {
-        this.events.onError?.(
-          error instanceof Error ? error : new Error(String(error)),
-        );
         throw error;
       }
     }
@@ -701,7 +737,7 @@ export class LocalAgentGenerator implements GenerationBackend {
         return { resolution: toLocalResolution(output), hadSideEffect: false };
       }
       if (this.abortRequested || budget.exhausted) {
-        await cancelLocalAgent(event.runId).catch(() => false);
+        this.stopRun();
         return {
           resolution: {
             text: "Error: the local CLI run is stopping.",
@@ -743,8 +779,7 @@ export class LocalAgentGenerator implements GenerationBackend {
           event.arguments && typeof event.arguments === "object"
             ? (event.arguments as { id?: unknown }).id
             : undefined;
-        const attachment =
-          typeof id === "string" ? attachmentIndex.get(id) : undefined;
+        const attachment = await resolveIndexedAttachment(attachmentIndex, id);
         output = attachment
           ? attachmentOutput(attachment)
           : normalizeToolExecutionOutput({
@@ -807,7 +842,7 @@ export class LocalAgentGenerator implements GenerationBackend {
         this.events.onFileChange?.(this.host.getFiles(), changes);
       }
       if (budgetError) {
-        await cancelLocalAgent(event.runId).catch(() => false);
+        this.stopRun();
       }
       return {
         resolution: toLocalResolution(output),
@@ -828,9 +863,7 @@ export class LocalAgentGenerator implements GenerationBackend {
           streamedChars += event.delta.length;
           if (streamedChars > MAX_LOCAL_STREAM_CHARS) {
             error = new Error(getT().settings.localCli.outputLimit);
-            this.abortRequested = true;
-            this.host.abort();
-            if (this.currentRunId) void cancelLocalAgent(this.currentRunId);
+            this.stopRun();
             break;
           }
           hadActivity = true;
@@ -842,9 +875,7 @@ export class LocalAgentGenerator implements GenerationBackend {
           streamedChars += event.delta.length;
           if (streamedChars > MAX_LOCAL_STREAM_CHARS) {
             error = new Error(getT().settings.localCli.outputLimit);
-            this.abortRequested = true;
-            this.host.abort();
-            if (this.currentRunId) void cancelLocalAgent(this.currentRunId);
+            this.stopRun();
             break;
           }
           hadActivity = true;
@@ -853,9 +884,7 @@ export class LocalAgentGenerator implements GenerationBackend {
           break;
         case "toolRequest":
           // LocalCliRuntime serializes tool execution and resolves each call
-          // exactly once. The generator retains the host-authority side effects
-          // in executeTool, but no longer owns the transport queue.
-          this.currentRunId = event.runId;
+          // exactly once through executeTool; nothing to track here.
           break;
         case "nativeTool": {
           hadActivity = true;
@@ -863,9 +892,7 @@ export class LocalAgentGenerator implements GenerationBackend {
             const budgetError = consumeToolBudget(budget, event.name);
             if (budgetError) {
               nativeRejected.add(event.callId);
-              if (this.currentRunId) {
-                void cancelLocalAgent(this.currentRunId);
-              }
+              this.stopRun();
               break;
             }
             nativeStarted.add(event.callId);
@@ -875,9 +902,7 @@ export class LocalAgentGenerator implements GenerationBackend {
             if (!nativeStarted.has(event.callId)) {
               const budgetError = consumeToolBudget(budget, event.name);
               if (budgetError) {
-                if (this.currentRunId) {
-                  void cancelLocalAgent(this.currentRunId);
-                }
+                this.stopRun();
                 break;
               }
               this.events.onToolCall?.(event.name, event.callId);
@@ -936,7 +961,6 @@ export class LocalAgentGenerator implements GenerationBackend {
         this.activeSignal ?? undefined,
       );
     } catch (cause) {
-      this.currentRunId = null;
       if (isLocalCliRuntimeError(cause)) {
         const failure = cause.failure;
         throw new LocalRunFailure(
@@ -951,9 +975,14 @@ export class LocalAgentGenerator implements GenerationBackend {
       );
     }
 
+    if (runtimeResult.prepared) {
+      this.events.onLocalCliPrepared?.(
+        this.config.provider,
+        runtimeResult.prepared,
+      );
+    }
     appendAssistant();
     this.attachLocalCliTelemetry(runtimeResult);
-    this.currentRunId = null;
     const rendererError = error as Error | null;
     if (rendererError) {
       throw new LocalRunFailure(rendererError.message, hadActivity);
@@ -1052,7 +1081,11 @@ export async function runLocalUtilityText(
   config: Pick<LocalAgentClientConfig, "provider" | "model" | "effort">,
   instructions: string,
   prompt: string,
-  options: { timeoutMs?: number; signal?: AbortSignal } = {},
+  options: {
+    timeoutMs?: number;
+    signal?: AbortSignal;
+    onPrepared?: NonNullable<GeneratorEvents["onLocalCliPrepared"]>;
+  } = {},
 ): Promise<string> {
   if (options.signal?.aborted) {
     throw options.signal.reason instanceof Error
@@ -1062,7 +1095,10 @@ export async function runLocalUtilityText(
   let text = "";
   const generator = createLocalAgentGenerator(
     { ...config, nativeSearch: false },
-    { onText: (delta) => (text += delta) },
+    {
+      onText: (delta) => (text += delta),
+      onLocalCliPrepared: options.onPrepared,
+    },
     {},
     {},
     undefined,

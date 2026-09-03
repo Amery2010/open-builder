@@ -68,7 +68,7 @@ function conversation(id: string): Conversation {
 const baseProps = {
   messages: [],
   isGenerating: false,
-  hasValidSettings: true,
+  hasConfiguredModelRuntime: true,
   onGenerate: vi.fn(async () => undefined),
   onStop: vi.fn(),
   onOpenSettings: vi.fn(),

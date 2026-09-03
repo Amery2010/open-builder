@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_OPENAI_MODEL } from "../../lib/ai/provider-config";
+import { createEmptyLocalCliObservationCache } from "../../lib/local-agent/observations";
 import { migrateSettings, SETTINGS_VERSION } from "./migrations";
 
 interface MigratedLocalAgentSettings {
@@ -83,7 +84,7 @@ describe("migrateSettings", () => {
   });
 
   it("adds custom prompts without overwriting an existing value", () => {
-    expect(SETTINGS_VERSION).toBe(21);
+    expect(SETTINGS_VERSION).toBe(22);
     const missing = migrateSettings({ system: {} }, 17) as Record<string, any>;
     const existing = migrateSettings(
       { system: { customSystemPrompt: "Keep changes surgical." } },
@@ -302,5 +303,36 @@ describe("migrateSettings", () => {
         antigravity: { model: "", effort: "" },
       },
     });
+  });
+
+  it("starts older settings with an empty local CLI observation cache", () => {
+    const migrated = migrateSettings(
+      { ai: { runtime: "localCli" } },
+      21,
+    ) as Record<string, any>;
+
+    expect(migrated.localCliObservationCache).toEqual(
+      createEmptyLocalCliObservationCache(),
+    );
+  });
+
+  it("drops unknown or malformed local CLI observation schemas", () => {
+    const empty = createEmptyLocalCliObservationCache();
+    const unknown = migrateSettings(
+      { localCliObservationCache: { ...empty, schemaVersion: 2 } },
+      22,
+    ) as Record<string, any>;
+    const malformed = migrateSettings(
+      {
+        localCliObservationCache: {
+          ...empty,
+          providers: { codex: { status: "loading" } },
+        },
+      },
+      22,
+    ) as Record<string, any>;
+
+    expect(unknown.localCliObservationCache).toEqual(empty);
+    expect(malformed.localCliObservationCache).toEqual(empty);
   });
 });

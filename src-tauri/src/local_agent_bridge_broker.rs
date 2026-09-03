@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
+use crate::local_agent::TrackedChannel;
 use crate::local_agent::{
     LocalAgentEvent, LocalToolAnnotations, LocalToolHostApproval, LocalToolResolution,
     LocalToolSpec,
@@ -137,7 +138,7 @@ struct BrokerRun {
     max_tool_calls: usize,
     tool_calls_started: AtomicUsize,
     cancellation: CancellationToken,
-    channel: tauri::ipc::Channel<LocalAgentEvent>,
+    channel: TrackedChannel,
     pending: Mutex<HashMap<String, oneshot::Sender<PendingResult>>>,
 }
 
@@ -231,7 +232,7 @@ impl ToolBroker {
         tools: Vec<LocalToolSpec>,
         max_tool_calls: usize,
         cancellation: CancellationToken,
-        channel: tauri::ipc::Channel<LocalAgentEvent>,
+        channel: TrackedChannel,
     ) -> Result<String, String> {
         let tools = validate_tools(tools)?;
         let token = format!("{}{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
@@ -590,7 +591,7 @@ mod tests {
                 vec![tool("allowed")],
                 max_tool_calls,
                 cancellation.clone(),
-                channel,
+                channel.into(),
             )
             .unwrap();
         (token, cancellation, receiver)
@@ -626,7 +627,7 @@ mod tests {
             vec![tool("same"), tool("same")],
             1,
             CancellationToken::new(),
-            channel,
+            channel.into(),
         );
         assert!(matches!(result, Err(message) if message.contains("duplicate")));
     }
@@ -640,7 +641,7 @@ mod tests {
             max_tool_calls: 8,
             tool_calls_started: AtomicUsize::new(0),
             cancellation: CancellationToken::new(),
-            channel,
+            channel: channel.into(),
             pending: Mutex::new(HashMap::new()),
         });
         let barrier = Arc::new(Barrier::new(33));
@@ -701,7 +702,7 @@ mod tests {
                 vec![tool("allowed")],
                 1,
                 cancellation.clone(),
-                failing_channel(),
+                failing_channel().into(),
             )
             .unwrap();
         let error = broker

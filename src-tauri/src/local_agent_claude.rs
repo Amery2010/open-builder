@@ -21,6 +21,7 @@ use crate::local_agent_protocol::{
     spawn_stderr_drain, spawn_wrapped, terminate, turn_prompt, write_json, FrozenProcessSpec,
     PreparedPrivateFile, ProtocolContext, ProtocolOutcome, ProtocolOutputBudget, RunSupervisor,
 };
+use crate::local_agent_runtime::{AdapterError, LocalCliFailureCode};
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -1647,7 +1648,7 @@ async fn wait_for_init(
     io: &mut ClaudeIo,
     context: &ProtocolContext,
     gateway_configured: bool,
-) -> Result<String, String> {
+) -> Result<String, AdapterError> {
     tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
         loop {
             let value = io.read_value().await?;
@@ -1664,7 +1665,7 @@ async fn wait_for_init(
                     .filter(|value| !value.is_empty())
                     .is_some_and(|expected| expected != session_id)
                 {
-                    return Err("Claude resumed a different session".to_string());
+                    return Err("Claude resumed a different session".into());
                 }
                 let cwd = value.get("cwd").and_then(Value::as_str).ok_or_else(|| {
                     "Claude init record omitted its working directory".to_string()
@@ -1675,13 +1676,12 @@ async fn wait_for_init(
                     .map_err(|_| "Claude init reported an invalid working directory".to_string())?;
                 if actual_cwd != expected_cwd {
                     return Err(
-                        "Claude isolation init reported an unexpected working directory"
-                            .to_string(),
+                        "Claude isolation init reported an unexpected working directory".into(),
                     );
                 }
                 if value.get("permissionMode").and_then(Value::as_str) != Some("dontAsk") {
                     return Err(
-                        "Claude isolation init reported an unexpected permission mode".to_string(),
+                        "Claude isolation init reported an unexpected permission mode".into(),
                     );
                 }
                 validate_init_inventory(&value, &context.request)?;
@@ -1692,7 +1692,7 @@ async fn wait_for_init(
                 "assistant" | "tool_use" | "tool_result" | "result"
             ) {
                 return Err(
-                    "Claude emitted user-visible activity before isolation attestation".to_string(),
+                    "Claude emitted user-visible activity before isolation attestation".into(),
                 );
             }
             if event_type(&value)? == "error" {
@@ -1706,7 +1706,7 @@ async fn wait_for_init(
             if capability_semantic_event(&value) {
                 return Err(
                     "Claude emitted an unexpected capability event before isolation attestation"
-                        .to_string(),
+                        .into(),
                 );
             }
         }
@@ -1849,7 +1849,7 @@ async fn run_claude_protocol(
     context: &ProtocolContext,
     io: &mut ClaudeIo,
     gateway_configured: bool,
-) -> Result<ProtocolOutcome, String> {
+) -> Result<ProtocolOutcome, AdapterError> {
     if context.cancellation.is_cancelled() {
         return Ok(ProtocolOutcome {
             session_id: context.request.session_id.clone(),
@@ -1903,7 +1903,7 @@ async fn run_claude_protocol(
             match event {
                 ClaudeEvent::Session(received) => {
                     if received != session_id {
-                        return Err("Claude changed sessions during a run".to_string());
+                        return Err("Claude changed sessions during a run".into());
                     }
                 }
                 ClaudeEvent::Text(text) => {
@@ -1931,9 +1931,10 @@ async fn run_claude_protocol(
                 } => {
                     if let Some(normalized) = native_tool_name(&name) {
                         if !context.request.native_search {
-                            return Err(
-                                "Claude attempted to use disabled native web search".to_string()
-                            );
+                            return Err(AdapterError::coded(
+                                LocalCliFailureCode::IsolationViolation,
+                                "Claude attempted to use disabled native web search",
+                            ));
                         }
                         if let std::collections::hash_map::Entry::Vacant(entry) =
                             active_native.entry(id.clone())
@@ -1942,14 +1943,16 @@ async fn run_claude_protocol(
                             entry.insert(normalized.to_string());
                         }
                     } else if !expected_mcp.contains(&name) {
-                        return Err("Claude attempted to use an unauthorized native or MCP tool"
-                            .to_string());
+                        return Err(AdapterError::coded(
+                            LocalCliFailureCode::IsolationViolation,
+                            "Claude attempted to use an unauthorized native or MCP tool",
+                        ));
                     }
                 }
                 ClaudeEvent::ToolInputDelta { index, delta } => {
                     let entry = tool_input_deltas.entry(index).or_default();
                     if entry.len().saturating_add(delta.len()) > MAX_TOOL_INPUT_BYTES {
-                        return Err("Claude tool input exceeded the request limit".to_string());
+                        return Err("Claude tool input exceeded the request limit".into());
                     }
                     entry.push_str(&delta);
                 }
@@ -2000,10 +2003,10 @@ async fn run_claude_protocol(
                             } => {
                                 if let Some(normalized) = native_tool_name(&name) {
                                     if !context.request.native_search {
-                                        return Err(
-                                            "Claude attempted to use disabled native web search"
-                                                .to_string(),
-                                        );
+                                        return Err(AdapterError::coded(
+                                            LocalCliFailureCode::IsolationViolation,
+                                            "Claude attempted to use disabled native web search",
+                                        ));
                                     }
                                     if let std::collections::hash_map::Entry::Vacant(entry) =
                                         active_native.entry(id.clone())
@@ -2012,10 +2015,10 @@ async fn run_claude_protocol(
                                         entry.insert(normalized.to_string());
                                     }
                                 } else if !expected_mcp.contains(&name) {
-                                    return Err(
-                                        "Claude attempted to use an unauthorized native or MCP tool"
-                                            .to_string(),
-                                    );
+                                    return Err(AdapterError::coded(
+                                        LocalCliFailureCode::IsolationViolation,
+                                        "Claude attempted to use an unauthorized native or MCP tool",
+                                    ));
                                 }
                             }
                             ClaudeEvent::ToolResult { id, result } => {
@@ -2035,7 +2038,7 @@ async fn run_claude_protocol(
                 } => {
                     if let Some(received_session) = received_session {
                         if received_session != session_id {
-                            return Err("Claude returned a different result session".to_string());
+                            return Err("Claude returned a different result session".into());
                         }
                     }
                     if let Some(usage) = usage {
@@ -2061,7 +2064,10 @@ async fn run_claude_protocol(
                         });
                     }
                     if retry_was_rate_limited {
-                        return Err("Claude request was rate limited".to_string());
+                        return Err(AdapterError::coded(
+                            LocalCliFailureCode::ProcessExit,
+                            "Claude request was rate limited",
+                        ));
                     }
                     return Err(safe_error_text(
                         text.as_deref(),
@@ -2073,7 +2079,7 @@ async fn run_claude_protocol(
                 ClaudeEvent::Retry { rate_limited } => {
                     retry_was_rate_limited |= rate_limited;
                 }
-                ClaudeEvent::Error(message) => return Err(message),
+                ClaudeEvent::Error(message) => return Err(message.into()),
                 ClaudeEvent::Ignore => {}
             }
         }
@@ -2085,9 +2091,9 @@ fn safe_error_text(
     fallback: &str,
     gateway_configured: bool,
     attempted_resume: bool,
-) -> String {
+) -> AdapterError {
     let Some(text) = value.filter(|text| !text.trim().is_empty()) else {
-        return fallback.to_string();
+        return fallback.into();
     };
     // Result payloads are provider-controlled and may contain authentication,
     // endpoint, or configuration details. Expose only a coarse category; the
@@ -2114,28 +2120,77 @@ fn safe_error_text(
     .iter()
     .any(|needle| lower.contains(needle));
     if attempted_resume && mentions_session && unavailable {
-        "Claude session is unavailable".to_string()
+        AdapterError::coded(
+            LocalCliFailureCode::SessionUnavailable,
+            "Claude session is unavailable",
+        )
+    } else if ["permission", "forbidden", "approval"]
+        .iter()
+        .any(|needle| lower.contains(needle))
+    {
+        AdapterError::coded(
+            LocalCliFailureCode::ProviderApprovalRejected,
+            "Claude provider approval rejected the requested capability.",
+        )
+    } else if ["native", "tool", "capability", "mcp"]
+        .iter()
+        .any(|needle| lower.contains(needle))
+        && ["unauthor", "disabled", "unexpected"]
+            .iter()
+            .any(|needle| lower.contains(needle))
+    {
+        AdapterError::coded(
+            LocalCliFailureCode::IsolationViolation,
+            "Claude requested an unavailable capability.",
+        )
     } else if ["auth", "login", "unauthor", "credential", "token"]
         .iter()
         .any(|needle| lower.contains(needle))
     {
-        if gateway_configured {
-            "Claude gateway authentication failed; check its configured credential.".to_string()
-        } else {
-            "Claude authentication failed; run claude auth login.".to_string()
-        }
-    } else if ["permission", "forbidden", "tool", "capability"]
+        AdapterError::coded(
+            LocalCliFailureCode::CredentialRejected,
+            if gateway_configured {
+                "Claude gateway authentication failed; check its configured credential."
+            } else {
+                "Claude authentication failed; run claude auth login."
+            },
+        )
+    } else if [
+        "unknown model",
+        "model not found",
+        "invalid model",
+        "selected model",
+        "reasoning effort",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+    {
+        AdapterError::coded(
+            LocalCliFailureCode::ModelRejected,
+            "Claude selected model or reasoning effort was rejected.",
+        )
+    } else if ["tool", "capability"]
         .iter()
         .any(|needle| lower.contains(needle))
     {
-        "Claude requested an unavailable capability.".to_string()
+        AdapterError::coded(
+            LocalCliFailureCode::IsolationViolation,
+            "Claude requested an unavailable capability.",
+        )
     } else if ["rate", "overload", "timeout", "temporarily"]
         .iter()
         .any(|needle| lower.contains(needle))
     {
-        "Claude request could not be completed; retry later.".to_string()
+        if lower.contains("rate") {
+            AdapterError::coded(
+                LocalCliFailureCode::ProcessExit,
+                "Claude request was rate limited",
+            )
+        } else {
+            "Claude request could not be completed; retry later.".into()
+        }
     } else {
-        fallback.to_string()
+        fallback.into()
     }
 }
 
@@ -2195,14 +2250,14 @@ fn prepare_with_environment(
     })
 }
 
-pub(crate) fn prepare_run(context: ProtocolContext) -> Result<PreparedClaudeRun, String> {
+pub(crate) fn prepare_run(context: ProtocolContext) -> Result<PreparedClaudeRun, AdapterError> {
     let provider_environment = load_provider_environment()?;
-    prepare_with_environment(context, provider_environment)
+    Ok(prepare_with_environment(context, provider_environment)?)
 }
 
 pub(crate) async fn launch_prepared(
     prepared: PreparedClaudeRun,
-) -> Result<ProtocolOutcome, String> {
+) -> Result<ProtocolOutcome, AdapterError> {
     let PreparedClaudeRun {
         context,
         provider_environment,
@@ -2227,7 +2282,7 @@ async fn run_prepared(
     context: &ProtocolContext,
     process_spec: FrozenProcessSpec,
     gateway_configured: bool,
-) -> Result<ProtocolOutcome, String> {
+) -> Result<ProtocolOutcome, AdapterError> {
     let process = RunSupervisor::spawn(process_spec, context.cancellation.clone())?;
     let supervisor = process.supervisor;
     let mut io = ClaudeIo {
@@ -2323,12 +2378,12 @@ mod tests {
             bridge_url: "http://127.0.0.1:34567/mcp".to_string(),
             bridge_token: "secret-bridge-token".to_string(),
             cancellation: CancellationToken::new(),
-            channel,
+            channel: channel.into(),
             cli_version: "2.1.251-test".to_string(),
         }
     }
 
-    async fn execute_contract(context: &ProtocolContext) -> Result<ProtocolOutcome, String> {
+    async fn execute_contract(context: &ProtocolContext) -> Result<ProtocolOutcome, AdapterError> {
         let files = prepare_run_files(context)?;
         let args = claude_args(
             &context.request,
@@ -2419,7 +2474,7 @@ mod tests {
         std::fs::write(&prepared.files.system_prompt, b"tampered").unwrap();
 
         let error = launch_prepared(prepared).await.unwrap_err();
-        assert_eq!(error, PREPARED_PRIVATE_FILES_CHANGED_ERROR);
+        assert_eq!(error.message, PREPARED_PRIVATE_FILES_CHANGED_ERROR);
         assert!(!root.join("provider-invocation.log").exists());
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -2731,48 +2786,82 @@ mod tests {
 
     #[test]
     fn redacts_provider_error_payloads() {
-        let message = safe_error_text(
+        let error = safe_error_text(
             Some("authorization failed: bearer secret-token and endpoint details"),
             "Claude model request failed",
             false,
             false,
         );
+        assert_eq!(error.code, Some(LocalCliFailureCode::CredentialRejected));
         assert_eq!(
-            message,
+            error.message,
             "Claude authentication failed; run claude auth login."
         );
-        assert!(!message.contains("secret-token"));
+        assert!(!error.message.contains("secret-token"));
 
-        let gateway_message = safe_error_text(
+        let gateway_error = safe_error_text(
             Some("authorization failed: bearer secret-token and endpoint details"),
             "Claude model request failed",
             true,
             false,
         );
         assert_eq!(
-            gateway_message,
+            gateway_error.code,
+            Some(LocalCliFailureCode::CredentialRejected)
+        );
+        assert_eq!(
+            gateway_error.message,
             "Claude gateway authentication failed; check its configured credential."
         );
-        assert!(!gateway_message.contains("secret-token"));
+        assert!(!gateway_error.message.contains("secret-token"));
 
-        assert_eq!(
-            safe_error_text(
-                Some("No conversation found for session resume-123"),
-                "Claude model request failed",
-                false,
-                true,
-            ),
-            "Claude session is unavailable"
+        let session = safe_error_text(
+            Some("No conversation found for session resume-123"),
+            "Claude model request failed",
+            false,
+            true,
+        );
+        assert_eq!(session.code, Some(LocalCliFailureCode::SessionUnavailable));
+        assert_eq!(session.message, "Claude session is unavailable");
+
+        let model = safe_error_text(
+            Some("invalid model selection"),
+            "Claude model request failed",
+            false,
+            false,
+        );
+        assert_eq!(model.code, Some(LocalCliFailureCode::ModelRejected));
+
+        let isolation = safe_error_text(
+            Some("attempted an unauthorized native tool"),
+            "Claude model request failed",
+            false,
+            false,
         );
         assert_eq!(
-            safe_error_text(
-                Some("No conversation found for session resume-123"),
-                "Claude model request failed",
-                false,
-                false,
-            ),
-            "Claude model request failed"
+            isolation.code,
+            Some(LocalCliFailureCode::IsolationViolation)
         );
+
+        let approval = safe_error_text(
+            Some("permission denied for a tool call"),
+            "Claude model request failed",
+            false,
+            false,
+        );
+        assert_eq!(
+            approval.code,
+            Some(LocalCliFailureCode::ProviderApprovalRejected)
+        );
+
+        let generic = safe_error_text(
+            Some("No conversation found for session resume-123"),
+            "Claude model request failed",
+            false,
+            false,
+        );
+        assert_eq!(generic.code, None);
+        assert_eq!(generic.message, "Claude model request failed");
     }
 
     #[test]
@@ -2858,7 +2947,7 @@ mod tests {
             bridge_url: "http://127.0.0.1:3333/mcp".to_string(),
             bridge_token: "secret-token".to_string(),
             cancellation: CancellationToken::new(),
-            channel: tauri::ipc::Channel::new(|_| Ok(())),
+            channel: tauri::ipc::Channel::new(|_| Ok(())).into(),
             cli_version: "2.1.251".to_string(),
         };
         let config = mcp_config(&context).unwrap();
@@ -2997,7 +3086,7 @@ mod tests {
                     request.tools.clone(),
                     request.max_tool_calls,
                     cancellation.clone(),
-                    channel.clone(),
+                    channel.clone().into(),
                 )
                 .await
                 .unwrap();
@@ -3088,7 +3177,10 @@ mod tests {
             Ok(_) => panic!("unknown Claude capability event must fail closed"),
             Err(error) => error,
         };
-        assert!(error.contains("unexpected native capability"), "{error}");
+        assert!(
+            error.message.contains("unexpected native capability"),
+            "{error}"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -3102,15 +3194,18 @@ mod tests {
                 .await
                 .expect_err("Claude failure fixture must not complete");
             match mode {
-                "malformed" => assert!(error.contains("malformed JSON"), "{error}"),
-                "oversized" => assert!(error.contains("line limit"), "{error}"),
+                "malformed" => assert!(error.message.contains("malformed JSON"), "{error}"),
+                "oversized" => assert!(error.message.contains("line limit"), "{error}"),
                 "stderr-approval" => {
-                    assert!(error.contains("provider approval rejected"), "{error}")
+                    assert!(
+                        error.message.contains("provider approval rejected"),
+                        "{error}"
+                    )
                 }
                 _ => assert!(
-                    error.contains("failed to write")
-                        || error.contains("closed unexpectedly")
-                        || error.contains("closed before"),
+                    error.message.contains("failed to write")
+                        || error.message.contains("closed unexpectedly")
+                        || error.message.contains("closed before"),
                     "{error}"
                 ),
             }

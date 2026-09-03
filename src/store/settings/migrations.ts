@@ -7,8 +7,12 @@ import {
   LOCAL_AGENT_PROVIDERS,
   type LocalAgentProvider,
 } from "../../lib/local-agent/providers";
+import {
+  createEmptyLocalCliObservationCache,
+  sanitizeLocalCliObservationCache,
+} from "../../lib/local-agent/observations";
 
-export const SETTINGS_VERSION = 21;
+export const SETTINGS_VERSION = 22;
 
 interface PersistedLocalAgentPreferences {
   model: string;
@@ -39,7 +43,10 @@ function migrateLocalAgentPreferences(
 }
 
 export function migrateSettings(persisted: unknown, version: number): unknown {
-  const state = persisted as Record<string, any>;
+  const state =
+    persisted && typeof persisted === "object" && !Array.isArray(persisted)
+      ? (persisted as Record<string, any>)
+      : {};
   if (version === 0 && state.ai?.apiUrl) {
     let baseUrl: string = state.ai.apiUrl;
     baseUrl = baseUrl.replace(/\/chat\/completions$/, "");
@@ -174,6 +181,13 @@ export function migrateSettings(persisted: unknown, version: number): unknown {
         : "codex",
       preferences: migrateLocalAgentPreferences(localAgent),
     };
+  }
+  if (version < 22) {
+    state.localCliObservationCache = createEmptyLocalCliObservationCache();
+  } else {
+    state.localCliObservationCache = sanitizeLocalCliObservationCache(
+      state.localCliObservationCache,
+    );
   }
   return state;
 }

@@ -50,7 +50,7 @@ vi.mock("./chat/ChatInput", () => ({
 const baseProps = {
   messages: [],
   isGenerating: false,
-  hasValidSettings: true,
+  hasConfiguredModelRuntime: true,
   onStop: vi.fn(),
   onOpenSettings: vi.fn(),
   onSetFiles: vi.fn(),
@@ -83,6 +83,35 @@ describe("ChatInterface forced Skills", () => {
       legacyPlanModeMigrated: true,
     });
     useDesignSelectionStore.setState({ selections: {} });
+  });
+
+  it("allows Local CLI submission while showing a non-blocking cached status", async () => {
+    const user = userEvent.setup();
+    const onGenerate = vi.fn(async () => undefined);
+    render(
+      <ChatInterface
+        {...baseProps}
+        localCliStatusNotice={{ providerName: "Codex", kind: "notFound" }}
+        onGenerate={onGenerate}
+      />,
+    );
+
+    expect(
+      screen.queryByText("AI Model Configuration Required"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "The selected CLI was not found. Choose its program or rescan in settings.",
+      ),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Prepare request" }));
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() =>
+      expect(onGenerate).toHaveBeenCalledWith("Build it", undefined, {
+        forcedSkillIds: ["review-code"],
+      }),
+    );
   });
 
   it("attaches a preview selection to one request and then clears it", async () => {
