@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 import {
   SandpackProvider,
   SandpackLayout,
@@ -14,7 +21,12 @@ import { useT } from "../i18n";
 import { SandpackListener } from "./code-viewer/SandpackListener";
 import { ViewToolbar } from "./code-viewer/ViewToolbar";
 import { FileExplorer } from "./code-viewer/FileExplorer";
-import type { ViewMode, DeviceSize } from "./code-viewer/ViewToolbar";
+import {
+  clampPreviewScale,
+  PREVIEW_SCALE_STEP,
+  type DeviceSize,
+  type ViewMode,
+} from "./code-viewer/ViewToolbar";
 import type { ProjectFiles, ProjectPreviewMode } from "../types";
 import {
   hasSensitiveProjectFileContent,
@@ -102,6 +114,22 @@ export function getSandpackFileContentToCommit(
     : content;
 }
 
+export function resolvePreviewScale({
+  captureActive,
+  requestedScale,
+}: {
+  captureActive: boolean;
+  requestedScale: number;
+}): number {
+  return captureActive ? 1 : requestedScale;
+}
+
+export function resolvePreviewIframeHeight(scale: number): string {
+  const normalizedScale = clampPreviewScale(scale);
+  const percentage = Math.round((100 / normalizedScale) * 100) / 100;
+  return `${percentage}%`;
+}
+
 interface CodeViewerProps {
   conversationId: string;
   files: ProjectFiles;
@@ -161,14 +189,10 @@ export function CodeViewer({
   );
   const [deviceSize, setDeviceSize] = useState<DeviceSize>("desktop");
   const [showConsole, setShowConsole] = useState(false);
-  const [requestedScale, setRequestedScale] = useState<number | null>(null);
-  const [fitScale, setFitScale] = useState(1);
+  const [requestedScale, setRequestedScale] = useState(1);
+  const [captureFitScale, setCaptureFitScale] = useState(1);
   const [designSystemsOpen, setDesignSystemsOpen] = useState(false);
   const [designTokensOpen, setDesignTokensOpen] = useState(false);
-  const [designTokenDraft, setDesignTokenDraft] = useState<{
-    path: string;
-    content: string;
-  } | null>(null);
   const [designSelectionActive, setDesignSelectionActive] = useState(false);
   const [designReviewOpen, setDesignReviewOpen] = useState(false);
   const [captureRuntimeSource, setCaptureRuntimeSource] = useState<
@@ -226,24 +250,27 @@ export function CodeViewer({
       ? { width: 768, height: 1024 }
       : { width: 375, height: 667 };
   const fixedPreview = captureViewport !== null || deviceSize !== "desktop";
-  const previewScale = fixedPreview
-    ? captureViewport
-      ? fitScale
-      : (requestedScale ?? fitScale)
-    : 1;
+  const previewScale = resolvePreviewScale({
+    captureActive: captureViewport !== null,
+    requestedScale,
+  });
 
   useEffect(() => {
     if (!previewEnabled) setViewMode("code");
   }, [previewEnabled]);
 
   useEffect(() => {
-    if (!fixedPreview) return;
+    setRequestedScale(1);
+  }, [conversationId, previewMode]);
+
+  useEffect(() => {
+    if (!captureViewport) return;
     const host = previewHostRef.current;
     if (!host) return;
     const update = () => {
       const rect = host.getBoundingClientRect();
       if (!rect.width || !rect.height) return;
-      setFitScale(
+      setCaptureFitScale(
         Math.min(
           1,
           Math.max(
@@ -260,11 +287,16 @@ export function CodeViewer({
     const observer = new ResizeObserver(update);
     observer.observe(host);
     return () => observer.disconnect();
-  }, [deviceDimensions.height, deviceDimensions.width, fixedPreview, viewMode]);
+  }, [
+    captureViewport,
+    deviceDimensions.height,
+    deviceDimensions.width,
+    viewMode,
+  ]);
 
   const handleDeviceSizeChange = (next: DeviceSize) => {
     setDeviceSize(next);
-    setRequestedScale(null);
+    setRequestedScale(1);
   };
 
   const previewFiles = useMemo(
@@ -275,27 +307,20 @@ export function CodeViewer({
       ),
     [files, previewMode],
   );
-  const runtimePreviewFiles = useMemo(
-    () =>
-      designTokenDraft
-        ? { ...previewFiles, [designTokenDraft.path]: designTokenDraft.content }
-        : previewFiles,
-    [designTokenDraft, previewFiles],
-  );
   const bridgeInjection = useMemo(
     () =>
       workspaceMode === "design"
         ? injectDesignBridge(
-            runtimePreviewFiles,
+            previewFiles,
             template,
             previewEnabled,
             captureRuntimeSource ?? undefined,
           )
-        : { supported: false as const, files: runtimePreviewFiles },
+        : { supported: false as const, files: previewFiles },
     [
       captureRuntimeSource,
       previewEnabled,
-      runtimePreviewFiles,
+      previewFiles,
       template,
       workspaceMode,
     ],
@@ -305,9 +330,7 @@ export function CodeViewer({
     effectiveViewMode === "preview" &&
     bridgeInjection.supported
       ? bridgeInjection.files
-      : effectiveViewMode === "preview"
-        ? runtimePreviewFiles
-        : previewFiles;
+      : previewFiles;
   const invalidateAutomaticReview = useCallback(() => {
     const review = useDesignReviewStore.getState();
     if (review.automatic) review.reset();
@@ -623,15 +646,6 @@ export function CodeViewer({
             ? t.toolbar.selectionReservedPath
             : undefined;
 
-  const handleDesignTokenDraftChange = useCallback(
-    (path: string | undefined, content: string | undefined) => {
-      setDesignTokenDraft(
-        path && content !== undefined ? { path, content } : null,
-      );
-    },
-    [],
-  );
-
   const handleDesignTokenCommit = useCallback(
     (path: string, content: string) => {
       if (files[path] === content) return;
@@ -643,7 +657,6 @@ export function CodeViewer({
         nextFiles,
         t.designTokens.snapshotLabel,
       );
-      setDesignTokenDraft(null);
     },
     [
       conversationId,
@@ -1033,6 +1046,34 @@ export function CodeViewer({
       ? requestedCurrentFile
       : (Object.keys(previewFiles)[0] ?? requestedCurrentFile);
   const sandpackCurrentFile = `/${effectiveCurrentFile}`;
+  const previewFrameScale = captureViewport ? captureFitScale : 1;
+  const previewHostOverflowClass = fixedPreview
+    ? "overflow-auto p-4"
+    : "overflow-hidden";
+  const previewFrameStyle = fixedPreview
+    ? {
+        width: deviceDimensions.width * previewFrameScale,
+        height: deviceDimensions.height * previewFrameScale,
+      }
+    : { width: "100%", height: "100%" };
+  const previewSurfaceStyle = fixedPreview
+    ? {
+        width: deviceDimensions.width,
+        height: deviceDimensions.height,
+        ...(captureViewport
+          ? {
+              transform: `scale(${previewFrameScale})`,
+              transformOrigin: "top left",
+            }
+          : {}),
+      }
+    : undefined;
+  const previewContentStyle = {
+    "--ob-preview-scale": String(previewScale),
+    "--ob-preview-iframe-height": resolvePreviewIframeHeight(previewScale),
+    "--ob-preview-transform-origin":
+      previewScale < 1 ? "top center" : "top left",
+  } as CSSProperties;
 
   const handleCreateFile = (path: string) => {
     const p = path.startsWith("/") ? path.slice(1) : path;
@@ -1061,14 +1102,17 @@ export function CodeViewer({
         onDeviceSizeChange={handleDeviceSizeChange}
         files={files}
         previewEnabled={previewEnabled}
-        previewScale={previewScale}
+        previewScale={requestedScale}
         onPreviewZoomIn={() =>
-          setRequestedScale(Math.min(1.5, previewScale + 0.1))
+          setRequestedScale((current) =>
+            clampPreviewScale(current + PREVIEW_SCALE_STEP),
+          )
         }
         onPreviewZoomOut={() =>
-          setRequestedScale(Math.max(0.25, previewScale - 0.1))
+          setRequestedScale((current) =>
+            clampPreviewScale(current - PREVIEW_SCALE_STEP),
+          )
         }
-        onPreviewFit={() => setRequestedScale(null)}
         onReloadPreview={handleReloadPreview}
         designMode={workspaceMode === "design"}
         onOpenDesignTokens={() => setDesignTokensOpen(true)}
@@ -1100,7 +1144,6 @@ export function CodeViewer({
           onOpenChange={setDesignTokensOpen}
           files={files}
           designState={designState}
-          onDraftChange={handleDesignTokenDraftChange}
           onCommit={handleDesignTokenCommit}
           onUpgrade={handleDesignTokenUpgrade}
           isGenerating={isGenerating}
@@ -1150,6 +1193,7 @@ export function CodeViewer({
           <SandpackRefreshRegistration onChange={registerSoftRefresh} />
           <SandpackListener
             conversationId={conversationId}
+            requestedActiveFile={sandpackCurrentFile}
             onFileChange={handleSandpackFileChange}
           />
           <SandpackLayout>
@@ -1160,72 +1204,55 @@ export function CodeViewer({
                 className={cn(
                   "h-full w-full",
                   effectiveViewMode === "preview" ? "block" : "hidden",
-                  fixedPreview ? "overflow-auto p-4" : "overflow-hidden",
+                  previewHostOverflowClass,
                 )}
               >
                 <div
                   className={cn("mx-auto", fixedPreview && "relative")}
-                  style={
-                    fixedPreview
-                      ? {
-                          width: deviceDimensions.width * previewScale,
-                          height: deviceDimensions.height * previewScale,
-                        }
-                      : { width: "100%", height: "100%" }
-                  }
+                  style={previewFrameStyle}
                 >
                   <div
                     className={cn(
                       "grid grid-rows-3 h-full",
                       fixedPreview &&
-                        "absolute left-0 top-0 overflow-hidden rounded-lg border bg-background shadow-lg",
+                        "overflow-hidden rounded-lg border bg-background shadow-lg",
                       captureViewport &&
-                        "rounded-none border-0 shadow-none transition-none",
+                        "absolute left-0 top-0 rounded-none border-0 shadow-none transition-none",
                     )}
-                    style={
-                      fixedPreview
-                        ? {
-                            width: deviceDimensions.width,
-                            height: deviceDimensions.height,
-                            transform: `scale(${previewScale})`,
-                            transformOrigin: "top left",
-                          }
-                        : undefined
-                    }
+                    style={previewSurfaceStyle}
                   >
                     <div
                       className={cn(
-                        "transition-[width,height,transform,opacity] duration-300 ease-in-out",
+                        "relative transition-[width,height,transform,opacity] duration-300 ease-in-out",
                         showConsole ? "row-span-2" : "row-span-3",
                       )}
                     >
                       <SandpackPreview
+                        className={cn(
+                          "preview-content-zoom",
+                          previewScale !== 1 && "preview-content-scaled",
+                        )}
+                        style={previewContentStyle}
                         showNavigator={!captureViewport}
                         showOpenInCodeSandbox={false}
                         showRefreshButton={false}
                         showRestartButton={false}
-                        actionsChildren={
-                          <>
-                            <SandpackActionButton
-                              label={
-                                showConsole ? t.console.hide : t.console.show
-                              }
-                              pressed={showConsole}
-                              onClick={() =>
-                                setShowConsole((visible) => !visible)
-                              }
-                            >
-                              <Terminal size={16} />
-                            </SandpackActionButton>
-                            <SandpackRefreshAction
-                              label={t.toolbar.reloadPreview}
-                              onBeforeRefresh={() =>
-                                flushPendingSandpackFileChanges(conversationId)
-                              }
-                            />
-                          </>
-                        }
                       />
+                      <div className="preview-viewport-actions absolute bottom-2 right-2 z-20 flex gap-2">
+                        <SandpackActionButton
+                          label={showConsole ? t.console.hide : t.console.show}
+                          pressed={showConsole}
+                          onClick={() => setShowConsole((visible) => !visible)}
+                        >
+                          <Terminal size={16} />
+                        </SandpackActionButton>
+                        <SandpackRefreshAction
+                          label={t.toolbar.reloadPreview}
+                          onBeforeRefresh={() =>
+                            flushPendingSandpackFileChanges(conversationId)
+                          }
+                        />
+                      </div>
                     </div>
                     <div
                       className={cn(

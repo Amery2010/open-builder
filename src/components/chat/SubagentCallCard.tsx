@@ -114,16 +114,31 @@ export const SubagentCallCard = memo(function SubagentCallCard({
   toolCallId,
   rawArgs,
   result,
+  toolOutput,
 }: SubagentCallCardProps) {
   const t = useT();
   const [expanded, setExpanded] = useState(false);
 
   const live = useSubagentStore((s) => s.progress[toolCallId]);
   const persisted = useMemo(() => parsePersisted(result), [result]);
+  const persistedError = useMemo(() => {
+    const resultText = result.trim();
+    if (toolOutput?.isError) {
+      return truncateSubagentText(
+        toolOutput.text.trim() || persisted?.error || resultText,
+        SUBAGENT_LIMITS.maxErrorChars,
+      );
+    }
+    if (!toolOutput && resultText.startsWith("Error") && !persisted) {
+      return truncateSubagentText(resultText, SUBAGENT_LIMITS.maxErrorChars);
+    }
+    return undefined;
+  }, [persisted, result, toolOutput]);
 
   const data: SubagentCardData = useMemo(() => {
+    let base: SubagentCardData;
     if (live) {
-      return {
+      base = {
         subagent: live.subagent,
         task: live.task,
         status: live.status,
@@ -135,19 +150,27 @@ export const SubagentCallCard = memo(function SubagentCallCard({
             : undefined,
         error: live.error,
       };
+    } else if (persisted) {
+      base = persisted;
+    } else {
+      const fallbackName =
+        typeof rawArgs?.subagent === "string" ? rawArgs.subagent : "subagent";
+      const fallbackTask =
+        typeof rawArgs?.task === "string" ? rawArgs.task : "";
+      base = {
+        subagent: fallbackName,
+        task: fallbackTask,
+        status: result ? "done" : "running",
+        text: persistedError
+          ? ""
+          : truncateSubagentText(result, SUBAGENT_LIMITS.maxLiveTextChars),
+        events: [],
+      };
     }
-    if (persisted) return persisted;
-    const fallbackName =
-      typeof rawArgs?.subagent === "string" ? rawArgs.subagent : "subagent";
-    const fallbackTask = typeof rawArgs?.task === "string" ? rawArgs.task : "";
-    return {
-      subagent: fallbackName,
-      task: fallbackTask,
-      status: result ? "done" : "running",
-      text: "",
-      events: [],
-    };
-  }, [live, persisted, rawArgs, result]);
+    return persistedError
+      ? { ...base, status: "failed", error: persistedError }
+      : base;
+  }, [live, persisted, persistedError, rawArgs, result]);
 
   const displayName =
     t.subagent.names[data.subagent as keyof typeof t.subagent.names] ??

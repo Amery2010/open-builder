@@ -1013,7 +1013,7 @@ export const en: typeof zh = {
     mobile: "Mobile",
     zoomIn: "Zoom in preview",
     zoomOut: "Zoom out preview",
-    fitPreview: "Fit preview",
+    zoomLevel: "Preview zoom level",
     reloadPreview: "Reload preview",
     download: "Download",
     designSystem: "Design system",
@@ -1094,7 +1094,7 @@ export const en: typeof zh = {
   designTokens: {
     title: "Design tokens",
     description:
-      "Edit a focused set of semantic values. Drafts preview live; Save creates one project snapshot.",
+      "Edit a focused set of semantic values. Changes apply when saved and create one project snapshot.",
     legacyTitle: "Legacy design reference",
     legacyDescription:
       "This DESIGN.md has no verified token contract. Choose and apply a compatible Design system to enable editing.",

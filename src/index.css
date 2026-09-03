@@ -225,6 +225,40 @@ body {
   display: none;
 }
 
+.editor .preview-content-zoom {
+  background-color: var(--background);
+  border: 0;
+  gap: 0;
+}
+
+.preview-content-zoom .sp-preview-container {
+  height: 100%;
+  min-height: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  background-color: var(--background);
+  border: 0;
+}
+
+.preview-content-zoom .sp-preview-iframe {
+  display: block;
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: var(--ob-preview-iframe-height) !important;
+  min-height: 0;
+  max-height: none;
+  flex: none;
+  border: 0;
+  outline: 0;
+}
+
+.preview-content-scaled .sp-preview-iframe {
+  transform: scale(var(--ob-preview-scale));
+  transform-origin: var(--ob-preview-transform-origin);
+}
+
 .editor .sp-console-list code {
   white-space: wrap;
 }
@@ -237,6 +271,17 @@ body {
 .markdown-content {
   word-wrap: break-word;
   overflow-wrap: break-word;
+}
+
+.markdown-content .markdown-inline-code {
+  display: inline;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  vertical-align: baseline;
+}
+
+.markdown-content pre > code {
+  display: block;
 }
 
 .markdown-content ul {

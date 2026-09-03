@@ -56,4 +56,63 @@ describe("MarkdownContent URL guards", () => {
     expect(markup).toContain('role="status"');
     expect(markup).toContain('aria-live="polite"');
   });
+
+  it("keeps inline code inline for both message variants", () => {
+    for (const variant of ["assistant", "user"] as const) {
+      const markup = renderToStaticMarkup(
+        createElement(
+          TooltipProvider,
+          null,
+          createElement(MarkdownContent, {
+            content: "Run `npm run build` before shipping.",
+            variant,
+          }),
+        ),
+      );
+      const inlineClass =
+        /<code class="([^"]*)"[^>]*>npm run build<\/code>/.exec(markup)?.[1];
+
+      expect(inlineClass?.split(" ")).toEqual(
+        expect.arrayContaining([
+          "markdown-inline-code",
+          "inline",
+          "whitespace-normal",
+          "align-baseline",
+        ]),
+      );
+      expect(markup).not.toContain("<pre");
+    }
+  });
+
+  it("keeps fenced code under pre and out of the inline style", () => {
+    const markup = renderToStaticMarkup(
+      createElement(
+        TooltipProvider,
+        null,
+        createElement(MarkdownContent, {
+          content: "```ts\nconst answer = 42;\n```",
+          variant: "assistant",
+        }),
+      ),
+    );
+
+    expect(markup).toMatch(/<pre[^>]*><code class="language-ts"/);
+    expect(markup).not.toContain("markdown-inline-code");
+  });
+
+  it("keeps an unlabelled fence out of the inline style", () => {
+    const markup = renderToStaticMarkup(
+      createElement(
+        TooltipProvider,
+        null,
+        createElement(MarkdownContent, {
+          content: "```\nfirst line\nsecond line\n```",
+          variant: "assistant",
+        }),
+      ),
+    );
+
+    expect(markup).toMatch(/<pre[^>]*><code>first line\nsecond line\n<\/code>/);
+    expect(markup).not.toContain("markdown-inline-code");
+  });
 });

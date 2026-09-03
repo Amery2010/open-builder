@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { SkillActiveContextController } from "../skills/active-context";
+import { getSubagentByName } from "../ai/subagents/registry";
 
 export const DESIGN_SURFACE_MODES = [
   "persuade",
@@ -71,7 +72,7 @@ export interface DesignContractController {
     reusableContract?: DesignContract,
   ): void;
   submit(input: unknown, context: SubmitDesignContractContext): DesignContract;
-  authorizeProjectWrite(toolName: string): string | undefined;
+  authorizeProjectWrite(toolName: string, args?: unknown): string | undefined;
   getContract(): DesignContract | null;
   isReady(): boolean;
 }
@@ -164,11 +165,24 @@ export function createDesignContractController(): DesignContractController {
       return cloneContract(parsed);
     },
 
-    authorizeProjectWrite(toolName) {
+    authorizeProjectWrite(toolName, args) {
+      // Registered read-only subagents can perform the required pre-contract
+      // inspection. Unknown and future write-capable agents remain fail-closed.
+      const requestedSubagent =
+        toolName === "dispatch_subagent" &&
+        args &&
+        typeof args === "object" &&
+        typeof (args as { subagent?: unknown }).subagent === "string"
+          ? getSubagentByName((args as { subagent: string }).subagent)
+          : null;
+      const isKnownReadonlySubagent =
+        requestedSubagent !== null &&
+        (requestedSubagent.writePolicy ?? "readonly") === "readonly";
       if (
         !policy.enabled ||
         !DESIGN_GATED_WRITE_TOOLS.has(toolName) ||
         toolName === "init_project" ||
+        isKnownReadonlySubagent ||
         contract
       ) {
         return undefined;

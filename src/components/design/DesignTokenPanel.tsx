@@ -26,10 +26,6 @@ interface DesignTokenPanelProps {
   onOpenChange: (open: boolean) => void;
   files: ProjectFiles;
   designState?: ConversationDesignState;
-  onDraftChange: (
-    path: string | undefined,
-    content: string | undefined,
-  ) => void;
   onCommit: (path: string, content: string) => void;
   onUpgrade: () => void;
   isGenerating: boolean;
@@ -40,7 +36,6 @@ export function DesignTokenPanel({
   onOpenChange,
   files,
   designState,
-  onDraftChange,
   onCommit,
   onUpgrade,
   isGenerating,
@@ -66,8 +61,7 @@ export function DesignTokenPanel({
     setValues(initialValues);
     setError(null);
     setDirty(false);
-    onDraftChange(undefined, undefined);
-  }, [initialValues, onDraftChange, open]);
+  }, [initialValues, open]);
 
   const updateValue = (property: string, value: string) => {
     if (!source || !tokensPath) return;
@@ -75,16 +69,14 @@ export function DesignTokenPanel({
     setValues(nextValues);
     setDirty(true);
     try {
-      const draft = writeEditableTokenValues(source, nextValues);
+      writeEditableTokenValues(source, nextValues);
       setError(null);
-      onDraftChange(tokensPath, draft);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     }
   };
 
   const close = () => {
-    onDraftChange(undefined, undefined);
     onOpenChange(false);
   };
 
@@ -92,7 +84,6 @@ export function DesignTokenPanel({
     setValues(initialValues);
     setDirty(false);
     setError(null);
-    onDraftChange(undefined, undefined);
   };
 
   const save = () => {
@@ -100,7 +91,6 @@ export function DesignTokenPanel({
     try {
       const content = writeEditableTokenValues(source, values);
       onCommit(tokensPath, content);
-      onDraftChange(undefined, undefined);
       onOpenChange(false);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));

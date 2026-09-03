@@ -7,7 +7,6 @@ import {
   Download,
   Minus,
   Plus,
-  Scan,
   Shapes,
   MousePointerClick,
   CircleHelp,
@@ -30,6 +29,18 @@ import {
 export type ViewMode = "preview" | "code";
 export type DeviceSize = "desktop" | "tablet" | "mobile";
 
+export const MIN_PREVIEW_SCALE = 0.25;
+export const MAX_PREVIEW_SCALE = 1.5;
+export const PREVIEW_SCALE_STEP = 0.1;
+
+export function clampPreviewScale(scale: number): number {
+  const clamped = Math.min(
+    MAX_PREVIEW_SCALE,
+    Math.max(MIN_PREVIEW_SCALE, scale),
+  );
+  return Math.round(clamped * 100) / 100;
+}
+
 interface ViewToolbarProps {
   viewMode: ViewMode;
   onViewModeChange: (mode: ViewMode) => void;
@@ -40,7 +51,6 @@ interface ViewToolbarProps {
   previewScale?: number;
   onPreviewZoomIn?: () => void;
   onPreviewZoomOut?: () => void;
-  onPreviewFit?: () => void;
   onReloadPreview?: () => void;
   designMode?: boolean;
   designSelectionSupported?: boolean;
@@ -110,7 +120,6 @@ export function ViewToolbar({
   previewScale = 1,
   onPreviewZoomIn,
   onPreviewZoomOut,
-  onPreviewFit,
   onReloadPreview,
   designMode = false,
   designSelectionSupported = false,
@@ -150,58 +159,49 @@ export function ViewToolbar({
       </div>
 
       <div className="flex items-center gap-2">
-        {designMode && onOpenDesignTokens && (
-          <ToolbarIconButton
-            onClick={onOpenDesignTokens}
-            label={t.toolbar.designTokens}
-            disabled={isGenerating}
-          >
-            <Shapes size={15} />
-          </ToolbarIconButton>
-        )}
-        {designMode && viewMode === "preview" && onOpenDesignReview && (
-          <ToolbarIconButton
-            onClick={onOpenDesignReview}
-            label={t.toolbar.reviewDesign}
-            disabled={isGenerating}
-          >
-            <ScanSearch size={15} />
-          </ToolbarIconButton>
-        )}
-        {designMode && viewMode === "preview" && designSelectionSupported && (
-          <ToolbarIconButton
-            selected={designSelectionActive}
-            onClick={() => onToggleDesignSelection?.()}
-            disabled={isGenerating}
-            label={
-              designSelectionActive
-                ? t.toolbar.stopSelecting
-                : t.toolbar.selectElement
-            }
-          >
-            <MousePointerClick size={15} />
-          </ToolbarIconButton>
-        )}
-        {designMode &&
-          !designSelectionSupported &&
-          designSelectionUnavailableReason && (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <span
-                  className="inline-flex size-8 items-center justify-center text-muted-foreground"
-                  aria-label={designSelectionUnavailableReason}
-                  tabIndex={0}
-                >
-                  <CircleHelp size={15} />
-                </span>
-              </TooltipTrigger>
-              <TooltipContent>
-                {designSelectionUnavailableReason}
-              </TooltipContent>
-            </Tooltip>
-          )}
         {previewEnabled && viewMode === "preview" && (
           <div className="flex items-center gap-1">
+            {designMode && onOpenDesignReview && (
+              <ToolbarIconButton
+                onClick={onOpenDesignReview}
+                label={t.toolbar.reviewDesign}
+                disabled={isGenerating}
+              >
+                <ScanSearch size={15} />
+              </ToolbarIconButton>
+            )}
+            {designMode && designSelectionSupported && (
+              <ToolbarIconButton
+                selected={designSelectionActive}
+                onClick={() => onToggleDesignSelection?.()}
+                disabled={isGenerating}
+                label={
+                  designSelectionActive
+                    ? t.toolbar.stopSelecting
+                    : t.toolbar.selectElement
+                }
+              >
+                <MousePointerClick size={15} />
+              </ToolbarIconButton>
+            )}
+            {designMode &&
+              !designSelectionSupported &&
+              designSelectionUnavailableReason && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span
+                      className="inline-flex size-8 items-center justify-center text-muted-foreground"
+                      aria-label={designSelectionUnavailableReason}
+                      tabIndex={0}
+                    >
+                      <CircleHelp size={15} />
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    {designSelectionUnavailableReason}
+                  </TooltipContent>
+                </Tooltip>
+              )}
             {onReloadPreview && (
               <ToolbarIconButton
                 onClick={onReloadPreview}
@@ -210,31 +210,34 @@ export function ViewToolbar({
                 <RefreshCw size={15} />
               </ToolbarIconButton>
             )}
-            {deviceSize !== "desktop" && (
-              <div className="flex items-center gap-0.5 rounded-lg border p-0.5">
-                <ToolbarIconButton
-                  onClick={() => onPreviewZoomOut?.()}
-                  label={t.toolbar.zoomOut}
-                >
-                  <Minus size={14} />
-                </ToolbarIconButton>
-                <span className="w-10 text-center font-mono text-[10px] text-muted-foreground">
-                  {Math.round(previewScale * 100)}%
-                </span>
-                <ToolbarIconButton
-                  onClick={() => onPreviewZoomIn?.()}
-                  label={t.toolbar.zoomIn}
-                >
-                  <Plus size={14} />
-                </ToolbarIconButton>
-                <ToolbarIconButton
-                  onClick={() => onPreviewFit?.()}
-                  label={t.toolbar.fitPreview}
-                >
-                  <Scan size={14} />
-                </ToolbarIconButton>
-              </div>
-            )}
+            <div
+              role="group"
+              aria-label={t.toolbar.zoomLevel}
+              className="flex h-8 items-center rounded-lg border border-border/70 p-0.5"
+            >
+              <ToolbarIconButton
+                onClick={() => onPreviewZoomOut?.()}
+                label={t.toolbar.zoomOut}
+                disabled={previewScale <= MIN_PREVIEW_SCALE}
+                className="size-7 text-muted-foreground hover:text-foreground"
+              >
+                <Minus size={13} />
+              </ToolbarIconButton>
+              <output
+                aria-label={t.toolbar.zoomLevel}
+                className="w-8 text-center font-mono text-[10px] font-medium tabular-nums text-muted-foreground"
+              >
+                {Math.round(previewScale * 100)}
+              </output>
+              <ToolbarIconButton
+                onClick={() => onPreviewZoomIn?.()}
+                label={t.toolbar.zoomIn}
+                disabled={previewScale >= MAX_PREVIEW_SCALE}
+                className="size-7 text-muted-foreground hover:text-foreground"
+              >
+                <Plus size={13} />
+              </ToolbarIconButton>
+            </div>
             <div className="flex items-center gap-1 p-0.5 rounded-lg border">
               <ToolbarIconButton
                 selected={deviceSize === "desktop"}
@@ -265,23 +268,32 @@ export function ViewToolbar({
         )}
 
         {viewMode === "code" && (
-          <ToolbarIconButton
-            onClick={() => downloadAsZip(files)}
-            label={t.toolbar.download}
-            variant="outline"
-          >
-            <Download size={16} />
-          </ToolbarIconButton>
-        )}
-        {desktopMode && onExportDirectory && (
-          <ToolbarIconButton
-            onClick={onExportDirectory}
-            label={t.toolbar.exportDirectory}
-            variant="outline"
-            disabled={isGenerating}
-          >
-            <FolderOutput size={16} />
-          </ToolbarIconButton>
+          <div className="flex items-center gap-1">
+            {designMode && onOpenDesignTokens && (
+              <ToolbarIconButton
+                onClick={onOpenDesignTokens}
+                label={t.toolbar.designTokens}
+                disabled={isGenerating}
+              >
+                <Shapes size={15} />
+              </ToolbarIconButton>
+            )}
+            <ToolbarIconButton
+              onClick={() => downloadAsZip(files)}
+              label={t.toolbar.download}
+            >
+              <Download size={16} />
+            </ToolbarIconButton>
+            {desktopMode && onExportDirectory && (
+              <ToolbarIconButton
+                onClick={onExportDirectory}
+                label={t.toolbar.exportDirectory}
+                disabled={isGenerating}
+              >
+                <FolderOutput size={16} />
+              </ToolbarIconButton>
+            )}
+          </div>
         )}
       </div>
     </div>

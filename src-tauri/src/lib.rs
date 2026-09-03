@@ -83,6 +83,15 @@ pub fn run() {
 
     #[cfg(desktop)]
     let builder = builder
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(
+                    tauri_plugin_window_state::StateFlags::SIZE
+                        | tauri_plugin_window_state::StateFlags::POSITION,
+                )
+                .with_filter(|label| label == "main")
+                .build(),
+        )
         .manage(mcp_stdio::McpStdioState::default())
         .manage(mcp_remote::McpRemoteState::default())
         .manage(mcp_oauth::McpOAuthState::default())

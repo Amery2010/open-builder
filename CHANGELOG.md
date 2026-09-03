@@ -8,7 +8,7 @@ Tagged versions use their Git tag date. Versions 1.4.0 through 1.7.0 were not ta
 
 ---
 
-## [Unreleased]
+## [v2.0.0]
 
 ### Added
 
@@ -29,6 +29,7 @@ Tagged versions use their Git tag date. Versions 1.4.0 through 1.7.0 were not ta
 
 ### Changed
 
+- The `v*` tag release workflow now extracts the exact matching `CHANGELOG.md` section into the GitHub draft Release description and fails before publishing when the section is missing, duplicated, or empty.
 - Codex reasoning-effort validation now follows the selected model's reported capabilities, accepting values such as `max` and `ultra` when advertised instead of relying on a fixed allow-list; unknown custom-provider capabilities remain explicitly unverified.
 - Claude local model selection now reads a validated third-party gateway's bounded `/v1/models` catalog automatically, preserves local aliases separately, and displays every valid gateway ID, including GPT and Gemini models, without requiring Claude Code's optional discovery switch.
 - Project starters now use an additive version-2 record with content digests, source and usage metadata, valid active-file and verified applied-Design preservation, and awaited persistence. Existing version-1 templates remain in the same database but are blocked until explicitly upgraded through the safe-copy review.
@@ -45,6 +46,7 @@ Tagged versions use their Git tag date. Versions 1.4.0 through 1.7.0 were not ta
 
 ### Fixed
 
+- Preview zoom now scales only the rendered webpage while keeping the Sandpack navigator and host controls at their normal size. Zoomed-out pages stay centered, zoomed-in pages remain scrollable in both directions, and the compact control shows a read-only numeric level without a Fit action or percent sign.
 - Codex now projects its exact run-scoped Host tool allowlist into MCP approval configuration, so `approval_policy = "never"` no longer blocks an already Host-authorized tool and degrades into a timeout. Claude keeps its explicit private MCP bridge outside `--safe-mode`, and Antigravity uses `--print=` so the CLI cannot consume `--print-timeout` as a positional prompt; Provider approval and pre-init failures now terminate as structured diagnostics.
 - Antigravity private homes now expose only the native macOS Keychain directory needed for cached account authentication, while keeping settings, agents, plugins, MCP configuration, conversation state, and workspaces app-private.
 - Provider `error`, `tool-error`, `abort`, and error finish events from streamed responses now reach the shared retry and error-classification path. Ask Question can therefore resume the same Agent loop after a transient post-answer failure instead of ending on an empty assistant response.

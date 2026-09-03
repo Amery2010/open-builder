@@ -147,6 +147,56 @@ describe("generator execution authorization", () => {
     expect(outcome.hadSideEffect).toBe(false);
   });
 
+  it("allows a registered read-only subagent before the Design contract while writes stay blocked", async () => {
+    const controller = createDesignContractController();
+    controller.reset({ enabled: true });
+    const subagentResult = JSON.stringify({
+      ok: true,
+      subagent: "code-explorer",
+      task: "Inspect the active entry chain.",
+      status: "done",
+      text: "src/main.tsx renders src/App.tsx",
+      events: [],
+      durationMs: 5,
+    });
+    const dispatchSubagent = vi.fn(async () => ({ text: subagentResult }));
+    const { generator } = createGenerator(
+      {
+        ...DISPATCH_SUBAGENT_TOOL,
+        write_file: BUILTIN_TOOLS.write_file,
+      },
+      vi.fn(),
+      {
+        dispatchSubagent,
+        authorizeToolCall: (name, args) =>
+          controller.authorizeProjectWrite(name, args),
+      },
+    );
+    const harness = generator as unknown as ToolInvoker;
+
+    const dispatched = await harness.executeTool(
+      call("dispatch_subagent", {
+        subagent: "code-explorer",
+        task: "Inspect the active entry chain.",
+      }),
+    );
+    const written = await harness.executeTool(
+      call("write_file", {
+        path: "src/App.tsx",
+        content: "export default function App() { return null; }",
+      }),
+    );
+
+    expect(dispatchSubagent).toHaveBeenCalledOnce();
+    expect(dispatched.result.text).toBe(subagentResult);
+    expect(dispatched.result.isError).not.toBe(true);
+    expect(dispatched.hadSideEffect).toBe(true);
+    expect(written.result).toMatchObject({ isError: true });
+    expect(written.result.text).toContain("Design contract required");
+    expect(written.hadSideEffect).toBe(false);
+    expect(generator.getFiles()).toEqual({});
+  });
+
   it("unlocks Design writes only after the structured contract tool succeeds", async () => {
     const controller = createDesignContractController();
     controller.reset({ enabled: true, expectedSystemId: "graphite" });

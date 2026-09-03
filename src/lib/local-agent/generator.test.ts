@@ -11,6 +11,7 @@ import { createLocalAgentGenerator, runLocalUtilityText } from "./generator";
 import type { LocalAgentEvent, LocalAgentStartRequest } from "./types";
 import type { LocalAgentProvider } from "./providers";
 import { buildCustomSystemPromptSection } from "../ai/custom-system-prompt";
+import { createDesignContractController } from "../design/run-contract";
 
 const localAgentMocks = vi.hoisted(() => ({
   start: vi.fn(),
@@ -63,7 +64,7 @@ function generator(
     ) => Promise<{ text: string }>;
     requestPlanApproval?: () => Promise<{ approved: boolean }>;
     onPlanApproved?: () => ToolSet;
-    authorizeToolCall?: (name: string) => string | undefined;
+    authorizeToolCall?: (name: string, args: unknown) => string | undefined;
     executionMode?: "chat" | "plan";
     nativeSearch?: boolean;
     provider?: LocalAgentProvider;
@@ -349,6 +350,64 @@ describe("LocalAgentGenerator", () => {
         text: expect.stringContaining("Design contract required"),
       }),
     );
+  });
+
+  it("dispatches a registered read-only subagent before a Design contract", async () => {
+    const controller = createDesignContractController();
+    controller.reset({ enabled: true });
+    const dispatch = vi.fn(async () => ({
+      text: JSON.stringify({
+        ok: true,
+        subagent: "code-explorer",
+        task: "Inspect the active entry chain.",
+        status: "done",
+        text: "src/main.tsx renders src/App.tsx",
+        events: [],
+        durationMs: 5,
+      }),
+    }));
+    localAgentMocks.start.mockImplementation(
+      async (
+        _request: LocalAgentStartRequest,
+        onEvent: (event: LocalAgentEvent) => void,
+      ) => {
+        queueMicrotask(() => {
+          onEvent({
+            type: "toolRequest",
+            runId: "run-readonly-subagent",
+            callId: "dispatch-readonly",
+            name: "dispatch_subagent",
+            arguments: {
+              subagent: "code-explorer",
+              task: "Inspect the active entry chain.",
+            },
+          });
+          onEvent({ type: "done", aborted: false });
+        });
+        return "run-readonly-subagent";
+      },
+    );
+    const { instance } = generator(baseConversation(), vi.fn(), vi.fn(), {
+      tools: DISPATCH_SUBAGENT_TOOL,
+      dispatchSubagent: dispatch,
+      authorizeToolCall: (name, args) =>
+        controller.authorizeProjectWrite(name, args),
+    });
+
+    await expect(instance.generate("Delegate inspection")).resolves.toEqual(
+      expect.objectContaining({ aborted: false }),
+    );
+
+    expect(dispatch).toHaveBeenCalledOnce();
+    expect(localAgentMocks.resolve).toHaveBeenCalledWith(
+      "run-readonly-subagent",
+      "dispatch-readonly",
+      expect.objectContaining({
+        isError: undefined,
+        text: expect.stringContaining("src/main.tsx"),
+      }),
+    );
+    expect(localAgentMocks.cancel).not.toHaveBeenCalled();
   });
 
   it("cannot execute a tool omitted from the run authority snapshot", async () => {

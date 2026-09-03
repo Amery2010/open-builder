@@ -194,6 +194,12 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Extract release notes
+        id: release-notes
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: node scripts/extract-release-notes.mjs
+
       - name: Build and release
         uses: tauri-apps/tauri-action@fce9c6108b31ea247710505d3aaaa893ee6768d4 # v0
         env:
@@ -206,7 +212,7 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "Open Builder ${{ github.ref_name }}"
-          releaseBody: "See CHANGELOG.md and the attached desktop installers."
+          releaseBody: ${{ steps.release-notes.outputs.body }}
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}

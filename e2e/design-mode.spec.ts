@@ -113,7 +113,7 @@ async function seedDesignProject(page: import("@playwright/test").Page) {
   ).toBeVisible();
 }
 
-test("point-selects a real Sandpack element, previews tokens, and keeps Bridge out of export", async ({
+test("point-selects a real Sandpack element, keeps token edits pending until saved, and keeps Bridge out of export", async ({
   page,
 }) => {
   await seedDesignProject(page);
@@ -212,13 +212,20 @@ test("point-selects a real Sandpack element, previews tokens, and keeps Bridge o
     "true",
   );
   await page.getByRole("button", { name: "Desktop" }).click();
+  const initialHeadingColor = await heading.evaluate(
+    (node) => getComputedStyle(node).color,
+  );
 
+  await expect(
+    page.getByRole("button", { name: "Edit design tokens" }),
+  ).toHaveCount(0);
+  await page.getByRole("button", { name: "Code" }).click();
   await page.getByRole("button", { name: "Edit design tokens" }).click();
   const accent = page.getByLabel("Accent", { exact: true });
   await accent.fill("#ff006e");
   await expect
     .poll(() => heading.evaluate((node) => getComputedStyle(node).color))
-    .toBe("rgb(255, 0, 110)");
+    .toBe(initialHeadingColor);
   const beforeSave = await page.evaluate(async () => {
     const url = "/src/store/conversation.ts";
     const { useConversationStore } = await import(url);
@@ -228,6 +235,10 @@ test("point-selects a real Sandpack element, previews tokens, and keeps Bridge o
   expect(beforeSave).toContain("--accent: #6541f5;");
 
   await page.getByRole("button", { name: "Save tokens" }).click();
+  await page.getByRole("button", { name: "Preview" }).click();
+  await expect
+    .poll(() => heading.evaluate((node) => getComputedStyle(node).color))
+    .toBe("rgb(255, 0, 110)");
   const saved = await page.evaluate(async () => {
     const conversationUrl = "/src/store/conversation.ts";
     const snapshotsUrl = "/src/store/snapshot.ts";

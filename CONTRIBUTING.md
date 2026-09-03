@@ -228,7 +228,7 @@ refactor(store): migrate session persistence to Zustand middleware
 
 `package.json` is the version source of truth. After intentionally changing it, run `pnpm version:sync` and verify with `pnpm version:check`. Do not edit Cargo, Tauri, or the in-app version independently.
 
-Keep `CHANGELOG.md` in reverse chronological order under `Unreleased`. A `v*` tag triggers the desktop draft-release workflow only after the frontend and Rust quality gates pass; Pages deployment remains tied to `main` or a manual workflow run.
+Keep `CHANGELOG.md` in reverse chronological order under `Unreleased`. Before pushing a `vX.Y.Z` tag, rename that section to `## [vX.Y.Z]`; legacy `## [X.Y.Z] - YYYY-MM-DD` headings remain supported. The tag triggers the desktop draft-release workflow only after the frontend and Rust quality gates pass, and the workflow uses that exact changelog section as the GitHub Release description. Missing, duplicate, or empty release sections fail before release creation. Pages deployment remains tied to `main` or a manual workflow run.
 
 ---
 

@@ -47,7 +47,6 @@ describe("DesignTokenPanel", () => {
             digest: "a".repeat(64),
           },
         }}
-        onDraftChange={vi.fn()}
         onCommit={vi.fn()}
         onUpgrade={vi.fn()}
         isGenerating={false}
@@ -69,9 +68,8 @@ describe("DesignTokenPanel", () => {
     expect(body).toHaveClass("min-h-0", "flex-1", "overflow-y-auto");
   });
 
-  it("previews repeated input but commits only once on Save", async () => {
+  it("keeps repeated input local but commits only once on Save", async () => {
     const user = userEvent.setup();
-    const onDraftChange = vi.fn();
     const onCommit = vi.fn();
     render(
       <DesignTokenPanel
@@ -87,7 +85,6 @@ describe("DesignTokenPanel", () => {
             digest: "a".repeat(64),
           },
         }}
-        onDraftChange={onDraftChange}
         onCommit={onCommit}
         onUpgrade={vi.fn()}
         isGenerating={false}
@@ -97,13 +94,43 @@ describe("DesignTokenPanel", () => {
     const accent = screen.getByLabelText("Accent");
     await user.clear(accent);
     await user.type(accent, "#112233");
-    expect(onDraftChange).toHaveBeenCalled();
     expect(onCommit).not.toHaveBeenCalled();
 
     await user.click(screen.getByRole("button", { name: "Save tokens" }));
     expect(onCommit).toHaveBeenCalledOnce();
     expect(onCommit.mock.calls[0][0]).toBe("tokens.css");
     expect(onCommit.mock.calls[0][1]).toContain("--accent: #112233;");
+  });
+
+  it("discards unsaved input when cancelled", async () => {
+    const user = userEvent.setup();
+    const onCommit = vi.fn();
+    const onOpenChange = vi.fn();
+    render(
+      <DesignTokenPanel
+        open
+        onOpenChange={onOpenChange}
+        files={{ "tokens.css": css }}
+        designState={{
+          appliedSystem: {
+            id: "stripe",
+            name: "Stripe",
+            source: "builtin",
+            version: "pinned",
+            digest: "a".repeat(64),
+          },
+        }}
+        onCommit={onCommit}
+        onUpgrade={vi.fn()}
+        isGenerating={false}
+      />,
+    );
+    await user.clear(screen.getByLabelText("Accent"));
+    await user.type(screen.getByLabelText("Accent"), "#112233");
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+
+    expect(onCommit).not.toHaveBeenCalled();
+    expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 
   it("keeps legacy DESIGN.md references read-only", () => {
@@ -120,7 +147,6 @@ describe("DesignTokenPanel", () => {
             version: "legacy",
           },
         }}
-        onDraftChange={vi.fn()}
         onCommit={vi.fn()}
         onUpgrade={vi.fn()}
         isGenerating={false}
@@ -148,7 +174,6 @@ describe("DesignTokenPanel", () => {
             digest: "a".repeat(64),
           },
         }}
-        onDraftChange={vi.fn()}
         onCommit={vi.fn()}
         onUpgrade={vi.fn()}
         isGenerating={false}
@@ -175,7 +200,6 @@ describe("DesignTokenPanel", () => {
             digest: "a".repeat(64),
           },
         }}
-        onDraftChange={vi.fn()}
         onCommit={vi.fn()}
         onUpgrade={vi.fn()}
         isGenerating={false}
@@ -191,7 +215,6 @@ describe("DesignTokenPanel", () => {
       open: true,
       onOpenChange: vi.fn(),
       files: {},
-      onDraftChange: vi.fn(),
       onCommit: vi.fn(),
       onUpgrade: vi.fn(),
       isGenerating: false,
@@ -231,7 +254,6 @@ describe("DesignTokenPanel", () => {
             digest: "a".repeat(64),
           },
         }}
-        onDraftChange={vi.fn()}
         onCommit={vi.fn()}
         onUpgrade={vi.fn()}
         isGenerating

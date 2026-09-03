@@ -953,7 +953,7 @@ export const zh = {
     mobile: "手机视图",
     zoomIn: "放大预览",
     zoomOut: "缩小预览",
-    fitPreview: "适应可用区域",
+    zoomLevel: "预览缩放比例",
     reloadPreview: "重新加载预览",
     download: "下载项目",
     designSystem: "设计系统",
@@ -1029,7 +1029,7 @@ export const zh = {
   },
   designTokens: {
     title: "设计 Token",
-    description: "只编辑精选语义值；草稿实时预览，保存时仅创建一个项目快照。",
+    description: "只编辑精选语义值；点击保存后才应用更改，并创建一个项目快照。",
     legacyTitle: "旧式设计参考",
     legacyDescription:
       "当前 DESIGN.md 没有已验证的 Token 契约。请选择并应用兼容设计系统后再编辑。",

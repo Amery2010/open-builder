@@ -28,7 +28,7 @@
     "test:components": "vitest run src/components",
     "test:e2e:design": "playwright test e2e/design-mode.spec.ts",
     "security:desktop": "node scripts/check-desktop-security.mjs",
-    "workflow:check": "node scripts/check-workflows.mjs",
+    "workflow:check": "node scripts/check-workflows.mjs && node --test scripts/extract-release-notes.test.mjs",
     "version:sync": "node scripts/version-contract.mjs --write",
     "version:check": "node scripts/version-contract.mjs"
   },

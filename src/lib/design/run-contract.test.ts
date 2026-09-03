@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { createSkillActiveContext } from "../skills/active-context";
 import type { SkillEntry } from "../skills/types";
 import { WRITE_TOOL_NAMES } from "../ai/tools-schema";
+import { SUBAGENT_REGISTRY } from "../ai/subagents/registry";
+import type { SubagentDefinition } from "../ai/subagents/types";
 import {
   createDesignContractController,
   type DesignContract,
@@ -74,6 +76,47 @@ describe("Design contract controller", () => {
       }),
     ).toMatchObject({ surface_mode: "operate", system_id: "graphite" });
     expect(controller.authorizeProjectWrite("write_file")).toBeUndefined();
+  });
+
+  it("allows known read-only subagents before the contract and fails closed otherwise", () => {
+    const controller = createDesignContractController();
+    controller.reset({ enabled: true });
+
+    expect(
+      controller.authorizeProjectWrite("dispatch_subagent", {
+        subagent: "code-explorer",
+        task: "Inspect the active entry chain.",
+      }),
+    ).toBeUndefined();
+    expect(
+      controller.authorizeProjectWrite("dispatch_subagent", {
+        subagent: "unknown-agent",
+        task: "Inspect the project.",
+      }),
+    ).toContain("Design contract required");
+
+    const fullWriteAgent: SubagentDefinition = {
+      name: "full-write-test-agent",
+      description: "Test-only write-capable agent",
+      systemPrompt: "Test only",
+      toolWhitelist: ["write_file"],
+      writePolicy: "fullWrite",
+    };
+    SUBAGENT_REGISTRY.push(fullWriteAgent);
+    try {
+      expect(
+        controller.authorizeProjectWrite("dispatch_subagent", {
+          subagent: fullWriteAgent.name,
+          task: "Modify the project.",
+        }),
+      ).toContain("Design contract required");
+    } finally {
+      SUBAGENT_REGISTRY.splice(SUBAGENT_REGISTRY.indexOf(fullWriteAgent), 1);
+    }
+
+    expect(controller.authorizeProjectWrite("write_file", {})).toContain(
+      "Design contract required",
+    );
   });
 
   it("validates applied system, change mode, and surface-specific Skills", () => {

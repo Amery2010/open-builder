@@ -30,6 +30,7 @@ futures-util = "0.3"
 tokio = { version = "1", features = ["io-util", "net", "process", "sync", "time"] }
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-window-state = "2.4.1"
 rmcp = { version = "3.1", default-features = false, features = ["client", "server", "transport-child-process", "transport-streamable-http-server"] }
 process-wrap = { version = "9.1", features = ["tokio1"] }
 uuid = { version = "1", features = ["v4"] }

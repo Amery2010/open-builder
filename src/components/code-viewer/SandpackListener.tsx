@@ -5,15 +5,17 @@ import { createSandpackFileChangeScheduler } from "./sandpack-file-changes";
 
 interface SandpackListenerProps {
   conversationId: string;
+  requestedActiveFile: string;
   onFileChange: (conversationId: string, path: string, content: string) => void;
 }
 
 export function SandpackListener({
   conversationId,
+  requestedActiveFile,
   onFileChange,
 }: SandpackListenerProps) {
   const { sandpack } = useSandpack();
-  const { files, activeFile } = sandpack;
+  const { files, activeFile, setActiveFile } = sandpack;
   const code = files[activeFile]?.code;
   const { logs } = useSandpackConsole({
     resetOnPreviewRestart: true,
@@ -24,6 +26,17 @@ export function SandpackListener({
     ReturnType<typeof createSandpackFileChangeScheduler> | undefined
   >(undefined);
   schedulerRef.current ??= createSandpackFileChangeScheduler();
+
+  useEffect(() => {
+    if (!requestedActiveFile) return;
+    const normalizedRequestedFile = requestedActiveFile.startsWith("/")
+      ? requestedActiveFile
+      : `/${requestedActiveFile}`;
+    if (!normalizedRequestedFile || normalizedRequestedFile === activeFile) {
+      return;
+    }
+    setActiveFile(normalizedRequestedFile);
+  }, [activeFile, requestedActiveFile, setActiveFile]);
 
   useEffect(() => {
     if (!activeFile || code === undefined) {

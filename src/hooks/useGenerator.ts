@@ -1697,10 +1697,11 @@ export function useGenerator({
             },
           };
         },
-        authorizeToolCall: (name) => {
+        authorizeToolCall: (name, args) => {
           if (activeToolProfileRef.current !== "design") return;
           return designContractControllerRef.current.authorizeProjectWrite(
             name,
+            args,
           );
         },
         runtimePlatform,

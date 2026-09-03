@@ -5,6 +5,8 @@ import {
   useCallback,
   isValidElement,
   Children,
+  createContext,
+  useContext,
 } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -26,6 +28,7 @@ const HLJS_STYLE_ID = "hljs-theme";
 const MAX_MARKDOWN_DATA_IMAGE_BYTES = 1024 * 1024;
 const SAFE_DATA_IMAGE_RE =
   /^data:image\/(?:png|jpe?g|gif|webp);base64,([a-zA-Z0-9+/=\s]+)$/i;
+const MarkdownCodeBlockContext = createContext(false);
 
 const markdownSanitizeSchema = {
   ...defaultSchema,
@@ -173,32 +176,59 @@ function CodeBlockHeader({
   );
 }
 
+function AssistantMarkdownCode({
+  className,
+  children,
+  node: _node,
+  ...props
+}: any) {
+  const isBlock = useContext(MarkdownCodeBlockContext);
+  return (
+    <code
+      className={
+        isBlock
+          ? className
+          : "markdown-inline-code inline whitespace-normal align-baseline bg-muted-foreground/15 px-1.5 py-0.5 rounded text-xs font-mono"
+      }
+      {...props}
+    >
+      {children}
+    </code>
+  );
+}
+
+function UserMarkdownCode({ className, children, node: _node, ...props }: any) {
+  const isBlock = useContext(MarkdownCodeBlockContext);
+  return (
+    <code
+      className={
+        isBlock
+          ? className
+          : "markdown-inline-code inline whitespace-normal align-baseline bg-primary-foreground/20 text-primary-foreground px-1.5 py-0.5 rounded text-xs font-mono"
+      }
+      {...props}
+    >
+      {children}
+    </code>
+  );
+}
+
 const assistantComponents = {
   p: ({ children }: any) => (
     <p className="text-sm leading-relaxed mb-2 last:mb-0">{children}</p>
   ),
-  code: ({ className, children, ...props }: any) =>
-    !className ? (
-      <code
-        className="bg-muted-foreground/15 px-1.5 py-0.5 rounded text-xs font-mono"
-        {...props}
-      >
-        {children}
-      </code>
-    ) : (
-      <code className={className} {...props}>
-        {children}
-      </code>
-    ),
+  code: AssistantMarkdownCode,
   pre: ({ children }: any) => {
     const lang = extractLang(children);
     const preRef = useRef<HTMLPreElement>(null);
     return (
       <div className="rounded-lg overflow-hidden my-2 border border-border/40 bg-muted-foreground/10">
         <CodeBlockHeader lang={lang} preRef={preRef} />
-        <pre ref={preRef} className="p-3 overflow-x-auto text-xs">
-          {children}
-        </pre>
+        <MarkdownCodeBlockContext.Provider value={true}>
+          <pre ref={preRef} className="p-3 overflow-x-auto text-xs">
+            {children}
+          </pre>
+        </MarkdownCodeBlockContext.Provider>
       </div>
     );
   },
@@ -289,28 +319,18 @@ const assistantComponents = {
 
 const userComponents = {
   ...assistantComponents,
-  code: ({ className, children, ...props }: any) =>
-    !className ? (
-      <code
-        className="bg-primary-foreground/20 text-primary-foreground px-1.5 py-0.5 rounded text-xs font-mono"
-        {...props}
-      >
-        {children}
-      </code>
-    ) : (
-      <code className={className} {...props}>
-        {children}
-      </code>
-    ),
+  code: UserMarkdownCode,
   pre: ({ children }: any) => {
     const lang = extractLang(children);
     const preRef = useRef<HTMLPreElement>(null);
     return (
       <div className="rounded-lg overflow-hidden my-2 border border-white/10 bg-black/20">
         <CodeBlockHeader lang={lang} preRef={preRef} />
-        <pre ref={preRef} className="p-3 overflow-x-auto text-xs">
-          {children}
-        </pre>
+        <MarkdownCodeBlockContext.Provider value={true}>
+          <pre ref={preRef} className="p-3 overflow-x-auto text-xs">
+            {children}
+          </pre>
+        </MarkdownCodeBlockContext.Provider>
       </div>
     );
   },

@@ -35,6 +35,48 @@ if (!/\brelease:\s*\n\s+needs:\s+quality\b/.test(release)) {
 if (!/releaseDraft:\s*true/.test(release)) {
   failures.push("release.yml must create a draft release.");
 }
+const extractReleaseNotesStep = release.indexOf(
+  "- name: Extract release notes",
+);
+const buildAndReleaseStep = release.indexOf("- name: Build and release");
+if (
+  extractReleaseNotesStep === -1 ||
+  buildAndReleaseStep === -1 ||
+  extractReleaseNotesStep > buildAndReleaseStep
+) {
+  failures.push(
+    "release.yml must extract release notes before building the release.",
+  );
+}
+if (!/^\s+id:\s*release-notes\s*$/m.test(release)) {
+  failures.push("release.yml release-note extraction step must keep its id.");
+}
+if (!/^\s+RELEASE_TAG:\s*\$\{\{\s*github\.ref_name\s*\}\}\s*$/m.test(release)) {
+  failures.push("release.yml must derive release notes from github.ref_name.");
+}
+if (!/^\s+run:\s*node scripts\/extract-release-notes\.mjs\s*$/m.test(release)) {
+  failures.push("release.yml must run the checked-in release-note extractor.");
+}
+if (
+  !/^\s+releaseBody:\s*\$\{\{\s*steps\.release-notes\.outputs\.body\s*\}\}\s*$/m.test(
+    release,
+  )
+) {
+  failures.push(
+    "release.yml must use the extracted CHANGELOG section as its release body.",
+  );
+}
+if (/See CHANGELOG\.md and the attached desktop installers\./.test(release)) {
+  failures.push("release.yml must not publish the legacy placeholder body.");
+}
+for (const file of [
+  "../../scripts/extract-release-notes.mjs",
+  "../../scripts/extract-release-notes.test.mjs",
+]) {
+  if (!existsSync(new URL(file, workflowsDir))) {
+    failures.push(`Required release-note contract file is missing: ${file}`);
+  }
+}
 if (existsSync(new URL("changelog.yml", workflowsDir))) {
   failures.push(
     "The legacy duplicate changelog release workflow must be removed.",
