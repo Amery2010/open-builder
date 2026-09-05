@@ -37,6 +37,7 @@ function context(mode: ToolRunContext["mode"] = "chat"): ToolRunContext {
     runId: "run-1",
     mode,
     platform: "web",
+    runtime: "api",
     allowedMcpAliases: new Set(),
     activeSkillIds: new Set(),
     approvedSkillScriptHashes: new Set(),

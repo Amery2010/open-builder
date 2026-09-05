@@ -112,6 +112,12 @@ import {
 } from "../lib/design/automatic-review";
 import { runProjectHealthCheck } from "../lib/tools/project-health";
 import { localAgentSupportsNativeSearch } from "../lib/local-agent/providers";
+import { createHostProjectPermissionSession } from "../lib/security/project-permission-host";
+import {
+  publishProjectPermissionAuthority,
+  registerProjectPermissionSession,
+  useProjectPermissionStore,
+} from "../store/project-permission";
 
 interface GeneratorConfigSnapshot {
   runtime: AISettings["runtime"];
@@ -131,6 +137,7 @@ interface GeneratorConfigSnapshot {
   unsplashKey: string;
   toolPolicyVersion: string;
   developerSkillScriptsEnabled: boolean;
+  permissionBrokerBypassEnabled: boolean;
 }
 
 const EMPTY_DESIGN_REVIEW_RUNS: DesignReviewRun[] = [];
@@ -142,6 +149,7 @@ function buildGeneratorConfigSnapshot(
   webSearch: WebSearchSettings,
   assetSearch: AssetSearchSettings,
   developerSkillScriptsEnabled: boolean,
+  permissionBrokerBypassEnabled: boolean,
 ): GeneratorConfigSnapshot {
   const localProvider = ai.localAgent.provider;
   const localPreferences = ai.localAgent.preferences[localProvider];
@@ -163,6 +171,7 @@ function buildGeneratorConfigSnapshot(
     unsplashKey: assetSearch.unsplashApiKey,
     toolPolicyVersion: TOOL_POLICY_VERSION,
     developerSkillScriptsEnabled,
+    permissionBrokerBypassEnabled,
   };
 }
 
@@ -173,6 +182,7 @@ function currentGeneratorConfigSnapshot(): GeneratorConfigSnapshot {
     state.webSearch,
     state.assetSearch,
     state.system.developerSkillScriptsEnabled,
+    state.system.permissionBrokerBypassEnabled,
   );
 }
 
@@ -198,7 +208,8 @@ function sameGeneratorConfig(
     a.pixabayKey === b.pixabayKey &&
     a.unsplashKey === b.unsplashKey &&
     a.toolPolicyVersion === b.toolPolicyVersion &&
-    a.developerSkillScriptsEnabled === b.developerSkillScriptsEnabled
+    a.developerSkillScriptsEnabled === b.developerSkillScriptsEnabled &&
+    a.permissionBrokerBypassEnabled === b.permissionBrokerBypassEnabled
   );
 }
 
@@ -552,6 +563,10 @@ export function useGenerator({
   const [isThinkingStreaming, setIsThinkingStreaming] = useState(false);
   const generatorConfigRef = useRef<GeneratorConfigSnapshot | null>(null);
   const generatorConstructionEpochRef = useRef(0);
+  const permissionBrokerBypassEnabled = useSettingsStore(
+    (state) => state.system.permissionBrokerBypassEnabled,
+  );
+  const previousPermissionBypassRef = useRef(permissionBrokerBypassEnabled);
   const activeId = useConversationStore((s) => s.activeId);
   const activeReviewFiles = useConversationStore((state) =>
     state.activeId ? state.conversations[state.activeId]?.files : undefined,
@@ -658,6 +673,21 @@ export function useGenerator({
     useSubagentStore.setState({ progress: {} });
     useDesignReviewStore.getState().reset();
   }, [clearOutputBuffers]);
+
+  useEffect(() => {
+    if (previousPermissionBypassRef.current === permissionBrokerBypassEnabled) {
+      return;
+    }
+    previousPermissionBypassRef.current = permissionBrokerBypassEnabled;
+    generationRunEpochRef.current += 1;
+    generatorConstructionEpochRef.current += 1;
+    generatorRef.current?.abort();
+    generatorRef.current = null;
+    generatorConfigRef.current = null;
+    useProjectPermissionStore
+      .getState()
+      .cancelPending("permission setting changed");
+  }, [permissionBrokerBypassEnabled]);
 
   useEffect(() => {
     if (prevActiveIdRef.current === activeId) return;
@@ -1006,6 +1036,7 @@ export function useGenerator({
       webSearchSettings,
       assetSearchSettings,
       useSettingsStore.getState().system.developerSkillScriptsEnabled,
+      useSettingsStore.getState().system.permissionBrokerBypassEnabled,
     );
 
     if (
@@ -1663,6 +1694,13 @@ export function useGenerator({
           return getMessagesForAPI({ ...conv, compressedContext: result });
         },
       } satisfies GeneratorEvents;
+      const projectPermissionSession = createHostProjectPermissionSession({
+        conversationId: generatorConversationId,
+        platform: runtimePlatform,
+        runtime: isLocalRuntime ? "local_cli" : "api",
+        bypassEnabled: permissionBrokerBypassEnabled,
+      });
+      let candidate: GenerationBackend | null = null;
       const generatorExtras = {
         conversationId: generatorConversationId,
         tools: initialTools,
@@ -1788,7 +1826,7 @@ export function useGenerator({
             files: prepared.files,
             changes: [...prepared.changes],
             resultNote: prepared.resultNote,
-            onCommitted: () => {
+            validateBeforeCommit: () => {
               const state = useConversationStore.getState();
               const current = state.conversations[generatorConversationId];
               if (
@@ -1797,6 +1835,9 @@ export function useGenerator({
               ) {
                 throw new DOMException("conversation switched", "AbortError");
               }
+            },
+            onCommitted: () => {
+              const state = useConversationStore.getState();
               state.setDesignStateForConversation(
                 generatorConversationId,
                 prepared.designState,
@@ -1811,6 +1852,14 @@ export function useGenerator({
             args,
           );
         },
+        projectPermissionSession,
+        onProjectPermissionAuthorityChange: () =>
+          publishProjectPermissionAuthority(
+            generatorConversationId,
+            projectPermissionSession,
+          ),
+        onProjectPermissionRequestFinished: (callId, error) =>
+          useProjectPermissionStore.getState().finishRequest(callId, error),
         runtimePlatform,
       } satisfies Pick<
         import("../lib/ai/generator").GeneratorOptions,
@@ -1822,10 +1871,12 @@ export function useGenerator({
         | "dispatchSubagent"
         | "prepareInitializedProject"
         | "authorizeToolCall"
+        | "projectPermissionSession"
+        | "onProjectPermissionAuthorityChange"
+        | "onProjectPermissionRequestFinished"
         | "runtimePlatform"
       >;
 
-      let candidate: GenerationBackend | null = null;
       if (isLocalRuntime) {
         if (!generatorConversationId) {
           throw new Error("The active conversation is unavailable.");
@@ -1898,6 +1949,11 @@ export function useGenerator({
 
       baseCustomToolSetRef.current = customToolSet;
       providerToolNamesRef.current = [...providerToolNames];
+      registerProjectPermissionSession(
+        generatorConversationId,
+        projectPermissionSession,
+        () => candidate?.rotateProjectPermissionAuthority?.(),
+      );
       generatorRef.current = candidate;
       generatorConfigRef.current = nextConfig;
     }
@@ -1907,6 +1963,7 @@ export function useGenerator({
     settings,
     webSearchSettings,
     assetSearchSettings,
+    permissionBrokerBypassEnabled,
     activeId,
     setMessages,
     setFiles,
@@ -2250,7 +2307,6 @@ export function useGenerator({
         reviewStore.reset();
       }
       const runEpoch = ++generationRunEpochRef.current;
-      generatorRef.current?.abort();
       const customSystemPromptSnapshot =
         useSettingsStore.getState().system.customSystemPrompt;
       runConversationIdRef.current = runConversationId;
@@ -2439,6 +2495,8 @@ export function useGenerator({
     setIsThinkingStreaming(false);
     flushOutputBuffers();
     generatorRef.current?.abort();
+    generatorRef.current = null;
+    generatorConfigRef.current = null;
     forcedSkillsPromptRef.current = "";
     customSystemPromptRef.current = "";
     requestPromptContextRef.current = "";

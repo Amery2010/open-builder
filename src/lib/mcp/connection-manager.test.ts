@@ -34,6 +34,7 @@ function chatContext(alias: string): ToolExecutionContext {
       runId: "run-1",
       mode: "chat",
       platform: "web",
+      runtime: "api",
       allowedMcpAliases: new Set([alias]),
       activeSkillIds: new Set(),
       approvedSkillScriptHashes: new Set(),

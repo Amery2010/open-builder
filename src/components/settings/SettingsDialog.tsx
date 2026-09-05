@@ -129,7 +129,15 @@ export function SettingsDialog({
     onSave(formData);
     onSaveWebSearch(webSearchForm);
     onSaveAssetSearch(assetSearchForm);
-    onSaveSystem(systemForm);
+    onSaveSystem(
+      runtimeChangeLocked
+        ? {
+            ...systemForm,
+            permissionBrokerBypassEnabled:
+              systemSettings.permissionBrokerBypassEnabled,
+          }
+        : systemForm,
+    );
     onClose();
   };
 
@@ -224,6 +232,8 @@ export function SettingsDialog({
               form={systemForm}
               setForm={setSystemForm}
               customSystemPromptError={customSystemPromptError}
+              runtimeChangeLocked={runtimeChangeLocked}
+              fullPermissionsLabels={t.settings.fullPermissions}
             />
           </TabsContent>
         </Tabs>

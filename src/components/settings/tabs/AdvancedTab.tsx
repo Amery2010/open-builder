@@ -1,5 +1,11 @@
 import { useEffect, useState } from "react";
-import { Braces, ScanSearch, Shield, TerminalSquare } from "lucide-react";
+import {
+  Braces,
+  ScanSearch,
+  Shield,
+  ShieldAlert,
+  TerminalSquare,
+} from "lucide-react";
 import type { SystemSettings } from "../../../store/settings";
 import {
   clearProxyLog,
@@ -15,20 +21,47 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { useT } from "../../../i18n";
 
-interface AdvancedTabProps {
+interface FullPermissionsLabels {
+  label: string;
+  on: string;
+  off: string;
+  hint: string;
+  stopFirst: string;
+}
+
+export interface AdvancedTabProps {
   form: SystemSettings;
   setForm: (value: SystemSettings) => void;
   customSystemPromptError?: string;
+  runtimeChangeLocked?: boolean;
+  fullPermissionsLabels?: Partial<FullPermissionsLabels>;
 }
 
 const CUSTOM_SYSTEM_PROMPT_ID = "custom-system-prompt";
+const FULL_PERMISSIONS_HINT_ID = "full-permissions-hint";
+const DEFAULT_FULL_PERMISSIONS_LABELS: FullPermissionsLabels = {
+  label: "Full permissions",
+  on: "Enabled",
+  off: "Disabled",
+  hint: "Allow destructive project file operations without a permission prompt. Other safety checks still apply.",
+  stopFirst: "Stop the current task before changing full permissions.",
+};
 
 export function AdvancedTab({
   form,
   setForm,
   customSystemPromptError,
+  runtimeChangeLocked = false,
+  fullPermissionsLabels,
 }: AdvancedTabProps) {
   const t = useT();
+  const permissionsLabels = {
+    ...DEFAULT_FULL_PERMISSIONS_LABELS,
+    ...fullPermissionsLabels,
+  };
+  const fullPermissionsHint = runtimeChangeLocked
+    ? permissionsLabels.stopFirst
+    : permissionsLabels.hint;
   const [proxyLog, setProxyLog] = useState<ProxyLogEntry[]>(() =>
     getProxyLog(),
   );
@@ -124,6 +157,39 @@ export function AdvancedTab({
           </p>
         </div>
       )}
+
+      <div className="space-y-2">
+        <Label>
+          <ShieldAlert size={16} className="inline mr-1" />
+          {permissionsLabels.label}
+        </Label>
+        <CapsuleGroup
+          label={
+            runtimeChangeLocked
+              ? `${permissionsLabels.label}. ${permissionsLabels.stopFirst}`
+              : permissionsLabels.label
+          }
+          value={form.permissionBrokerBypassEnabled ? "on" : "off"}
+          onChange={(value) =>
+            setForm({
+              ...form,
+              permissionBrokerBypassEnabled: value === "on",
+            })
+          }
+          disabled={runtimeChangeLocked}
+          options={[
+            { value: "on", label: permissionsLabels.on },
+            { value: "off", label: permissionsLabels.off },
+          ]}
+        />
+        <p
+          id={FULL_PERMISSIONS_HINT_ID}
+          className="text-xs text-muted-foreground"
+          role="note"
+        >
+          {fullPermissionsHint}
+        </p>
+      </div>
 
       {isTauri() && (
         <div className="space-y-2">

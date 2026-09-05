@@ -22,7 +22,11 @@ import {
   type RuntimePlatform,
   type ToolRunContext,
 } from "./tools-schema";
-import { HostToolDispatchError, type HostToolRun } from "./host-tool-catalog";
+import {
+  HostToolDispatchError,
+  type HostToolProjectPermissionResolution,
+  type HostToolRun,
+} from "./host-tool-catalog";
 import { DEFAULT_SYSTEM_PROMPT } from "./system-prompt";
 import { buildProjectGuidelinesSection } from "./project-guidelines";
 import { PLAN_APPROVED_PREFIX, PLAN_REJECTED_PREFIX } from "./plan-mode";
@@ -47,6 +51,11 @@ import {
 } from "../skills/active-context";
 import type { SkillActiveContextController } from "../skills/active-context";
 import { recordPermissionActivity } from "../security/activity-log";
+import {
+  ProjectPermissionError,
+  type ProjectPermissionPermit,
+  type ProjectPermissionSession,
+} from "../security/project-permission-broker";
 import { isRetryableGenerationError } from "./generation-error";
 import { attachmentPartsForModel } from "../attachments/model-context";
 import { sanitizeToolExecutionOutputForHistory } from "../utils/message-security";
@@ -64,7 +73,36 @@ import type {
   ResolvedAttachment,
   GenerationBackend,
   AgentToolExecutor,
+  InitializedProjectPreparation,
 } from "./generator-types";
+
+function diffProjectFiles(
+  before: Readonly<ProjectFiles>,
+  after: Readonly<ProjectFiles>,
+): FileChange[] {
+  const changes: FileChange[] = [];
+  for (const path of Object.keys(after).sort((left, right) =>
+    left.localeCompare(right),
+  )) {
+    if (!(path in before)) changes.push({ path, action: "created" });
+    else if (before[path] !== after[path]) {
+      changes.push({ path, action: "modified" });
+    }
+  }
+  for (const path of Object.keys(before).sort((left, right) =>
+    left.localeCompare(right),
+  )) {
+    if (!(path in after)) changes.push({ path, action: "deleted" });
+  }
+  return changes;
+}
+
+interface InitializationPermissionPreflight {
+  readonly projectRevision: number;
+  readonly preparation?: InitializedProjectPreparation;
+  readonly failed?: boolean;
+  readonly error?: unknown;
+}
 
 // Re-export everything so callers can keep importing types from this module.
 export type {
@@ -137,15 +175,31 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
   private readonly onPlanApproved?: GeneratorOptions["onPlanApproved"];
   private readonly dispatchSubagent?: GeneratorOptions["dispatchSubagent"];
   private readonly prepareInitializedProject?: GeneratorOptions["prepareInitializedProject"];
+  private readonly projectPermissionSession?: ProjectPermissionSession;
+  private readonly onProjectPermissionAuthorityChange?: GeneratorOptions["onProjectPermissionAuthorityChange"];
+  private readonly onProjectPermissionRequestFinished?: GeneratorOptions["onProjectPermissionRequestFinished"];
   private readonly conversationId?: string;
   private systemPromptSuffix: string = "";
   private untrustedReferenceContext: string = "";
   private readOnlyMode = false;
   private executionMode: ExecutionMode;
   private readonly runtimePlatform: RuntimePlatform;
+  private readonly toolRuntime: ToolRunContext["runtime"];
   private allowedMcpAliases: ReadonlySet<string>;
   private readonly skillContext: SkillActiveContextController;
   private runId: string;
+  private projectRevision = 0;
+  private permissionAuthorityEpoch = 0;
+  private readonly permissionPermits = new Map<
+    string,
+    ProjectPermissionPermit
+  >();
+  private readonly permissionExemptCalls = new Map<string, number>();
+  private readonly permissionImplementationCalls = new Set<string>();
+  private readonly initializationPermissionPreflights = new Map<
+    string,
+    InitializationPermissionPreflight
+  >();
 
   constructor(options: GeneratorOptions, events: GeneratorEvents = {}) {
     this.apiType = options.apiType ?? "openai-compatible";
@@ -171,9 +225,15 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
     this.onPlanApproved = options.onPlanApproved;
     this.dispatchSubagent = options.dispatchSubagent;
     this.prepareInitializedProject = options.prepareInitializedProject;
+    this.projectPermissionSession = options.projectPermissionSession;
+    this.onProjectPermissionAuthorityChange =
+      options.onProjectPermissionAuthorityChange;
+    this.onProjectPermissionRequestFinished =
+      options.onProjectPermissionRequestFinished;
     this.conversationId = options.conversationId;
     this.executionMode = options.executionMode ?? "chat";
     this.runtimePlatform = options.runtimePlatform ?? "web";
+    this.toolRuntime = options.toolRuntime ?? "api";
     this.allowedMcpAliases = new Set(options.allowedMcpAliases ?? []);
     this.skillContext = createSkillActiveContext(
       options.initialSkillContext ?? null,
@@ -193,7 +253,7 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
   }
 
   setFiles(files: ProjectFiles): void {
-    this.files = { ...files };
+    this.commitProjectFiles(files);
   }
 
   getMessages(): Message[] {
@@ -258,6 +318,13 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
     this.rebuildToolRun();
   }
 
+  rotateProjectPermissionAuthority(): void {
+    this.runId = this.createRunId();
+    this.permissionAuthorityEpoch += 1;
+    this.rebuildToolRun();
+    this.publishProjectPermissionAuthority();
+  }
+
   setAllowedMcpAliases(aliases: ReadonlySet<string>): void {
     this.allowedMcpAliases = new Set(aliases);
     this.rebuildToolRun();
@@ -276,6 +343,7 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
       conversationId: this.conversationId,
       mode: this.executionMode,
       platform: this.runtimePlatform,
+      runtime: this.toolRuntime,
       allowedMcpAliases: new Set(this.allowedMcpAliases),
       activeSkillIds,
       approvedSkillScriptHashes: new Set<string>(),
@@ -293,7 +361,13 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
 
   abort(): void {
     this.ctrl?.abort();
-    this.ctrl = null;
+    this.initializationPermissionPreflights.clear();
+    this.permissionExemptCalls.clear();
+    this.permissionImplementationCalls.clear();
+    if (this.projectPermissionSession) {
+      this.projectPermissionSession.change({ type: "close" });
+      this.publishProjectPermissionAuthority();
+    }
   }
 
   beginExternalRun(): AbortSignal {
@@ -360,6 +434,249 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
       globalThis.crypto?.randomUUID?.() ??
       `run-${Date.now()}-${Math.random().toString(36).slice(2)}`
     );
+  }
+
+  private publishProjectPermissionAuthority(): void {
+    if (!this.projectPermissionSession) return;
+    this.onProjectPermissionAuthorityChange?.(
+      this.projectPermissionSession.authority(),
+    );
+  }
+
+  private commitProjectFiles(files: ProjectFiles): void {
+    const currentPaths = Object.keys(this.files);
+    const nextPaths = Object.keys(files);
+    const unchanged =
+      currentPaths.length === nextPaths.length &&
+      currentPaths.every(
+        (path) =>
+          Object.prototype.hasOwnProperty.call(files, path) &&
+          files[path] === this.files[path],
+      );
+    if (unchanged) return;
+    this.initializationPermissionPreflights.clear();
+    this.files = { ...files };
+    this.projectRevision += 1;
+    if (!this.projectPermissionSession) return;
+    this.projectPermissionSession.change({
+      type: "project_revision",
+      revision: this.projectRevision,
+    });
+    // The permission snapshot changed, so subsequent calls use a freshly
+    // compiled Host Tool Run. Project edits alone do not expand authority and
+    // therefore retain the provider-visible run id.
+    this.rebuildToolRun();
+    this.publishProjectPermissionAuthority();
+  }
+
+  private async prepareInitializationPermissionImpact(
+    callId: string,
+    input: unknown,
+    fallback: HostToolProjectPermissionResolution,
+    signal: AbortSignal,
+  ): Promise<HostToolProjectPermissionResolution | undefined> {
+    const revision = this.projectRevision;
+    const initialized = await dispatchFsTool(
+      "init_project",
+      input as { template: string },
+      this.files,
+    );
+    if (!initialized?.newFiles) return fallback;
+
+    let preparation: InitializedProjectPreparation | undefined;
+    if (this.prepareInitializedProject) {
+      try {
+        const prepared = await this.prepareInitializedProject(
+          initialized.newFiles,
+          {
+            conversationId: this.conversationId,
+            template: String((input as { template?: unknown }).template ?? ""),
+            signal,
+          },
+        );
+        if (prepared) preparation = prepared;
+      } catch (error) {
+        if (error instanceof Error && error.name === "AbortError") throw error;
+        this.initializationPermissionPreflights.set(callId, {
+          projectRevision: revision,
+          failed: true,
+          error,
+        });
+        return undefined;
+      }
+    }
+
+    if (signal.aborted) {
+      throw new DOMException(
+        "Project initialization was cancelled.",
+        "AbortError",
+      );
+    }
+    if (revision !== this.projectRevision) {
+      throw new ProjectPermissionError(
+        "permission_stale",
+        "The project changed during initialization preflight.",
+      );
+    }
+
+    const preparedFiles = preparation?.files ?? initialized.newFiles;
+    const validation = validateProjectFiles(preparedFiles);
+    if (!validation.ok) {
+      this.initializationPermissionPreflights.set(callId, {
+        projectRevision: revision,
+        failed: true,
+        error: new Error(validation.error),
+      });
+      return undefined;
+    }
+    if (this.prepareInitializedProject) {
+      this.initializationPermissionPreflights.set(callId, {
+        projectRevision: revision,
+        preparation,
+      });
+    }
+
+    const affectedPaths = diffProjectFiles(this.files, preparedFiles).map(
+      (change) => change.path,
+    );
+    if (affectedPaths.length === 0) return undefined;
+    return Object.freeze({
+      scope: Object.freeze({ kind: "project" as const }),
+      affectedPaths: Object.freeze(affectedPaths),
+      affectedCount: affectedPaths.length,
+    });
+  }
+
+  private discardPermissionSiblingCalls(calls: readonly ToolCall[]): void {
+    const context = this.getRunContext();
+    for (const call of calls) {
+      if (this.toolRun.providerOwnedNames.has(call.function.name)) continue;
+      const output = normalizeToolExecutionOutput({
+        text:
+          `Error: tool "${call.function.name}" was discarded because ` +
+          "ProjectFiles permission changed during this response. Reissue it " +
+          "in the next provider iteration using the new Host authority.",
+        isError: true,
+      });
+      let args: unknown = null;
+      try {
+        args = JSON.parse(call.function.arguments);
+      } catch {
+        // Malformed sibling arguments remain inert.
+      }
+      this.messages.push({
+        role: "tool",
+        tool_call_id: call.id,
+        content: output.text,
+        toolOutput: output,
+      });
+      recordPermissionActivity({
+        conversationId: context.conversationId,
+        tool: call.function.name,
+        source: context.allowedMcpAliases.has(call.function.name)
+          ? "mcp"
+          : (getToolCapability(call.function.name)?.source ?? "unknown"),
+        mode: context.mode,
+        platform: context.platform,
+        decision: "denied",
+        reason: "ProjectFiles permission authority rotation barrier",
+      });
+      this.events.onToolResult?.(
+        call.function.name,
+        args,
+        output.text,
+        call.id,
+        output,
+      );
+    }
+  }
+
+  private enterProjectPermissionImplementation(callId: string): void {
+    if (this.ctrl?.signal.aborted) {
+      throw this.ctrl.signal.reason instanceof Error
+        ? this.ctrl.signal.reason
+        : new DOMException(
+            "Destructive project operation was cancelled.",
+            "AbortError",
+          );
+    }
+    if (this.permissionImplementationCalls.has(callId)) {
+      throw new ProjectPermissionError(
+        "permission_authority_stale",
+        "This destructive tool call already entered Host implementation.",
+      );
+    }
+    const hasExemption = this.permissionExemptCalls.has(callId);
+    const exemptRevision = this.permissionExemptCalls.get(callId);
+    this.permissionExemptCalls.delete(callId);
+    const permit = this.permissionPermits.get(callId);
+    if (!hasExemption && !permit) {
+      throw new ProjectPermissionError(
+        "permission_authority_stale",
+        "Destructive Host implementation has no matching call permit.",
+      );
+    }
+    if (
+      (hasExemption && exemptRevision !== this.projectRevision) ||
+      (permit && permit.projectRevision !== this.projectRevision)
+    ) {
+      throw new ProjectPermissionError(
+        "permission_stale",
+        "The project changed before destructive implementation could start.",
+      );
+    }
+    if (
+      permit &&
+      permit.lifetime !== "bypass" &&
+      this.projectPermissionSession?.authority().id !== permit.authorityId
+    ) {
+      throw new ProjectPermissionError(
+        "permission_authority_stale",
+        "Permission authority changed before Host implementation could start.",
+      );
+    }
+    this.permissionImplementationCalls.add(callId);
+  }
+
+  private assertProjectPermissionCommitCurrent(callId: string): void {
+    if (this.ctrl?.signal.aborted) {
+      throw this.ctrl.signal.reason instanceof Error
+        ? this.ctrl.signal.reason
+        : new DOMException(
+            "Destructive project operation was cancelled.",
+            "AbortError",
+          );
+    }
+    if (!this.permissionImplementationCalls.has(callId)) {
+      throw new ProjectPermissionError(
+        "permission_authority_stale",
+        "Destructive Host implementation is no longer authorized to commit.",
+      );
+    }
+    const permit = this.permissionPermits.get(callId);
+    if (permit && permit.projectRevision !== this.projectRevision) {
+      throw new ProjectPermissionError(
+        "permission_stale",
+        "The project changed before destructive implementation could commit.",
+      );
+    }
+    const authority = this.projectPermissionSession?.authority();
+    if (permit && (!authority || authority.closed)) {
+      throw new ProjectPermissionError(
+        "permission_cancelled",
+        "The ProjectFiles permission session closed before commit.",
+      );
+    }
+    if (
+      permit &&
+      permit.lifetime !== "bypass" &&
+      authority?.id !== permit.authorityId
+    ) {
+      throw new ProjectPermissionError(
+        "permission_authority_stale",
+        "Permission authority changed before destructive implementation could commit.",
+      );
+    }
   }
 
   private async _runGenerateLoop(): Promise<GenerateResult> {
@@ -485,11 +802,14 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
           }
         }
 
-        for (const toolCall of regularCalls) {
+        let permissionBarrier = false;
+        for (let index = 0; index < regularCalls.length; index += 1) {
+          const toolCall = regularCalls[index];
           if (this.toolRun.providerOwnedNames.has(toolCall.function.name)) {
             continue;
           }
 
+          const permissionEpoch = this.permissionAuthorityEpoch;
           const { result, changes } = await this.executeTool(toolCall);
 
           this.messages.push({
@@ -502,6 +822,19 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
           if (changes.length > 0) {
             this.events.onFileChange?.(this.getFiles(), changes);
           }
+          if (this.permissionAuthorityEpoch !== permissionEpoch) {
+            this.discardPermissionSiblingCalls([
+              ...regularCalls.slice(index + 1),
+              ...dispatchCalls,
+            ]);
+            permissionBarrier = true;
+            break;
+          }
+        }
+
+        if (permissionBarrier) {
+          if (iter === this.maxIterations - 1) maxReached = true;
+          continue;
         }
 
         if (dispatchCalls.length > 0) {
@@ -869,10 +1202,12 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
 
   private rebuildToolRun(): void {
     const runContext = this.getRunContext();
+    const profile = this.inferToolProfile();
+    const permissionAuthority = this.projectPermissionSession?.authority();
     this.toolRun = HOST_TOOL_CATALOG.openRun({
       tools: this.tools,
       context: runContext,
-      profile: this.inferToolProfile(),
+      profile,
       allowedDynamicNames: this.allowedMcpAliases,
       providerOwnedNames: this.providerToolNames,
       guard: async (call, record) => {
@@ -910,13 +1245,119 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
           skillContext: this.skillContext,
         });
       },
-      requestApproval: () => undefined,
-      hostDispatcher: (call) =>
-        this.executeAuthorizedTool(
+      requestApproval: async (call, record) => {
+        const permission = record.projectPermission;
+        if (!permission) return;
+        const callId = call.callId ?? "host-tool";
+        this.permissionExemptCalls.delete(callId);
+        const signal = this.ctrl?.signal ?? new AbortController().signal;
+        if (signal.aborted) {
+          throw new DOMException("Permission request cancelled.", "AbortError");
+        }
+        // Run the same pure transform as the implementation before opening a
+        // prompt. Invalid, missing, no-op, and empty-project initialization
+        // calls keep their original tool result and never ask for authority.
+        let impact = await permission.resolve(call.input, this.files);
+        if (!impact) {
+          this.permissionExemptCalls.set(callId, this.projectRevision);
+          return;
+        }
+        if (
+          runContext.mode !== "chat" ||
+          profile === "design_review" ||
+          !runContext.conversationId
+        ) {
+          this.initializationPermissionPreflights.delete(callId);
+          throw new ProjectPermissionError(
+            "permission_prompt_unavailable",
+            "Destructive ProjectFiles permission is available only in the main Chat run.",
+          );
+        }
+        if (signal.aborted) {
+          this.initializationPermissionPreflights.delete(callId);
+          throw new DOMException("Permission request cancelled.", "AbortError");
+        }
+        if (!this.projectPermissionSession || !permissionAuthority) {
+          this.initializationPermissionPreflights.delete(callId);
+          throw new ProjectPermissionError(
+            "permission_prompt_unavailable",
+            "The ProjectFiles permission prompt is unavailable.",
+          );
+        }
+        if (call.name === "init_project") {
+          impact = await this.prepareInitializationPermissionImpact(
+            callId,
+            call.input,
+            impact,
+            signal,
+          );
+          if (!impact) {
+            this.permissionExemptCalls.set(callId, this.projectRevision);
+            return;
+          }
+        }
+
+        const beforeRevision =
+          this.projectPermissionSession.authority().revision;
+        try {
+          const permit = await this.projectPermissionSession.authorize({
+            runId: runContext.runId,
+            callId,
+            tool: call.name,
+            runtime: runContext.runtime,
+            operation: permission.operation,
+            sessionEligible: permission.sessionEligible,
+            scope: impact.scope,
+            affectedPaths: impact.affectedPaths,
+            affectedCount: impact.affectedCount,
+            projectRevision: this.projectRevision,
+            authorityId: permissionAuthority.id,
+            signal,
+          });
+          this.permissionPermits.set(callId, permit);
+          if (
+            this.projectPermissionSession.authority().revision !==
+            beforeRevision
+          ) {
+            this.rotateProjectPermissionAuthority();
+          } else {
+            this.publishProjectPermissionAuthority();
+          }
+          this.onProjectPermissionRequestFinished?.(callId);
+        } catch (error) {
+          this.initializationPermissionPreflights.delete(callId);
+          if (
+            this.projectPermissionSession.authority().revision !==
+            beforeRevision
+          ) {
+            // Required audit can fail after the Broker has already rotated and
+            // then revoked an attempted grant. Reopen the Host run even on the
+            // error path so its immutable permission projection cannot drift.
+            this.rotateProjectPermissionAuthority();
+          }
+          const visibleError =
+            error instanceof ProjectPermissionError &&
+            (error.code === "permission_audit_unavailable" ||
+              error.code === "permission_prompt_unavailable" ||
+              error.code === "permission_authority_stale")
+              ? error.message
+              : undefined;
+          this.onProjectPermissionRequestFinished?.(callId, visibleError);
+          throw error;
+        }
+      },
+      hostDispatcher: (call, record) => {
+        const callId = call.callId ?? "host-tool";
+        if (record.projectPermission) {
+          this.enterProjectPermissionImplementation(callId);
+        }
+        return this.executeAuthorizedTool(
           call.name,
           call.input,
-          call.callId ?? "host-tool",
-        ),
+          callId,
+          Boolean(record.projectPermission),
+        );
+      },
       validateState: () => {
         const validation = validateProjectFiles(this.files);
         return validation.ok ? undefined : validation.error;
@@ -939,7 +1380,7 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
         // Dynamic MCP adapters already record their authoritative lifecycle,
         // drift, approval, target, and outcome details. Avoid adding a second
         // generic entry that could contradict an adapter-level denial.
-        if (record.source === "mcp") return;
+        if (record.source === "mcp" || record.projectPermission) return;
         recordPermissionActivity({
           conversationId: this.conversationId,
           tool: call.name,
@@ -993,7 +1434,7 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
     }
 
     try {
-      return (await this.toolRun.dispatch({
+      const outcome = (await this.toolRun.dispatch({
         name,
         input: args,
         callId: toolCall.id,
@@ -1002,30 +1443,72 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
         changes: FileChange[];
         hadSideEffect: boolean;
       };
+      await this.settleProjectPermission(
+        toolCall.id,
+        outcome.result.isError ? "failed" : "succeeded",
+        outcome.result.isError ? "tool_error" : undefined,
+      );
+      return outcome;
     } catch (error) {
-      if (error instanceof DOMException && error.name === "AbortError") {
+      await this.settleProjectPermission(
+        toolCall.id,
+        error instanceof ProjectPermissionError &&
+          error.code === "permission_stale"
+          ? "stale"
+          : error instanceof Error && error.name === "AbortError"
+            ? "aborted"
+            : "failed",
+        error instanceof ProjectPermissionError ? error.code : undefined,
+      );
+      if (error instanceof Error && error.name === "AbortError") {
         throw error;
       }
       const reason =
-        error instanceof Error ? error.message : "Host tool dispatch failed.";
+        error instanceof ProjectPermissionError
+          ? `${error.code}: ${error.message}`
+          : error instanceof Error
+            ? error.message
+            : "Host tool dispatch failed.";
       const output = normalizeToolExecutionOutput({
         text: `Error: ${reason}`,
         isError: true,
       });
-      recordPermissionActivity({
-        conversationId: this.conversationId,
-        tool: name,
-        source: authorityRecord.source,
-        mode: this.executionMode,
-        platform: this.runtimePlatform,
-        decision: "denied",
-        reason:
-          error instanceof HostToolDispatchError
-            ? `${error.stage}: ${error.message}`
-            : reason,
-      });
+      if (!(error instanceof ProjectPermissionError)) {
+        recordPermissionActivity({
+          conversationId: this.conversationId,
+          tool: name,
+          source: authorityRecord.source,
+          mode: this.executionMode,
+          platform: this.runtimePlatform,
+          decision: "denied",
+          reason:
+            error instanceof HostToolDispatchError
+              ? `${error.stage}: ${error.message}`
+              : reason,
+        });
+      }
       this.events.onToolResult?.(name, args, output.text, toolCall.id, output);
       return { result: output, changes: [], hadSideEffect: false };
+    }
+  }
+
+  private async settleProjectPermission(
+    callId: string,
+    outcome: "succeeded" | "failed" | "aborted" | "stale",
+    errorCode?: string,
+  ): Promise<void> {
+    this.permissionImplementationCalls.delete(callId);
+    const permit = this.permissionPermits.get(callId);
+    if (!permit || !this.projectPermissionSession) return;
+    this.permissionPermits.delete(callId);
+    try {
+      await this.projectPermissionSession.settle(permit, {
+        outcome,
+        ...(errorCode ? { errorCode } : {}),
+      });
+    } catch {
+      // The destructive operation may already have happened. Final audit is
+      // terminal and must never turn a completed call into a retryable error.
     }
   }
 
@@ -1033,6 +1516,7 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
     name: string,
     input: unknown,
     toolCallId: string,
+    requiresProjectPermission: boolean,
   ): Promise<{
     result: ToolExecutionOutput;
     changes: FileChange[];
@@ -1048,9 +1532,17 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
     // File-system tools go through the shared dispatcher.
     const fsOutcome = await dispatchFsTool(name, args, this.files);
     if (fsOutcome) {
+      const initializationPreflight =
+        name === "init_project"
+          ? this.initializationPermissionPreflights.get(toolCallId)
+          : undefined;
+      if (name === "init_project") {
+        this.initializationPermissionPreflights.delete(toolCallId);
+      }
       let nextFiles = fsOutcome.newFiles;
       let changes = fsOutcome.changes;
       let resultText = fsOutcome.result;
+      let validatePreparedProjectBeforeCommit: (() => void) | undefined;
       let onPreparedProjectCommitted: (() => void) | undefined;
       if (
         name === "init_project" &&
@@ -1058,21 +1550,37 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
         this.prepareInitializedProject
       ) {
         try {
-          const prepared = await this.prepareInitializedProject(nextFiles, {
-            conversationId: this.conversationId,
-            template: String(args.template ?? ""),
-            signal: this.ctrl?.signal ?? new AbortController().signal,
-          });
+          if (
+            initializationPreflight?.projectRevision === this.projectRevision &&
+            initializationPreflight.failed
+          ) {
+            throw initializationPreflight.error;
+          }
+          const prepared =
+            initializationPreflight?.projectRevision === this.projectRevision
+              ? initializationPreflight.preparation
+              : await this.prepareInitializedProject(nextFiles, {
+                  conversationId: this.conversationId,
+                  template: String(args.template ?? ""),
+                  signal: this.ctrl?.signal ?? new AbortController().signal,
+                });
+          if (this.ctrl?.signal.aborted) {
+            throw new DOMException(
+              "Project initialization was cancelled.",
+              "AbortError",
+            );
+          }
           if (prepared) {
             nextFiles = prepared.files;
             changes = [...changes, ...(prepared.changes ?? [])];
             if (prepared.resultNote) {
               resultText = `${resultText}; ${prepared.resultNote}`;
             }
+            validatePreparedProjectBeforeCommit = prepared.validateBeforeCommit;
             onPreparedProjectCommitted = prepared.onCommitted;
           }
         } catch (error) {
-          if (error instanceof DOMException && error.name === "AbortError") {
+          if (error instanceof Error && error.name === "AbortError") {
             throw error;
           }
           const errMsg = `Error: ${error instanceof Error ? error.message : String(error)}`;
@@ -1107,7 +1615,17 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
           );
           return { result: output, changes: [], hadSideEffect: false };
         }
-        this.files = nextFiles;
+        validatePreparedProjectBeforeCommit?.();
+        if (requiresProjectPermission) {
+          // dispatchFsTool/init preparation may yield. Stop, conversation
+          // replacement, project revision changes, or grant revocation must be
+          // observed immediately before the first write becomes visible.
+          this.assertProjectPermissionCommitCurrent(toolCallId);
+        }
+        if (name === "init_project") {
+          changes = diffProjectFiles(this.files, nextFiles);
+        }
+        this.commitProjectFiles(nextFiles);
         onPreparedProjectCommitted?.();
       }
       if (fsOutcome.templateChange) {
@@ -1225,7 +1743,7 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
                 changes.push({ path, action: "deleted" });
               }
             }
-            this.files = { ...afterFiles };
+            this.commitProjectFiles(afterFiles);
             if (changes.length > 0) {
               this.events.onFileChange?.(this.getFiles(), changes);
             }

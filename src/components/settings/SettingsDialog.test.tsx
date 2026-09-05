@@ -229,4 +229,44 @@ describe("SettingsDialog", () => {
       ),
     ).toBeInTheDocument();
   });
+
+  it("does not save a stale full-permission toggle after a task starts", async () => {
+    const user = userEvent.setup();
+    const onSaveSystem = vi.fn();
+    const validSettings = {
+      ...aiDefaults,
+      apiKey: "test-key",
+      apiBaseUrl: "https://api.example.com",
+    };
+    const renderDialog = (runtimeChangeLocked: boolean) => (
+      <TooltipProvider>
+        <SettingsDialog
+          isOpen
+          onClose={vi.fn()}
+          settings={validSettings}
+          onSave={vi.fn()}
+          webSearchSettings={webSearchDefaults}
+          onSaveWebSearch={vi.fn()}
+          assetSearchSettings={assetSearchDefaults}
+          onSaveAssetSearch={vi.fn()}
+          systemSettings={systemDefaults}
+          onSaveSystem={onSaveSystem}
+          runtimeChangeLocked={runtimeChangeLocked}
+        />
+      </TooltipProvider>
+    );
+    const view = render(renderDialog(false));
+    await user.click(screen.getByRole("tab", { name: "Advanced" }));
+    const permissions = screen.getByRole("group", {
+      name: "Enable full permissions",
+    });
+    await user.click(
+      within(permissions).getByRole("button", { name: "Enabled" }),
+    );
+
+    view.rerender(renderDialog(true));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(onSaveSystem).toHaveBeenCalledWith(systemDefaults);
+  });
 });

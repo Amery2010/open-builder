@@ -9,6 +9,7 @@ import {
 } from "./tools-schema";
 import { DISPATCH_SUBAGENT_TOOL } from "../tools/subagent-tool";
 import type {
+  FileChange,
   GeneratorEvents,
   GeneratorOptions,
   Message,
@@ -21,6 +22,13 @@ import { SUBMIT_DESIGN_CONTRACT_TOOL } from "../design/run-contract-tool";
 import { SCRIPT_SKILL_TOOL } from "../skills/tools";
 import { SEARCH_TOOLS } from "../tools/search";
 import { ASSET_SEARCH_TOOLS } from "../tools/asset-search";
+import {
+  createProjectPermissionBroker,
+  type ProjectPermissionAuditEvent,
+  type ProjectPermissionDecision,
+  type ProjectPermissionSession,
+} from "../security/project-permission-broker";
+import * as fsTools from "../tools/fs-tools";
 
 const EMPTY_TEST_TOOL = tool({
   description: "Test dynamic tool",
@@ -73,6 +81,10 @@ function createGenerator(
     onPlanApproved?: () => ToolSet | void | Promise<ToolSet | void>;
     prepareInitializedProject?: GeneratorOptions["prepareInitializedProject"];
     authorizeToolCall?: GeneratorOptions["authorizeToolCall"];
+    projectPermissionSession?: ProjectPermissionSession;
+    toolRuntime?: GeneratorOptions["toolRuntime"];
+    onProjectPermissionAuthorityChange?: GeneratorOptions["onProjectPermissionAuthorityChange"];
+    onProjectPermissionRequestFinished?: GeneratorOptions["onProjectPermissionRequestFinished"];
   } = {},
   events: GeneratorEvents = {},
 ) {
@@ -89,6 +101,38 @@ function createGenerator(
   );
   (generator as unknown as ToolInvoker).ctrl = new AbortController();
   return { generator, handler };
+}
+
+function createPermissionHarness(input?: {
+  decisions?: readonly ProjectPermissionDecision[];
+  decide?: (
+    request: Parameters<
+      Parameters<typeof createProjectPermissionBroker>[0]["decision"]["decide"]
+    >[0],
+    signal: AbortSignal,
+  ) => ProjectPermissionDecision | Promise<ProjectPermissionDecision>;
+  audit?: (event: ProjectPermissionAuditEvent) => void | Promise<void>;
+  bypassEnabled?: boolean;
+}) {
+  const queued = [...(input?.decisions ?? [])];
+  const decide = vi.fn(
+    input?.decide ?? (() => queued.shift() ?? ({ kind: "deny" } as const)),
+  );
+  const events: ProjectPermissionAuditEvent[] = [];
+  const audit = vi.fn(async (event: ProjectPermissionAuditEvent) => {
+    events.push(event);
+    await input?.audit?.(event);
+  });
+  const session = createProjectPermissionBroker({
+    decision: { decide },
+    audit: { record: audit },
+  }).openSession({
+    conversationId: "conversation-a",
+    policyVersion: "test-policy",
+    projectRevision: 0,
+    bypassEnabled: input?.bypassEnabled ?? false,
+  });
+  return { session, decide, audit, events };
 }
 
 describe("generator execution authorization", () => {
@@ -113,6 +157,458 @@ describe("generator execution authorization", () => {
 
     expect(dispatchSubagent).toHaveBeenCalledOnce();
     expect(dispatchSubagent.mock.calls[0][5]).toBe("conversation-a");
+  });
+
+  it("does not prompt for ordinary ProjectFiles writes or patches", async () => {
+    const permission = createPermissionHarness();
+    const { generator } = createGenerator(
+      {
+        write_file: BUILTIN_TOOLS.write_file,
+        patch_file: BUILTIN_TOOLS.patch_file,
+      },
+      vi.fn(),
+      {
+        conversationId: "conversation-a",
+        initialFiles: { "src/App.ts": "export const value = 1;" },
+        projectPermissionSession: permission.session,
+      },
+    );
+    const harness = generator as unknown as ToolInvoker;
+
+    await harness.executeTool(
+      call("write_file", {
+        path: "src/App.ts",
+        content: "export const value = 2;",
+      }),
+    );
+    await harness.executeTool(
+      call("patch_file", {
+        path: "src/App.ts",
+        patches: [{ search: "value = 2", replace: "value = 3" }],
+      }),
+    );
+
+    expect(permission.decide).not.toHaveBeenCalled();
+    expect(generator.getFiles()["src/App.ts"]).toContain("value = 3");
+  });
+
+  it("authorizes deletion once, rotates authority, and settles the result", async () => {
+    const permission = createPermissionHarness({
+      decisions: [{ kind: "allow_once" }],
+    });
+    const authorityChanged = vi.fn();
+    const { generator } = createGenerator(
+      { delete_file: BUILTIN_TOOLS.delete_file },
+      vi.fn(),
+      {
+        conversationId: "conversation-a",
+        initialFiles: { "src/old.ts": "old" },
+        projectPermissionSession: permission.session,
+        onProjectPermissionAuthorityChange: authorityChanged,
+      },
+    );
+    const initialRunId = generator.getRunContext().runId;
+
+    const outcome = await (generator as unknown as ToolInvoker).executeTool(
+      call("delete_file", { path: "src/old.ts" }, "delete-once"),
+    );
+
+    expect(outcome.result.isError).not.toBe(true);
+    expect(generator.getFiles()).toEqual({});
+    expect(permission.decide).toHaveBeenCalledOnce();
+    expect(generator.getRunContext().runId).not.toBe(initialRunId);
+    expect(permission.session.authority().grants).toEqual([]);
+    expect(authorityChanged).toHaveBeenCalled();
+    expect(permission.events.map((event) => event.type)).toEqual(
+      expect.arrayContaining([
+        "requested",
+        "approved",
+        "execution_started",
+        "settled",
+      ]),
+    );
+  });
+
+  it("reuses a denial only within the same generation run", async () => {
+    const permission = createPermissionHarness({
+      decisions: [{ kind: "deny" }],
+    });
+    const { generator } = createGenerator(
+      { delete_file: BUILTIN_TOOLS.delete_file },
+      vi.fn(),
+      {
+        conversationId: "conversation-a",
+        initialFiles: { "src/old.ts": "old" },
+        projectPermissionSession: permission.session,
+      },
+    );
+    const harness = generator as unknown as ToolInvoker;
+
+    const first = await harness.executeTool(
+      call("delete_file", { path: "src/old.ts" }, "denied-1"),
+    );
+    const second = await harness.executeTool(
+      call("delete_file", { path: "src/old.ts" }, "denied-2"),
+    );
+
+    expect(first.result.text).toContain("permission_denied");
+    expect(second.result.text).toContain("permission_denied");
+    expect(permission.decide).toHaveBeenCalledOnce();
+    expect(generator.getFiles()["src/old.ts"]).toBe("old");
+  });
+
+  it("reuses session scope for the same operation but not another operation", async () => {
+    const permission = createPermissionHarness({
+      decisions: [
+        { kind: "allow_session", scope: { kind: "project" } },
+        { kind: "allow_once" },
+      ],
+    });
+    const { generator } = createGenerator(
+      {
+        delete_file: BUILTIN_TOOLS.delete_file,
+        rename_file: BUILTIN_TOOLS.rename_file,
+      },
+      vi.fn(),
+      {
+        conversationId: "conversation-a",
+        initialFiles: {
+          "src/a.ts": "a",
+          "src/b.ts": "b",
+          "src/c.ts": "c",
+        },
+        projectPermissionSession: permission.session,
+      },
+    );
+    const harness = generator as unknown as ToolInvoker;
+
+    await harness.executeTool(
+      call("delete_file", { path: "src/a.ts" }, "delete-a"),
+    );
+    await harness.executeTool(
+      call("delete_file", { path: "src/b.ts" }, "delete-b"),
+    );
+    await harness.executeTool(
+      call(
+        "rename_file",
+        { old_path: "src/c.ts", new_path: "src/d.ts" },
+        "move-c",
+      ),
+    );
+
+    expect(permission.decide).toHaveBeenCalledTimes(2);
+    expect(permission.decide.mock.calls[0][0].operation).toBe("delete");
+    expect(permission.decide.mock.calls[1][0].operation).toBe("move");
+    expect(generator.getFiles()).toEqual({ "src/d.ts": "c" });
+  });
+
+  it("requires once-only approval to replace a non-empty project", async () => {
+    const permission = createPermissionHarness({
+      decisions: [{ kind: "allow_once" }],
+    });
+    const { generator } = createGenerator(
+      { init_project: BUILTIN_TOOLS.init_project },
+      vi.fn(),
+      {
+        conversationId: "conversation-a",
+        initialFiles: { "legacy.txt": "old project" },
+        projectPermissionSession: permission.session,
+      },
+    );
+
+    const outcome = await (generator as unknown as ToolInvoker).executeTool(
+      call("init_project", { template: "static" }, "replace-project"),
+    );
+
+    expect(outcome.result.isError).not.toBe(true);
+    expect(permission.decide).toHaveBeenCalledWith(
+      expect.objectContaining({
+        operation: "replace_project",
+        sessionEligible: false,
+        scope: { kind: "project" },
+      }),
+      expect.any(AbortSignal),
+    );
+    expect(permission.session.authority().grants).toEqual([]);
+    expect(generator.getFiles()["legacy.txt"]).toBeUndefined();
+  });
+
+  it("previews the complete prepared Design initialization impact", async () => {
+    const prepareInitializedProject = vi.fn(
+      async (files: Record<string, string>) => ({
+        files: {
+          ...files,
+          "DESIGN.md": "design contract",
+          "tokens.css": ":root { --accent: teal; }",
+        },
+      }),
+    );
+    const permission = createPermissionHarness({
+      decisions: [{ kind: "allow_once" }],
+    });
+    const { generator } = createGenerator(
+      { init_project: BUILTIN_TOOLS.init_project },
+      vi.fn(),
+      {
+        conversationId: "conversation-a",
+        initialFiles: { "legacy.txt": "old project" },
+        projectPermissionSession: permission.session,
+        prepareInitializedProject,
+      },
+    );
+
+    const outcome = await (generator as unknown as ToolInvoker).executeTool(
+      call("init_project", { template: "static" }, "prepared-replacement"),
+    );
+    const request = permission.decide.mock.calls[0][0];
+    const committedPaths = outcome.changes
+      .map((change) => (change as FileChange).path)
+      .sort();
+
+    expect(prepareInitializedProject).toHaveBeenCalledOnce();
+    expect(request.affectedPaths).toEqual(committedPaths);
+    expect(request.affectedPaths).toEqual(
+      expect.arrayContaining(["DESIGN.md", "tokens.css", "legacy.txt"]),
+    );
+    expect(request.affectedCount).toBe(committedPaths.length);
+  });
+
+  it("does not prompt when non-empty initialization preparation will fail", async () => {
+    const permission = createPermissionHarness({
+      decisions: [{ kind: "allow_once" }],
+    });
+    const { generator } = createGenerator(
+      { init_project: BUILTIN_TOOLS.init_project },
+      vi.fn(),
+      {
+        conversationId: "conversation-a",
+        initialFiles: { "legacy.txt": "old project" },
+        projectPermissionSession: permission.session,
+        prepareInitializedProject: async () => {
+          throw new Error("selected design system is unavailable");
+        },
+      },
+    );
+
+    const outcome = await (generator as unknown as ToolInvoker).executeTool(
+      call("init_project", { template: "static" }, "failed-preparation"),
+    );
+
+    expect(permission.decide).not.toHaveBeenCalled();
+    expect(outcome.result.text).toContain(
+      "selected design system is unavailable",
+    );
+    expect(generator.getFiles()).toEqual({ "legacy.txt": "old project" });
+  });
+
+  it("keeps files unchanged when required approval audit cannot be persisted", async () => {
+    const permission = createPermissionHarness({
+      decisions: [{ kind: "allow_once" }],
+      audit: (event) => {
+        if (event.type === "execution_started") {
+          throw new Error("audit storage unavailable");
+        }
+      },
+    });
+    const { generator } = createGenerator(
+      { delete_file: BUILTIN_TOOLS.delete_file },
+      vi.fn(),
+      {
+        conversationId: "conversation-a",
+        initialFiles: { "src/old.ts": "old" },
+        projectPermissionSession: permission.session,
+      },
+    );
+    const initialRunId = generator.getRunContext().runId;
+
+    const outcome = await (generator as unknown as ToolInvoker).executeTool(
+      call("delete_file", { path: "src/old.ts" }, "audit-failed"),
+    );
+
+    expect(outcome.result.text).toContain("permission_audit_unavailable");
+    expect(generator.getFiles()["src/old.ts"]).toBe("old");
+    expect(generator.getRunContext().runId).not.toBe(initialRunId);
+  });
+
+  it("bypasses only the Broker and preserves other Host guards", async () => {
+    const permission = createPermissionHarness({
+      bypassEnabled: true,
+      audit: () => {
+        throw new Error("best-effort audit unavailable");
+      },
+    });
+    const { generator } = createGenerator(
+      { delete_file: BUILTIN_TOOLS.delete_file },
+      vi.fn(),
+      {
+        conversationId: "conversation-a",
+        initialFiles: { "src/old.ts": "old", ".env": "SECRET=value" },
+        projectPermissionSession: permission.session,
+      },
+    );
+    const harness = generator as unknown as ToolInvoker;
+    const deleted = await harness.executeTool(
+      call("delete_file", { path: "src/old.ts" }, "bypassed-delete"),
+    );
+    const protectedPath = await harness.executeTool(
+      call("delete_file", { path: ".env" }, "protected-delete"),
+    );
+
+    expect(deleted.result.isError).not.toBe(true);
+    expect(protectedPath.result.text).toContain("manage_env");
+    expect(permission.decide).not.toHaveBeenCalled();
+    expect(generator.getFiles()[".env"]).toBe("SECRET=value");
+
+    const planPermission = createPermissionHarness({ bypassEnabled: true });
+    const plan = createGenerator(
+      { delete_file: BUILTIN_TOOLS.delete_file },
+      vi.fn(),
+      {
+        executionMode: "plan",
+        conversationId: "conversation-a",
+        initialFiles: { "src/plan.ts": "keep" },
+        projectPermissionSession: planPermission.session,
+      },
+    );
+    const blocked = await (
+      plan.generator as unknown as ToolInvoker
+    ).executeTool(call("delete_file", { path: "src/plan.ts" }, "plan-delete"));
+    expect(blocked.result.text).toContain("not permitted by policy");
+    expect(plan.generator.getFiles()["src/plan.ts"]).toBe("keep");
+  });
+
+  it("cancels a pending permission request when project state changes", async () => {
+    let resolveDecision!: (decision: ProjectPermissionDecision) => void;
+    const decision = new Promise<ProjectPermissionDecision>((resolve) => {
+      resolveDecision = resolve;
+    });
+    const permission = createPermissionHarness({ decide: () => decision });
+    const { generator } = createGenerator(
+      { delete_file: BUILTIN_TOOLS.delete_file },
+      vi.fn(),
+      {
+        conversationId: "conversation-a",
+        initialFiles: { "src/old.ts": "old" },
+        projectPermissionSession: permission.session,
+      },
+    );
+    const authorization = (generator as unknown as ToolInvoker).executeTool(
+      call("delete_file", { path: "src/old.ts" }, "stale-delete"),
+    );
+    await vi.waitFor(() => expect(permission.decide).toHaveBeenCalledOnce());
+    generator.setFiles({ "src/new.ts": "new" });
+
+    const outcome = await authorization;
+    expect(outcome.result.text).toContain("permission_stale");
+    expect(generator.getFiles()).toEqual({ "src/new.ts": "new" });
+    resolveDecision({ kind: "allow_once" });
+  });
+
+  it("aborts a pending permission request and revokes grants on Stop", async () => {
+    const permission = createPermissionHarness({
+      decide: () => new Promise<ProjectPermissionDecision>(() => undefined),
+    });
+    const { generator } = createGenerator(
+      { delete_file: BUILTIN_TOOLS.delete_file },
+      vi.fn(),
+      {
+        conversationId: "conversation-a",
+        initialFiles: { "src/old.ts": "old" },
+        projectPermissionSession: permission.session,
+      },
+    );
+    const authorization = (generator as unknown as ToolInvoker).executeTool(
+      call("delete_file", { path: "src/old.ts" }, "stopped-delete"),
+    );
+    await vi.waitFor(() => expect(permission.decide).toHaveBeenCalledOnce());
+
+    generator.abort();
+
+    await expect(authorization).rejects.toMatchObject({ name: "AbortError" });
+    expect(permission.session.authority().grants).toEqual([]);
+    expect(generator.getFiles()["src/old.ts"]).toBe("old");
+  });
+
+  it("does not commit a late project replacement after Stop", async () => {
+    let finishPreparation!: (value: { files: Record<string, string> }) => void;
+    const preparation = new Promise<{ files: Record<string, string> }>(
+      (resolve) => {
+        finishPreparation = resolve;
+      },
+    );
+    const prepareInitializedProject = vi.fn(() => preparation);
+    const permission = createPermissionHarness({
+      decisions: [{ kind: "allow_once" }],
+    });
+    const { generator } = createGenerator(
+      { init_project: BUILTIN_TOOLS.init_project },
+      vi.fn(),
+      {
+        conversationId: "conversation-a",
+        initialFiles: { "legacy.txt": "old project" },
+        projectPermissionSession: permission.session,
+        prepareInitializedProject,
+      },
+    );
+    const execution = (generator as unknown as ToolInvoker).executeTool(
+      call("init_project", { template: "static" }, "late-replacement"),
+    );
+    await vi.waitFor(() =>
+      expect(prepareInitializedProject).toHaveBeenCalledOnce(),
+    );
+
+    generator.abort();
+    finishPreparation({ files: { "index.html": "late replacement" } });
+
+    await expect(execution).rejects.toMatchObject({ name: "AbortError" });
+    expect(generator.getFiles()).toEqual({ "legacy.txt": "old project" });
+  });
+
+  it("does not commit a bypassed init after Stop while template loading is pending", async () => {
+    let releaseTemplate!: () => void;
+    let markTemplateStarted!: () => void;
+    const templateStarted = new Promise<void>((resolve) => {
+      markTemplateStarted = resolve;
+    });
+    const templateGate = new Promise<void>((resolve) => {
+      releaseTemplate = resolve;
+    });
+    const originalDispatchFsTool = fsTools.dispatchFsTool;
+    const dispatchSpy = vi
+      .spyOn(fsTools, "dispatchFsTool")
+      .mockImplementation(async (...args) => {
+        if (args[0] === "init_project") {
+          markTemplateStarted();
+          await templateGate;
+        }
+        return originalDispatchFsTool(...args);
+      });
+    const permission = createPermissionHarness({ bypassEnabled: true });
+    const { generator } = createGenerator(
+      { init_project: BUILTIN_TOOLS.init_project },
+      vi.fn(),
+      {
+        conversationId: "conversation-a",
+        initialFiles: { "legacy.txt": "old project" },
+        projectPermissionSession: permission.session,
+      },
+    );
+
+    try {
+      const execution = (generator as unknown as ToolInvoker).executeTool(
+        call("init_project", { template: "static" }, "late-bypass-init"),
+      );
+      await templateStarted;
+
+      generator.abort();
+      releaseTemplate();
+
+      await expect(execution).rejects.toMatchObject({ name: "AbortError" });
+      expect(generator.getFiles()).toEqual({ "legacy.txt": "old project" });
+    } finally {
+      releaseTemplate();
+      dispatchSpy.mockRestore();
+    }
   });
 
   it("rejects a forged tool call that is absent from the current run schema", async () => {
@@ -696,6 +1192,102 @@ describe("generator execution authorization", () => {
       );
       expect(denied?.content).toContain("discarded");
     }
+  });
+
+  it("discards sibling calls after interactive permission rotates authority", async () => {
+    const permission = createPermissionHarness({
+      decisions: [{ kind: "allow_once" }],
+    });
+    const { generator } = createGenerator(
+      {
+        delete_file: BUILTIN_TOOLS.delete_file,
+        write_file: BUILTIN_TOOLS.write_file,
+      },
+      vi.fn(),
+      {
+        conversationId: "conversation-a",
+        initialFiles: { "src/old.ts": "old" },
+        projectPermissionSession: permission.session,
+      },
+    );
+    const harness = generator as unknown as GeneratorRunHarness;
+    const request = vi.spyOn(harness, "requestWithRetry");
+    request
+      .mockResolvedValueOnce({
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          call("delete_file", { path: "src/old.ts" }, "approved-delete"),
+          call(
+            "write_file",
+            { path: "src/result.ts", content: "stale" },
+            "stale-sibling",
+          ),
+        ],
+      })
+      .mockResolvedValueOnce({
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          call(
+            "write_file",
+            { path: "src/result.ts", content: "fresh" },
+            "fresh-write",
+          ),
+        ],
+      })
+      .mockResolvedValueOnce({ role: "assistant", content: "Done" });
+
+    const result = await generator.generate("Replace the obsolete file");
+
+    expect(request).toHaveBeenCalledTimes(3);
+    expect(result.files).toEqual({ "src/result.ts": "fresh" });
+    expect(
+      result.messages.find(
+        (message) =>
+          message.role === "tool" && message.tool_call_id === "stale-sibling",
+      )?.content,
+    ).toContain("ProjectFiles permission changed");
+  });
+
+  it("keeps a session grant across naturally completed user generations", async () => {
+    const permission = createPermissionHarness({
+      decisions: [{ kind: "allow_session", scope: { kind: "project" } }],
+    });
+    const { generator } = createGenerator(
+      { delete_file: BUILTIN_TOOLS.delete_file },
+      vi.fn(),
+      {
+        conversationId: "conversation-a",
+        initialFiles: { "src/a.ts": "a", "src/b.ts": "b" },
+        projectPermissionSession: permission.session,
+      },
+    );
+    const harness = generator as unknown as GeneratorRunHarness;
+    vi.spyOn(harness, "requestWithRetry")
+      .mockResolvedValueOnce({
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          call("delete_file", { path: "src/a.ts" }, "delete-a-first-run"),
+        ],
+      })
+      .mockResolvedValueOnce({ role: "assistant", content: "First done" })
+      .mockResolvedValueOnce({
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          call("delete_file", { path: "src/b.ts" }, "delete-b-second-run"),
+        ],
+      })
+      .mockResolvedValueOnce({ role: "assistant", content: "Second done" });
+
+    await generator.generate("Delete the first obsolete file");
+    await generator.generate("Delete the second obsolete file");
+
+    expect(permission.decide).toHaveBeenCalledOnce();
+    expect(permission.session.authority().grants).toHaveLength(1);
+    expect(generator.getFiles()).toEqual({});
   });
 
   it("does not treat a forged exit_plan_mode call as a barrier in Chat", async () => {

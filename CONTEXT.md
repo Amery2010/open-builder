@@ -56,6 +56,26 @@ _Avoid_: WCAG conformance, whole-page proof
 
 ## Host Tool language
 
+**Destructive Project Operation**:
+An AI-requested deletion, move or rename, or replacement of a non-empty Conversation project tree. Ordinary reads and non-destructive writes are not Destructive Project Operations.
+_Avoid_: File write, elevated tool
+
+**Permission Session**:
+The temporary authority context for one continuously active Conversation. It survives natural task completion but ends on Stop, Conversation switch, project replacement or reset, runtime rebuild, or application restart.
+_Avoid_: Login session, persisted permission
+
+**Permission Grant**:
+A user decision allowing one Destructive Project Operation once, or allowing delete or move operations within a chosen ProjectFiles scope for the current Permission Session.
+_Avoid_: Tool availability, operating-system permission
+
+**Permission Authority Snapshot**:
+The immutable, revisioned view of a Permission Session's grants and bypass state used to open a Host Tool Run. A changed grant set produces a new snapshot rather than expanding an existing one.
+_Avoid_: Mutable ACL, Provider approval
+
+**Full Permission Bypass**:
+A global, default-off preference that skips Permission Broker restrictions for Destructive Project Operations only. It does not relax Plan, Skill, Design, MCP, Registry, sensitive-path, or native runtime policies.
+_Avoid_: Disable all security, unrestricted filesystem
+
 **Host Tool Record**:
 A single flat declaration containing a tool's model schema, source and effects, run availability, approval and retention policy, presentation metadata, and Host implementation or provider ownership.
 _Avoid_: Capability row, handler registration

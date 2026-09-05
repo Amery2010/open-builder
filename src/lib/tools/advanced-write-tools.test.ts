@@ -18,6 +18,7 @@ function toolContext(): ToolExecutionContext {
       runId: "run-1",
       mode: "chat",
       platform: "desktop",
+      runtime: "api",
       allowedMcpAliases: new Set<string>(),
       activeSkillIds: new Set<string>(),
       approvedSkillScriptHashes: new Set<string>(),

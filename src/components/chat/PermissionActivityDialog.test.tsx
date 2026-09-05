@@ -11,6 +11,15 @@ import {
   clearPermissionActivity,
   recordPermissionActivity,
 } from "../../lib/security/activity-log";
+import type {
+  ProjectPermissionAuthoritySnapshot,
+  ProjectPermissionSession,
+} from "../../lib/security/project-permission-broker";
+import {
+  publishProjectPermissionAuthority,
+  registerProjectPermissionSession,
+  useProjectPermissionStore,
+} from "../../store/project-permission";
 import { PermissionActivityDialog } from "./PermissionActivityDialog";
 
 describe("PermissionActivityDialog", () => {
@@ -26,6 +35,7 @@ describe("PermissionActivityDialog", () => {
       globalEnabled: true,
       _hasHydrated: true,
     });
+    useProjectPermissionStore.setState({ pending: null, authorities: {} });
   });
 
   it("shows only the current conversation with localized tool names", () => {
@@ -182,5 +192,66 @@ describe("PermissionActivityDialog", () => {
 
     await user.keyboard("{Escape}");
     expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it("revokes an active session grant and rotates Host authority", async () => {
+    const user = userEvent.setup();
+    let authority: ProjectPermissionAuthoritySnapshot = {
+      id: "authority-1",
+      digest: "digest-1",
+      revision: 1,
+      sessionId: "session-1",
+      conversationId: "conversation-a",
+      policyVersion: "test",
+      projectRevision: 0,
+      bypassEnabled: false,
+      closed: false,
+      grants: [
+        {
+          id: "grant-1",
+          operation: "delete",
+          scope: { kind: "subtree", path: "src/legacy" },
+        },
+      ],
+    };
+    const session = {
+      authority: () => authority,
+      change: vi.fn((change: { type: string; grantId?: string }) => {
+        if (change.type === "revoke_grant" && change.grantId === "grant-1") {
+          authority = {
+            ...authority,
+            id: "authority-2",
+            digest: "digest-2",
+            revision: 2,
+            grants: [],
+          };
+        }
+      }),
+      authorize: vi.fn(),
+      settle: vi.fn(),
+    } as unknown as ProjectPermissionSession;
+    const rotateHostAuthority = vi.fn();
+    registerProjectPermissionSession(
+      "conversation-a",
+      session,
+      rotateHostAuthority,
+    );
+    render(
+      <PermissionActivityDialog
+        open
+        conversationId="conversation-a"
+        onClose={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(/src\/legacy/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Revoke" }));
+
+    expect(rotateHostAuthority).toHaveBeenCalledOnce();
+    expect(
+      await screen.findByText("There are no active session grants."),
+    ).toBeInTheDocument();
+    authority = { ...authority, closed: true };
+    publishProjectPermissionAuthority("conversation-a", session);
   });
 });

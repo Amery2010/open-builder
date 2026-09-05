@@ -33,6 +33,7 @@ import {
 import { findWithdrawableUserMessageIndex } from "../lib/utils/merge-messages";
 import { useConversationStore } from "../store/conversation";
 import { useInteractiveStore } from "../store/interactive";
+import { useProjectPermissionStore } from "../store/project-permission";
 import { useSnapshotStore } from "../store/snapshot";
 import { discardPendingSandpackFileChanges } from "./code-viewer/sandpack-file-changes";
 import {
@@ -81,6 +82,11 @@ const PermissionActivityDialog = lazy(() =>
     default: module.PermissionActivityDialog,
   })),
 );
+const PermissionRequestDialog = lazy(() =>
+  import("./chat/PermissionRequestDialog").then((module) => ({
+    default: module.PermissionRequestDialog,
+  })),
+);
 
 interface ChatInterfaceProps {
   messages: Message[];
@@ -118,6 +124,7 @@ interface ChatInterfaceProps {
   onCompileDesignSystem?: (
     draft: CustomDesignSystemDraft,
   ) => Promise<StagedDesignSystemImport>;
+  onContextClear?: () => void;
   onProjectReset?: () => void;
   /** Atomically abort/remove the final genuine user message in the owner and
    * return the draft that should be restored to this composer. */
@@ -185,6 +192,7 @@ export function ChatInterface({
   onHealthCheck,
   onApplyDesignSystem = () => {},
   onCompileDesignSystem,
+  onContextClear,
   onProjectReset,
   onWithdrawLastMessage,
 }: ChatInterfaceProps) {
@@ -215,9 +223,14 @@ export function ChatInterface({
         item.kind === "question" && item.presentation === "questionnaire",
     ),
   );
-  const hasPendingInteraction = useInteractiveStore(
+  const hasPendingInteractiveItem = useInteractiveStore(
     (state) => state.pending.length > 0,
   );
+  const pendingProjectPermission = useProjectPermissionStore(
+    (state) => state.pending,
+  );
+  const hasPendingInteraction =
+    hasPendingInteractiveItem || pendingProjectPermission !== null;
   const isQuestionnairePending = pendingQuestionnaire !== undefined;
   const withdrawableUserMessageIndex = findWithdrawableUserMessageIndex(
     messages,
@@ -262,6 +275,10 @@ export function ChatInterface({
   const [attachmentRestoreWarning, setAttachmentRestoreWarning] = useState<
     string | null
   >(null);
+
+  useEffect(() => {
+    if (pendingProjectPermission) setShowPermissionActivity(false);
+  }, [pendingProjectPermission]);
 
   useEffect(() => {
     setShowPermissionActivity(false);
@@ -324,6 +341,7 @@ export function ChatInterface({
             if (attachment.previewUrl)
               URL.revokeObjectURL(attachment.previewUrl);
           }
+          onContextClear?.();
           useConversationStore.getState().clearContext();
           setAttachments([]);
           setForcedSkillIds([]);
@@ -356,6 +374,7 @@ export function ChatInterface({
       onReview,
       onRetry,
       onContinue,
+      onContextClear,
       attachments,
       messages,
       setRollbackConfirmId,
@@ -607,7 +626,10 @@ export function ChatInterface({
 
   return (
     <div className="relative flex h-full min-h-0 flex-col overflow-hidden bg-background">
-      <div className="contents" inert={isQuestionnairePending}>
+      <div
+        className="contents"
+        inert={isQuestionnairePending || pendingProjectPermission !== null}
+      >
         <ChatHeader
           isGenerating={isGenerating}
           onOpenSettings={onOpenSettings}
@@ -779,6 +801,50 @@ export function ChatInterface({
               open
               conversationId={activeId}
               onClose={() => setShowPermissionActivity(false)}
+            />
+          </Suspense>
+        )}
+
+        {pendingProjectPermission && (
+          <Suspense fallback={null}>
+            <PermissionRequestDialog
+              open
+              operation={pendingProjectPermission.request.operation}
+              paths={
+                pendingProjectPermission.request.affectedPaths.length > 0
+                  ? pendingProjectPermission.request.affectedPaths
+                  : [t.permissionRequest.projectRoot]
+              }
+              count={pendingProjectPermission.request.affectedCount}
+              eligibleForSession={
+                pendingProjectPermission.request.sessionEligible
+              }
+              commonParent={pendingProjectPermission.commonParent}
+              submitting={pendingProjectPermission.submitting}
+              error={pendingProjectPermission.error}
+              labels={t.permissionRequest}
+              onDeny={() =>
+                useProjectPermissionStore
+                  .getState()
+                  .submitDecision(pendingProjectPermission.request.requestId, {
+                    kind: "deny",
+                  })
+              }
+              onAllowOnce={() =>
+                useProjectPermissionStore
+                  .getState()
+                  .submitDecision(pendingProjectPermission.request.requestId, {
+                    kind: "allow_once",
+                  })
+              }
+              onAllowSession={(scope) =>
+                useProjectPermissionStore
+                  .getState()
+                  .submitDecision(pendingProjectPermission.request.requestId, {
+                    kind: "allow_session",
+                    scope,
+                  })
+              }
             />
           </Suspense>
         )}

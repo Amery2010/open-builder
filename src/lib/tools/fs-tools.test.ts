@@ -10,6 +10,7 @@ import {
   fsSearchInFiles,
   fsWriteFile,
   normalizeProjectPath,
+  resolveProjectPermissionImpact,
 } from "./fs-tools";
 import { ENV_TOOL_LIMITS, fsManageEnv } from "./env-tools";
 import type { ProjectFiles } from "../ai/generator-types";
@@ -444,6 +445,53 @@ describe("fsRenameFile", () => {
     expect(result.newFiles?.["src/ui/index.ts"]).toBe(
       'export { Button } from "./Button";\n',
     );
+  });
+});
+
+describe("resolveProjectPermissionImpact", () => {
+  it("returns no requirement for ordinary failures or empty initialization", async () => {
+    await expect(
+      resolveProjectPermissionImpact("delete_file", { path: "missing.ts" }, {}),
+    ).resolves.toBeUndefined();
+    await expect(
+      resolveProjectPermissionImpact(
+        "init_project",
+        { template: "static" },
+        {},
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it("includes moved paths and automatically rewritten references", async () => {
+    const impact = await resolveProjectPermissionImpact(
+      "rename_file",
+      { old_path: "src/old.ts", new_path: "src/new.ts" },
+      {
+        "src/old.ts": "export const value = 1;",
+        "src/App.ts": 'import { value } from "./old";',
+      },
+    );
+
+    expect(impact).toEqual({
+      scope: {
+        kind: "exact",
+        paths: ["src/App.ts", "src/new.ts", "src/old.ts"],
+      },
+      affectedPaths: ["src/App.ts", "src/new.ts", "src/old.ts"],
+      affectedCount: 3,
+    });
+  });
+
+  it("treats initialization over a non-empty project as project replacement", async () => {
+    const impact = await resolveProjectPermissionImpact(
+      "init_project",
+      { template: "static" },
+      { "legacy.txt": "keep?" },
+    );
+
+    expect(impact?.scope).toEqual({ kind: "project" });
+    expect(impact?.affectedPaths).toContain("legacy.txt");
+    expect(impact?.affectedCount).toBe(impact?.affectedPaths.length);
   });
 });
 

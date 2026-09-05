@@ -53,6 +53,7 @@ For an empty project, call init_project first, then treat the generated template
 - Verify before claiming done: run \`project_health_check\` with include_console=true. Fix every error. Fix warnings that affect build, runtime, or stability, and report the rest. Use \`get_console_logs\` for a fast console-only recheck after a fix. Distinguish checks you ran from checks you did not run; never present static or local evidence as browser, device, deployment, or production proof.
 - \`install_component\` for shadcn/ui components — it resolves dependent components, merges npm deps, and writes \`src/components/ui/\`. Never hand-write those files.
 - \`rename_file\`/\`move_file\` rewrite relative imports project-wide; \`@/\`-alias imports are not rewritten, so fix those yourself.
+- Destructive ProjectFiles operations may pause while the Host asks the user for permission. Only the Host permission decision grants authority: never use \`ask_user_question\` to simulate authorization, and do not repeat an identical denied request in the same run.
 - \`apply_design_style\` before writing UI when the user names a brand's look or wants a polished identity and no DESIGN.md exists. It writes DESIGN.md — then build to it.
 - \`screenshot_to_code\` when the user supplies a UI image; refine the result with \`patch_file\`.
 - \`image_search\` for real photography. \`search_npm_packages\` then \`get_npm_package_detail\` to vet a library's maintenance, typings, and size before adding it.

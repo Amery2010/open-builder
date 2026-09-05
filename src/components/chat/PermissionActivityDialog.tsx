@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -15,6 +16,11 @@ import {
   type PermissionActivityEntry,
 } from "../../lib/security/activity-log";
 import { useMcpStore } from "../../store/mcp";
+import {
+  revokeProjectPermissionGrant,
+  useProjectPermissionStore,
+} from "../../store/project-permission";
+import type { ProjectPermissionScope } from "../../lib/security/project-permission-broker";
 
 interface PermissionActivityDialogProps {
   open: boolean;
@@ -29,6 +35,9 @@ export function PermissionActivityDialog({
 }: PermissionActivityDialogProps) {
   const t = useT();
   const mcpServers = useMcpStore((state) => state.servers);
+  const permissionAuthority = useProjectPermissionStore(
+    (state) => state.authorities[conversationId],
+  );
   const [entries, setEntries] = useState<PermissionActivityEntry[]>(() =>
     getPermissionActivity(conversationId),
   );
@@ -61,6 +70,13 @@ export function PermissionActivityDialog({
   }, [mcpServers]);
 
   const toolNames = t.tool.names as Record<string, string | undefined>;
+  const describeScope = (scope: ProjectPermissionScope) => {
+    if (scope.kind === "project") return t.permissionActivity.scopes.project;
+    if (scope.kind === "subtree") {
+      return `${t.permissionActivity.scopes.subtree}: ${scope.path}`;
+    }
+    return `${t.permissionActivity.scopes.exact}: ${scope.paths.join(", ")}`;
+  };
   const displayToolName = (entry: PermissionActivityEntry) => {
     if (entry.source === "mcp") {
       const resolvedAlias = mcpAliases.get(entry.tool);
@@ -90,6 +106,46 @@ export function PermissionActivityDialog({
         </DialogHeader>
 
         <div className="min-h-0 flex-1 overflow-y-auto">
+          <section className="space-y-3 border-b bg-muted/20 px-5 py-4">
+            <h2 className="text-sm font-medium">
+              {t.permissionActivity.activeGrants}
+            </h2>
+            {!permissionAuthority?.grants.length ? (
+              <p className="text-xs text-muted-foreground">
+                {t.permissionActivity.noActiveGrants}
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {permissionAuthority.grants.map((grant) => (
+                  <article
+                    key={grant.id}
+                    className="flex items-start justify-between gap-3 rounded-md border bg-background px-3 py-2.5"
+                  >
+                    <div className="min-w-0 space-y-1">
+                      <Badge variant="secondary">
+                        {t.permissionRequest.operation[grant.operation]}
+                      </Badge>
+                      <p className="break-all text-xs text-muted-foreground">
+                        {describeScope(grant.scope)}
+                      </p>
+                    </div>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="h-7 shrink-0 px-2 text-xs"
+                      onClick={() =>
+                        revokeProjectPermissionGrant(conversationId, grant.id)
+                      }
+                    >
+                      {t.permissionActivity.revoke}
+                    </Button>
+                  </article>
+                ))}
+              </div>
+            )}
+          </section>
+
           {entries.length === 0 ? (
             <p className="px-5 py-10 text-center text-sm text-muted-foreground">
               {t.permissionActivity.empty}
@@ -126,6 +182,11 @@ export function PermissionActivityDialog({
                     <span>
                       {t.permissionActivity.platforms[entry.platform]}
                     </span>
+                    {entry.runtime && (
+                      <span>
+                        {t.permissionActivity.runtimes[entry.runtime]}
+                      </span>
+                    )}
                   </div>
 
                   {(entry.target || entry.reason) && (
@@ -149,6 +210,12 @@ export function PermissionActivityDialog({
                         </div>
                       )}
                     </dl>
+                  )}
+
+                  {entry.scope && (
+                    <p className="break-all text-xs text-muted-foreground">
+                      {describeScope(entry.scope)}
+                    </p>
                   )}
 
                   <details className="text-xs text-muted-foreground">

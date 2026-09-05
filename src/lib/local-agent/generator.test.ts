@@ -13,6 +13,12 @@ import type { LocalAgentEvent, LocalAgentStartRequest } from "./types";
 import type { LocalAgentProvider } from "./providers";
 import { buildCustomSystemPromptSection } from "../ai/custom-system-prompt";
 import { createDesignContractController } from "../design/run-contract";
+import {
+  createProjectPermissionBroker,
+  type ProjectPermissionDecision,
+  type ProjectPermissionRequest,
+  type ProjectPermissionSession,
+} from "../security/project-permission-broker";
 
 const localAgentMocks = vi.hoisted(() => ({
   start: vi.fn(),
@@ -72,6 +78,7 @@ function generator(
     onFileChange?: NonNullable<GeneratorEvents["onFileChange"]>;
     onLocalCliPrepared?: NonNullable<GeneratorEvents["onLocalCliPrepared"]>;
     onError?: NonNullable<GeneratorEvents["onError"]>;
+    projectPermissionSession?: ProjectPermissionSession;
   } = {},
 ) {
   const tools = options.tools ?? {};
@@ -106,6 +113,7 @@ function generator(
         : undefined,
       onPlanApproved: options.onPlanApproved,
       authorizeToolCall: options.authorizeToolCall,
+      projectPermissionSession: options.projectPermissionSession,
     },
   );
   instance.syncMessages(conversation.messages);
@@ -303,6 +311,125 @@ describe("LocalAgentGenerator", () => {
       "write-file",
       expect.objectContaining({ isError: undefined }),
     );
+  });
+
+  it("waits for the shared Host Broker and resolves a Local CLI delete once", async () => {
+    let emit: ((event: LocalAgentEvent) => void) | undefined;
+    let resolveDecision!: (decision: ProjectPermissionDecision) => void;
+    const decision = vi.fn(
+      (_request: ProjectPermissionRequest, _signal: AbortSignal) =>
+        new Promise<ProjectPermissionDecision>((resolve) => {
+          resolveDecision = resolve;
+        }),
+    );
+    const projectPermissionSession = createProjectPermissionBroker({
+      decision: { decide: decision },
+      audit: { record: vi.fn() },
+    }).openSession({
+      conversationId: "conversation-1",
+      policyVersion: "test-policy",
+      projectRevision: 0,
+      bypassEnabled: false,
+    });
+    localAgentMocks.start.mockImplementation(
+      async (
+        _request: LocalAgentStartRequest,
+        onEvent: (event: LocalAgentEvent) => void,
+      ) => {
+        emit = onEvent;
+        return "run-permission";
+      },
+    );
+    const conversation = baseConversation({
+      files: { "src/old.ts": "old" },
+    });
+    const { instance } = generator(conversation, vi.fn(), vi.fn(), {
+      tools: { delete_file: BUILTIN_TOOLS.delete_file },
+      projectPermissionSession,
+    });
+    const pending = instance.generate("Delete the obsolete file");
+    await vi.waitFor(() => expect(emit).toBeTypeOf("function"));
+    emit!({
+      type: "toolRequest",
+      runId: "run-permission",
+      callId: "delete-old",
+      name: "delete_file",
+      arguments: { path: "src/old.ts" },
+    });
+    await vi.waitFor(() => expect(decision).toHaveBeenCalledOnce());
+    expect(decision.mock.calls[0][0]).toMatchObject({
+      runtime: "local_cli",
+      operation: "delete",
+    });
+    expect(localAgentMocks.resolve).not.toHaveBeenCalled();
+
+    resolveDecision({ kind: "allow_once" });
+    await vi.waitFor(() =>
+      expect(localAgentMocks.resolve).toHaveBeenCalledWith(
+        "run-permission",
+        "delete-old",
+        expect.objectContaining({ isError: undefined }),
+      ),
+    );
+    emit!({ type: "done", aborted: false });
+    await pending;
+
+    expect(localAgentMocks.resolve).toHaveBeenCalledTimes(1);
+    expect(instance.getFiles()).toEqual({});
+  });
+
+  it("cancels a Local CLI permission wait and drops a late decision on Stop", async () => {
+    let emit: ((event: LocalAgentEvent) => void) | undefined;
+    let resolveDecision!: (decision: ProjectPermissionDecision) => void;
+    const decision = vi.fn(
+      (_request: ProjectPermissionRequest, _signal: AbortSignal) =>
+        new Promise<ProjectPermissionDecision>((resolve) => {
+          resolveDecision = resolve;
+        }),
+    );
+    const projectPermissionSession = createProjectPermissionBroker({
+      decision: { decide: decision },
+      audit: { record: vi.fn() },
+    }).openSession({
+      conversationId: "conversation-1",
+      policyVersion: "test-policy",
+      projectRevision: 0,
+      bypassEnabled: false,
+    });
+    localAgentMocks.start.mockImplementation(
+      async (
+        _request: LocalAgentStartRequest,
+        onEvent: (event: LocalAgentEvent) => void,
+      ) => {
+        emit = onEvent;
+        return "run-permission-stop";
+      },
+    );
+    const conversation = baseConversation({
+      files: { "src/old.ts": "old" },
+    });
+    const { instance } = generator(conversation, vi.fn(), vi.fn(), {
+      tools: { delete_file: BUILTIN_TOOLS.delete_file },
+      projectPermissionSession,
+    });
+    const pending = instance.generate("Delete the obsolete file");
+    await vi.waitFor(() => expect(emit).toBeTypeOf("function"));
+    emit!({
+      type: "toolRequest",
+      runId: "run-permission-stop",
+      callId: "delete-after-stop",
+      name: "delete_file",
+      arguments: { path: "src/old.ts" },
+    });
+    await vi.waitFor(() => expect(decision).toHaveBeenCalledOnce());
+
+    instance.abort();
+    resolveDecision({ kind: "allow_once" });
+    emit!({ type: "done", aborted: true });
+
+    await expect(pending).resolves.toMatchObject({ aborted: true });
+    expect(localAgentMocks.resolve).not.toHaveBeenCalled();
+    expect(instance.getFiles()).toEqual({ "src/old.ts": "old" });
   });
 
   it("enforces host write authorization for local CLI tool requests", async () => {
@@ -537,6 +664,12 @@ describe("LocalAgentGenerator", () => {
     expect(request?.systemPrompt).toContain("not the user's ProjectFiles");
     expect(request?.systemPrompt).toContain(
       "does not make the Open Builder project read-only",
+    );
+    expect(request?.systemPrompt).toContain(
+      "Only that Host decision grants authority",
+    );
+    expect(request?.systemPrompt).toContain(
+      "Never use ask_user_question or provider-native permission prompts",
     );
   });
 

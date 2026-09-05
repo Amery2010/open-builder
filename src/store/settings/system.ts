@@ -11,6 +11,7 @@ export interface SystemSettings {
   planModeEnabled: boolean;
   autoQaEnabled: boolean;
   developerSkillScriptsEnabled: boolean;
+  permissionBrokerBypassEnabled: boolean;
   customSystemPrompt: string;
 }
 
@@ -22,6 +23,7 @@ export const systemDefaults: SystemSettings = {
   planModeEnabled: false,
   autoQaEnabled: false,
   developerSkillScriptsEnabled: false,
+  permissionBrokerBypassEnabled: false,
   customSystemPrompt: "",
 };
 

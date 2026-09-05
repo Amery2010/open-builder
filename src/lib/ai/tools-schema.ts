@@ -26,6 +26,8 @@ import {
   type ToolOutputRetention,
 } from "./host-tool-catalog";
 import { TOOL_POLICY_VERSION } from "./tool-policy-version";
+import { resolveProjectPermissionImpact } from "../tools/fs-tools";
+import type { HostToolProjectPermission } from "./host-tool-catalog";
 
 export { TOOL_POLICY_VERSION };
 
@@ -302,6 +304,7 @@ export const BUILTIN_TOOLS = {
 };
 
 export type RuntimePlatform = "web" | "desktop" | "mobile";
+export type ToolRuntime = "api" | "local_cli";
 export type ExecutionMode = "chat" | "plan" | "auto_qa" | "subagent";
 export type ToolProfile = "default" | "design" | "design_review";
 export type ToolSource =
@@ -321,6 +324,7 @@ export interface ToolRunContext {
   readonly conversationId?: string;
   readonly mode: ExecutionMode;
   readonly platform: RuntimePlatform;
+  readonly runtime: ToolRuntime;
   readonly allowedMcpAliases: ReadonlySet<string>;
   readonly activeSkillIds: ReadonlySet<string>;
   readonly approvedSkillScriptHashes: ReadonlySet<string>;
@@ -630,6 +634,7 @@ interface RecordOptions {
   providerOwned?: boolean;
   providerAlternative?: boolean;
   iconKey?: string;
+  projectPermission?: HostToolProjectPermission;
 }
 
 function hostRecord(
@@ -674,11 +679,19 @@ function hostRecord(
               : {}),
           },
     ),
+    projectPermission: options.projectPermission,
   });
 }
 
 export const HOST_TOOL_RECORDS: readonly HostToolRecord[] = Object.freeze([
-  hostRecord("init_project", "project", ["write_project"], CHAT_ONLY),
+  hostRecord("init_project", "project", ["write_project"], CHAT_ONLY, {
+    projectPermission: {
+      operation: "replace_project",
+      sessionEligible: false,
+      resolve: (input, files) =>
+        resolveProjectPermissionImpact("init_project", input, files),
+    },
+  }),
   hostRecord("manage_dependencies", "project", ["write_project"], CHAT_ONLY),
   hostRecord("list_files", "project", ["read_project"], ALL_READ_MODES, {
     profiles: ["default", "design", "design_review"],
@@ -691,9 +704,30 @@ export const HOST_TOOL_RECORDS: readonly HostToolRecord[] = Object.freeze([
   hostRecord("search_in_files", "project", ["read_project"], ALL_READ_MODES, {
     profiles: ["default", "design", "design_review"],
   }),
-  hostRecord("delete_file", "project", ["write_project"], CHAT_ONLY),
-  hostRecord("rename_file", "project", ["write_project"], CHAT_ONLY),
-  hostRecord("move_file", "project", ["write_project"], CHAT_ONLY),
+  hostRecord("delete_file", "project", ["write_project"], CHAT_ONLY, {
+    projectPermission: {
+      operation: "delete",
+      sessionEligible: true,
+      resolve: (input, files) =>
+        resolveProjectPermissionImpact("delete_file", input, files),
+    },
+  }),
+  hostRecord("rename_file", "project", ["write_project"], CHAT_ONLY, {
+    projectPermission: {
+      operation: "move",
+      sessionEligible: true,
+      resolve: (input, files) =>
+        resolveProjectPermissionImpact("rename_file", input, files),
+    },
+  }),
+  hostRecord("move_file", "project", ["write_project"], CHAT_ONLY, {
+    projectPermission: {
+      operation: "move",
+      sessionEligible: true,
+      resolve: (input, files) =>
+        resolveProjectPermissionImpact("move_file", input, files),
+    },
+  }),
   hostRecord("read_env_schema", "project", ["read_project"], CHAT_AND_PLAN),
   hostRecord("manage_env", "project", ["write_project"], CHAT_ONLY),
   hostRecord("get_console_logs", "builtin", ["read_runtime"], CHAT_ONLY),
@@ -874,6 +908,7 @@ export function buildToolSetForRun({
       runId: "projection",
       mode,
       platform,
+      runtime: "api",
       allowedMcpAliases: new Set(allowedDynamicNames),
       activeSkillIds: new Set<string>(),
       approvedSkillScriptHashes: new Set<string>(),

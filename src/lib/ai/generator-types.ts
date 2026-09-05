@@ -8,9 +8,14 @@ import type { ApiType } from "./provider";
 import type {
   ExecutionMode,
   RuntimePlatform,
+  ToolRuntime,
   ToolRunContext,
 } from "./tools-schema";
 import type { ToolOutputRetention } from "./host-tool-catalog";
+import type {
+  ProjectPermissionAuthoritySnapshot,
+  ProjectPermissionSession,
+} from "../security/project-permission-broker";
 import type {
   SkillActiveContext,
   SkillActiveContextController,
@@ -266,6 +271,9 @@ export interface InitializedProjectPreparation {
   changes?: FileChange[];
   /** Compact trusted note appended to the init_project tool result. */
   resultNote?: string;
+  /** Rechecks external Conversation/Design authority immediately before the
+   * prepared files become authoritative. Must not mutate state. */
+  validateBeforeCommit?: () => void;
   /** Runs only after the prepared file tree passes validation and is committed. */
   onCommitted?: () => void;
 }
@@ -311,8 +319,18 @@ export interface GeneratorOptions {
     args: unknown,
     context: ToolExecutionContext,
   ) => string | void | Promise<string | void>;
+  /** Host-owned destructive ProjectFiles authority shared by API and Local CLI
+   * adapters. Omit for isolated utility runs that cannot mutate ProjectFiles. */
+  projectPermissionSession?: ProjectPermissionSession;
+  onProjectPermissionAuthorityChange?: (
+    authority: ProjectPermissionAuthoritySnapshot,
+  ) => void;
+  onProjectPermissionRequestFinished?: (callId: string, error?: string) => void;
   executionMode?: ExecutionMode;
   runtimePlatform?: RuntimePlatform;
+  /** Execution transport. Desktop is a platform and does not imply that a
+   * provider CLI owns the run. */
+  toolRuntime?: ToolRuntime;
   allowedMcpAliases?: ReadonlySet<string>;
   /** Provider-facing annotations for dynamic local tools. */
   localToolAnnotations?: ReadonlyMap<string, LocalToolAnnotations>;
@@ -418,6 +436,8 @@ export interface GenerationBackend {
   setTools(tools: ToolSet): void;
   setReadOnlyMode(readOnly: boolean): void;
   setExecutionMode(mode: ExecutionMode): void;
+  /** Reopen the immutable Host Tool Run after a manual grant revocation. */
+  rotateProjectPermissionAuthority?(): void;
   /** Restrict provider-native search for isolated utility profiles whose
    * shared execution mode is still chat. */
   setNativeSearchAllowed?(allowed: boolean): void;

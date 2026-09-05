@@ -35,10 +35,14 @@ export function createOpenAIGenerator(
     | "dispatchSubagent"
     | "executionMode"
     | "runtimePlatform"
+    | "toolRuntime"
     | "conversationId"
     | "allowedMcpAliases"
     | "initialSkillContext"
     | "prepareInitializedProject"
+    | "projectPermissionSession"
+    | "onProjectPermissionAuthorityChange"
+    | "onProjectPermissionRequestFinished"
   >,
 ): WebAppGenerator {
   const apiType = config.apiType ?? "openai-compatible";

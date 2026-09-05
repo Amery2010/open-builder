@@ -660,6 +660,7 @@ export default function App() {
       onHealthCheck={healthCheck}
       onApplyDesignSystem={handleApplyDesignSystem}
       onCompileDesignSystem={handleCompileDesignSystem}
+      onContextClear={invalidateGenerator}
       onProjectReset={invalidateGenerator}
       onWithdrawLastMessage={withdrawLastUserMessage}
     />

@@ -55,6 +55,7 @@ Your provider-native working directory, scratch files, and native filesystem API
 The Open Builder Host tools are the only authority for ProjectFiles, preview state, Skills, memory, and approved MCP calls. Use the Host tools for every project read and write, including initializing, listing, reading, searching, creating, patching, deleting, renaming, moving, and updating project configuration files.
 The provider's native read-only or strict filesystem mode applies only to its native scratch/runtime. It does not make the Open Builder project read-only: in normal Chat, and in the fresh iteration after the user approves Plan Mode, use every authorized Host project tool needed to complete the requested read/write work.
 Never route project work through the native shell, filesystem, hooks, plugins, or external MCP configuration.
+Destructive ProjectFiles operations may pause while the Open Builder Host asks the user for permission. Only that Host decision grants authority. Never use ask_user_question or provider-native permission prompts as a substitute, and do not repeat an identical denied request in the same run.
 Read listed attachments with read_attachment, using the opaque attachment id.
 screenshot_to_code is deliberately unavailable here: inspect the attachment yourself and build with the normal project tools.
 `;
@@ -336,6 +337,10 @@ export class LocalAgentGenerator implements GenerationBackend {
 
   setExecutionMode(mode: ExecutionMode): void {
     this.host.setExecutionMode(mode);
+  }
+
+  rotateProjectPermissionAuthority(): void {
+    this.host.rotateProjectPermissionAuthority();
   }
 
   setNativeSearchAllowed(allowed: boolean): void {
@@ -1047,6 +1052,7 @@ export function createLocalAgentGenerator(
     | "dispatchSubagent"
     | "executionMode"
     | "runtimePlatform"
+    | "toolRuntime"
     | "conversationId"
     | "allowedMcpAliases"
     | "initialSkillContext"
@@ -1054,6 +1060,9 @@ export function createLocalAgentGenerator(
     | "maxIterations"
     | "prepareInitializedProject"
     | "authorizeToolCall"
+    | "projectPermissionSession"
+    | "onProjectPermissionAuthorityChange"
+    | "onProjectPermissionRequestFinished"
   >,
 ): LocalAgentGenerator {
   const host = new WebAppGenerator(
@@ -1067,6 +1076,7 @@ export function createLocalAgentGenerator(
       customTools,
       customToolHandler,
       ...(extras ?? {}),
+      toolRuntime: "local_cli",
     },
     events,
   );

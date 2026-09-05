@@ -72,6 +72,7 @@ describe("migrateSettings", () => {
         planModeEnabled: boolean;
         autoQaEnabled: boolean;
         developerSkillScriptsEnabled: boolean;
+        permissionBrokerBypassEnabled: boolean;
         customSystemPrompt: string;
       };
     };
@@ -80,11 +81,12 @@ describe("migrateSettings", () => {
     expect(migrated.system.planModeEnabled).toBe(false);
     expect(migrated.system.autoQaEnabled).toBe(false);
     expect(migrated.system.developerSkillScriptsEnabled).toBe(false);
+    expect(migrated.system.permissionBrokerBypassEnabled).toBe(false);
     expect(migrated.system.customSystemPrompt).toBe("");
   });
 
   it("adds custom prompts without overwriting an existing value", () => {
-    expect(SETTINGS_VERSION).toBe(22);
+    expect(SETTINGS_VERSION).toBe(23);
     const missing = migrateSettings({ system: {} }, 17) as Record<string, any>;
     const existing = migrateSettings(
       { system: { customSystemPrompt: "Keep changes surgical." } },
@@ -93,6 +95,22 @@ describe("migrateSettings", () => {
 
     expect(missing.system.customSystemPrompt).toBe("");
     expect(existing.system.customSystemPrompt).toBe("Keep changes surgical.");
+  });
+
+  it("adds the permission broker bypass setting without overwriting an existing value", () => {
+    const missing = migrateSettings({ system: {} }, 22) as Record<string, any>;
+    const enabled = migrateSettings(
+      { system: { permissionBrokerBypassEnabled: true } },
+      22,
+    ) as Record<string, any>;
+    const disabled = migrateSettings(
+      { system: { permissionBrokerBypassEnabled: false } },
+      22,
+    ) as Record<string, any>;
+
+    expect(missing.system.permissionBrokerBypassEnabled).toBe(false);
+    expect(enabled.system.permissionBrokerBypassEnabled).toBe(true);
+    expect(disabled.system.permissionBrokerBypassEnabled).toBe(false);
   });
 
   it("adds the Exa key without changing existing search engine choices", () => {

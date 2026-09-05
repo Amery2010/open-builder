@@ -16,6 +16,7 @@ function planContext(aliases: ReadonlySet<string>): ToolExecutionContext {
       runId: "run-1",
       mode: "plan",
       platform: "desktop",
+      runtime: "api",
       allowedMcpAliases: aliases,
       activeSkillIds: new Set(),
       approvedSkillScriptHashes: new Set(),

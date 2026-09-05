@@ -84,6 +84,70 @@ describe("tool policies", () => {
     expect(HOST_TOOL_CATALOG.get("apply_design_system")).toBeUndefined();
   });
 
+  it("declares ProjectFiles permission only for destructive operations", () => {
+    const protectedRecords = Object.fromEntries(
+      HOST_TOOL_RECORDS.filter((record) => record.projectPermission).map(
+        (record) => [
+          record.name,
+          {
+            operation: record.projectPermission?.operation,
+            sessionEligible: record.projectPermission?.sessionEligible,
+          },
+        ],
+      ),
+    );
+
+    expect(protectedRecords).toEqual({
+      init_project: {
+        operation: "replace_project",
+        sessionEligible: false,
+      },
+      delete_file: { operation: "delete", sessionEligible: true },
+      rename_file: { operation: "move", sessionEligible: true },
+      move_file: { operation: "move", sessionEligible: true },
+    });
+    for (const name of [
+      "list_files",
+      "read_files",
+      "write_file",
+      "patch_file",
+      "manage_dependencies",
+      "manage_env",
+      "update_design_tokens",
+    ]) {
+      expect(HOST_TOOL_CATALOG.get(name)?.projectPermission).toBeUndefined();
+    }
+  });
+
+  it("projects equivalent Host authority for API and Local CLI runtimes", () => {
+    const tools = {
+      delete_file: BUILTIN_TOOLS.delete_file,
+      write_file: BUILTIN_TOOLS.write_file,
+    };
+    const baseContext = {
+      runId: "runtime-parity",
+      mode: "chat" as const,
+      platform: "desktop" as const,
+      allowedMcpAliases: new Set<string>(),
+      activeSkillIds: new Set<string>(),
+      approvedSkillScriptHashes: new Set<string>(),
+      policyVersion: "test",
+    };
+    const api = HOST_TOOL_CATALOG.openRun({
+      tools,
+      context: { ...baseContext, runtime: "api" },
+    });
+    const local = HOST_TOOL_CATALOG.openRun({
+      tools,
+      context: { ...baseContext, runtime: "local_cli" },
+    });
+
+    expect([...local.authority.names]).toEqual([...api.authority.names]);
+    expect(local.authority.get("delete_file")?.projectPermission).toMatchObject(
+      { operation: "delete", sessionEligible: true },
+    );
+  });
+
   it("keeps presentation summaries bounded and free of file or secret values", () => {
     const summarize =
       HOST_TOOL_CATALOG.get("manage_env")?.presentation.summarizeArguments;

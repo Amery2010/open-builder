@@ -9,8 +9,34 @@ import type {
   ToolRunContext,
   ToolSource,
 } from "./tools-schema";
+import type {
+  ProjectPermissionOperation,
+  ProjectPermissionScope,
+} from "../security/project-permission-broker";
 
 export type ToolOutputRetention = "full" | "summary-only" | "run-only";
+
+export interface HostToolProjectPermissionResolution {
+  readonly scope: ProjectPermissionScope;
+  readonly affectedPaths: readonly string[];
+  readonly affectedCount: number;
+}
+
+export interface HostToolProjectPermission {
+  readonly operation: ProjectPermissionOperation;
+  readonly sessionEligible: boolean;
+  /** Pure preflight over already schema-validated input and canonical
+   * ProjectFiles. Undefined means the operation is empty or would already
+   * fail, so the implementation returns its normal tool result without a
+   * meaningless permission prompt. */
+  readonly resolve: (
+    input: unknown,
+    files: Readonly<Record<string, string>>,
+  ) =>
+    | HostToolProjectPermissionResolution
+    | undefined
+    | Promise<HostToolProjectPermissionResolution | undefined>;
+}
 
 export interface HostToolPresentation {
   readonly name: Readonly<{ en: string; zh: string }>;
@@ -44,6 +70,7 @@ export interface HostToolRecord {
   readonly outputRetention: ToolOutputRetention;
   readonly presentation: HostToolPresentation;
   readonly implementation: HostToolImplementation;
+  readonly projectPermission?: HostToolProjectPermission;
 }
 
 export interface HostToolDispatchCall {
@@ -158,6 +185,9 @@ function freezeRecord(record: HostToolRecord): HostToolRecord {
       name: Object.freeze({ ...record.presentation.name }),
     }),
     implementation: Object.freeze({ ...record.implementation }),
+    projectPermission: record.projectPermission
+      ? Object.freeze({ ...record.projectPermission })
+      : undefined,
   });
 }
 
@@ -285,6 +315,7 @@ export class HostToolCatalog {
         outputRetention: record.outputRetention,
         presentation: record.presentation,
         implementation: record.implementation,
+        projectPermission: record.projectPermission,
       };
       selected.set(name, freezeRecord(selectedRecord));
       modelTools[name] = definition;

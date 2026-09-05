@@ -1,4 +1,5 @@
 import type { ProjectFiles, FileChange } from "../ai/generator-types";
+import type { HostToolProjectPermissionResolution } from "../ai/host-tool-catalog";
 import { truncate } from "../utils/truncate";
 import { renamePathInProject, basename } from "./file-refs";
 import { fsReadEnvSchema, fsManageEnv, type ManageEnvOp } from "./env-tools";
@@ -678,4 +679,44 @@ export async function dispatchFsTool(
     default:
       return null;
   }
+}
+
+/** Resolve the real ProjectFiles impact of a destructive call by running the
+ * same pure file transform used by execution. Invalid and otherwise failing
+ * calls deliberately return undefined so the normal tool error is preserved
+ * without opening a permission prompt. */
+export async function resolveProjectPermissionImpact(
+  name: "delete_file" | "rename_file" | "move_file" | "init_project",
+  args: unknown,
+  files: Readonly<ProjectFiles>,
+): Promise<HostToolProjectPermissionResolution | undefined> {
+  const outcome = await dispatchFsTool(name, args as any, { ...files });
+  if (!outcome?.newFiles || outcome.result.startsWith("Error:")) {
+    return undefined;
+  }
+
+  if (name === "init_project") {
+    if (Object.keys(files).length === 0) return undefined;
+    const affectedPaths = [
+      ...new Set([...Object.keys(files), ...Object.keys(outcome.newFiles)]),
+    ].sort((left, right) => left.localeCompare(right));
+    return Object.freeze({
+      scope: Object.freeze({ kind: "project" as const }),
+      affectedPaths: Object.freeze(affectedPaths),
+      affectedCount: affectedPaths.length,
+    });
+  }
+
+  const affectedPaths = [
+    ...new Set(outcome.changes.map((change) => change.path)),
+  ].sort((left, right) => left.localeCompare(right));
+  if (affectedPaths.length === 0) return undefined;
+  return Object.freeze({
+    scope: Object.freeze({
+      kind: "exact" as const,
+      paths: Object.freeze(affectedPaths),
+    }),
+    affectedPaths: Object.freeze(affectedPaths),
+    affectedCount: affectedPaths.length,
+  });
 }

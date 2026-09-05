@@ -153,4 +153,16 @@ describe("custom system prompt", () => {
       "Distinguish checks you ran from checks you did not run",
     );
   });
+
+  it("keeps destructive permission authority with the Host", () => {
+    expect(DEFAULT_SYSTEM_PROMPT).toContain(
+      "Destructive ProjectFiles operations may pause",
+    );
+    expect(DEFAULT_SYSTEM_PROMPT).toContain(
+      "never use `ask_user_question` to simulate authorization",
+    );
+    expect(DEFAULT_SYSTEM_PROMPT).toContain(
+      "do not repeat an identical denied request in the same run",
+    );
+  });
 });

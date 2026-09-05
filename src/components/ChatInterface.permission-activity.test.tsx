@@ -9,8 +9,10 @@ import {
 } from "../lib/security/activity-log";
 import { useConversationStore } from "../store/conversation";
 import { useInteractiveStore } from "../store/interactive";
+import { useProjectPermissionStore } from "../store/project-permission";
 import { useSnapshotStore } from "../store/snapshot";
 import type { Conversation } from "../types";
+import type { ProjectPermissionRequest } from "../lib/security/project-permission-broker";
 import { ChatInterface } from "./ChatInterface";
 
 vi.mock("@tanstack/react-virtual", () => ({
@@ -49,7 +51,13 @@ vi.mock("./chat/PermissionActivityDialog", () => ({
   ),
 }));
 vi.mock("./chat/EmptyState", () => ({ EmptyState: () => null }));
-vi.mock("./chat/ChatInput", () => ({ ChatInput: () => null }));
+vi.mock("./chat/ChatInput", () => ({
+  ChatInput: (props: { onSlashCommand: (command: string) => void }) => (
+    <button type="button" onClick={() => props.onSlashCommand("clear")}>
+      Clear context
+    </button>
+  ),
+}));
 
 function conversation(id: string): Conversation {
   return {
@@ -94,6 +102,7 @@ describe("ChatInterface permission activity", () => {
     clearPermissionActivity();
     Element.prototype.scrollIntoView = vi.fn();
     useInteractiveStore.setState({ pending: [] });
+    useProjectPermissionStore.setState({ pending: null, authorities: {} });
     useSnapshotStore.setState({ snapshots: {} });
     useConversationStore.setState({
       activeId: "conversation-a",
@@ -155,5 +164,47 @@ describe("ChatInterface permission activity", () => {
     expect(
       screen.getByRole("button", { name: "Permission activity: 1" }),
     ).toBeEnabled();
+  });
+
+  it("tears down runtime permission state before clearing context", async () => {
+    const user = userEvent.setup();
+    const onContextClear = vi.fn();
+    render(<ChatInterface {...baseProps} onContextClear={onContextClear} />);
+
+    await user.click(screen.getByRole("button", { name: "Clear context" }));
+
+    await waitFor(() => expect(onContextClear).toHaveBeenCalledOnce());
+  });
+
+  it("makes the underlying chat inert while permission is pending", async () => {
+    const request: ProjectPermissionRequest = {
+      requestId: "request-1",
+      sessionId: "session-1",
+      conversationId: "conversation-a",
+      runId: "run-1",
+      callId: "call-1",
+      tool: "delete_file",
+      runtime: "api",
+      operation: "delete",
+      sessionEligible: true,
+      scope: { kind: "exact", paths: ["src/old.ts"] },
+      affectedPaths: ["src/old.ts"],
+      affectedCount: 1,
+      projectRevision: 0,
+      authorityId: "authority-1",
+      requirementDigest: "digest-1",
+    };
+    const decision = useProjectPermissionStore
+      .getState()
+      .requestDecision(request, new AbortController().signal);
+
+    render(<ChatInterface {...baseProps} />);
+
+    await screen.findByRole("dialog");
+    expect(
+      screen.getByText("Clear context").closest(".contents"),
+    ).toHaveAttribute("inert");
+    useProjectPermissionStore.getState().cancelPending("test cleanup");
+    await expect(decision).rejects.toMatchObject({ name: "AbortError" });
   });
 });

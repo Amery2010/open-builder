@@ -64,6 +64,7 @@ function context(
       conversationId: "conversation-1",
       mode,
       platform: "web",
+      runtime: "api",
       allowedMcpAliases: new Set([alias]),
       activeSkillIds: new Set(),
       approvedSkillScriptHashes: new Set(),

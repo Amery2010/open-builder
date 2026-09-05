@@ -12,7 +12,7 @@ import {
   sanitizeLocalCliObservationCache,
 } from "../../lib/local-agent/observations";
 
-export const SETTINGS_VERSION = 22;
+export const SETTINGS_VERSION = 23;
 
 interface PersistedLocalAgentPreferences {
   model: string;
@@ -188,6 +188,12 @@ export function migrateSettings(persisted: unknown, version: number): unknown {
     state.localCliObservationCache = sanitizeLocalCliObservationCache(
       state.localCliObservationCache,
     );
+  }
+  if (version < 23) {
+    if (!state.system) state.system = {};
+    if (typeof state.system.permissionBrokerBypassEnabled !== "boolean") {
+      state.system.permissionBrokerBypassEnabled = false;
+    }
   }
   return state;
 }

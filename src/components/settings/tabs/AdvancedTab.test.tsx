@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useSettingsStore } from "../../../store/settings";
 import { systemDefaults } from "../../../store/settings/system";
@@ -50,5 +51,64 @@ describe("AdvancedTab", () => {
     expect(content.indexOf("Developer Skill scripts")).toBeLessThan(
       content.indexOf("Reverse Proxy"),
     );
+  });
+
+  it("updates full permissions through its capsule group", async () => {
+    const user = userEvent.setup();
+    const setForm = vi.fn();
+    render(
+      <AdvancedTab
+        form={systemDefaults}
+        setForm={setForm}
+        fullPermissionsLabels={{
+          label: "Full permissions",
+          on: "Enabled",
+          off: "Disabled",
+          hint: "Destructive project operations require approval.",
+          stopFirst: "Stop the current task before changing full permissions.",
+        }}
+      />,
+    );
+
+    const group = screen.getByRole("group", { name: "Full permissions" });
+    expect(
+      within(group).getByRole("button", { name: "Disabled" }),
+    ).toHaveAttribute("aria-pressed", "true");
+
+    await user.click(within(group).getByRole("button", { name: "Enabled" }));
+    expect(setForm).toHaveBeenCalledWith({
+      ...systemDefaults,
+      permissionBrokerBypassEnabled: true,
+    });
+  });
+
+  it("locks full permissions while a task is running and explains how to unlock it", () => {
+    render(
+      <AdvancedTab
+        form={systemDefaults}
+        setForm={vi.fn()}
+        runtimeChangeLocked
+        fullPermissionsLabels={{
+          label: "Full permissions",
+          on: "Enabled",
+          off: "Disabled",
+          hint: "Destructive project operations require approval.",
+          stopFirst: "Stop the current task before changing full permissions.",
+        }}
+      />,
+    );
+
+    const group = screen.getByRole("group", {
+      name: "Full permissions. Stop the current task before changing full permissions.",
+    });
+    expect(group.querySelectorAll("button")).toHaveLength(2);
+    for (const button of group.querySelectorAll("button")) {
+      expect(button).toBeDisabled();
+    }
+    expect(
+      screen.getByText(
+        "Stop the current task before changing full permissions.",
+      ),
+    ).toHaveAttribute("id", "full-permissions-hint");
   });
 });
