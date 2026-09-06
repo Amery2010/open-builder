@@ -12,6 +12,8 @@ import type {
   ConversationDesignState,
   WorkspaceMode,
   ProjectPreviewMode,
+  ProjectAsset,
+  ProjectAssets,
   ProjectFiles,
   PreviewView,
 } from "../types";
@@ -20,14 +22,23 @@ import { validateProjectFiles } from "../lib/utils/project-files";
 import { deleteAttachmentsForMessages } from "../lib/attachments/store";
 import { normalizeCompressedSummary } from "../lib/utils/compress-context";
 import { findWithdrawableUserMessageIndex } from "../lib/utils/merge-messages";
+import {
+  addProjectAssetModules,
+  collectProjectAssetBlobRefs,
+  normalizeProjectAssets,
+  releaseUnreferencedProjectAssetBlobs,
+  syncProjectAssetModules,
+  validateProjectAssets,
+} from "../lib/project-assets/core";
 
-const CONVERSATION_STORE_VERSION = 5;
+const CONVERSATION_STORE_VERSION = 6;
 const DEFAULT_PROJECT_TEMPLATE = "vite-react-ts";
 
 export function normalizeConversationProjectState<T extends Conversation>(
   conversation: T,
 ): T {
   const paths = Object.keys(conversation.files);
+  const assets = normalizeProjectAssets(conversation.assets);
   const activeFile =
     conversation.activeFile && conversation.activeFile in conversation.files
       ? conversation.activeFile
@@ -78,6 +89,7 @@ export function normalizeConversationProjectState<T extends Conversation>(
     conversation.defaultPreviewView === defaultPreviewView &&
     conversation.workspaceMode === workspaceMode &&
     conversation.planReturnMode === planReturnMode &&
+    conversation.assets === assets &&
     conversation.designState === designState
   ) {
     return conversation;
@@ -86,6 +98,7 @@ export function normalizeConversationProjectState<T extends Conversation>(
   return {
     ...conversation,
     activeFile,
+    assets,
     previewMode,
     defaultPreviewView,
     isProjectInitialized,
@@ -113,6 +126,7 @@ export function normalizePersistedConversationProjects<T>(state: T): T {
 
 const conversationMigrations: MigrationStep[] = [
   (state) => state,
+  normalizePersistedConversationProjects,
   normalizePersistedConversationProjects,
   normalizePersistedConversationProjects,
   normalizePersistedConversationProjects,
@@ -205,8 +219,17 @@ interface ConversationState {
   withdrawLastUserMessage: (conversationId?: string) => Message | undefined;
   setFiles: (updater: Updater<ProjectFiles>) => void;
   setFilesForConversation: (id: string, updater: Updater<ProjectFiles>) => void;
+  setAssetsForConversation: (
+    id: string,
+    updater: Updater<ProjectAssets>,
+  ) => void;
+  addProjectAsset: (
+    id: string,
+    asset: ProjectAsset,
+  ) => { ok: true } | { ok: false; error: string };
   replaceProject: (input: {
     files: ProjectFiles;
+    assets?: ProjectAssets;
     template: string;
     previewMode: ProjectPreviewMode;
     activeFile?: string;
@@ -249,6 +272,7 @@ export const useConversationStore = create<ConversationState>()(
           title: DEFAULT_TITLE,
           messages: [],
           files: {},
+          assets: {},
           template: DEFAULT_PROJECT_TEMPLATE,
           previewMode: "sandpack",
           defaultPreviewView: "desktop",
@@ -265,7 +289,16 @@ export const useConversationStore = create<ConversationState>()(
       },
 
       addConversation: (conversation) => {
-        const validation = validateProjectFiles(conversation.files);
+        const assets = normalizeProjectAssets(conversation.assets);
+        const assetValidation = validateProjectAssets(assets);
+        if (!assetValidation.ok) {
+          throw new Error(assetValidation.error);
+        }
+        const preparedFiles = addProjectAssetModules(
+          conversation.files,
+          assets,
+        );
+        const validation = validateProjectFiles(preparedFiles);
         if (!validation.ok) {
           throw new Error(validation.error);
         }
@@ -276,7 +309,8 @@ export const useConversationStore = create<ConversationState>()(
           id,
           title: conversation.title || DEFAULT_TITLE,
           messages: [...conversation.messages],
-          files: { ...conversation.files },
+          files: { ...preparedFiles },
+          assets,
           compressedContext: normalizeStoredCompressedContext(
             conversation.compressedContext,
           ),
@@ -299,6 +333,7 @@ export const useConversationStore = create<ConversationState>()(
           title: src ? src.title : DEFAULT_TITLE,
           messages: src ? [...src.messages] : [],
           files: src ? { ...src.files } : {},
+          assets: src ? { ...(src.assets ?? {}) } : {},
           activeFile: src?.activeFile,
           template: src?.template ?? DEFAULT_PROJECT_TEMPLATE,
           previewMode: src?.previewMode ?? "sandpack",
@@ -335,6 +370,7 @@ export const useConversationStore = create<ConversationState>()(
 
       deleteConversation: (id) => {
         const current = get();
+        const deletedAssets = current.conversations[id]?.assets;
         const deletedMessages = current.conversations[id]?.messages ?? [];
         const retainedMessages = Object.values(current.conversations)
           .filter((conversation) => conversation.id !== id)
@@ -357,6 +393,19 @@ export const useConversationStore = create<ConversationState>()(
         ).catch((error) => {
           console.warn("Failed to release conversation attachments:", error);
         });
+        const candidateAssetRefs = collectProjectAssetBlobRefs([deletedAssets]);
+        if (candidateAssetRefs.size > 0) {
+          void releaseUnreferencedProjectAssetBlobs(candidateAssetRefs, [
+            ...Object.values(get().conversations).map(
+              (conversation) => conversation.assets,
+            ),
+            ...Object.values(useSnapshotStore.getState().snapshots)
+              .flat()
+              .map((snapshot) => snapshot.assets),
+          ]).catch((error) => {
+            console.warn("Failed to release project assets:", error);
+          });
+        }
         void import("../lib/design/review-jobs/runner")
           .then(({ designReviewJobRunner }) => {
             designReviewJobRunner.removeConversation(id);
@@ -579,7 +628,19 @@ export const useConversationStore = create<ConversationState>()(
         set((s) => {
           if (!s.conversations[id]) return s;
           const conv = s.conversations[id];
-          const files = applyUpdater(updater, conv.files);
+          let files: ProjectFiles;
+          try {
+            files = addProjectAssetModules(
+              applyUpdater(updater, conv.files),
+              conv.assets ?? {},
+            );
+          } catch (error) {
+            console.warn(
+              "[conversation] Rejected project files:",
+              error instanceof Error ? error.message : String(error),
+            );
+            return s;
+          }
           const validation = validateProjectFiles(files);
           if (!validation.ok) {
             console.warn(
@@ -602,18 +663,141 @@ export const useConversationStore = create<ConversationState>()(
         });
       },
 
-      replaceProject: ({ files, template, previewMode, activeFile }) => {
+      setAssetsForConversation: (id, updater) => {
+        const previousAssets = get().conversations[id]?.assets ?? {};
+        set((state) => {
+          const conversation = state.conversations[id];
+          if (!conversation) return state;
+          const assets = applyUpdater(updater, conversation.assets ?? {});
+          const validation = validateProjectAssets(assets);
+          if (!validation.ok) {
+            console.warn(
+              "[conversation] Rejected project assets:",
+              validation.error,
+            );
+            return state;
+          }
+          let files: ProjectFiles;
+          try {
+            files = syncProjectAssetModules(
+              conversation.files,
+              conversation.assets ?? {},
+              assets,
+            );
+          } catch (error) {
+            console.warn(
+              "[conversation] Rejected project assets:",
+              error instanceof Error ? error.message : String(error),
+            );
+            return state;
+          }
+          return {
+            conversations: {
+              ...state.conversations,
+              [id]: { ...conversation, files, assets, updatedAt: Date.now() },
+            },
+          };
+        });
+        const candidateAssetRefs = collectProjectAssetBlobRefs([
+          previousAssets,
+        ]);
+        if (candidateAssetRefs.size > 0) {
+          void releaseUnreferencedProjectAssetBlobs(candidateAssetRefs, [
+            ...Object.values(get().conversations).map(
+              (conversation) => conversation.assets,
+            ),
+            ...Object.values(useSnapshotStore.getState().snapshots)
+              .flat()
+              .map((snapshot) => snapshot.assets),
+          ]).catch((error) => {
+            console.warn("Failed to release project assets:", error);
+          });
+        }
+      },
+
+      addProjectAsset: (id, asset) => {
+        const conversation = get().conversations[id];
+        if (!conversation) {
+          return {
+            ok: false,
+            error: "The target conversation does not exist.",
+          };
+        }
+        if (
+          conversation.files[asset.path] !== undefined ||
+          conversation.assets?.[asset.path]
+        ) {
+          return {
+            ok: false,
+            error: `Project path "${asset.path}" already exists.`,
+          };
+        }
+        const assets = { ...(conversation.assets ?? {}), [asset.path]: asset };
+        const assetValidation = validateProjectAssets(assets);
+        if (!assetValidation.ok) return assetValidation;
+        let files: ProjectFiles;
+        try {
+          files = addProjectAssetModules(conversation.files, assets);
+        } catch (error) {
+          return {
+            ok: false,
+            error: error instanceof Error ? error.message : String(error),
+          };
+        }
+        set((state) => {
+          const current = state.conversations[id];
+          if (current !== conversation) return state;
+          return {
+            conversations: {
+              ...state.conversations,
+              [id]: {
+                ...conversation,
+                files,
+                assets,
+                updatedAt: Date.now(),
+              },
+            },
+          };
+        });
+        if (get().conversations[id] === conversation) {
+          return {
+            ok: false,
+            error: "The project changed while importing the asset.",
+          };
+        }
+        return { ok: true };
+      },
+
+      replaceProject: ({
+        files,
+        assets = {},
+        template,
+        previewMode,
+        activeFile,
+      }) => {
         const activeId = get().activeId;
         if (!activeId || !get().conversations[activeId]) {
           return { ok: false, error: "No active conversation." };
         }
-        const validation = validateProjectFiles(files);
+        let preparedFiles: ProjectFiles;
+        try {
+          preparedFiles = addProjectAssetModules(files, assets);
+        } catch (error) {
+          return {
+            ok: false,
+            error: error instanceof Error ? error.message : String(error),
+          };
+        }
+        const validation = validateProjectFiles(preparedFiles);
         if (!validation.ok) {
           return { ok: false, error: validation.error };
         }
-        const paths = Object.keys(files);
+        const assetValidation = validateProjectAssets(assets);
+        if (!assetValidation.ok) return assetValidation;
+        const previousAssets = get().conversations[activeId].assets;
+        const paths = Object.keys(preparedFiles);
         const nextActiveFile =
-          activeFile && activeFile in files ? activeFile : paths[0];
+          activeFile && activeFile in preparedFiles ? activeFile : paths[0];
         useSnapshotStore.getState().deleteSnapshotsForConversation(activeId);
         set((state) => {
           const conversation = state.conversations[activeId];
@@ -623,7 +807,8 @@ export const useConversationStore = create<ConversationState>()(
               ...state.conversations,
               [activeId]: {
                 ...conversation,
-                files: { ...files },
+                files: { ...preparedFiles },
+                assets: { ...assets },
                 template,
                 previewMode,
                 defaultPreviewView: "desktop",
@@ -636,6 +821,21 @@ export const useConversationStore = create<ConversationState>()(
             },
           };
         });
+        const candidateAssetRefs = collectProjectAssetBlobRefs([
+          previousAssets,
+        ]);
+        if (candidateAssetRefs.size > 0) {
+          void releaseUnreferencedProjectAssetBlobs(candidateAssetRefs, [
+            ...Object.values(get().conversations).map(
+              (conversation) => conversation.assets,
+            ),
+            ...Object.values(useSnapshotStore.getState().snapshots)
+              .flat()
+              .map((snapshot) => snapshot.assets),
+          ]).catch((error) => {
+            console.warn("Failed to release project assets:", error);
+          });
+        }
         return { ok: true };
       },
 
@@ -677,6 +877,7 @@ export const useConversationStore = create<ConversationState>()(
       resetProject: () => {
         const activeId = get().activeId;
         if (!activeId || !get().conversations[activeId]) return;
+        const previousAssets = get().conversations[activeId].assets;
         useSnapshotStore.getState().deleteSnapshotsForConversation(activeId);
         set((s) => {
           const conv = s.conversations[activeId];
@@ -688,6 +889,7 @@ export const useConversationStore = create<ConversationState>()(
                 ...conv,
                 messages: [],
                 files: {},
+                assets: {},
                 template: DEFAULT_PROJECT_TEMPLATE,
                 previewMode: "sandpack",
                 defaultPreviewView: "desktop",
@@ -701,6 +903,19 @@ export const useConversationStore = create<ConversationState>()(
             },
           };
         });
+        const candidateAssetRefs = collectProjectAssetBlobRefs([
+          previousAssets,
+        ]);
+        if (candidateAssetRefs.size > 0) {
+          void releaseUnreferencedProjectAssetBlobs(
+            candidateAssetRefs,
+            Object.values(get().conversations).map(
+              (conversation) => conversation.assets,
+            ),
+          ).catch((error) => {
+            console.warn("Failed to release project assets:", error);
+          });
+        }
       },
 
       setTemplate: (updater) => {

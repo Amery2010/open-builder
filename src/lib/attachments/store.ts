@@ -60,15 +60,30 @@ export async function storeAttachmentFile(
   file: File,
   type: AttachmentRef["type"],
 ): Promise<Attachment> {
+  return storeAttachmentBlob(file, type, file.name);
+}
+
+export async function storeAttachmentBlob(
+  blob: Blob,
+  type: AttachmentRef["type"],
+  name: string,
+  options: { createPreviewUrl?: boolean } = {},
+): Promise<Attachment> {
   const id = createId();
-  await attachmentBlobs.setItem(id, file);
+  await attachmentBlobs.setItem(id, blob);
   return {
     id,
     type,
-    name: file.name || (type === "image" ? "pasted-image" : "pasted-file"),
-    mimeType: attachmentMimeType(file),
-    size: file.size,
-    previewUrl: type === "image" ? URL.createObjectURL(file) : undefined,
+    name: name || (type === "image" ? "pasted-image" : "pasted-file"),
+    mimeType:
+      blob instanceof File
+        ? attachmentMimeType(blob)
+        : blob.type || "application/octet-stream",
+    size: blob.size,
+    previewUrl:
+      type === "image" && options.createPreviewUrl !== false
+        ? URL.createObjectURL(blob)
+        : undefined,
   };
 }
 
@@ -170,9 +185,14 @@ export function collectAttachmentIds(
   messages: readonly Message[],
 ): Set<string> {
   return new Set(
-    messages.flatMap((message) =>
-      (message.metadata?.attachments ?? []).map((attachment) => attachment.id),
-    ),
+    messages.flatMap((message) => [
+      ...(message.metadata?.attachments ?? []).map(
+        (attachment) => attachment.id,
+      ),
+      ...(message.toolOutput?.content ?? []).flatMap((part) =>
+        part.type === "local_image" ? [part.id] : [],
+      ),
+    ]),
   );
 }
 

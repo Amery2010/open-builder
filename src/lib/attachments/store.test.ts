@@ -34,6 +34,33 @@ describe("attachment reference collection", () => {
     expect(getUnreferencedAttachmentIds(fork, [])).toEqual(["shared"]);
   });
 
+  it("tracks generated-image references stored in tool results", () => {
+    const generated: Message[] = [
+      {
+        role: "tool",
+        content: "Generated image: result.png",
+        tool_call_id: "image-call",
+        toolOutput: {
+          text: "Generated image: result.png",
+          content: [
+            {
+              type: "local_image",
+              id: "generated-image",
+              name: "result.png",
+              mimeType: "image/png",
+              size: 128,
+            },
+          ],
+        },
+      },
+    ];
+
+    expect(getUnreferencedAttachmentIds(generated, generated)).toEqual([]);
+    expect(getUnreferencedAttachmentIds(generated, [])).toEqual([
+      "generated-image",
+    ]);
+  });
+
   it("keeps text attachment instructions inside an untrusted material boundary", async () => {
     const attachment: Attachment = {
       id: "prompt-file",

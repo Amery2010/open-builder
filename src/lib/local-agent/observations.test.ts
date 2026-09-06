@@ -88,6 +88,44 @@ describe("Local CLI observation cache", () => {
     expect(JSON.stringify(observation)).not.toContain("super-secret");
   });
 
+  it("keeps legacy capability caches explicitly unverified", () => {
+    const observation = sanitizeLocalCliProbe(
+      probe(),
+      { model: "", effort: "" },
+      123,
+    );
+
+    expect(observation?.capabilities).toMatchObject({
+      imageGeneration: false,
+      imageEditing: false,
+      mediaCapabilitiesVerified: false,
+    });
+
+    const legacy = {
+      schemaVersion: 1,
+      host: null,
+      providers: {
+        codex: {
+          ...observation!,
+          capabilities: {
+            sessions: true,
+            reasoning: true,
+            tools: true,
+            nativeSearch: true,
+          },
+        },
+      },
+    };
+    expect(isLocalCliObservationCache(legacy)).toBe(true);
+    expect(
+      sanitizeLocalCliObservationCache(legacy).providers.codex?.capabilities,
+    ).toMatchObject({
+      imageGeneration: false,
+      imageEditing: false,
+      mediaCapabilitiesVerified: false,
+    });
+  });
+
   it("bounds large catalogs while retaining the selected and default models", () => {
     const models = Array.from({ length: 140 }, (_, index) => ({
       id: `model-${index}`,

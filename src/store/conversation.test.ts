@@ -699,6 +699,40 @@ describe("conversation store", () => {
     expect(localforageMock.removeItem).toHaveBeenCalledWith("shared-pdf");
   });
 
+  it("forks project asset references and releases the Blob after the final owner", async () => {
+    const original = useConversationStore.getState().createConversation();
+    const asset = {
+      path: "public/generated/hero.png",
+      blobRef: `sha256:${"b".repeat(64)}`,
+      mimeType: "image/png" as const,
+      size: 9,
+      digest: "b".repeat(64),
+      modulePath: "src/generated-assets/hero-bbbbbbbb.js",
+      publicPath: "/generated/hero.png",
+    };
+    useConversationStore.setState((state) => ({
+      conversations: {
+        ...state.conversations,
+        [original]: {
+          ...state.conversations[original],
+          assets: { [asset.path]: asset },
+        },
+      },
+    }));
+    const fork = useConversationStore.getState().forkConversation();
+
+    useConversationStore.getState().deleteConversation(fork);
+    await vi.waitFor(() => {
+      expect(localforageMock.removeItem).not.toHaveBeenCalledWith(
+        asset.blobRef,
+      );
+    });
+    useConversationStore.getState().deleteConversation(original);
+    await vi.waitFor(() => {
+      expect(localforageMock.removeItem).toHaveBeenCalledWith(asset.blobRef);
+    });
+  });
+
   it("keeps provider sessions independent and excludes them from forks", () => {
     const original = useConversationStore.getState().createConversation();
     const session = {

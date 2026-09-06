@@ -86,6 +86,11 @@ describe("LocalCliRuntime", () => {
     expect(result).toMatchObject({
       status: "ready",
       catalogAuthority: "partial",
+      capabilities: {
+        imageGeneration: false,
+        imageEditing: false,
+        mediaCapabilitiesVerified: false,
+      },
     });
     expect(result.checkedAt).toBeTypeOf("number");
   });

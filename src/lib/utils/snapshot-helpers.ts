@@ -15,7 +15,7 @@ export function createSnapshotForCurrentState(): void {
     if (merged[i].role === "assistant") {
       useSnapshotStore
         .getState()
-        .createSnapshot(conv.id, merged[i].id, conv.files);
+        .createSnapshot(conv.id, merged[i].id, conv.files, conv.assets ?? {});
       return;
     }
   }

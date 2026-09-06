@@ -5,10 +5,21 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 const MAX_PROJECT_FILES: usize = 1_000;
 const MAX_PROJECT_BYTES: usize = 12 * 1024 * 1024;
+const MAX_PROJECT_ASSETS: usize = 100;
+const MAX_PROJECT_ASSET_BYTES: usize = 8 * 1024 * 1024;
+const MAX_PROJECT_ASSETS_BYTES: usize = 64 * 1024 * 1024;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesignProjectAssetInput {
+    path: String,
+    mime_type: String,
+    bytes: Vec<u8>,
+}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -76,10 +87,44 @@ fn create_unique_directory(parent: &Path, stem: &str) -> Result<(PathBuf, String
     Err("Could not allocate a unique export directory.".to_string())
 }
 
+fn validate_image_asset(asset: &DesignProjectAssetInput) -> Result<(), String> {
+    let extension = Path::new(&asset.path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let bytes = &asset.bytes;
+    let signature_matches = match asset.mime_type.as_str() {
+        "image/png" => {
+            matches!(extension.as_str(), "png")
+                && bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a])
+        }
+        "image/jpeg" => {
+            matches!(extension.as_str(), "jpg" | "jpeg")
+                && bytes.starts_with(&[0xff, 0xd8, 0xff])
+                && bytes.ends_with(&[0xff, 0xd9])
+        }
+        "image/webp" => {
+            matches!(extension.as_str(), "webp")
+                && bytes.starts_with(b"RIFF")
+                && bytes.get(8..12) == Some(b"WEBP")
+        }
+        _ => false,
+    };
+    if !signature_matches {
+        return Err(format!(
+            "Project asset {:?} does not match its declared image type.",
+            asset.path
+        ));
+    }
+    Ok(())
+}
+
 fn export_project_files(
     parent: &Path,
     project_name: &str,
     files: &BTreeMap<String, String>,
+    assets: &[DesignProjectAssetInput],
 ) -> Result<DesignExportResult, String> {
     if !parent.is_dir() {
         return Err("The selected export parent is not a directory.".to_string());
@@ -94,10 +139,45 @@ fn export_project_files(
     if total_bytes > MAX_PROJECT_BYTES {
         return Err("Project export exceeds the 12 MiB limit.".to_string());
     }
+    if assets.len() > MAX_PROJECT_ASSETS {
+        return Err(format!(
+            "Project export contains too many assets (max {MAX_PROJECT_ASSETS})."
+        ));
+    }
+    let asset_bytes = assets.iter().try_fold(0usize, |total, asset| {
+        if asset.bytes.is_empty() || asset.bytes.len() > MAX_PROJECT_ASSET_BYTES {
+            return Err(format!(
+                "Project asset {:?} has an invalid size.",
+                asset.path
+            ));
+        }
+        total
+            .checked_add(asset.bytes.len())
+            .ok_or_else(|| "Project asset export size overflowed.".to_string())
+    })?;
+    if asset_bytes > MAX_PROJECT_ASSETS_BYTES {
+        return Err(format!(
+            "Project assets exceed the {MAX_PROJECT_ASSETS_BYTES} byte limit."
+        ));
+    }
     let validated = files
         .keys()
         .map(|path| safe_relative_path(path).map(|relative| (path, relative)))
         .collect::<Result<Vec<_>, _>>()?;
+    let validated_assets = assets
+        .iter()
+        .map(|asset| {
+            let relative = safe_relative_path(&asset.path)?;
+            if files.contains_key(&asset.path) {
+                return Err(format!(
+                    "Project asset path conflicts with a text file: {:?}",
+                    asset.path
+                ));
+            }
+            validate_image_asset(asset)?;
+            Ok((asset, relative))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
     let stem = safe_directory_stem(project_name);
     let (destination, directory_name) = create_unique_directory(parent, &stem)?;
     let write_result = (|| {
@@ -117,6 +197,22 @@ fn export_project_files(
                 .write_all(files[source_path].as_bytes())
                 .map_err(|error| format!("Could not write {}: {error}", output_path.display()))?;
         }
+        for (asset, relative) in validated_assets {
+            let output_path = destination.join(relative);
+            if let Some(directory) = output_path.parent() {
+                fs::create_dir_all(directory).map_err(|error| {
+                    format!("Could not create {}: {error}", directory.display())
+                })?;
+            }
+            let mut output = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&output_path)
+                .map_err(|error| format!("Could not create {}: {error}", output_path.display()))?;
+            output
+                .write_all(&asset.bytes)
+                .map_err(|error| format!("Could not write {}: {error}", output_path.display()))?;
+        }
         Ok::<(), String>(())
     })();
     if let Err(error) = write_result {
@@ -126,7 +222,7 @@ fn export_project_files(
     Ok(DesignExportResult {
         path: destination.to_string_lossy().into_owned(),
         directory_name,
-        file_count: files.len(),
+        file_count: files.len() + assets.len(),
     })
 }
 
@@ -135,8 +231,9 @@ pub fn design_export_project(
     parent_path: String,
     project_name: String,
     files: BTreeMap<String, String>,
+    assets: Vec<DesignProjectAssetInput>,
 ) -> Result<DesignExportResult, String> {
-    export_project_files(Path::new(&parent_path), &project_name, &files)
+    export_project_files(Path::new(&parent_path), &project_name, &files, &assets)
 }
 
 #[cfg(test)]
@@ -168,8 +265,8 @@ mod tests {
             ("src/app.ts".to_string(), "export {}".to_string()),
         ]);
 
-        let first = export_project_files(&parent, "Demo", &files).unwrap();
-        let second = export_project_files(&parent, "Demo", &files).unwrap();
+        let first = export_project_files(&parent, "Demo", &files, &[]).unwrap();
+        let second = export_project_files(&parent, "Demo", &files, &[]).unwrap();
 
         assert_eq!(first.directory_name, "Demo-2");
         assert_eq!(second.directory_name, "Demo-3");
@@ -188,8 +285,35 @@ mod tests {
     fn export_rejects_unsafe_paths_without_creating_a_project() {
         let parent = temporary_directory();
         let files = BTreeMap::from([("../escape.txt".to_string(), "no".to_string())]);
-        assert!(export_project_files(&parent, "Unsafe", &files).is_err());
+        assert!(export_project_files(&parent, "Unsafe", &files, &[]).is_err());
         assert!(!parent.join("Unsafe").exists());
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn export_writes_valid_image_assets_and_rejects_mismatched_signatures() {
+        let parent = temporary_directory();
+        let files = BTreeMap::from([("index.html".to_string(), "<main />".to_string())]);
+        let png = DesignProjectAssetInput {
+            path: "public/generated/hero.png".to_string(),
+            mime_type: "image/png".to_string(),
+            bytes: vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0],
+        };
+
+        let result = export_project_files(&parent, "Images", &files, &[png]).unwrap();
+        assert_eq!(result.file_count, 2);
+        assert_eq!(
+            fs::read(Path::new(&result.path).join("public/generated/hero.png")).unwrap(),
+            vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0]
+        );
+
+        let invalid = DesignProjectAssetInput {
+            path: "public/generated/fake.png".to_string(),
+            mime_type: "image/png".to_string(),
+            bytes: b"not a png".to_vec(),
+        };
+        assert!(export_project_files(&parent, "Invalid", &files, &[invalid]).is_err());
+        assert!(!parent.join("Invalid").exists());
         fs::remove_dir_all(parent).unwrap();
     }
 }

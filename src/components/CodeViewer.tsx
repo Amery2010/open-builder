@@ -21,13 +21,19 @@ import { useT } from "../i18n";
 import { SandpackListener } from "./code-viewer/SandpackListener";
 import { ViewToolbar } from "./code-viewer/ViewToolbar";
 import { FileExplorer } from "./code-viewer/FileExplorer";
+import { ProjectAssetList } from "./code-viewer/ProjectAssetList";
 import {
   clampPreviewScale,
   PREVIEW_SCALE_STEP,
   type DeviceSize,
   type ViewMode,
 } from "./code-viewer/ViewToolbar";
-import type { PreviewView, ProjectFiles, ProjectPreviewMode } from "../types";
+import type {
+  PreviewView,
+  ProjectAssets,
+  ProjectFiles,
+  ProjectPreviewMode,
+} from "../types";
 import { normalizePreviewView } from "../types";
 import {
   hasSensitiveProjectFileContent,
@@ -116,6 +122,7 @@ import {
   SandpackRefreshAction,
   SandpackRefreshRegistration,
 } from "./code-viewer/SandpackPreviewActions";
+import { projectFilesForSandpack } from "../lib/project-assets/core";
 
 interface PendingDesignCapture {
   expectation: DesignBridgeCaptureExpectation;
@@ -134,6 +141,7 @@ interface PendingDesignNavigation {
 }
 
 const EMPTY_DESIGN_REVIEW_RUNS: readonly DesignReviewRun[] = [];
+const EMPTY_PROJECT_ASSETS: ProjectAssets = {};
 
 function pageReviewStatus(
   pageId: string,
@@ -321,6 +329,10 @@ export function CodeViewer({
   );
   const conversationTitle = useConversationStore(
     (state) => state.conversations[conversationId]?.title ?? DEFAULT_TITLE,
+  );
+  const projectAssets = useConversationStore(
+    (state) =>
+      state.conversations[conversationId]?.assets ?? EMPTY_PROJECT_ASSETS,
   );
   const desktopMode = supportsDesktopDesignTools();
   const setDesignSelection = useDesignSelectionStore(
@@ -563,6 +575,23 @@ export function CodeViewer({
       ),
     [files, previewMode],
   );
+  const [assetPreviewFiles, setAssetPreviewFiles] =
+    useState<ProjectFiles>(previewFiles);
+  useEffect(() => {
+    let cancelled = false;
+    setAssetPreviewFiles(previewFiles);
+    void projectFilesForSandpack(previewFiles, projectAssets).then(
+      (derived) => {
+        if (!cancelled) setAssetPreviewFiles(derived);
+      },
+      () => {
+        if (!cancelled) setAssetPreviewFiles(previewFiles);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [previewFiles, projectAssets]);
   useEffect(() => {
     let cancelled = false;
     previewGenerationRef.current = undefined;
@@ -602,17 +631,17 @@ export function CodeViewer({
     () =>
       workspaceMode === "design"
         ? injectDesignBridge(
-            previewFiles,
+            assetPreviewFiles,
             template,
             previewEnabled,
             captureRuntimeSource ?? undefined,
             previewGeneration ?? "pending",
           )
-        : { supported: false as const, files: previewFiles },
+        : { supported: false as const, files: assetPreviewFiles },
     [
       captureRuntimeSource,
       previewEnabled,
-      previewFiles,
+      assetPreviewFiles,
       previewGeneration,
       template,
       workspaceMode,
@@ -623,7 +652,7 @@ export function CodeViewer({
     effectiveViewMode === "preview" &&
     bridgeInjection.supported
       ? bridgeInjection.files
-      : previewFiles;
+      : assetPreviewFiles;
   const invalidateAutomaticReview = useCallback(() => {
     const review = useDesignReviewStore.getState();
     if (review.automatic) review.reset();
@@ -633,6 +662,11 @@ export function CodeViewer({
       if (
         path === DESIGN_BRIDGE_VIRTUAL_PATH ||
         path === DESIGN_CAPTURE_RUNTIME_VIRTUAL_PATH
+      ) {
+        return;
+      }
+      if (
+        Object.values(projectAssets).some((asset) => asset.modulePath === path)
       ) {
         return;
       }
@@ -655,7 +689,13 @@ export function CodeViewer({
       invalidateAutomaticReview();
       onFileChange(targetConversationId, path, nextContent);
     },
-    [bridgeInjection, files, invalidateAutomaticReview, onFileChange],
+    [
+      bridgeInjection,
+      files,
+      invalidateAutomaticReview,
+      onFileChange,
+      projectAssets,
+    ],
   );
   const sandpackFiles = useMemo(
     () =>
@@ -1234,6 +1274,7 @@ export function CodeViewer({
         conversationTitle === DEFAULT_TITLE
           ? "open-builder-project"
           : conversationTitle,
+        projectAssets,
       );
       if (result) {
         setDesktopActionMessage(
@@ -1248,7 +1289,7 @@ export function CodeViewer({
         ),
       );
     }
-  }, [conversationTitle, files, isGenerating, t.toolbar]);
+  }, [conversationTitle, files, isGenerating, projectAssets, t.toolbar]);
 
   const waitForPreviewViewport = useCallback(
     async (
@@ -2006,6 +2047,7 @@ export function CodeViewer({
         deviceSize={deviceSize}
         onDeviceSizeChange={handleDeviceSizeChange}
         files={files}
+        assets={projectAssets}
         previewEnabled={previewEnabled}
         previewScale={requestedScale}
         onPreviewZoomIn={() =>
@@ -2259,6 +2301,7 @@ export function CodeViewer({
                 )}
               >
                 <div className="w-56 border-r h-full shrink-0 overflow-hidden flex flex-col">
+                  <ProjectAssetList assets={projectAssets} />
                   <FileExplorer
                     files={previewFiles}
                     currentFile={currentFile}

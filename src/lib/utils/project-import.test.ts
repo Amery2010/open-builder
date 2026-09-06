@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 
 import JSZip from "jszip";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { useSettingsStore } from "../../store/settings";
 import {
   PROJECT_IMPORT_LIMITS,
   inferProjectPreview,
@@ -12,14 +13,37 @@ import {
 
 const encoder = new TextEncoder();
 
-function sourceFile(path: string, content: string | Uint8Array): File {
+const compressionMocks = vi.hoisted(() => ({
+  compress: vi.fn(),
+}));
+
+vi.mock("../images/compress-local-image", () => ({
+  compressLocalImage: compressionMocks.compress,
+}));
+
+function sourceFile(
+  path: string,
+  content: string | Uint8Array,
+  lastModified = 0,
+): File {
   const bytes = typeof content === "string" ? encoder.encode(content) : content;
   return {
     name: path.split("/").pop() ?? path,
     size: bytes.byteLength,
+    lastModified,
     webkitRelativePath: path,
     arrayBuffer: async () => bytes.slice().buffer,
   } as File;
+}
+
+async function sha256(bytes: Uint8Array): Promise<string> {
+  const digest = await globalThis.crypto.subtle.digest(
+    "SHA-256",
+    Uint8Array.from(bytes).buffer,
+  );
+  return Array.from(new Uint8Array(digest), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
 }
 
 function zipFile(name: string, bytes: Uint8Array): File {
@@ -63,6 +87,18 @@ function replaceFirstCentralSizes(
 }
 
 describe("project import staging", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    compressionMocks.compress.mockImplementation(async (file: File) => file);
+    useSettingsStore.setState((state) => ({
+      system: {
+        ...state.system,
+        imageCompressionEnabled: true,
+        imageCompressionQuality: 0.85,
+      },
+    }));
+  });
+
   it("filters dependencies, secrets and binaries while preserving safe dotfiles", async () => {
     const staged = await stageProjectFromFileList([
       sourceFile(
@@ -81,7 +117,10 @@ describe("project import staging", () => {
       sourceFile("demo/.env.example", "API_KEY="),
       sourceFile("demo/node_modules/pkg/index.js", "module.exports = {}"),
       sourceFile("demo/dist/app.js", "compiled"),
-      sourceFile("demo/public/logo.png", new Uint8Array([0, 1, 2, 3])),
+      sourceFile(
+        "demo/public/logo.png",
+        new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1]),
+      ),
     ]);
 
     expect(staged.name).toBe("demo");
@@ -96,15 +135,20 @@ describe("project import staging", () => {
     expect(staged.files["src/App.tsx"]).not.toContain("secret-sentinel-123");
     expect(staged.files["src/App.tsx"]).toContain("[REDACTED]");
     expect(staged.report).toMatchObject({
-      importedFiles: 4,
       redactedFiles: 1,
-      skipped: { ignored: 2, sensitive: 1, binary: 1, symlink: 0 },
+      importedFiles: 5,
+      skipped: { ignored: 2, sensitive: 1, binary: 0, symlink: 0 },
+    });
+    expect(staged.assets).toHaveLength(1);
+    expect(staged.assets?.[0]).toMatchObject({
+      path: "public/logo.png",
+      mimeType: "image/png",
     });
   });
 
   it("imports a directory handle without descending into ignored directories", async () => {
     const dependencyGetFile = vi.fn();
-    const fileHandle = (name: string, content: string) => ({
+    const fileHandle = (name: string, content: string | Uint8Array) => ({
       kind: "file" as const,
       name,
       getFile: async () => sourceFile(name, content),
@@ -127,6 +171,13 @@ describe("project import staging", () => {
           "index.html",
           fileHandle("index.html", "<main />"),
         ] as unknown as [string, FileSystemHandle];
+        yield [
+          "logo.png",
+          fileHandle(
+            "logo.png",
+            new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1]),
+          ),
+        ] as unknown as [string, FileSystemHandle];
         yield ["node_modules", ignoredDirectory] as unknown as [
           string,
           FileSystemHandle,
@@ -138,14 +189,93 @@ describe("project import staging", () => {
 
     expect(staged.files).toEqual({ "index.html": "<main />" });
     expect(staged.template).toBe("static");
+    expect(staged.assets).toHaveLength(1);
     expect(staged.report.skipped.ignored).toBe(1);
     expect(dependencyGetFile).not.toHaveBeenCalled();
+  });
+
+  it("stages compressed project asset bytes and their final digest", async () => {
+    const sourceBytes = new Uint8Array([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2,
+    ]);
+    const compressedBytes = sourceBytes.subarray(0, 8);
+    useSettingsStore.setState((state) => ({
+      system: {
+        ...state.system,
+        imageCompressionQuality: 0.42,
+      },
+    }));
+    compressionMocks.compress.mockImplementation(
+      async (file: File) =>
+        new File([compressedBytes], file.name, {
+          type: file.type,
+          lastModified: file.lastModified,
+        }),
+    );
+
+    const staged = await stageProjectFromFileList([
+      sourceFile("demo/index.html", "<main />"),
+      sourceFile("demo/public/hero.png", sourceBytes, 123),
+    ]);
+
+    expect(compressionMocks.compress).toHaveBeenCalledOnce();
+    expect(compressionMocks.compress).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: "hero.png",
+        type: "image/png",
+        size: sourceBytes.byteLength,
+        lastModified: 123,
+      }),
+      { enabled: true, quality: 0.42 },
+    );
+    expect(staged.assets?.[0]).toMatchObject({
+      path: "public/hero.png",
+      mimeType: "image/png",
+      size: compressedBytes.byteLength,
+      digest: await sha256(compressedBytes),
+    });
+    expect(staged.report.totalBytes).toBe(
+      encoder.encode("<main />").byteLength + compressedBytes.byteLength,
+    );
+  });
+
+  it("passes disabled compression settings while preserving project asset bytes", async () => {
+    const sourceBytes = new Uint8Array([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1,
+    ]);
+    useSettingsStore.setState((state) => ({
+      system: {
+        ...state.system,
+        imageCompressionEnabled: false,
+        imageCompressionQuality: 0.37,
+      },
+    }));
+
+    const staged = await stageProjectFromFileList([
+      sourceFile("demo/index.html", "<main />"),
+      sourceFile("demo/public/logo.png", sourceBytes),
+    ]);
+
+    expect(compressionMocks.compress).toHaveBeenCalledWith(
+      expect.objectContaining({ size: sourceBytes.byteLength }),
+      { enabled: false, quality: 0.37 },
+    );
+    expect(staged.assets?.[0]).toMatchObject({
+      size: sourceBytes.byteLength,
+      digest: await sha256(sourceBytes),
+    });
   });
 
   it("strips a ZIP root folder and rejects unsafe paths and compression bombs", async () => {
     const valid = new JSZip();
     valid.file("demo/package.json", '{"devDependencies":{"vite":"4.2.0"}}');
     valid.file("demo/src/main.ts", "console.log('ok')");
+    valid.file(
+      "demo/public/generated/hero.webp",
+      new Uint8Array([
+        0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x45, 0x42, 0x50,
+      ]),
+    );
     valid.file("__MACOSX/demo/._main.ts", "metadata");
     const validBytes = await valid.generateAsync({ type: "uint8array" });
 
@@ -156,6 +286,11 @@ describe("project import staging", () => {
       "src/main.ts",
     ]);
     expect(staged.report.skipped.ignored).toBe(1);
+    expect(staged.assets).toHaveLength(1);
+    expect(staged.assets?.[0]).toMatchObject({
+      path: "public/generated/hero.webp",
+      mimeType: "image/webp",
+    });
 
     const unsafe = new JSZip();
     unsafe.file("root/safe.ts", "safe");

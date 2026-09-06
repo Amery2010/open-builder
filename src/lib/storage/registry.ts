@@ -23,6 +23,10 @@ import {
 import { redactStorageExport } from "./export-redaction";
 import { createDefaultAgnesMcpSettings } from "../mcp/agnes/types";
 import { stopAgnesVideoTasks } from "../mcp/agnes/video-task-manager";
+import {
+  clearProjectAssetStorage,
+  estimateProjectAssetStorage,
+} from "../project-assets/core";
 
 export interface StorageEstimate {
   bytes: number;
@@ -39,7 +43,8 @@ export interface StorageDomain {
     | "templates"
     | "mcp"
     | "skills"
-    | "attachments";
+    | "attachments"
+    | "projectAssets";
   estimate(): Promise<StorageEstimate>;
   clear(): Promise<void>;
   export(): Promise<unknown>;
@@ -221,6 +226,18 @@ export const STORAGE_DOMAINS: readonly StorageDomain[] = [
     export: async () => ({
       note: "Attachment blobs are intentionally excluded from generic export.",
       ...(await estimateAttachmentStorage()),
+    }),
+  },
+  {
+    id: "projectAssets",
+    estimate: async () => {
+      const { count, bytes } = await estimateProjectAssetStorage();
+      return { items: count, bytes };
+    },
+    clear: clearProjectAssetStorage,
+    export: async () => ({
+      note: "Project asset blobs are exported with their projects, not generic storage metadata.",
+      ...(await estimateProjectAssetStorage()),
     }),
   },
 ] as const;

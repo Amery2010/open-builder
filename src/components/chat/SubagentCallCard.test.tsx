@@ -33,6 +33,18 @@ describe("SubagentCallCard errors", () => {
     useSubagentStore.setState({ progress: {} });
   });
 
+  it("keeps the task out of the compact title and shows it when expanded", async () => {
+    const user = userEvent.setup();
+    render(<SubagentCallCard {...baseProps} result="" />);
+
+    expect(
+      screen.queryByText("Inspect the active entry chain."),
+    ).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /Code Explorer/ }));
+    expect(screen.getByText("Inspect the active entry chain.")).toBeVisible();
+  });
+
   it("renders a non-JSON tool error as a failed subagent call", async () => {
     const user = userEvent.setup();
     const reason =

@@ -2,9 +2,6 @@ import { memo, type RefObject } from "react";
 import {
   ChevronRight,
   ChevronDown,
-  File,
-  Folder,
-  FolderOpen,
   FilePlus,
   FolderPlus,
   Pencil,
@@ -26,6 +23,7 @@ import { useT } from "../../../i18n";
 import type { FileNode } from "./types";
 import { BASE_PAD, INDENT } from "./types";
 import { InlineInput } from "./InlineInput";
+import { MaterialIcon } from "./file-icons";
 
 export interface FileTreeNodeProps {
   node: FileNode;
@@ -132,7 +130,7 @@ export const FileTreeNode = memo(function FileTreeNode(
         {isRenaming ? (
           <InlineInput
             ref={renameInputRef}
-            icon={<Folder size={14} className="text-blue-500 shrink-0" />}
+            icon={<MaterialIcon name={renameName || node.name} kind="folder" />}
             value={renameName}
             onChange={setRenameName}
             onKeyDown={handleRenameKeyDown}
@@ -177,11 +175,11 @@ export const FileTreeNode = memo(function FileTreeNode(
                     className="text-muted-foreground shrink-0"
                   />
                 )}
-                {isExpanded ? (
-                  <FolderOpen size={14} className="text-blue-500 shrink-0" />
-                ) : (
-                  <Folder size={14} className="text-blue-500 shrink-0" />
-                )}
+                <MaterialIcon
+                  name={node.name}
+                  kind="folder"
+                  expanded={isExpanded}
+                />
                 <span className="text-foreground/80 flex-1 truncate">
                   {node.name}
                 </span>
@@ -224,9 +222,9 @@ export const FileTreeNode = memo(function FileTreeNode(
                 ref={createInputRef}
                 icon={
                   createState!.type === "file" ? (
-                    <File size={14} className="text-gray-400 shrink-0" />
+                    <MaterialIcon name={createName || "file"} kind="file" />
                   ) : (
-                    <Folder size={14} className="text-blue-500 shrink-0" />
+                    <MaterialIcon name={createName || "folder"} kind="folder" />
                   )
                 }
                 value={createName}
@@ -259,7 +257,7 @@ export const FileTreeNode = memo(function FileTreeNode(
     return (
       <InlineInput
         ref={renameInputRef}
-        icon={<File size={14} className="text-muted-foreground shrink-0" />}
+        icon={<MaterialIcon name={renameName || node.name} kind="file" />}
         value={renameName}
         onChange={setRenameName}
         onKeyDown={handleRenameKeyDown}
@@ -293,7 +291,7 @@ export const FileTreeNode = memo(function FileTreeNode(
           draggable
           onDragStart={(e) => handleDragStart(e, node)}
         >
-          <File size={14} className="text-muted-foreground shrink-0" />
+          <MaterialIcon name={node.name} kind="file" />
           <span className="truncate">{node.name}</span>
         </button>
       </ContextMenuTrigger>

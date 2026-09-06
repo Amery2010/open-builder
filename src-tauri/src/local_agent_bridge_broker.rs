@@ -139,7 +139,14 @@ struct BrokerRun {
     tool_calls_started: AtomicUsize,
     cancellation: CancellationToken,
     channel: TrackedChannel,
-    pending: Mutex<HashMap<String, oneshot::Sender<PendingResult>>>,
+    pending: Mutex<HashMap<String, PendingCall>>,
+}
+
+struct PendingCall {
+    name: String,
+    sender: oneshot::Sender<PendingResult>,
+    cancellation: CancellationToken,
+    media_claimed: bool,
 }
 
 impl BrokerRun {
@@ -163,8 +170,9 @@ impl BrokerRun {
 
     fn cancel_pending(&self, reason: &str) {
         if let Ok(mut pending) = self.pending.lock() {
-            for (_, sender) in pending.drain() {
-                let _ = sender.send(Err(BrokerError::new(
+            for (_, call) in pending.drain() {
+                call.cancellation.cancel();
+                let _ = call.sender.send(Err(BrokerError::new(
                     BrokerErrorKind::PendingCancelled,
                     reason,
                 )));
@@ -193,7 +201,9 @@ impl PendingCallGuard {
 impl Drop for PendingCallGuard {
     fn drop(&mut self) {
         if let Ok(mut pending) = self.run.pending.lock() {
-            pending.remove(&self.call_id);
+            if let Some(call) = pending.remove(&self.call_id) {
+                call.cancellation.cancel();
+            }
         }
     }
 }
@@ -329,10 +339,19 @@ impl ToolBroker {
 
         let call_id = uuid::Uuid::new_v4().to_string();
         let (sender, receiver) = oneshot::channel();
+        let call_cancellation = run.cancellation.child_token();
         run.pending
             .lock()
             .map_err(|_| BrokerError::new(BrokerErrorKind::Internal, "tool call lock poisoned"))?
-            .insert(call_id.clone(), sender);
+            .insert(
+                call_id.clone(),
+                PendingCall {
+                    name: name.clone(),
+                    sender,
+                    cancellation: call_cancellation,
+                    media_claimed: false,
+                },
+            );
         let _guard = PendingCallGuard::new(run.clone(), call_id.clone());
 
         if run
@@ -383,21 +402,49 @@ impl ToolBroker {
         result: LocalToolResolution,
     ) -> Result<(), String> {
         let run = self.run_for_id(run_id).map_err(|error| error.message)?;
-        let sender = run
+        let call = run
             .pending
             .lock()
             .map_err(|_| "tool call lock poisoned".to_string())?
             .remove(call_id)
             .ok_or_else(|| "local agent tool call is not pending".to_string())?;
+        call.cancellation.cancel();
 
         if let Err(error) = self.validate_result_size(&result) {
             let message = error.message.clone();
-            let _ = sender.send(Err(error));
+            let _ = call.sender.send(Err(error));
             return Err(message);
         }
-        sender
+        call.sender
             .send(Ok(result))
             .map_err(|_| "local agent tool call was cancelled".to_string())
+    }
+
+    pub(crate) fn claim_pending_tool(
+        &self,
+        run_id: &str,
+        call_id: &str,
+        expected_name: &str,
+    ) -> Result<CancellationToken, String> {
+        let run = self.run_for_id(run_id).map_err(|error| error.message)?;
+        if run.cancellation.is_cancelled() {
+            return Err("local agent run is cancelled".to_string());
+        }
+        let mut pending = run
+            .pending
+            .lock()
+            .map_err(|_| "tool call lock poisoned".to_string())?;
+        let call = pending
+            .get_mut(call_id)
+            .ok_or_else(|| "local agent tool call is not pending".to_string())?;
+        if call.name != expected_name {
+            return Err("local agent tool call does not authorize this operation".to_string());
+        }
+        if call.media_claimed {
+            return Err("local agent tool call authority was already claimed".to_string());
+        }
+        call.media_claimed = true;
+        Ok(call.cancellation.child_token())
     }
 
     pub(crate) fn unregister(&self, run_id: &str, reason: &str) {
@@ -575,6 +622,15 @@ mod tests {
         })
     }
 
+    fn resolution(text: &str) -> LocalToolResolution {
+        LocalToolResolution {
+            text: text.to_string(),
+            is_error: Some(false),
+            structured_content: None,
+            content: None,
+        }
+    }
+
     fn register(
         broker: &ToolBroker,
         max_tool_calls: usize,
@@ -630,6 +686,93 @@ mod tests {
             channel.into(),
         );
         assert!(matches!(result, Err(message) if message.contains("duplicate")));
+    }
+
+    #[test]
+    fn arbitrary_task_ids_cannot_claim_media_authority() {
+        let broker = ToolBroker::default();
+        assert!(broker
+            .claim_pending_tool("missing-run", "missing-call", "generate_image")
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn another_pending_tool_cannot_authorize_image_generation() {
+        let broker = ToolBroker::with_limits(128, 128);
+        let (channel, mut events) = channel();
+        let cancellation = CancellationToken::new();
+        let token = broker
+            .register(
+                "run".to_string(),
+                vec![tool("read_file")],
+                1,
+                cancellation,
+                channel.into(),
+            )
+            .unwrap();
+        let authorization = format!("Bearer {token}");
+        let caller = {
+            let broker = broker.clone();
+            tokio::spawn(async move {
+                broker
+                    .call(Some(&authorization), "read_file".to_string(), json!({}))
+                    .await
+            })
+        };
+        let event = events.recv().await.unwrap();
+        let run_id = event["runId"].as_str().unwrap();
+        let call_id = event["callId"].as_str().unwrap();
+        assert!(broker
+            .claim_pending_tool(run_id, call_id, "generate_image")
+            .is_err());
+        broker.resolve(run_id, call_id, resolution("read")).unwrap();
+        assert_eq!(caller.await.unwrap().unwrap().text, "read");
+    }
+
+    #[tokio::test]
+    async fn exact_pending_image_call_is_single_use_and_follows_parent_cancellation() {
+        let broker = ToolBroker::with_limits(128, 128);
+        let (channel, mut events) = channel();
+        let parent_cancellation = CancellationToken::new();
+        let token = broker
+            .register(
+                "run".to_string(),
+                vec![tool("generate_image")],
+                1,
+                parent_cancellation.clone(),
+                channel.into(),
+            )
+            .unwrap();
+        let authorization = format!("Bearer {token}");
+        let caller = {
+            let broker = broker.clone();
+            tokio::spawn(async move {
+                broker
+                    .call(
+                        Some(&authorization),
+                        "generate_image".to_string(),
+                        json!({}),
+                    )
+                    .await
+            })
+        };
+        let event = events.recv().await.unwrap();
+        let run_id = event["runId"].as_str().unwrap();
+        let call_id = event["callId"].as_str().unwrap();
+        let media_cancellation = broker
+            .claim_pending_tool(run_id, call_id, "generate_image")
+            .unwrap();
+        assert!(!media_cancellation.is_cancelled());
+        assert!(broker
+            .claim_pending_tool(run_id, call_id, "generate_image")
+            .is_err());
+
+        parent_cancellation.cancel();
+        assert!(media_cancellation.is_cancelled());
+        assert_eq!(
+            caller.await.unwrap().unwrap_err().kind(),
+            BrokerErrorKind::PendingCancelled
+        );
     }
 
     #[test]

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   Braces,
+  ImageDown,
   ScanSearch,
   Shield,
   ShieldAlert,
@@ -14,6 +15,10 @@ import {
   type ProxyLogEntry,
 } from "../../../lib/infra/proxy";
 import { getMcpPlatformCapabilities } from "../../../lib/mcp/tauri-host";
+import {
+  IMAGE_COMPRESSION_MAX_QUALITY,
+  IMAGE_COMPRESSION_MIN_QUALITY,
+} from "../../../store/settings/system";
 import { Button } from "@/components/ui/button";
 import { CapsuleGroup } from "@/components/ui/capsule-group";
 import { Input } from "@/components/ui/input";
@@ -29,12 +34,36 @@ interface FullPermissionsLabels {
   stopFirst: string;
 }
 
+export interface ImageCompressionQualityMessages {
+  required: string;
+  invalid: string;
+  outOfRange: string;
+}
+
+export function validateImageCompressionQualityDraft(
+  value: string,
+  messages: ImageCompressionQualityMessages,
+): string | undefined {
+  if (!value.trim()) return messages.required;
+  const quality = Number(value);
+  if (!Number.isFinite(quality)) return messages.invalid;
+  if (
+    quality < IMAGE_COMPRESSION_MIN_QUALITY ||
+    quality > IMAGE_COMPRESSION_MAX_QUALITY
+  ) {
+    return messages.outOfRange;
+  }
+  return undefined;
+}
+
 export interface AdvancedTabProps {
   form: SystemSettings;
   setForm: (value: SystemSettings) => void;
   customSystemPromptError?: string;
   runtimeChangeLocked?: boolean;
   fullPermissionsLabels?: Partial<FullPermissionsLabels>;
+  imageCompressionQualityDraft?: string;
+  onImageCompressionQualityDraftChange?: (value: string) => void;
 }
 
 const CUSTOM_SYSTEM_PROMPT_ID = "custom-system-prompt";
@@ -53,6 +82,8 @@ export function AdvancedTab({
   customSystemPromptError,
   runtimeChangeLocked = false,
   fullPermissionsLabels,
+  imageCompressionQualityDraft,
+  onImageCompressionQualityDraftChange,
 }: AdvancedTabProps) {
   const t = useT();
   const permissionsLabels = {
@@ -66,6 +97,28 @@ export function AdvancedTab({
     getProxyLog(),
   );
   const [supportsSkillScripts, setSupportsSkillScripts] = useState(false);
+  const [
+    localImageCompressionQualityDraft,
+    setLocalImageCompressionQualityDraft,
+  ] = useState(() => String(form.imageCompressionQuality));
+
+  const qualityDraft =
+    imageCompressionQualityDraft ?? localImageCompressionQualityDraft;
+  const setQualityDraft =
+    onImageCompressionQualityDraftChange ??
+    setLocalImageCompressionQualityDraft;
+  const imageCompressionQualityError = validateImageCompressionQualityDraft(
+    qualityDraft,
+    t.settings.imageCompression,
+  );
+
+  useEffect(() => {
+    if (imageCompressionQualityDraft === undefined) {
+      setLocalImageCompressionQualityDraft(
+        String(form.imageCompressionQuality),
+      );
+    }
+  }, [form.imageCompressionQuality, imageCompressionQualityDraft]);
 
   useEffect(() => {
     let active = true;
@@ -109,6 +162,76 @@ export function AdvancedTab({
             {customSystemPromptError}
           </p>
         )}
+      </div>
+
+      <div className="space-y-2">
+        <Label>
+          <ImageDown size={16} className="inline mr-1" aria-hidden="true" />
+          {t.settings.imageCompression.label}
+        </Label>
+        <CapsuleGroup
+          label={t.settings.imageCompression.label}
+          value={form.imageCompressionEnabled ? "on" : "off"}
+          onChange={(value) =>
+            setForm({ ...form, imageCompressionEnabled: value === "on" })
+          }
+          options={[
+            { value: "on", label: t.settings.imageCompression.on },
+            { value: "off", label: t.settings.imageCompression.off },
+          ]}
+        />
+        <p className="text-xs text-muted-foreground">
+          {t.settings.imageCompression.hint}
+        </p>
+        <div className="space-y-1.5">
+          <Label htmlFor="image-compression-quality" className="text-xs">
+            {t.settings.imageCompression.quality}
+          </Label>
+          <Input
+            id="image-compression-quality"
+            type="number"
+            min={IMAGE_COMPRESSION_MIN_QUALITY}
+            max={IMAGE_COMPRESSION_MAX_QUALITY}
+            step="0.01"
+            value={qualityDraft}
+            disabled={!form.imageCompressionEnabled}
+            aria-invalid={imageCompressionQualityError ? "true" : undefined}
+            aria-describedby={`image-compression-quality-hint${
+              imageCompressionQualityError
+                ? " image-compression-quality-error"
+                : ""
+            }`}
+            onChange={(event) => {
+              const value = event.target.value;
+              setQualityDraft(value);
+              const error = validateImageCompressionQualityDraft(
+                value,
+                t.settings.imageCompression,
+              );
+              if (!error) {
+                setForm({
+                  ...form,
+                  imageCompressionQuality: Number(value),
+                });
+              }
+            }}
+          />
+          <p
+            id="image-compression-quality-hint"
+            className="text-xs text-muted-foreground"
+          >
+            {t.settings.imageCompression.qualityHint}
+          </p>
+          {imageCompressionQualityError && (
+            <p
+              id="image-compression-quality-error"
+              className="text-xs text-destructive"
+              role="alert"
+            >
+              {imageCompressionQualityError}
+            </p>
+          )}
+        </div>
       </div>
 
       <div className="space-y-2">

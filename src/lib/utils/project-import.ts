@@ -10,6 +10,14 @@ import {
   PROJECT_FILE_LIMITS,
   validateProjectFiles,
 } from "./project-files";
+import {
+  PROJECT_ASSET_LIMITS,
+  projectAssetMimeTypeForPath,
+  stageProjectAsset,
+  type StagedProjectAsset,
+} from "../project-assets/core";
+import { compressLocalImage } from "../images/compress-local-image";
+import { useSettingsStore } from "../../store/settings";
 
 export const PROJECT_IMPORT_LIMITS = {
   maxArchiveBytes: 16 * 1024 * 1024,
@@ -30,6 +38,7 @@ export interface ProjectImportReport {
 export interface StagedProjectImport {
   name: string;
   files: ProjectFiles;
+  assets?: StagedProjectAsset[];
   template: string;
   previewMode: ProjectPreviewMode;
   activeFile?: string;
@@ -43,6 +52,7 @@ interface SourceEntry {
   path: string;
   size: number;
   read: () => Promise<Uint8Array>;
+  lastModified?: number;
   symlink?: boolean;
 }
 
@@ -389,7 +399,10 @@ async function stageSourceEntries(
   entries: SourceEntry[],
   report = createReport(),
 ): Promise<StagedProjectImport> {
+  const { imageCompressionEnabled, imageCompressionQuality } =
+    useSettingsStore.getState().system;
   const accepted: SourceEntry[] = [];
+  const acceptedAssets: SourceEntry[] = [];
   const seen = new Set<string>();
   let declaredBytes = 0;
 
@@ -400,7 +413,8 @@ async function stageSourceEntries(
       continue;
     }
     const reason = classifyProjectPath(path);
-    if (reason) {
+    const assetMimeType = projectAssetMimeTypeForPath(path);
+    if (reason && !(reason === "binary" && assetMimeType)) {
       incrementSkip(report, reason);
       continue;
     }
@@ -409,14 +423,23 @@ async function stageSourceEntries(
     if (!Number.isSafeInteger(entry.size) || entry.size < 0) {
       throw new Error(`Project file "${path}" has an invalid size.`);
     }
-    if (entry.size > PROJECT_FILE_LIMITS.maxFileBytes) {
+    const maxEntryBytes = assetMimeType
+      ? PROJECT_ASSET_LIMITS.maxAssetBytes
+      : PROJECT_FILE_LIMITS.maxFileBytes;
+    if (entry.size > maxEntryBytes) {
       throw new Error(
-        `Project file "${path}" is too large (max ${PROJECT_FILE_LIMITS.maxFileBytes} bytes).`,
+        `Project file "${path}" is too large (max ${maxEntryBytes} bytes).`,
       );
     }
-    if (accepted.length + 1 > PROJECT_FILE_LIMITS.maxFiles) {
+    if (
+      (!assetMimeType && accepted.length + 1 > PROJECT_FILE_LIMITS.maxFiles) ||
+      (assetMimeType &&
+        acceptedAssets.length + 1 > PROJECT_ASSET_LIMITS.maxAssets)
+    ) {
       throw new Error(
-        `Project has too many files (max ${PROJECT_FILE_LIMITS.maxFiles}).`,
+        assetMimeType
+          ? `Project has too many assets (max ${PROJECT_ASSET_LIMITS.maxAssets}).`
+          : `Project has too many files (max ${PROJECT_FILE_LIMITS.maxFiles}).`,
       );
     }
     declaredBytes += entry.size;
@@ -425,7 +448,7 @@ async function stageSourceEntries(
         `Project files are too large in total (max ${PROJECT_FILE_LIMITS.maxTotalBytes} bytes).`,
       );
     }
-    accepted.push({ ...entry, path });
+    (assetMimeType ? acceptedAssets : accepted).push({ ...entry, path });
   }
 
   const files: ProjectFiles = {};
@@ -444,6 +467,27 @@ async function stageSourceEntries(
     files[entry.path] = redacted;
   }
 
+  const assets: StagedProjectAsset[] = [];
+  for (const entry of acceptedAssets) {
+    const bytes = await entry.read();
+    if (bytes.byteLength !== entry.size) {
+      throw new Error(`Project asset "${entry.path}" changed while importing.`);
+    }
+    const mimeType = projectAssetMimeTypeForPath(entry.path);
+    const name = entry.path.split("/").pop() ?? entry.path;
+    const file = new File([Uint8Array.from(bytes).buffer], name, {
+      type: mimeType ?? undefined,
+      lastModified: entry.lastModified ?? 0,
+    });
+    const compressed = await compressLocalImage(file, {
+      enabled: imageCompressionEnabled,
+      quality: imageCompressionQuality,
+    });
+    assets.push(
+      await stageProjectAsset(entry.path, compressed, mimeType ?? undefined),
+    );
+  }
+
   if (Object.keys(files).length === 0) {
     throw new Error("The selected project contains no importable text files.");
   }
@@ -451,11 +495,13 @@ async function stageSourceEntries(
   if (!validation.ok) throw new Error(validation.error);
   const preview = inferProjectPreview(files);
   const stats = getProjectFilesStats(files);
-  report.importedFiles = stats.fileCount;
-  report.totalBytes = stats.totalBytes;
+  report.importedFiles = stats.fileCount + assets.length;
+  report.totalBytes =
+    stats.totalBytes + assets.reduce((sum, asset) => sum + asset.size, 0);
   return {
     name: cleanProjectName(name),
     files,
+    assets,
     template: preview.template,
     previewMode: preview.previewMode,
     activeFile: chooseActiveFile(files),
@@ -638,6 +684,7 @@ export async function stageProjectFromFileList(
   const entries: SourceEntry[] = files.map((file, index) => ({
     path: stripped.paths[index],
     size: file.size,
+    lastModified: file.lastModified,
     read: async () => new Uint8Array(await file.arrayBuffer()),
   }));
   return stageSourceEntries(stripped.name ?? "Imported project", entries);
@@ -673,7 +720,10 @@ export async function stageProjectFromDirectoryHandle(
         continue;
       }
       const reason = classifyProjectPath(path);
-      if (reason) {
+      if (
+        reason &&
+        !(reason === "binary" && projectAssetMimeTypeForPath(path))
+      ) {
         incrementSkip(report, reason);
         continue;
       }
@@ -681,6 +731,7 @@ export async function stageProjectFromDirectoryHandle(
       entries.push({
         path,
         size: file.size,
+        lastModified: file.lastModified,
         read: async () => new Uint8Array(await file.arrayBuffer()),
       });
     }
@@ -723,7 +774,10 @@ export async function stageProjectFromTauriDirectory(): Promise<StagedProjectImp
         await walk(childAbsolute, childPath);
       } else if (entry.isFile) {
         const reason = classifyProjectPath(childPath);
-        if (reason) {
+        if (
+          reason &&
+          !(reason === "binary" && projectAssetMimeTypeForPath(childPath))
+        ) {
           incrementSkip(report, reason);
           continue;
         }

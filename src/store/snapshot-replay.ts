@@ -1,5 +1,5 @@
 import { applyPatch, createPatch } from "diff";
-import type { ProjectFiles, ProjectSnapshot } from "../types";
+import type { ProjectAssets, ProjectFiles, ProjectSnapshot } from "../types";
 
 /** Reconstruct full file state by replaying snapshots up to (and including)
  *  `targetId`. Starts from the nearest preceding checkpoint when available;
@@ -40,6 +40,16 @@ export function replaySnapshots(
     }
   }
   return files;
+}
+
+/** Reconstruct the binary asset reference table at a snapshot. Asset metadata
+ * is stored in full because the bytes themselves remain in Blob storage. */
+export function replaySnapshotAssets(
+  snapshots: ProjectSnapshot[],
+  targetSnapshotId: string,
+): ProjectAssets {
+  const target = snapshots.find((snapshot) => snapshot.id === targetSnapshotId);
+  return { ...(target?.assets ?? {}) };
 }
 
 function diffFiles(

@@ -5,6 +5,9 @@ export const LOCAL_AGENT_PROVIDER_CATALOG = {
     cliName: "codex",
     modelName: "Codex",
     nativeSearch: true,
+    imageGeneration: true,
+    imageEditing: true,
+    mediaCapabilitiesVerified: true,
   },
   claude: {
     id: "claude",
@@ -12,6 +15,9 @@ export const LOCAL_AGENT_PROVIDER_CATALOG = {
     cliName: "claude",
     modelName: "Claude",
     nativeSearch: true,
+    imageGeneration: false,
+    imageEditing: false,
+    mediaCapabilitiesVerified: true,
   },
   pi: {
     id: "pi",
@@ -19,6 +25,9 @@ export const LOCAL_AGENT_PROVIDER_CATALOG = {
     cliName: "pi",
     modelName: "Pi",
     nativeSearch: false,
+    imageGeneration: false,
+    imageEditing: false,
+    mediaCapabilitiesVerified: true,
   },
   antigravity: {
     id: "antigravity",
@@ -26,6 +35,9 @@ export const LOCAL_AGENT_PROVIDER_CATALOG = {
     cliName: "agy",
     modelName: "Antigravity",
     nativeSearch: true,
+    imageGeneration: true,
+    imageEditing: false,
+    mediaCapabilitiesVerified: false,
   },
 } as const;
 
@@ -48,4 +60,14 @@ export function localAgentSupportsNativeSearch(
   provider: LocalAgentProvider,
 ): boolean {
   return LOCAL_AGENT_PROVIDER_CATALOG[provider].nativeSearch;
+}
+
+export function localAgentImageCapabilities(provider: LocalAgentProvider): {
+  imageGeneration: boolean;
+  imageEditing: boolean;
+  mediaCapabilitiesVerified: boolean;
+} {
+  const { imageGeneration, imageEditing, mediaCapabilitiesVerified } =
+    LOCAL_AGENT_PROVIDER_CATALOG[provider];
+  return { imageGeneration, imageEditing, mediaCapabilitiesVerified };
 }

@@ -383,6 +383,16 @@ impl ToolBridge {
         self.broker.resolve(run_id, call_id, result)
     }
 
+    pub fn claim_pending_tool(
+        &self,
+        run_id: &str,
+        call_id: &str,
+        expected_name: &str,
+    ) -> Result<CancellationToken, String> {
+        self.broker
+            .claim_pending_tool(run_id, call_id, expected_name)
+    }
+
     pub fn unregister(&self, run_id: &str, reason: &str) {
         self.broker.unregister(run_id, reason);
     }

@@ -181,6 +181,9 @@ export interface ProjectSnapshot {
   label?: string;
   /** Full file tree at this point. Only present on checkpoint snapshots. */
   fullFiles?: _ProjectFiles;
+  /** Binary project assets are stored out of line; snapshots retain only their
+   * content-addressed references. Older snapshots implicitly contain none. */
+  assets?: ProjectAssets;
 }
 
 // ─── Memory types ───────────────────────────────────────────────────────────
@@ -298,6 +301,8 @@ export interface Conversation {
   title: string;
   messages: _Message[];
   files: _ProjectFiles;
+  /** Binary project assets keyed by their project-relative path. */
+  assets?: ProjectAssets;
   template: string;
   previewMode?: ProjectPreviewMode;
   /** Project preference for the initial preview device. Manual device changes
@@ -325,6 +330,25 @@ export interface Conversation {
   createdAt: number;
   updatedAt: number;
 }
+
+export type ProjectAssetMimeType = "image/png" | "image/jpeg" | "image/webp";
+
+export interface ProjectAsset {
+  /** Project-relative export path, for example public/generated/hero.png. */
+  path: string;
+  /** Content-addressed key in the project asset Blob store. */
+  blobRef: string;
+  mimeType: ProjectAssetMimeType;
+  size: number;
+  /** Lower-case SHA-256 digest of the original image bytes. */
+  digest: string;
+  /** Managed text module that application source can import. */
+  modulePath: string;
+  /** Browser path used by an exported project. */
+  publicPath: string;
+}
+
+export type ProjectAssets = Record<string, ProjectAsset>;
 
 // ─── Project template types ─────────────────────────────────────────────────
 

@@ -6,6 +6,8 @@ import type {
   LocalAgentProbe,
   LocalAgentProvider,
   LocalAgentStartRequest,
+  LocalGeneratedImage,
+  LocalImageGenerationRequest,
   LocalToolResolution,
 } from "./types";
 
@@ -105,4 +107,14 @@ export async function cancelLocalAgent(runId: string): Promise<boolean> {
 export async function cancelAllLocalAgents(): Promise<number> {
   if (!(await supportsLocalAgents())) return 0;
   return invoke<number>("local_agent_cancel_all");
+}
+
+export async function generateLocalAgentImage(
+  request: LocalImageGenerationRequest,
+): Promise<LocalGeneratedImage> {
+  return invoke<LocalGeneratedImage>("local_agent_generate_image", { request });
+}
+
+export async function cancelLocalAgentImage(taskId: string): Promise<boolean> {
+  return invoke<boolean>("local_agent_cancel_image", { taskId });
 }

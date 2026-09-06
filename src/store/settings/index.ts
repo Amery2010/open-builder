@@ -11,7 +11,12 @@ import {
   assetSearchDefaults,
   createAssetSearchSlice,
 } from "./asset-search";
-import { type SystemSlice, systemDefaults, createSystemSlice } from "./system";
+import {
+  type SystemSlice,
+  systemDefaults,
+  createSystemSlice,
+  normalizeSystemSettings,
+} from "./system";
 import { SETTINGS_VERSION, migrateSettings } from "./migrations";
 import {
   createEmptyLocalCliObservationCache,
@@ -78,9 +83,20 @@ export const useSettingsStore = create<SettingsState>()(
           persisted && typeof persisted === "object"
             ? (persisted as Partial<SettingsState>)
             : {};
+        const persistedSystem = persistedState.system;
+        const mergedSystem =
+          persistedSystem &&
+          typeof persistedSystem === "object" &&
+          !Array.isArray(persistedSystem)
+            ? normalizeSystemSettings({
+                ...current.system,
+                ...persistedSystem,
+              })
+            : current.system;
         return {
           ...current,
           ...persistedState,
+          system: mergedSystem,
           localCliObservationCache: sanitizeLocalCliObservationCache(
             persistedState.localCliObservationCache,
           ),

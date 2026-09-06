@@ -29,10 +29,16 @@ export function useRollback({
 
   const flushSnapshotUpdate = useCallback(() => {
     if (!activeId || snapshotsLength === 0) return;
-    const currentFiles =
-      useConversationStore.getState().conversations[activeId]?.files;
-    if (currentFiles) {
-      useSnapshotStore.getState().updateLatestSnapshot(activeId, currentFiles);
+    const conversation =
+      useConversationStore.getState().conversations[activeId];
+    if (conversation) {
+      useSnapshotStore
+        .getState()
+        .updateLatestSnapshot(
+          activeId,
+          conversation.files,
+          conversation.assets,
+        );
     }
   }, [activeId, snapshotsLength]);
 
@@ -47,7 +53,13 @@ export function useRollback({
       const restoredFiles = useSnapshotStore
         .getState()
         .reconstructFiles(activeId, snap.id);
+      const restoredAssets = useSnapshotStore
+        .getState()
+        .reconstructAssets(activeId, snap.id);
       onSetFiles(restoredFiles);
+      useConversationStore
+        .getState()
+        .setAssetsForConversation(activeId, restoredAssets);
       setRollbackConfirmId(null);
       const label = findPrecedingUserLabel(messages, messageId);
       setRollbackInfo({ messageId, label });

@@ -100,6 +100,9 @@ const EMPTY_CAPABILITIES: LocalAgentProbe["capabilities"] = {
   reasoning: false,
   tools: false,
   nativeSearch: false,
+  imageGeneration: false,
+  imageEditing: false,
+  mediaCapabilitiesVerified: false,
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -169,8 +172,28 @@ function isCapabilities(
     typeof value.sessions === "boolean" &&
     typeof value.reasoning === "boolean" &&
     typeof value.tools === "boolean" &&
-    typeof value.nativeSearch === "boolean"
+    typeof value.nativeSearch === "boolean" &&
+    (value.imageGeneration === undefined ||
+      typeof value.imageGeneration === "boolean") &&
+    (value.imageEditing === undefined ||
+      typeof value.imageEditing === "boolean") &&
+    (value.mediaCapabilitiesVerified === undefined ||
+      typeof value.mediaCapabilitiesVerified === "boolean")
   );
+}
+
+function cleanCapabilities(
+  value: LocalAgentProbe["capabilities"],
+): LocalAgentProbe["capabilities"] {
+  return {
+    sessions: value.sessions,
+    reasoning: value.reasoning,
+    tools: value.tools,
+    nativeSearch: value.nativeSearch,
+    imageGeneration: value.imageGeneration === true,
+    imageEditing: value.imageEditing === true,
+    mediaCapabilitiesVerified: value.mediaCapabilitiesVerified === true,
+  };
 }
 
 function isPersistedLocalCliHostObservation(
@@ -393,7 +416,7 @@ export function sanitizeLocalCliProbe(
       .map((effort) => redactLocalCliMessage(effort.slice(0, 100)))
       .filter(Boolean),
     capabilities: isCapabilities(probe.capabilities)
-      ? { ...probe.capabilities }
+      ? cleanCapabilities(probe.capabilities)
       : { ...EMPTY_CAPABILITIES },
     setupCommand: redactLocalCliMessage(
       boundedString(probe.setupCommand, 600) ?? "",
@@ -445,7 +468,7 @@ export function sanitizeLocalCliObservationCache(
       efforts: observation.efforts
         .map((effort) => redactLocalCliMessage(effort.slice(0, 100)))
         .filter(Boolean),
-      capabilities: { ...observation.capabilities },
+      capabilities: cleanCapabilities(observation.capabilities),
       setupCommand: redactLocalCliMessage(
         observation.setupCommand.slice(0, 600),
       ),

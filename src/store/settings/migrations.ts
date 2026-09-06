@@ -11,8 +11,13 @@ import {
   createEmptyLocalCliObservationCache,
   sanitizeLocalCliObservationCache,
 } from "../../lib/local-agent/observations";
+import {
+  IMAGE_COMPRESSION_DEFAULT_QUALITY,
+  IMAGE_COMPRESSION_MAX_QUALITY,
+  IMAGE_COMPRESSION_MIN_QUALITY,
+} from "./system";
 
-export const SETTINGS_VERSION = 23;
+export const SETTINGS_VERSION = 24;
 
 interface PersistedLocalAgentPreferences {
   model: string;
@@ -194,6 +199,18 @@ export function migrateSettings(persisted: unknown, version: number): unknown {
     if (typeof state.system.permissionBrokerBypassEnabled !== "boolean") {
       state.system.permissionBrokerBypassEnabled = false;
     }
+  }
+  if (!state.system) state.system = {};
+  if (typeof state.system.imageCompressionEnabled !== "boolean") {
+    state.system.imageCompressionEnabled = true;
+  }
+  if (
+    typeof state.system.imageCompressionQuality !== "number" ||
+    !Number.isFinite(state.system.imageCompressionQuality) ||
+    state.system.imageCompressionQuality < IMAGE_COMPRESSION_MIN_QUALITY ||
+    state.system.imageCompressionQuality > IMAGE_COMPRESSION_MAX_QUALITY
+  ) {
+    state.system.imageCompressionQuality = IMAGE_COMPRESSION_DEFAULT_QUALITY;
   }
   return state;
 }

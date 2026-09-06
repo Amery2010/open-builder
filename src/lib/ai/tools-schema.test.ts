@@ -148,7 +148,7 @@ describe("tool policies", () => {
     );
   });
 
-  it("keeps presentation summaries bounded and free of file or secret values", () => {
+  it("does not derive presentation summaries from tool arguments", () => {
     const summarize =
       HOST_TOOL_CATALOG.get("manage_env")?.presentation.summarizeArguments;
     const summary = summarize?.({
@@ -158,7 +158,7 @@ describe("tool policies", () => {
       content: "private file content",
     });
 
-    expect(summary).toContain("operations[1]");
+    expect(summary).toBe("");
     expect(summary).not.toContain("super-secret-value");
     expect(summary).not.toContain("private file content");
 
@@ -169,8 +169,7 @@ describe("tool policies", () => {
       script_path: "scripts/run.ts",
       args: ["--token", "super-secret-value"],
     });
-    expect(scriptSummary).toContain("skill_name=safe-skill");
-    expect(scriptSummary).toContain("args[2]");
+    expect(scriptSummary).toBe("");
     expect(scriptSummary).not.toContain("super-secret-value");
   });
 

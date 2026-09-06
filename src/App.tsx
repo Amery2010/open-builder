@@ -16,6 +16,10 @@ import { useProjectTemplateLibraryUi } from "./store/project-template-library-ui
 import { useT } from "./i18n";
 import { discardPendingSandpackFileChanges } from "./components/code-viewer/sandpack-file-changes";
 import type { StagedProjectImport } from "./lib/utils/project-import";
+import {
+  materializeStagedProjectAssets,
+  releaseMaterializedProjectAssets,
+} from "./lib/project-assets";
 import type {
   Attachment,
   DesignRecommendation,
@@ -225,7 +229,7 @@ export default function App() {
   );
 
   const handleImportProject = useCallback(
-    (project: StagedProjectImport) => {
+    async (project: StagedProjectImport) => {
       if (!activeId)
         return { ok: false as const, error: "No active conversation." };
       if (isGenerating) {
@@ -234,13 +238,28 @@ export default function App() {
           error: "Stop generation before importing a project.",
         };
       }
+      const materialized = await materializeStagedProjectAssets(
+        project.assets ?? [],
+        project.files,
+      );
+      if (useConversationStore.getState().activeId !== activeId) {
+        await releaseMaterializedProjectAssets(materialized.assets);
+        return {
+          ok: false as const,
+          error: "The active conversation changed while importing the project.",
+        };
+      }
       discardPendingSandpackFileChanges(activeId);
       const result = replaceProject({
-        files: project.files,
+        files: materialized.files,
+        assets: materialized.assets,
         template: project.template,
         previewMode: project.previewMode,
         activeFile: project.activeFile,
       });
+      if (!result.ok) {
+        await releaseMaterializedProjectAssets(materialized.assets);
+      }
       if (!result.ok) return result;
       invalidateGenerator();
       restartSandpack();

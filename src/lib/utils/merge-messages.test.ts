@@ -276,26 +276,105 @@ describe("mergeMessages", () => {
 
     expect(titlesFor(zh)).toEqual([
       "检查项目健康状态",
-      "搜索网络: React 19",
+      "搜索网络",
       "Google 搜索",
       "读取文件",
       "读取附件",
-      "搜索网络: release notes",
+      "搜索网络",
       "读取网页",
       "MCP 工具",
-      "未知工具 · future_tool: diagnostics",
+      "未知工具 · future_tool",
     ]);
     expect(titlesFor(en)).toEqual([
       "Check Project Health",
-      "Web Search: React 19",
+      "Web Search",
       "Google Search",
       "Read File",
       "Read Attachment",
-      "Web Search: release notes",
+      "Web Search",
       "Read Web Page",
       "MCP Tool",
-      "Unknown Tool · future_tool: diagnostics",
+      "Unknown Tool · future_tool",
     ]);
+  });
+
+  it("keeps tool titles independent from path, template, query, and count arguments", async () => {
+    const { mergeMessages } = await import("./merge-messages");
+    const messages: Message[] = [
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "init",
+            type: "function",
+            function: {
+              name: "init_project",
+              arguments: '{"template":"react-ts"}',
+            },
+          },
+          {
+            id: "patch",
+            type: "function",
+            function: {
+              name: "patch_file",
+              arguments:
+                '{"path":"src/App.tsx","patches":[{"search":"old","replace":"new"}]}',
+            },
+          },
+          {
+            id: "read",
+            type: "function",
+            function: {
+              name: "read_files",
+              arguments: '{"paths":["src/App.tsx","src/main.tsx"]}',
+            },
+          },
+          {
+            id: "npm",
+            type: "function",
+            function: {
+              name: "search_npm_packages",
+              arguments: '{"packageName":"react"}',
+            },
+          },
+          {
+            id: "reader",
+            type: "function",
+            function: {
+              name: "web_reader",
+              arguments: '{"urls":["https://example.com"]}',
+            },
+          },
+          {
+            id: "subagent",
+            type: "function",
+            function: {
+              name: "dispatch_subagent",
+              arguments:
+                '{"subagent":"code-reviewer","task":"Investigate the latest changes"}',
+            },
+          },
+        ],
+      },
+    ];
+
+    const blocks = mergeMessages(messages, zh)[0].blocks.filter(
+      (block) => block.type === "tool",
+    );
+
+    expect(blocks.map((block) => block.title)).toEqual([
+      "初始化项目",
+      "修改文件",
+      "读取文件",
+      "搜索 NPM 包",
+      "读取网页",
+      "调用子代理",
+    ]);
+    expect(blocks[1]).toMatchObject({ path: "src/App.tsx" });
+    expect(blocks[2]).toMatchObject({
+      paths: ["src/App.tsx", "src/main.tsx"],
+    });
   });
 
   it("uses completed MCP identity from rich output", async () => {

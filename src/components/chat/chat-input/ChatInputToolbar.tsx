@@ -54,6 +54,7 @@ interface ChatInputToolbarProps {
   workspaceMode: WorkspaceMode;
   setWorkspaceMode: (mode: WorkspaceMode) => void;
   isGenerating: boolean;
+  isProcessingImages?: boolean;
   hasContent: boolean;
   isHoveringStop: boolean;
   onHoveringStopChange: (v: boolean) => void;
@@ -120,6 +121,7 @@ export function ChatInputToolbar({
   workspaceMode,
   setWorkspaceMode,
   isGenerating,
+  isProcessingImages = false,
   hasContent,
   isHoveringStop,
   onHoveringStopChange,
@@ -141,6 +143,7 @@ export function ChatInputToolbar({
                     variant="ghost"
                     className="size-7 text-muted-foreground hover:text-foreground"
                     aria-label={t.chat.attachment}
+                    disabled={isProcessingImages}
                   >
                     <Paperclip size={16} />
                   </Button>
@@ -159,7 +162,7 @@ export function ChatInputToolbar({
               {t.chat.uploadFile}
             </DropdownMenuItem>
             <DropdownMenuItem
-              disabled={isGenerating}
+              disabled={isGenerating || isProcessingImages}
               onSelect={onUploadProject}
             >
               <FolderUp size={14} />
@@ -316,7 +319,7 @@ export function ChatInputToolbar({
             label={t.chat.send}
             type="submit"
             size="icon"
-            disabled={!hasContent}
+            disabled={!hasContent || isProcessingImages}
             className="size-7"
           >
             <SendHorizonal size={16} />

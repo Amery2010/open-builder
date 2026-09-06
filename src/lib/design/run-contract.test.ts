@@ -1,3 +1,4 @@
+import { asSchema } from "ai";
 import { describe, expect, it } from "vitest";
 import { createSkillActiveContext } from "../skills/active-context";
 import type { SkillEntry } from "../skills/types";
@@ -6,10 +7,15 @@ import { SUBAGENT_REGISTRY } from "../ai/subagents/registry";
 import type { SubagentDefinition } from "../ai/subagents/types";
 import {
   createDesignContractController,
+  designContractModelSchema,
   designContractSchema,
   type DesignContract,
   type DesignBlueprintScope,
 } from "./run-contract";
+import {
+  designContractToolInputSchema,
+  SUBMIT_DESIGN_CONTRACT_TOOL,
+} from "./run-contract-tool";
 
 function skill(id: string): SkillEntry {
   return {
@@ -58,7 +64,87 @@ function blueprint(
   };
 }
 
+describe("Design contract schema", () => {
+  it("publishes only the canonical blueprint field to models", async () => {
+    const schema = await asSchema(
+      SUBMIT_DESIGN_CONTRACT_TOOL.submit_design_contract.inputSchema,
+    ).jsonSchema;
+    const objectSchema = schema as {
+      properties?: Record<string, unknown>;
+      required?: string[];
+    };
+
+    expect(objectSchema.properties).toHaveProperty("blueprint");
+    expect(objectSchema.properties).not.toHaveProperty("blueprint_scope");
+    expect(objectSchema.required).toEqual(
+      expect.arrayContaining(["target", "preserve"]),
+    );
+    expect(
+      (objectSchema.properties?.target as { description?: string }).description,
+    ).toBeTruthy();
+    expect(
+      (objectSchema.properties?.preserve as { description?: string })
+        .description,
+    ).toBeTruthy();
+  });
+
+  it("normalizes the legacy blueprint alias and merges equal dual fields", async () => {
+    const legacyInput = { ...contract(), blueprint_scope: blueprint() };
+    const legacy = designContractSchema.parse(legacyInput);
+    const duplicate = designContractSchema.parse({
+      ...contract(),
+      blueprint: blueprint(),
+      blueprint_scope: blueprint(),
+    });
+    const validated =
+      await designContractToolInputSchema.validate?.(legacyInput);
+
+    expect(legacy.blueprint).toEqual(blueprint());
+    expect(legacy).not.toHaveProperty("blueprint_scope");
+    expect(duplicate.blueprint).toEqual(blueprint());
+    expect(duplicate).not.toHaveProperty("blueprint_scope");
+    expect(validated).toMatchObject({
+      success: true,
+      value: { blueprint: blueprint() },
+    });
+    expect(designContractModelSchema.safeParse(legacyInput).success).toBe(
+      false,
+    );
+  });
+
+  it("rejects conflicting canonical and legacy blueprint fields", () => {
+    expect(() =>
+      designContractSchema.parse({
+        ...contract(),
+        blueprint: blueprint(),
+        blueprint_scope: blueprint({ revision: "blueprint-r4" }),
+      }),
+    ).toThrow("must describe the same scope");
+  });
+});
+
 describe("Design contract controller", () => {
+  it("keeps project writes locked after an invalid contract submission", () => {
+    const controller = createDesignContractController();
+    const skills = createSkillActiveContext();
+    skills.activate(skill("design-product-ui"));
+    controller.reset({ enabled: true });
+
+    expect(() =>
+      controller.submit(
+        { ...contract(), target: undefined },
+        {
+          expectedSystemId: "graphite",
+          skillContext: skills,
+        },
+      ),
+    ).toThrow();
+    expect(controller.isReady()).toBe(false);
+    expect(controller.authorizeProjectWrite("write_file")).toContain(
+      "Design contract required",
+    );
+  });
+
   it("blocks project writes until a valid contract is accepted", () => {
     const controller = createDesignContractController();
     const skills = createSkillActiveContext();

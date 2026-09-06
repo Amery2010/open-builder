@@ -3,6 +3,10 @@ import type { StateCreator } from "zustand";
 export type Language = "system" | "zh" | "en";
 export type Theme = "system" | "light" | "dark";
 
+export const IMAGE_COMPRESSION_DEFAULT_QUALITY = 0.85;
+export const IMAGE_COMPRESSION_MIN_QUALITY = 0.01;
+export const IMAGE_COMPRESSION_MAX_QUALITY = 1;
+
 export interface SystemSettings {
   language: Language;
   theme: Theme;
@@ -13,6 +17,8 @@ export interface SystemSettings {
   developerSkillScriptsEnabled: boolean;
   permissionBrokerBypassEnabled: boolean;
   customSystemPrompt: string;
+  imageCompressionEnabled: boolean;
+  imageCompressionQuality: number;
 }
 
 export const systemDefaults: SystemSettings = {
@@ -25,7 +31,32 @@ export const systemDefaults: SystemSettings = {
   developerSkillScriptsEnabled: false,
   permissionBrokerBypassEnabled: false,
   customSystemPrompt: "",
+  imageCompressionEnabled: true,
+  imageCompressionQuality: IMAGE_COMPRESSION_DEFAULT_QUALITY,
 };
+
+export function normalizeSystemSettings(
+  settings: SystemSettings,
+): SystemSettings {
+  const candidate = settings as SystemSettings & {
+    imageCompressionEnabled?: unknown;
+    imageCompressionQuality?: unknown;
+  };
+  return {
+    ...settings,
+    imageCompressionEnabled:
+      typeof candidate.imageCompressionEnabled === "boolean"
+        ? candidate.imageCompressionEnabled
+        : systemDefaults.imageCompressionEnabled,
+    imageCompressionQuality:
+      typeof candidate.imageCompressionQuality === "number" &&
+      Number.isFinite(candidate.imageCompressionQuality) &&
+      candidate.imageCompressionQuality >= IMAGE_COMPRESSION_MIN_QUALITY &&
+      candidate.imageCompressionQuality <= IMAGE_COMPRESSION_MAX_QUALITY
+        ? candidate.imageCompressionQuality
+        : systemDefaults.imageCompressionQuality,
+  };
+}
 
 export interface SystemSlice {
   system: SystemSettings;
@@ -40,7 +71,7 @@ export const createSystemSlice: StateCreator<
   SystemSlice
 > = (set) => ({
   system: systemDefaults,
-  setSystem: (settings) => set({ system: settings }),
+  setSystem: (settings) => set({ system: normalizeSystemSettings(settings) }),
   setPlanMode: (enabled) =>
     set((state) => ({
       system: {

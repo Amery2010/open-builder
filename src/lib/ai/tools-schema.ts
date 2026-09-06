@@ -590,67 +590,6 @@ function englishName(name: string): string {
     .join(" ");
 }
 
-function summarizeArguments(args: unknown): string {
-  if (!args || typeof args !== "object") return "";
-  const safeScalarKeys = new Set([
-    "key",
-    "baseline_generation",
-    "max_results",
-    "name",
-    "new_path",
-    "old_path",
-    "overwrite",
-    "path",
-    "reference_path",
-    "script_path",
-    "skill_name",
-    "style",
-    "target_dir",
-    "template",
-    "view",
-  ]);
-  const safeArrayKeys = new Set(["paths", "viewports"]);
-  const summaries: string[] = [];
-  for (const [key, value] of Object.entries(args)) {
-    if (key === "changes" && Array.isArray(value)) {
-      const tokens = value
-        .map((item) =>
-          item && typeof item === "object" && "token" in item
-            ? String(item.token)
-            : "?",
-        )
-        .slice(0, 16);
-      summaries.push(`${key}=${tokens.join(",")}`);
-      continue;
-    }
-    if (Array.isArray(value)) {
-      const primitiveValues = value.filter(
-        (item) => typeof item === "string" || typeof item === "number",
-      );
-      summaries.push(
-        safeArrayKeys.has(key) &&
-          primitiveValues.length === value.length &&
-          value.length <= 3
-          ? `${key}=${primitiveValues.join(",")}`
-          : `${key}[${value.length}]`,
-      );
-      continue;
-    }
-    if (
-      safeScalarKeys.has(key) &&
-      (typeof value === "string" ||
-        typeof value === "number" ||
-        typeof value === "boolean")
-    ) {
-      const normalized = String(value).replace(/\s+/g, " ");
-      summaries.push(
-        `${key}=${normalized.length > 80 ? `${normalized.slice(0, 77)}...` : normalized}`,
-      );
-    }
-  }
-  return summaries.join("; ").slice(0, 240);
-}
-
 interface RecordOptions {
   definition?: ToolSet[string];
   profiles?: readonly ToolProfile[];
@@ -692,7 +631,9 @@ function hostRecord(
         zh: TOOL_ZH_NAMES[name] ?? name,
       }),
       iconKey: options.iconKey ?? TOOL_ICON_KEYS[name] ?? source,
-      summarizeArguments,
+      // Retain the catalog field for compatibility; card titles no longer
+      // derive any text from tool arguments.
+      summarizeArguments: () => "",
     }),
     implementation: Object.freeze(
       options.providerOwned

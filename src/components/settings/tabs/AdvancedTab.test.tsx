@@ -5,7 +5,10 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useSettingsStore } from "../../../store/settings";
 import { systemDefaults } from "../../../store/settings/system";
-import { AdvancedTab } from "./AdvancedTab";
+import {
+  AdvancedTab,
+  validateImageCompressionQualityDraft,
+} from "./AdvancedTab";
 
 const infraMocks = vi.hoisted(() => ({
   isTauri: vi.fn(() => true),
@@ -80,6 +83,68 @@ describe("AdvancedTab", () => {
       ...systemDefaults,
       permissionBrokerBypassEnabled: true,
     });
+  });
+
+  it("validates image compression quality drafts without writing invalid numbers", async () => {
+    const messages = {
+      required: "quality required",
+      invalid: "quality invalid",
+      outOfRange: "quality out of range",
+    };
+    expect(validateImageCompressionQualityDraft("", messages)).toBe(
+      "quality required",
+    );
+    expect(validateImageCompressionQualityDraft("Infinity", messages)).toBe(
+      "quality invalid",
+    );
+    expect(validateImageCompressionQualityDraft("0", messages)).toBe(
+      "quality out of range",
+    );
+    expect(validateImageCompressionQualityDraft("1.01", messages)).toBe(
+      "quality out of range",
+    );
+    expect(validateImageCompressionQualityDraft("0.85", messages)).toBe(
+      undefined,
+    );
+
+    const user = userEvent.setup();
+    const setForm = vi.fn();
+    render(<AdvancedTab form={systemDefaults} setForm={setForm} />);
+
+    const quality = screen.getByLabelText("Compression quality");
+    expect(quality).toHaveAttribute("min", "0.01");
+    expect(quality).toHaveAttribute("max", "1");
+    expect(quality).toHaveAttribute("step", "0.01");
+
+    await user.clear(quality);
+    expect(quality).toHaveAttribute("aria-invalid", "true");
+    expect(
+      screen.getByText("Enter a compression quality."),
+    ).toBeInTheDocument();
+    expect(setForm).not.toHaveBeenCalled();
+
+    await user.type(quality, "0.72");
+    expect(setForm).toHaveBeenLastCalledWith({
+      ...systemDefaults,
+      imageCompressionQuality: 0.72,
+    });
+  });
+
+  it("disables quality editing while preserving the configured value", () => {
+    render(
+      <AdvancedTab
+        form={{
+          ...systemDefaults,
+          imageCompressionEnabled: false,
+          imageCompressionQuality: 0.42,
+        }}
+        setForm={vi.fn()}
+      />,
+    );
+
+    const quality = screen.getByLabelText("Compression quality");
+    expect(quality).toBeDisabled();
+    expect(quality).toHaveValue(0.42);
   });
 
   it("locks full permissions while a task is running and explains how to unlock it", () => {

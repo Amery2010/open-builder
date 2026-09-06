@@ -126,6 +126,14 @@ export interface DesignSelectionContext {
 export type ToolExecutionContent =
   | { type: "text"; text: string }
   | { type: "image"; data: string; mimeType: string }
+  | {
+      /** Persisted reference to an image in the local attachment Blob store. */
+      type: "local_image";
+      id: string;
+      name: string;
+      mimeType: string;
+      size: number;
+    }
   | { type: "audio"; data: string; mimeType: string }
   | {
       type: "resource";

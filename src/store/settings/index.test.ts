@@ -164,6 +164,39 @@ describe("settings persistence", () => {
     expect(useSettingsStore.getState().isAIConfigured()).toBe(true);
   });
 
+  it("normalizes image compression settings on set and same-version hydration", async () => {
+    const { storage } = createMemoryStorage();
+    vi.stubGlobal("localStorage", storage);
+    const { useSettingsStore } = await import("./index");
+    const currentSystem = useSettingsStore.getState().system;
+
+    useSettingsStore.getState().setSystem({
+      ...currentSystem,
+      imageCompressionEnabled: "yes",
+      imageCompressionQuality: Number.POSITIVE_INFINITY,
+    } as never);
+
+    expect(useSettingsStore.getState().system).toMatchObject({
+      ...currentSystem,
+      imageCompressionEnabled: true,
+      imageCompressionQuality: 0.85,
+    });
+
+    storage.setItem(
+      "open-builder-settings",
+      JSON.stringify({
+        state: { system: { imageCompressionEnabled: false } },
+        version: 24,
+      }),
+    );
+    await useSettingsStore.persist.rehydrate();
+
+    expect(useSettingsStore.getState().system).toMatchObject({
+      imageCompressionEnabled: false,
+      imageCompressionQuality: 0.85,
+    });
+  });
+
   it("persists sanitized provider observations while treating verification as display state", async () => {
     const { storage } = createMemoryStorage();
     vi.stubGlobal("localStorage", storage);

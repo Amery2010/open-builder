@@ -176,6 +176,46 @@ describe("SettingsDialog", () => {
     );
   });
 
+  it("keeps invalid image compression quality drafts out of saved settings", async () => {
+    const user = userEvent.setup();
+    const onSaveSystem = vi.fn();
+    const validSettings = {
+      ...aiDefaults,
+      apiKey: "test-key",
+      apiBaseUrl: "https://api.example.com",
+    };
+    render(
+      <TooltipProvider>
+        <SettingsDialog
+          isOpen
+          onClose={vi.fn()}
+          settings={validSettings}
+          onSave={vi.fn()}
+          webSearchSettings={webSearchDefaults}
+          onSaveWebSearch={vi.fn()}
+          assetSearchSettings={assetSearchDefaults}
+          onSaveAssetSearch={vi.fn()}
+          systemSettings={systemDefaults}
+          onSaveSystem={onSaveSystem}
+        />
+      </TooltipProvider>,
+    );
+
+    await user.click(screen.getByRole("tab", { name: "Advanced" }));
+    const quality = screen.getByLabelText("Compression quality");
+    await user.clear(quality);
+
+    expect(quality).toHaveAttribute("aria-invalid", "true");
+    const error = screen.getByText("Enter a compression quality.");
+    expect(quality).toHaveAttribute(
+      "aria-describedby",
+      expect.stringContaining(error.id),
+    );
+
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(onSaveSystem).not.toHaveBeenCalled();
+  });
+
   it("keeps the shared close control above the sticky header", async () => {
     const user = userEvent.setup();
     const onClose = vi.fn();

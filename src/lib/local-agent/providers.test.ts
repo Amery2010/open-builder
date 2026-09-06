@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   isLocalAgentProvider,
+  localAgentImageCapabilities,
   localAgentSupportsNativeSearch,
   LOCAL_AGENT_PROVIDER_CATALOG,
   LOCAL_AGENT_PROVIDERS,
@@ -44,5 +45,23 @@ describe("local-agent provider catalog", () => {
     expect(localAgentSupportsNativeSearch("claude")).toBe(true);
     expect(localAgentSupportsNativeSearch("pi")).toBe(false);
     expect(localAgentSupportsNativeSearch("antigravity")).toBe(true);
+  });
+
+  it("keeps media support and its verification state provider-scoped", () => {
+    expect(localAgentImageCapabilities("codex")).toEqual({
+      imageGeneration: true,
+      imageEditing: true,
+      mediaCapabilitiesVerified: true,
+    });
+    expect(localAgentImageCapabilities("antigravity")).toEqual({
+      imageGeneration: true,
+      imageEditing: false,
+      mediaCapabilitiesVerified: false,
+    });
+    expect(localAgentImageCapabilities("claude")).toEqual({
+      imageGeneration: false,
+      imageEditing: false,
+      mediaCapabilitiesVerified: true,
+    });
   });
 });

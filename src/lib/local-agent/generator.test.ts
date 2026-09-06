@@ -19,6 +19,7 @@ import {
   type ProjectPermissionRequest,
   type ProjectPermissionSession,
 } from "../security/project-permission-broker";
+import { useSettingsStore } from "../../store/settings";
 
 const localAgentMocks = vi.hoisted(() => ({
   start: vi.fn(),
@@ -28,6 +29,20 @@ const localAgentMocks = vi.hoisted(() => ({
 
 const attachmentMocks = vi.hoisted(() => ({
   resolve: vi.fn(),
+  store: vi.fn(),
+  delete: vi.fn(),
+}));
+
+const mediaMocks = vi.hoisted(() => ({
+  generate: vi.fn(),
+}));
+
+const projectAssetMocks = vi.hoisted(() => ({
+  importGenerated: vi.fn(),
+}));
+
+const compressionMocks = vi.hoisted(() => ({
+  compress: vi.fn(),
 }));
 
 vi.mock("./tauri", () => ({
@@ -40,8 +55,32 @@ vi.mock("./tauri", () => ({
 }));
 
 vi.mock("../attachments/store", () => ({
+  deleteAttachment: attachmentMocks.delete,
   resolveAttachmentForModel: attachmentMocks.resolve,
+  storeAttachmentBlob: attachmentMocks.store,
 }));
+
+vi.mock("./media", () => ({
+  generateLocalImage: mediaMocks.generate,
+}));
+
+vi.mock("../project-assets/import", () => ({
+  importGeneratedImageAsset: projectAssetMocks.importGenerated,
+}));
+
+vi.mock("../images/compress-local-image", () => ({
+  compressLocalImage: compressionMocks.compress,
+}));
+
+async function sha256(bytes: Uint8Array): Promise<string> {
+  const digest = await globalThis.crypto.subtle.digest(
+    "SHA-256",
+    Uint8Array.from(bytes).buffer,
+  );
+  return Array.from(new Uint8Array(digest), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+}
 
 function baseConversation(overrides: Partial<Conversation> = {}): Conversation {
   return {
@@ -147,11 +186,49 @@ function completeRun(
 describe("LocalAgentGenerator", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    useSettingsStore.setState((state) => ({
+      system: {
+        ...state.system,
+        imageCompressionEnabled: true,
+        imageCompressionQuality: 0.85,
+      },
+    }));
     localAgentMocks.resolve.mockResolvedValue(undefined);
     localAgentMocks.cancel.mockResolvedValue(true);
     attachmentMocks.resolve.mockRejectedValue(
       new Error("attachment unavailable"),
     );
+    attachmentMocks.store.mockImplementation(
+      async (blob: Blob, type: "image" | "file", name: string) => ({
+        id: "stored-generated-image",
+        type,
+        name,
+        mimeType: blob.type,
+        size: blob.size,
+      }),
+    );
+    compressionMocks.compress.mockImplementation(async (file: File) => file);
+    mediaMocks.generate.mockResolvedValue({
+      id: "provider-image",
+      mimeType: "image/png",
+      data: "aW1hZ2U=",
+      size: 5,
+      sha256: "a".repeat(64),
+      fileName: "generated.png",
+    });
+    projectAssetMocks.importGenerated.mockResolvedValue({
+      asset: {
+        path: "public/generated/generated.png",
+        blobRef: `sha256:${"a".repeat(64)}`,
+        mimeType: "image/png",
+        size: 5,
+        digest: "a".repeat(64),
+        modulePath: "src/generated-assets/generated-a1b2c3d4.js",
+        publicPath: "/generated/generated.png",
+      },
+      modulePath: "src/generated-assets/generated-a1b2c3d4.js",
+      publicPath: "/generated/generated.png",
+    });
   });
 
   it("normalizes local CLI deltas and saves provider session metadata", async () => {
@@ -175,7 +252,7 @@ describe("LocalAgentGenerator", () => {
       provider: "codex",
       prompt: "Build it",
       mode: "chat",
-      tools: [],
+      tools: [expect.objectContaining({ name: "generate_image" })],
       nativeSearch: false,
       maxToolCalls: 30,
     });
@@ -629,7 +706,7 @@ describe("LocalAgentGenerator", () => {
 
     await instance.generate("Attempt a hidden tool");
 
-    expect(request?.tools).toEqual([]);
+    expect(request?.tools.map((tool) => tool.name)).toEqual(["generate_image"]);
     expect(customToolHandler).not.toHaveBeenCalled();
     expect(localAgentMocks.resolve).toHaveBeenCalledWith(
       "run-hidden-tool",
@@ -1251,6 +1328,338 @@ describe("LocalAgentGenerator", () => {
     );
   });
 
+  it("generates a local image, persists only its Blob reference, and exposes project import", async () => {
+    const compressedBytes = new TextEncoder().encode("tiny");
+    compressionMocks.compress.mockImplementation(
+      async (file: File) =>
+        new File([compressedBytes], file.name, {
+          type: file.type,
+          lastModified: file.lastModified,
+        }),
+    );
+    let request: LocalAgentStartRequest | undefined;
+    localAgentMocks.start.mockImplementation(
+      async (
+        currentRequest: LocalAgentStartRequest,
+        onEvent: (event: LocalAgentEvent) => void,
+      ) => {
+        request = currentRequest;
+        queueMicrotask(() => {
+          onEvent({
+            type: "toolRequest",
+            runId: "run-image",
+            callId: "generate-image",
+            name: "generate_image",
+            arguments: { prompt: "A small red fox" },
+          });
+          onEvent({ type: "done", aborted: false });
+        });
+        return "run-image";
+      },
+    );
+    const { instance } = generator(
+      baseConversation({
+        files: { "src/App.tsx": "export default function App() {}" },
+        isProjectInitialized: true,
+      }),
+    );
+
+    await instance.generate("Create and use an illustration");
+
+    expect(request?.tools.map((tool) => tool.name)).toEqual(
+      expect.arrayContaining(["generate_image", "import_generated_image"]),
+    );
+    expect(mediaMocks.generate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId: "run-image:generate-image",
+        provider: "codex",
+        prompt: "A small red fox",
+        references: [],
+      }),
+      expect.any(AbortSignal),
+    );
+    expect(compressionMocks.compress).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: "generated.png",
+        type: "image/png",
+        size: 5,
+        lastModified: 0,
+      }),
+      { enabled: true, quality: 0.85 },
+      expect.any(AbortSignal),
+    );
+    expect(attachmentMocks.store).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "image/png", size: 4 }),
+      "image",
+      "generated.png",
+      { createPreviewUrl: false },
+    );
+    expect(instance.getMessages()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: "tool",
+          toolOutput: expect.objectContaining({
+            content: [
+              expect.objectContaining({
+                type: "local_image",
+                id: "stored-generated-image",
+              }),
+            ],
+          }),
+        }),
+      ]),
+    );
+    expect(localAgentMocks.resolve).toHaveBeenCalledWith(
+      "run-image",
+      "generate-image",
+      expect.objectContaining({
+        structuredContent: expect.objectContaining({
+          name: "generated.png",
+          mimeType: "image/png",
+          size: 4,
+          sha256: await sha256(compressedBytes),
+          providerSha256: "a".repeat(64),
+        }),
+        content: [
+          expect.objectContaining({
+            type: "text",
+            text: expect.stringContaining("stored-generated-image"),
+          }),
+        ],
+      }),
+    );
+  });
+
+  it("passes disabled compression settings and hashes the stored generated bytes", async () => {
+    useSettingsStore.setState((state) => ({
+      system: {
+        ...state.system,
+        imageCompressionEnabled: false,
+        imageCompressionQuality: 0.63,
+      },
+    }));
+    localAgentMocks.start.mockImplementation(
+      async (
+        _request: LocalAgentStartRequest,
+        onEvent: (event: LocalAgentEvent) => void,
+      ) => {
+        queueMicrotask(() => {
+          onEvent({
+            type: "toolRequest",
+            runId: "run-image-disabled",
+            callId: "generate-image-disabled",
+            name: "generate_image",
+            arguments: { prompt: "A small red fox" },
+          });
+          onEvent({ type: "done", aborted: false });
+        });
+        return "run-image-disabled";
+      },
+    );
+
+    await generator(baseConversation()).instance.generate("Create an image");
+
+    expect(compressionMocks.compress).toHaveBeenCalledWith(
+      expect.objectContaining({ size: 5 }),
+      { enabled: false, quality: 0.63 },
+      expect.any(AbortSignal),
+    );
+    expect(localAgentMocks.resolve).toHaveBeenCalledWith(
+      "run-image-disabled",
+      "generate-image-disabled",
+      expect.objectContaining({
+        structuredContent: expect.objectContaining({
+          size: 5,
+          sha256: await sha256(new TextEncoder().encode("image")),
+          providerSha256: "a".repeat(64),
+        }),
+      }),
+    );
+  });
+
+  it("rejects Antigravity reference-image editing before starting a media task", async () => {
+    const reference = {
+      id: "reference-image",
+      type: "image" as const,
+      name: "reference.png",
+      mimeType: "image/png",
+      size: 5,
+      content: "data:image/png;base64,aW1hZ2U=",
+    };
+    localAgentMocks.start.mockImplementation(
+      async (
+        _request: LocalAgentStartRequest,
+        onEvent: (event: LocalAgentEvent) => void,
+      ) => {
+        queueMicrotask(() => {
+          onEvent({
+            type: "toolRequest",
+            runId: "run-antigravity-image",
+            callId: "edit-image",
+            name: "generate_image",
+            arguments: {
+              prompt: "Make it darker",
+              reference_ids: [reference.id],
+            },
+          });
+          onEvent({ type: "done", aborted: false });
+        });
+        return "run-antigravity-image";
+      },
+    );
+
+    await generator(baseConversation(), vi.fn(), vi.fn(), {
+      provider: "antigravity",
+    }).instance.generate("Edit the image", [reference]);
+
+    expect(mediaMocks.generate).not.toHaveBeenCalled();
+    expect(localAgentMocks.resolve).toHaveBeenCalledWith(
+      "run-antigravity-image",
+      "edit-image",
+      expect.objectContaining({
+        isError: true,
+        text: expect.stringContaining(
+          "does not support reference-image editing",
+        ),
+      }),
+    );
+  });
+
+  it("imports only a generated image from the same conversation into the project", async () => {
+    let emit: ((event: LocalAgentEvent) => void) | undefined;
+    localAgentMocks.start.mockImplementation(
+      async (
+        _request: LocalAgentStartRequest,
+        onEvent: (event: LocalAgentEvent) => void,
+      ) => {
+        emit = onEvent;
+        return "run-image-import";
+      },
+    );
+    const conversation = baseConversation({
+      files: { "src/App.tsx": "export default function App() {}" },
+      isProjectInitialized: true,
+    });
+    projectAssetMocks.importGenerated.mockImplementation(async () => {
+      conversation.files = {
+        ...conversation.files,
+        "src/generated-assets/generated-a1b2c3d4.js":
+          'export default "/generated/generated.png";\n',
+      };
+      return {
+        asset: {
+          path: "public/generated/generated.png",
+          blobRef: `sha256:${"a".repeat(64)}`,
+          mimeType: "image/png",
+          size: 5,
+          digest: "a".repeat(64),
+          modulePath: "src/generated-assets/generated-a1b2c3d4.js",
+          publicPath: "/generated/generated.png",
+        },
+        modulePath: "src/generated-assets/generated-a1b2c3d4.js",
+        publicPath: "/generated/generated.png",
+      };
+    });
+    const onFileChange = vi.fn();
+    const { instance } = generator(conversation, vi.fn(), vi.fn(), {
+      onFileChange,
+    });
+    const pending = instance.generate("Generate and import it");
+    await vi.waitFor(() => expect(emit).toBeTypeOf("function"));
+    emit!({
+      type: "toolRequest",
+      runId: "run-image-import",
+      callId: "generate-image",
+      name: "generate_image",
+      arguments: { prompt: "A small red fox" },
+    });
+    await vi.waitFor(() =>
+      expect(localAgentMocks.resolve).toHaveBeenCalledWith(
+        "run-image-import",
+        "generate-image",
+        expect.anything(),
+      ),
+    );
+    emit!({
+      type: "toolRequest",
+      runId: "run-image-import",
+      callId: "import-image",
+      name: "import_generated_image",
+      arguments: { image_id: "stored-generated-image" },
+    });
+    await vi.waitFor(() =>
+      expect(projectAssetMocks.importGenerated).toHaveBeenCalledWith(
+        expect.objectContaining({
+          conversationId: conversation.id,
+          imageId: "stored-generated-image",
+        }),
+      ),
+    );
+    emit!({ type: "done", aborted: false });
+    await pending;
+
+    expect(compressionMocks.compress).toHaveBeenCalledOnce();
+    expect(onFileChange).toHaveBeenCalledWith(
+      expect.objectContaining({
+        "src/generated-assets/generated-a1b2c3d4.js": expect.any(String),
+      }),
+      [
+        {
+          path: "src/generated-assets/generated-a1b2c3d4.js",
+          action: "created",
+        },
+      ],
+    );
+  });
+
+  it("keeps project import available after switching to a provider without image generation", async () => {
+    let request: LocalAgentStartRequest | undefined;
+    localAgentMocks.start.mockImplementation(
+      async (
+        currentRequest: LocalAgentStartRequest,
+        onEvent: (event: LocalAgentEvent) => void,
+      ) => {
+        request = currentRequest;
+        queueMicrotask(() => completeRun(onEvent, "run-provider-switch"));
+        return "run-provider-switch";
+      },
+    );
+    const conversation = baseConversation({
+      files: { "src/App.tsx": "export default function App() {}" },
+      isProjectInitialized: true,
+      messages: [
+        {
+          role: "tool",
+          tool_call_id: "old-generate-image",
+          content: '{"kind":"local_generated_image_v1"}',
+          toolOutput: {
+            text: '{"kind":"local_generated_image_v1"}',
+            content: [
+              {
+                type: "local_image",
+                id: "existing-generated-image",
+                name: "existing.png",
+                mimeType: "image/png",
+                size: 5,
+              },
+            ],
+          },
+        },
+      ],
+    });
+
+    await generator(conversation, vi.fn(), vi.fn(), {
+      provider: "claude",
+    }).instance.generate("Import the existing image");
+
+    expect(request?.tools.map((tool) => tool.name)).toContain(
+      "import_generated_image",
+    );
+    expect(request?.tools.map((tool) => tool.name)).not.toContain(
+      "generate_image",
+    );
+  });
+
   it("preserves PDF attachments as resource content for transport adapters", async () => {
     const attachment = {
       id: "attachment-pdf",
@@ -1436,6 +1845,7 @@ describe("LocalAgentGenerator", () => {
       "exit_plan_mode",
     ]);
     expect(starts[1].tools.map((tool) => tool.name)).toEqual([
+      "generate_image",
       "list_files",
       "write_file",
     ]);
@@ -1668,6 +2078,47 @@ describe("LocalAgentGenerator", () => {
     await expect(pending).resolves.toMatchObject({
       maxIterationsReached: true,
     });
+  });
+
+  it("counts duplicate native tool updates only once", async () => {
+    let emit: ((event: LocalAgentEvent) => void) | undefined;
+    localAgentMocks.start.mockImplementation(
+      async (
+        _request: LocalAgentStartRequest,
+        onEvent: (event: LocalAgentEvent) => void,
+      ) => {
+        emit = onEvent;
+        return "run-native-duplicate";
+      },
+    );
+    const { instance } = generator(baseConversation(), vi.fn(), vi.fn(), {
+      maxIterations: 1,
+      nativeSearch: true,
+    });
+    const pending = instance.generate("Search once");
+    await vi.waitFor(() => expect(emit).toBeTypeOf("function"));
+
+    const started: LocalAgentEvent = {
+      type: "nativeTool",
+      callId: "search-1",
+      name: "search_web",
+      phase: "started",
+      arguments: { query: "Open Builder" },
+    };
+    const completed: LocalAgentEvent = {
+      ...started,
+      phase: "completed",
+      result: { results: [{ url: "https://example.test" }] },
+    };
+    emit!(started);
+    emit!(started);
+    emit!(completed);
+    emit!(completed);
+    emit!({ type: "textDelta", delta: "Found it" });
+    emit!({ type: "done", aborted: false });
+
+    await expect(pending).resolves.toMatchObject({ text: "Found it" });
+    expect(localAgentMocks.cancel).not.toHaveBeenCalled();
   });
 
   it("cancels when cumulative renderer output exceeds its limit", async () => {

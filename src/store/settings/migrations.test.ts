@@ -74,6 +74,8 @@ describe("migrateSettings", () => {
         developerSkillScriptsEnabled: boolean;
         permissionBrokerBypassEnabled: boolean;
         customSystemPrompt: string;
+        imageCompressionEnabled: boolean;
+        imageCompressionQuality: number;
       };
     };
 
@@ -83,10 +85,12 @@ describe("migrateSettings", () => {
     expect(migrated.system.developerSkillScriptsEnabled).toBe(false);
     expect(migrated.system.permissionBrokerBypassEnabled).toBe(false);
     expect(migrated.system.customSystemPrompt).toBe("");
+    expect(migrated.system.imageCompressionEnabled).toBe(true);
+    expect(migrated.system.imageCompressionQuality).toBe(0.85);
   });
 
   it("adds custom prompts without overwriting an existing value", () => {
-    expect(SETTINGS_VERSION).toBe(23);
+    expect(SETTINGS_VERSION).toBe(24);
     const missing = migrateSettings({ system: {} }, 17) as Record<string, any>;
     const existing = migrateSettings(
       { system: { customSystemPrompt: "Keep changes surgical." } },
@@ -111,6 +115,54 @@ describe("migrateSettings", () => {
     expect(missing.system.permissionBrokerBypassEnabled).toBe(false);
     expect(enabled.system.permissionBrokerBypassEnabled).toBe(true);
     expect(disabled.system.permissionBrokerBypassEnabled).toBe(false);
+  });
+
+  it("adds and normalizes image compression settings", () => {
+    const missing = migrateSettings({ system: {} }, 23) as Record<string, any>;
+    const existing = migrateSettings(
+      {
+        system: {
+          imageCompressionEnabled: false,
+          imageCompressionQuality: 0.42,
+        },
+      },
+      23,
+    ) as Record<string, any>;
+    const invalid = migrateSettings(
+      {
+        system: {
+          imageCompressionEnabled: "yes",
+          imageCompressionQuality: Number.NaN,
+        },
+      },
+      23,
+    ) as Record<string, any>;
+    const invalidCurrent = migrateSettings(
+      {
+        system: {
+          imageCompressionEnabled: null,
+          imageCompressionQuality: 1.01,
+        },
+      },
+      24,
+    ) as Record<string, any>;
+
+    expect(missing.system).toMatchObject({
+      imageCompressionEnabled: true,
+      imageCompressionQuality: 0.85,
+    });
+    expect(existing.system).toMatchObject({
+      imageCompressionEnabled: false,
+      imageCompressionQuality: 0.42,
+    });
+    expect(invalid.system).toMatchObject({
+      imageCompressionEnabled: true,
+      imageCompressionQuality: 0.85,
+    });
+    expect(invalidCurrent.system).toMatchObject({
+      imageCompressionEnabled: true,
+      imageCompressionQuality: 0.85,
+    });
   });
 
   it("adds the Exa key without changing existing search engine choices", () => {

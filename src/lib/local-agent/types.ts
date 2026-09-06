@@ -60,8 +60,42 @@ export interface LocalAgentProbe {
     reasoning: boolean;
     tools: boolean;
     nativeSearch: boolean;
+    /** Optional on older desktop builds and persisted observations. */
+    imageGeneration?: boolean;
+    /** Optional on older desktop builds and persisted observations. */
+    imageEditing?: boolean;
+    /** True only when the backend completed a provider capability probe. */
+    mediaCapabilitiesVerified?: boolean;
   };
   message?: string;
+}
+
+export interface LocalImageReferenceInput {
+  id: string;
+  name: string;
+  mimeType: "image/png" | "image/jpeg" | "image/webp";
+  /** Raw base64 without a data URL prefix. */
+  data: string;
+}
+
+export interface LocalImageGenerationRequest {
+  taskId: string;
+  provider: LocalAgentProvider;
+  model?: string;
+  effort?: string;
+  prompt: string;
+  references: LocalImageReferenceInput[];
+}
+
+export interface LocalGeneratedImage {
+  id: string;
+  mimeType: "image/png" | "image/jpeg" | "image/webp";
+  /** Raw base64 without a data URL prefix. */
+  data: string;
+  size: number;
+  sha256: string;
+  revisedPrompt?: string;
+  fileName?: string;
 }
 
 export interface LocalToolSpec {

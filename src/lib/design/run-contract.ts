@@ -135,39 +135,76 @@ export const designBlueprintScopeSchema = z
   })
   .strict();
 
+const designContractShape = {
+  surface_mode: z.enum(DESIGN_SURFACE_MODES),
+  change_mode: z.enum(DESIGN_CHANGE_MODES),
+  target: z
+    .string()
+    .trim()
+    .min(1)
+    .max(1_000)
+    .describe("The specific interface, flow, or project area to change."),
+  audience: z.string().trim().min(1).max(1_000),
+  primary_goal: z.string().trim().min(1).max(1_000),
+  concept: z.string().trim().min(1).max(2_000),
+  system_id: z.string().trim().min(1).max(100).nullable(),
+  translation: z
+    .object({
+      foundations: z.string().trim().min(1).max(2_000),
+      composition: z.string().trim().min(1).max(2_000),
+      components: z.string().trim().min(1).max(2_000),
+    })
+    .strict(),
+  preserve: z
+    .array(z.string().trim().min(1).max(1_000))
+    .min(1)
+    .max(30)
+    .describe("Existing behavior and contracts that must remain unchanged."),
+  acceptance: z.array(z.string().trim().min(1).max(1_000)).min(1).max(30),
+};
+
+/** Canonical schema shown to models and emitted by all successful parses. */
+export const designContractModelSchema = z
+  .object({
+    ...designContractShape,
+    blueprint: designBlueprintScopeSchema
+      .optional()
+      .describe("Optional run-bound Design blueprint scope."),
+  })
+  .strict();
+
+/**
+ * Host compatibility schema. Older clients may still send
+ * `blueprint_scope`, but the accepted value is always normalized to the
+ * canonical `blueprint` field.
+ */
 export const designContractSchema = z
   .object({
-    surface_mode: z.enum(DESIGN_SURFACE_MODES),
-    change_mode: z.enum(DESIGN_CHANGE_MODES),
-    target: z.string().trim().min(1).max(1_000),
-    audience: z.string().trim().min(1).max(1_000),
-    primary_goal: z.string().trim().min(1).max(1_000),
-    concept: z.string().trim().min(1).max(2_000),
-    system_id: z.string().trim().min(1).max(100).nullable(),
-    translation: z
-      .object({
-        foundations: z.string().trim().min(1).max(2_000),
-        composition: z.string().trim().min(1).max(2_000),
-        components: z.string().trim().min(1).max(2_000),
-      })
-      .strict(),
-    preserve: z.array(z.string().trim().min(1).max(1_000)).min(1).max(30),
-    acceptance: z.array(z.string().trim().min(1).max(1_000)).min(1).max(30),
-    // `blueprint` is the canonical name. `blueprint_scope` is retained as a
-    // spelling-compatible input for callers that name the contract field
-    // after the scope itself; both forms are validated identically.
+    ...designContractShape,
     blueprint: designBlueprintScopeSchema.optional(),
     blueprint_scope: designBlueprintScopeSchema.optional(),
   })
   .strict()
-  .superRefine((value, context) => {
-    if (value.blueprint && value.blueprint_scope) {
+  .transform((value, context) => {
+    const { blueprint_scope: legacyBlueprint, ...canonical } = value;
+    if (
+      canonical.blueprint &&
+      legacyBlueprint &&
+      JSON.stringify(canonical.blueprint) !== JSON.stringify(legacyBlueprint)
+    ) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "provide either blueprint or blueprint_scope, not both",
-        path: ["blueprint"],
+        message: "blueprint and blueprint_scope must describe the same scope",
+        path: ["blueprint_scope"],
       });
+      return z.NEVER;
     }
+    return {
+      ...canonical,
+      ...((canonical.blueprint ?? legacyBlueprint)
+        ? { blueprint: canonical.blueprint ?? legacyBlueprint }
+        : {}),
+    };
   });
 
 export type DesignSurfaceMode = (typeof DESIGN_SURFACE_MODES)[number];
@@ -404,7 +441,7 @@ function normalizeBlueprintBindings(
 function blueprintScopeForContract(
   value: DesignContract,
 ): DesignBlueprintScope | null {
-  return value.blueprint ?? value.blueprint_scope ?? null;
+  return value.blueprint ?? null;
 }
 
 function unknownBlueprintValues(
@@ -583,16 +620,6 @@ function cloneContract(contract: DesignContract): DesignContract {
       shared_scope: {
         file_paths: [...contract.blueprint.shared_scope.file_paths],
         ui_ids: [...contract.blueprint.shared_scope.ui_ids],
-      },
-    };
-  }
-  if (contract.blueprint_scope) {
-    cloned.blueprint_scope = {
-      ...contract.blueprint_scope,
-      target_page_ids: [...contract.blueprint_scope.target_page_ids],
-      shared_scope: {
-        file_paths: [...contract.blueprint_scope.shared_scope.file_paths],
-        ui_ids: [...contract.blueprint_scope.shared_scope.ui_ids],
       },
     };
   }

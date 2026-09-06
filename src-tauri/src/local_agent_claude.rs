@@ -80,6 +80,9 @@ pub(crate) const IDENTITY: AdapterIdentity = AdapterIdentity {
         reasoning: true,
         tools: true,
         native_search: true,
+        image_generation: false,
+        image_editing: false,
+        media_capabilities_verified: false,
     },
     // Version, isolation, and auth are separately bounded probe stages.
     probe_timeout: Duration::from_secs(30),

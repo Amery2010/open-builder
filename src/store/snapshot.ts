@@ -2,11 +2,12 @@ import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
 import localforage from "localforage";
 import { createPatch } from "diff";
-import type { ProjectFiles, ProjectSnapshot } from "../types";
+import type { ProjectAssets, ProjectFiles, ProjectSnapshot } from "../types";
 import { createLocalforageStorage } from "./utils/localforage-storage";
 import { runMigrations, type MigrationStep } from "./utils/migrate";
 import {
   rebuildSnapshotChainWithoutSnapshot,
+  replaySnapshotAssets,
   replaySnapshots,
 } from "./snapshot-replay";
 import {
@@ -16,7 +17,7 @@ import {
 
 export { replaySnapshots } from "./snapshot-replay";
 
-const SNAPSHOT_STORE_VERSION = 2;
+const SNAPSHOT_STORE_VERSION = 3;
 /** How many patch snapshots to write between checkpoints. The first snapshot
  *  in a chain is always a checkpoint so reconstruction is anchored even for
  *  short chains. */
@@ -38,6 +39,7 @@ const snapshotMigrations: MigrationStep[] = [
     }
     return state;
   },
+  (state) => state,
 ];
 
 const snapshotStorage = createLocalforageStorage(
@@ -52,6 +54,7 @@ interface SnapshotState {
     conversationId: string,
     messageId: string,
     currentFiles: ProjectFiles,
+    currentAssets?: ProjectAssets,
   ) => void;
 
   getSnapshots: (conversationId: string) => ProjectSnapshot[];
@@ -65,6 +68,11 @@ interface SnapshotState {
     conversationId: string,
     snapshotId: string,
   ) => ProjectFiles;
+
+  reconstructAssets: (
+    conversationId: string,
+    snapshotId: string,
+  ) => ProjectAssets;
 
   deleteSnapshotsForConversation: (conversationId: string) => void;
 
@@ -82,7 +90,54 @@ interface SnapshotState {
   updateLatestSnapshot: (
     conversationId: string,
     currentFiles: ProjectFiles,
+    currentAssets?: ProjectAssets,
   ) => void;
+}
+
+function sameProjectAssets(left: ProjectAssets, right: ProjectAssets): boolean {
+  const leftEntries = Object.entries(left);
+  const rightEntries = Object.entries(right);
+  return (
+    leftEntries.length === rightEntries.length &&
+    leftEntries.every(([path, asset]) => {
+      const other = right[path];
+      return (
+        other !== undefined &&
+        asset.blobRef === other.blobRef &&
+        asset.modulePath === other.modulePath &&
+        asset.publicPath === other.publicPath
+      );
+    })
+  );
+}
+
+function releaseSnapshotAssetCandidates(
+  snapshots: readonly ProjectSnapshot[],
+): void {
+  const candidateRefs = new Set(
+    snapshots.flatMap((snapshot) =>
+      Object.values(snapshot.assets ?? {}).map((asset) => asset.blobRef),
+    ),
+  );
+  if (candidateRefs.size === 0) return;
+  void Promise.all([
+    import("./conversation"),
+    import("../lib/project-assets/core"),
+  ])
+    .then(
+      ([{ useConversationStore }, { releaseUnreferencedProjectAssetBlobs }]) =>
+        releaseUnreferencedProjectAssetBlobs(candidateRefs, [
+          ...Object.values(useConversationStore.getState().conversations).map(
+            (conversation) => conversation.assets,
+          ),
+          ...Object.values(useSnapshotStore.getState().snapshots)
+            .flat()
+            .map((snapshot) => snapshot.assets),
+        ]),
+    )
+    .catch((error) => {
+      console.warn("Failed to release snapshot project assets:", error);
+    });
 }
 
 /** Count patch snapshots that have accumulated since the most recent checkpoint. */
@@ -101,7 +156,12 @@ export const useSnapshotStore = create<SnapshotState>()(
       snapshots: {},
       _hasHydrated: false,
 
-      createSnapshot: (conversationId, messageId, currentFiles) => {
+      createSnapshot: (
+        conversationId,
+        messageId,
+        currentFiles,
+        currentAssets = {},
+      ) => {
         const state = get();
         const chain = state.snapshots[conversationId] ?? [];
 
@@ -113,6 +173,7 @@ export const useSnapshotStore = create<SnapshotState>()(
           chain.length > 0
             ? replaySnapshots(chain, chain[chain.length - 1].id)
             : {};
+        const prevAssets = chain.at(-1)?.assets ?? {};
 
         const patches: Record<string, string> = {};
         const addedFiles: Record<string, string> = {};
@@ -138,7 +199,8 @@ export const useSnapshotStore = create<SnapshotState>()(
         if (
           Object.keys(patches).length === 0 &&
           Object.keys(addedFiles).length === 0 &&
-          deletedFiles.length === 0
+          deletedFiles.length === 0 &&
+          sameProjectAssets(prevAssets, currentAssets)
         ) {
           return;
         }
@@ -161,6 +223,7 @@ export const useSnapshotStore = create<SnapshotState>()(
           deletedFiles,
           createdAt: Date.now(),
           kind: asCheckpoint ? "checkpoint" : "patch",
+          assets: { ...currentAssets },
         };
         const snapshot: ProjectSnapshot = asCheckpoint
           ? { ...base, fullFiles: { ...currentFiles } }
@@ -173,7 +236,10 @@ export const useSnapshotStore = create<SnapshotState>()(
         set((s) => ({
           snapshots: {
             ...s.snapshots,
-            [conversationId]: [...(s.snapshots[conversationId] ?? []), snapshot],
+            [conversationId]: [
+              ...(s.snapshots[conversationId] ?? []),
+              snapshot,
+            ],
           },
         }));
       },
@@ -193,12 +259,18 @@ export const useSnapshotStore = create<SnapshotState>()(
         return replaySnapshots(chain, snapshotId);
       },
 
-      updateLatestSnapshot: (conversationId, currentFiles) => {
+      reconstructAssets: (conversationId, snapshotId) => {
+        const chain = get().snapshots[conversationId] ?? [];
+        return replaySnapshotAssets(chain, snapshotId);
+      },
+
+      updateLatestSnapshot: (conversationId, currentFiles, currentAssets) => {
         const state = get();
         const chain = state.snapshots[conversationId] ?? [];
         if (chain.length === 0) return;
 
         const latest = chain[chain.length - 1];
+        const nextAssets = currentAssets ?? latest.assets ?? {};
 
         // Reconstruct file state before the latest snapshot
         const prevFiles: ProjectFiles =
@@ -228,6 +300,7 @@ export const useSnapshotStore = create<SnapshotState>()(
           patches,
           addedFiles,
           deletedFiles,
+          assets: { ...nextAssets },
           // Keep checkpoint metadata in sync with the new file state so a
           // future replay anchored at this snapshot stays correct.
           ...(latest.kind === "checkpoint"
@@ -248,10 +321,12 @@ export const useSnapshotStore = create<SnapshotState>()(
       },
 
       deleteSnapshotsForConversation: (conversationId) => {
+        const removed = get().snapshots[conversationId] ?? [];
         set((s) => {
           const { [conversationId]: _, ...rest } = s.snapshots;
           return { snapshots: rest };
         });
+        releaseSnapshotAssetCandidates(removed);
       },
 
       renameSnapshot: (conversationId, snapshotId, label) => {
@@ -271,6 +346,9 @@ export const useSnapshotStore = create<SnapshotState>()(
       },
 
       deleteSnapshot: (conversationId, snapshotId) => {
+        const removed = (get().snapshots[conversationId] ?? []).filter(
+          (snapshot) => snapshot.id === snapshotId,
+        );
         set((s) => {
           const chain = s.snapshots[conversationId] ?? [];
           return {
@@ -284,9 +362,11 @@ export const useSnapshotStore = create<SnapshotState>()(
             },
           };
         });
+        releaseSnapshotAssetCandidates(removed);
       },
 
       pruneSnapshots: (maxPerConversation) => {
+        const before = Object.values(get().snapshots).flat();
         let removedCount = 0;
         set((s) => {
           const result = pruneSnapshotRecord(
@@ -297,6 +377,14 @@ export const useSnapshotStore = create<SnapshotState>()(
           removedCount = result.removedCount;
           return { snapshots: result.snapshots };
         });
+        const retainedIds = new Set(
+          Object.values(get().snapshots)
+            .flat()
+            .map((snapshot) => snapshot.id),
+        );
+        releaseSnapshotAssetCandidates(
+          before.filter((snapshot) => !retainedIds.has(snapshot.id)),
+        );
         return removedCount;
       },
     }),

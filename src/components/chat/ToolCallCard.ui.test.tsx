@@ -2,17 +2,19 @@
 
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ScrollText } from "lucide-react";
 import { useSettingsStore } from "../../store/settings";
 import { TOOL_METADATA } from "../../lib/ai/tool-metadata";
 import { ToolCallCard } from "./ToolCallCard";
+import * as attachmentStore from "../../lib/attachments/store";
 
 const originalSystem = useSettingsStore.getState().system;
 
 describe("ToolCallCard UI", () => {
   afterEach(() => {
     useSettingsStore.getState().setSystem(originalSystem);
+    vi.restoreAllMocks();
   });
 
   it("adds a localized accessible status without changing result payloads", () => {
@@ -34,6 +36,22 @@ describe("ToolCallCard UI", () => {
     expect(
       screen.getByRole("button", { name: /搜索图片.*失败/ }),
     ).toBeInTheDocument();
+  });
+
+  it("keeps compact file context badges separate from the tool title", () => {
+    render(
+      <ToolCallCard
+        toolName="patch_file"
+        title="Patch File"
+        path="src/components/App.tsx"
+        result="OK"
+        toolCallId="patch-file"
+      />,
+    );
+
+    expect(screen.getByText("Patch File")).toBeInTheDocument();
+    expect(screen.getByText("App.tsx")).toBeInTheDocument();
+    expect(screen.queryByText(/path=/)).not.toBeInTheDocument();
   });
 
   it("localizes MCP result chrome while preserving third-party content", async () => {
@@ -79,6 +97,48 @@ describe("ToolCallCard UI", () => {
     expect(
       screen.getByRole("img", { name: "MCP 工具结果" }),
     ).toBeInTheDocument();
+  });
+
+  it("loads persisted generated images without embedding bytes in history", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(attachmentStore, "getAttachmentBlob").mockResolvedValue(
+      new Blob(["image"], { type: "image/png" }),
+    );
+    vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:generated-image");
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
+
+    render(
+      <ToolCallCard
+        toolName="generate_image"
+        title="Generate image"
+        path=""
+        result="Generated image: result.png"
+        toolCallId="generate-image"
+        toolOutput={{
+          text: "Generated image: result.png",
+          content: [
+            {
+              type: "local_image",
+              id: "generated-image",
+              name: "result.png",
+              mimeType: "image/png",
+              size: 5,
+            },
+          ],
+        }}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: /Generate image.*Completed/ }),
+    );
+    expect(
+      await screen.findByRole("img", { name: "result.png" }),
+    ).toHaveAttribute("src", "blob:generated-image");
+    expect(screen.getByRole("link", { name: "Download" })).toHaveAttribute(
+      "download",
+      "result.png",
+    );
   });
 
   it("keeps successful Skill loads expandable without exposing instructions", async () => {

@@ -351,15 +351,14 @@ function bindReviewContractToCurrentBlueprint(
 ): DesignContract | null {
   const result = readProjectDesign(files);
   if (result.status !== "ready") {
-    return contract.blueprint || contract.blueprint_scope ? null : contract;
+    return contract.blueprint ? null : contract;
   }
-  const { blueprint_scope: _legacyScope, ...base } = contract;
   const knownPageIds = new Set(result.design.pages.map((page) => page.id));
   const targetPageIds = (affectedPageIds ?? []).filter((pageId) =>
     knownPageIds.has(pageId),
   );
   return {
-    ...base,
+    ...contract,
     blueprint: {
       revision: result.design.revision,
       target_page_ids:
@@ -1509,7 +1508,7 @@ export function useGenerator({
               })
               .catch(() => undefined);
           }
-          return JSON.stringify({ accepted: true, contract });
+          return JSON.stringify({ accepted: true });
         },
         getDesignHealthContext: () => {
           if (activeToolProfileRef.current !== "design") return undefined;
@@ -2650,7 +2649,7 @@ export function useGenerator({
           options.reusableDesignContract,
         );
         lastAcceptedDesignContractRef.current =
-          options.reusableDesignContract ?? null;
+          designContractControllerRef.current.getContract();
         const resolvedAttachments = attachments?.length
           ? await resolveAttachmentsForModel(attachments)
           : [];

@@ -13,6 +13,8 @@ mod local_agent_claude;
 #[cfg(desktop)]
 mod local_agent_codex;
 #[cfg(desktop)]
+mod local_agent_media;
+#[cfg(desktop)]
 mod local_agent_models;
 #[cfg(desktop)]
 mod local_agent_pi;
@@ -131,6 +133,8 @@ pub fn run() {
             local_agent::local_agent_resolve_tool,
             local_agent::local_agent_cancel,
             local_agent::local_agent_cancel_all,
+            local_agent_media::local_agent_generate_image,
+            local_agent_media::local_agent_cancel_image,
         ]);
 
     #[cfg(mobile)]

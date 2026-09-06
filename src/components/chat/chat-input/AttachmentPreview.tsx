@@ -10,11 +10,13 @@ function getFileExt(name: string): string {
 interface AttachmentPreviewProps {
   attachments: Attachment[];
   onRemove: (index: number) => void;
+  disabled?: boolean;
 }
 
 export function AttachmentPreview({
   attachments,
   onRemove,
+  disabled = false,
 }: AttachmentPreviewProps) {
   if (attachments.length === 0) return null;
   return (
@@ -56,8 +58,9 @@ export function AttachmentPreview({
           <button
             type="button"
             onClick={() => onRemove(i)}
+            disabled={disabled}
             aria-label={`Remove ${att.name}`}
-            className="absolute top-0.5 right-0.5 bg-black/60 text-white rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
+            className="absolute top-0.5 right-0.5 bg-black/60 text-white rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition-opacity disabled:pointer-events-none"
           >
             <X size={12} />
           </button>

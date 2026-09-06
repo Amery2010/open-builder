@@ -15,16 +15,16 @@ import {
   RefreshCw,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import JSZip from "jszip";
 import { saveAs } from "file-saver";
 import { useT } from "../../i18n";
-import type { PreviewView, ProjectFiles } from "@/types";
+import type { PreviewView, ProjectAssets, ProjectFiles } from "@/types";
 import type { ReactNode } from "react";
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { buildProjectZip } from "@/lib/project-assets/archive";
 
 export type ViewMode = "preview" | "code";
 export type DeviceSize = PreviewView;
@@ -47,6 +47,7 @@ interface ViewToolbarProps {
   deviceSize: DeviceSize;
   onDeviceSizeChange: (size: DeviceSize) => void;
   files: ProjectFiles;
+  assets?: ProjectAssets;
   previewEnabled?: boolean;
   previewScale?: number;
   onPreviewZoomIn?: () => void;
@@ -72,13 +73,11 @@ interface ViewToolbarProps {
   };
 }
 
-async function downloadAsZip(files: ProjectFiles) {
-  const zip = new JSZip();
-  for (const [path, content] of Object.entries(files)) {
-    zip.file(path, content);
-  }
-  const blob = await zip.generateAsync({ type: "blob" });
-  saveAs(blob, "project.zip");
+export async function downloadProjectAsZip(
+  files: ProjectFiles,
+  assets: ProjectAssets = {},
+): Promise<void> {
+  saveAs(await buildProjectZip(files, assets), "project.zip");
 }
 
 function ToolbarIconButton({
@@ -124,6 +123,7 @@ export function ViewToolbar({
   deviceSize,
   onDeviceSizeChange,
   files,
+  assets = {},
   previewEnabled = true,
   previewScale = 1,
   onPreviewZoomIn,
@@ -329,7 +329,7 @@ export function ViewToolbar({
               </ToolbarIconButton>
             )}
             <ToolbarIconButton
-              onClick={() => downloadAsZip(files)}
+              onClick={() => void downloadProjectAsZip(files, assets)}
               label={t.toolbar.download}
             >
               <Download size={16} />

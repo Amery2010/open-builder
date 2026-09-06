@@ -1,4 +1,4 @@
-import { useState, memo } from "react";
+import { useEffect, useState, memo } from "react";
 import {
   ChevronRight,
   Wrench,
@@ -6,6 +6,7 @@ import {
   X,
   AlertTriangle,
   ExternalLink,
+  Download,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -13,6 +14,7 @@ import { FileTreeView } from "./FileTreeView";
 import { useT } from "../../i18n";
 import type { ToolBlock } from "../../types";
 import { TOOL_METADATA } from "../../lib/ai/tool-metadata";
+import { getAttachmentBlob } from "../../lib/attachments/store";
 
 export const TOOL_CARD_LIMITS = {
   maxJsonParseChars: 200_000,
@@ -428,7 +430,8 @@ export const ToolCallCard = memo(function ToolCallCard({
                 </div>
               ))}
             </div>
-          ) : toolOutput?.source?.kind === "mcp" ? (
+          ) : toolOutput?.source?.kind === "mcp" ||
+            toolOutput?.content?.some((part) => part.type === "local_image") ? (
             <RichToolResult
               output={toolOutput}
               fallback={displayResult ?? ""}
@@ -521,6 +524,51 @@ function dataUrl(data: string, mimeType: string): string {
   return data.startsWith("data:") ? data : `data:${mimeType};base64,${data}`;
 }
 
+function LocalImageResult({ id, name }: { id: string; name: string }) {
+  const t = useT();
+  const [url, setUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    let objectUrl: string | null = null;
+    void getAttachmentBlob(id).then((blob) => {
+      if (!active || !blob) return;
+      objectUrl = URL.createObjectURL(blob);
+      setUrl(objectUrl);
+    });
+    return () => {
+      active = false;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [id]);
+
+  if (!url) {
+    return (
+      <p className="text-xs text-muted-foreground">
+        [{name}: {t.tool.emptyEmbeddedResource}]
+      </p>
+    );
+  }
+
+  return (
+    <div className="space-y-2">
+      <img
+        src={url}
+        alt={name || t.tool.mcpResultAlt}
+        className="max-h-72 max-w-full rounded-md border border-border/60 object-contain"
+      />
+      <a
+        href={url}
+        download={name}
+        className="inline-flex items-center gap-1.5 text-xs text-primary hover:underline"
+      >
+        <Download size={13} />
+        {t.explorer.download}
+      </a>
+    </div>
+  );
+}
+
 export function safeExternalResourceUrl(uri: string): string | null {
   try {
     const url = new URL(uri);
@@ -581,6 +629,8 @@ function RichToolResult({
                 className="max-h-72 max-w-full rounded-md border border-border/60 object-contain"
               />
             );
+          case "local_image":
+            return <LocalImageResult key={key} id={part.id} name={part.name} />;
           case "audio":
             return (
               <audio

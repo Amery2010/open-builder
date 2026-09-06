@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
-import { File, Folder, FilePlus, FolderPlus, Search } from "lucide-react";
+import { FilePlus, FolderPlus, Search } from "lucide-react";
 import JSZip from "jszip";
 import { TooltipIconButton } from "@/components/ui/tooltip-icon-button";
 import { Input } from "@/components/ui/input";
@@ -9,6 +9,7 @@ import { FileTreeNode } from "./file-explorer/FileTreeNode";
 import { InlineInput } from "./file-explorer/InlineInput";
 import { BASE_PAD, INDENT, buildFileTree } from "./file-explorer/types";
 import type { FileNode } from "./file-explorer/types";
+import { MaterialIcon } from "./file-explorer/file-icons";
 
 interface FileExplorerProps {
   files: ProjectFiles;
@@ -360,9 +361,9 @@ export function FileExplorer({
             ref={createInputRef}
             icon={
               createState.type === "file" ? (
-                <File size={14} className="text-gray-400 shrink-0" />
+                <MaterialIcon name={createName || "file"} kind="file" />
               ) : (
-                <Folder size={14} className="text-blue-500 shrink-0" />
+                <MaterialIcon name={createName || "folder"} kind="folder" />
               )
             }
             value={createName}

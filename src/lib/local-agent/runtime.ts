@@ -636,6 +636,9 @@ export class LocalCliRuntime {
             reasoning: false,
             tools: false,
             nativeSearch: false,
+            imageGeneration: false,
+            imageEditing: false,
+            mediaCapabilitiesVerified: false,
           },
           message: "Local CLI agents are unavailable on this host.",
           catalogAuthority: "partial",
@@ -1024,6 +1027,13 @@ export function normalizeLocalCliProbe(
 ): LocalCliInspection {
   return {
     ...probe,
+    capabilities: {
+      ...probe.capabilities,
+      imageGeneration: probe.capabilities.imageGeneration === true,
+      imageEditing: probe.capabilities.imageEditing === true,
+      mediaCapabilitiesVerified:
+        probe.capabilities.mediaCapabilitiesVerified === true,
+    },
     status: inspectionStatus(probe),
     reasonCode: inspectionReason(probe),
     catalogAuthority: probe.catalogAuthority ?? "partial",

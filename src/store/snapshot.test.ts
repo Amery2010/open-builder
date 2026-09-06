@@ -2,11 +2,39 @@ import { createPatch } from "diff";
 import { describe, expect, it } from "vitest";
 import {
   rebuildSnapshotChainWithoutSnapshot,
+  replaySnapshotAssets,
   replaySnapshots,
 } from "./snapshot-replay";
 import type { ProjectSnapshot } from "../types";
 
 describe("replaySnapshots", () => {
+  it("restores asset references without embedding image bytes", () => {
+    const asset = {
+      path: "public/generated/hero.png",
+      blobRef: `sha256:${"a".repeat(64)}`,
+      mimeType: "image/png" as const,
+      size: 9,
+      digest: "a".repeat(64),
+      modulePath: "src/generated-assets/hero-aaaaaaaa.js",
+      publicPath: "/generated/hero.png",
+    };
+    const snapshot: ProjectSnapshot = {
+      id: "assets",
+      conversationId: "conv-1",
+      messageId: "assistant-assets",
+      patches: {},
+      addedFiles: {},
+      deletedFiles: [],
+      assets: { [asset.path]: asset },
+      createdAt: 1,
+    };
+
+    expect(replaySnapshotAssets([snapshot], snapshot.id)).toEqual({
+      [asset.path]: asset,
+    });
+    expect(JSON.stringify(snapshot)).not.toContain("data:image");
+  });
+
   it("reconstructs files from the nearest checkpoint to the requested snapshot", () => {
     const chain: ProjectSnapshot[] = [
       {

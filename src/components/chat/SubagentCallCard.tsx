@@ -6,7 +6,6 @@ import { LazyMarkdownContent } from "./LazyMarkdownContent";
 import { ToolCallCard } from "./ToolCallCard";
 import { AgnesMediaResult } from "./AgnesMediaResult";
 import { useT } from "../../i18n";
-import { truncate } from "../../lib/utils/truncate";
 import { useSubagentStore } from "../../store/subagent";
 import { getSubagentByName } from "../../lib/ai/subagents/registry";
 import {
@@ -177,7 +176,6 @@ export const SubagentCallCard = memo(function SubagentCallCard({
     data.subagent;
   const def = getSubagentByName(data.subagent);
   const writePolicy = def?.writePolicy ?? "readonly";
-  const taskSummary = truncate(data.task, 80);
   const durationLabel =
     data.durationMs != null
       ? t.subagent.duration.replace("{n}", (data.durationMs / 1000).toFixed(1))
@@ -193,11 +191,7 @@ export const SubagentCallCard = memo(function SubagentCallCard({
         <span className="text-xs font-medium text-foreground shrink-0">
           {displayName}
         </span>
-        {taskSummary && (
-          <span className="text-xs text-muted-foreground truncate flex-1 min-w-0">
-            · {taskSummary}
-          </span>
-        )}
+        <span className="flex-1 min-w-0" aria-hidden="true" />
         <Badge
           variant="outline"
           className="text-[10px] font-mono h-5 px-1.5 text-muted-foreground border-border/80"

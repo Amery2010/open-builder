@@ -4,6 +4,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde_json::{json, Value};
 use tokio::io::BufReader;
 use tokio::process::Command;
@@ -15,6 +16,9 @@ use crate::local_agent::{
     LocalAgentRunScopeKind, LocalAgentStartRequest,
 };
 use crate::local_agent_adapter::{AdapterIdentity, AdapterProbe};
+use crate::local_agent_media::{
+    read_generated_image, GeneratedImageBytes, PreparedLocalImageRequest,
+};
 use crate::local_agent_models::CatalogAuthority;
 use crate::local_agent_protocol::{
     apply_minimal_environment, command_output_capped, command_output_capped_with_env,
@@ -35,6 +39,14 @@ const AGENT_NAME: &str = "open-builder";
 const MCP_SERVER_NAME: &str = "open_builder";
 const DEFAULT_EFFORTS: &[&str] = &["low", "medium", "high"];
 const PRINT_TIMEOUT: &str = "30m";
+const NATIVE_SEARCH_TOOL: &str = "search_web";
+const NATIVE_URL_TOOL: &str = "read_url_content";
+const LEGACY_NATIVE_URL_TOOL: &str = "read_url";
+const IMAGE_AGENT_NAME: &str = "open-builder-image";
+const IMAGE_TOOL: &str = "generate_image";
+const MAX_IMAGE_OUTPUT_BYTES: usize = 25 * 1024 * 1024;
+const MAX_IMAGE_VALUE_BYTES: usize = 64 * 1024;
+const IMAGE_RUN_ERROR: &str = "Antigravity image generation failed.";
 
 pub(crate) const IDENTITY: AdapterIdentity = AdapterIdentity {
     command_name: "agy",
@@ -44,6 +56,9 @@ pub(crate) const IDENTITY: AdapterIdentity = AdapterIdentity {
         reasoning: true,
         tools: true,
         native_search: true,
+        image_generation: true,
+        image_editing: false,
+        media_capabilities_verified: false,
     },
     probe_timeout: Duration::from_secs(30),
     unix_home_directories: &[".local/bin"],
@@ -61,6 +76,7 @@ struct InstallationInspection {
 #[derive(Debug, PartialEq, Eq)]
 struct InitAttestation {
     conversation_id: String,
+    native_tools: BTreeSet<String>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -867,7 +883,7 @@ fn agent_source(request: &LocalAgentStartRequest) -> Result<String, String> {
         .map(|tool| mcp_tool_name(&tool.name))
         .collect::<Vec<_>>();
     if request.native_search {
-        tool_names.push("read_url".to_string());
+        tool_names.extend([NATIVE_SEARCH_TOOL.to_string(), NATIVE_URL_TOOL.to_string()]);
     }
     let mut source = String::from(
         "---\nname: open-builder\ndescription: Isolated Open Builder local-agent runtime.\nmainAgent: true\nsubagent: false\ntools:\n",
@@ -897,9 +913,6 @@ fn permission_settings(request: &LocalAgentStartRequest, model_provider: Option<
         .iter()
         .map(|tool| format!("mcp({MCP_SERVER_NAME}/{})", tool.name))
         .collect::<Vec<_>>();
-    if request.native_search {
-        allow.push("read_url(*)".to_string());
-    }
     let mut deny = vec![
         "read_file(*)".to_string(),
         "write_file(*)".to_string(),
@@ -907,8 +920,15 @@ fn permission_settings(request: &LocalAgentStartRequest, model_provider: Option<
         "command(*)".to_string(),
         "unsandboxed(*)".to_string(),
     ];
-    if !request.native_search {
-        deny.push("read_url(*)".to_string());
+    let native_search_permissions = [
+        format!("{NATIVE_SEARCH_TOOL}(*)"),
+        format!("{NATIVE_URL_TOOL}(*)"),
+        format!("{LEGACY_NATIVE_URL_TOOL}(*)"),
+    ];
+    if request.native_search {
+        allow.extend(native_search_permissions);
+    } else {
+        deny.extend(native_search_permissions);
     }
     let mut settings = json!({
         "toolPermission": "strict",
@@ -1179,6 +1199,49 @@ fn is_subagent_capability(name: &str) -> bool {
         )
 }
 
+fn native_search_tools_from_inventory(
+    inventory: &BTreeSet<String>,
+    expected_tools: &BTreeSet<String>,
+    enabled: bool,
+) -> Result<BTreeSet<String>, String> {
+    if !expected_tools.is_subset(inventory) {
+        return Err("Antigravity did not expose the exact approved tool inventory".to_string());
+    }
+
+    let native_tools = inventory
+        .difference(expected_tools)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if !enabled {
+        if native_tools.is_empty() {
+            return Ok(native_tools);
+        }
+        return Err("Antigravity exposed native search while it was disabled".to_string());
+    }
+
+    if native_tools == BTreeSet::from([NATIVE_SEARCH_TOOL.to_string(), NATIVE_URL_TOOL.to_string()])
+    {
+        return Ok(native_tools);
+    }
+
+    // Antigravity versions that predate read_url_content may still expose the
+    // same search tool and report the URL reader using its old name. Keep this
+    // compatibility path narrow: read_url by itself cannot prove web search.
+    if native_tools
+        == BTreeSet::from([
+            NATIVE_SEARCH_TOOL.to_string(),
+            LEGACY_NATIVE_URL_TOOL.to_string(),
+        ])
+    {
+        return Ok(native_tools);
+    }
+
+    Err(
+        "Antigravity native search requires search_web and read_url_content (or verified legacy read_url)"
+            .to_string(),
+    )
+}
+
 fn attest_init(
     value: &Value,
     files: &RunFiles,
@@ -1218,26 +1281,28 @@ fn attest_init(
         .and_then(Value::as_array)
         .filter(|tools| tools.len() <= 512)
         .ok_or_else(|| "Antigravity init omitted its tool inventory".to_string())?;
-    let mut expected_inventory = files.expected_tools.clone();
-    if request.native_search {
-        expected_inventory.insert("read_url".to_string());
-    }
+    let expected_inventory = files.expected_tools.clone();
     let mut inventory = BTreeSet::new();
     for tool in tools {
         let name = tool
             .as_str()
             .filter(|name| !name.is_empty() && name.len() <= 256)
             .ok_or_else(|| "Antigravity init returned a malformed tool inventory".to_string())?;
-        if !expected_inventory.contains(name) {
+        if !expected_inventory.contains(name)
+            && !(request.native_search
+                && matches!(
+                    name,
+                    NATIVE_SEARCH_TOOL | NATIVE_URL_TOOL | LEGACY_NATIVE_URL_TOOL
+                ))
+        {
             return Err("Antigravity exposed an unauthorized native or MCP capability".to_string());
         }
         if !inventory.insert(name.to_string()) {
             return Err("Antigravity init repeated a tool capability".to_string());
         }
     }
-    if inventory != expected_inventory {
-        return Err("Antigravity did not expose the exact approved tool inventory".to_string());
-    }
+    let native_tools =
+        native_search_tools_from_inventory(&inventory, &expected_inventory, request.native_search)?;
     let conversation_id = value
         .get("conversation_id")
         .or_else(|| init.get("conversation_id"))
@@ -1255,6 +1320,7 @@ fn attest_init(
     }
     Ok(InitAttestation {
         conversation_id: conversation_id.to_string(),
+        native_tools,
     })
 }
 
@@ -1300,11 +1366,16 @@ fn validate_runtime_tool(
     if is_subagent_capability(name) {
         return Err("Antigravity attempted to use an external-agent capability".to_string());
     }
-    if name == "read_url" {
-        return if request.native_search {
+    if matches!(
+        name,
+        NATIVE_SEARCH_TOOL | NATIVE_URL_TOOL | LEGACY_NATIVE_URL_TOOL
+    ) {
+        return if request.native_search && expected_tools.contains(name) {
             Ok(true)
         } else {
-            Err("Antigravity attempted to use disabled native URL access".to_string())
+            Err(format!(
+                "Antigravity attempted to use disabled or unattested native capability {name}"
+            ))
         };
     }
     if name == "call_mcp_tool" {
@@ -1400,11 +1471,23 @@ fn decode_step(
                 .and_then(Value::as_u64)
                 .map(|index| format!("agy-step-{index}"))
                 .unwrap_or_else(|| "agy-tool".to_string());
-            let arguments = info.get("parameters").cloned();
-            let result = info
-                .get("output")
+            if let Some(info_name) = info.get("name").and_then(Value::as_str) {
+                if info_name != name {
+                    return Err("Antigravity tool update changed its canonical tool name".to_string());
+                }
+            }
+            let arguments = info
+                .get("parameters")
                 .cloned()
-                .or_else(|| info.get("error").cloned());
+                .or_else(|| info.get("action").cloned());
+            let result = (phase == "completed")
+                .then(|| {
+                    info.get("output")
+                        .cloned()
+                        .or_else(|| info.get("result").cloned())
+                        .or_else(|| info.get("error").cloned())
+                })
+                .flatten();
             events.push(RuntimeEvent::Tool {
                 call_id,
                 name: name.to_string(),
@@ -1635,6 +1718,11 @@ async fn run_protocol(
     .await
     .map_err(|_| "Antigravity init timed out before user content was sent".to_string())??;
     let attestation = attest_init(&init, files, &context.request)?;
+    let expected_runtime_tools = files
+        .expected_tools
+        .union(&attestation.native_tools)
+        .cloned()
+        .collect::<BTreeSet<_>>();
     context
         .channel
         .send(LocalAgentEvent::Session {
@@ -1676,7 +1764,7 @@ async fn run_protocol(
                 for event in decode_step(
                     &value,
                     &attestation.conversation_id,
-                    &files.expected_tools,
+                    &expected_runtime_tools,
                     &context.request,
                 )? {
                     saw_text |= send_runtime_event(context, event)?;
@@ -1757,6 +1845,760 @@ async fn run_protocol(
             Some(_) | None => return Err("Antigravity emitted an unsupported stream event".into()),
         }
     }
+}
+
+fn image_agent_source() -> &'static str {
+    "---\nname: open-builder-image\ndescription: Isolated Open Builder image-generation worker.\nmainAgent: true\nsubagent: false\ntools:\n  - \"generate_image\"\n---\nYou are an isolated image generation worker. Use the built-in generate_image capability exactly once for the user's text-to-image request. Do not use files, shell commands, browsers, MCP servers, web search, URL readers, subagents, skills, plugins, or any other capability. A text-only answer is not a successful result."
+}
+
+fn image_permission_settings(model_provider: Option<&str>) -> Value {
+    let mut settings = json!({
+        "toolPermission": "strict",
+        "artifactReviewPolicy": "asks-for-review",
+        "enableTerminalSandbox": true,
+        "allowNonWorkspaceAccess": false,
+        "enableTelemetry": false,
+        "permissions": {
+            "allow": ["generate_image(*)"],
+            "deny": [
+                "read_file(*)",
+                "write_file(*)",
+                "edit_file(*)",
+                "list_directory(*)",
+                "glob(*)",
+                "command(*)",
+                "shell(*)",
+                "execute_url(*)",
+                "browser(*)",
+                "browser_use(*)",
+                "mcp(*)",
+                "search_web(*)",
+                "read_url_content(*)",
+                "read_url(*)",
+                "subagent(*)",
+                "invoke_agent(*)",
+                "invoke_subagent(*)",
+                "start_subagent(*)",
+                "unsandboxed(*)"
+            ],
+            "ask": []
+        }
+    });
+    if let Some(model_provider) = model_provider {
+        settings["modelProvider"] = json!(model_provider);
+    }
+    settings
+}
+
+fn image_process_args(request: &PreparedLocalImageRequest) -> Result<Vec<String>, String> {
+    if request.prompt.is_empty()
+        || request.prompt.len() > 128 * 1024
+        || request.prompt.contains('\0')
+    {
+        return Err("Antigravity image prompt is invalid".to_string());
+    }
+    if let Some(model) = request.model.as_deref().filter(|value| !value.is_empty()) {
+        if !is_safe_option(model) {
+            return Err("Antigravity image model id contains unsupported characters".to_string());
+        }
+    }
+    if let Some(effort) = request.effort.as_deref().filter(|value| !value.is_empty()) {
+        if !DEFAULT_EFFORTS.contains(&effort) {
+            return Err("Antigravity image effort is unsupported".to_string());
+        }
+    }
+    let mut args = vec![
+        "--print".to_string(),
+        "--output-format".to_string(),
+        "stream-json".to_string(),
+        "--print-timeout".to_string(),
+        PRINT_TIMEOUT.to_string(),
+        "--agent".to_string(),
+        IMAGE_AGENT_NAME.to_string(),
+        "--sandbox".to_string(),
+    ];
+    if let Some(model) = request.model.as_deref().filter(|value| !value.is_empty()) {
+        args.extend(["--model".to_string(), model.to_string()]);
+    }
+    if let Some(effort) = request.effort.as_deref().filter(|value| !value.is_empty()) {
+        args.extend(["--effort".to_string(), effort.to_string()]);
+    }
+    // Keep the prompt as the final positional argument. This makes every
+    // preceding option unambiguous even when a prompt begins with a dash.
+    args.push(request.prompt.clone());
+    Ok(args)
+}
+
+fn prepare_image_files(
+    request: &PreparedLocalImageRequest,
+    provider_environment: &AntigravityProviderEnvironment,
+) -> Result<(PathBuf, PathBuf, Vec<PreparedPrivateFile>), String> {
+    ensure_private_directory(&request.run_dir)?;
+    let home = request.run_dir.join("antigravity-home");
+    if home.exists() {
+        return Err("the private Antigravity image home is not fresh".to_string());
+    }
+    ensure_private_directory(&home)?;
+    project_platform_credentials(&home)?;
+    reject_private_customizations(&home)?;
+
+    let gemini_dir = home.join(".gemini");
+    ensure_private_directory(&gemini_dir)?;
+    let settings_dir = gemini_dir.join("antigravity-cli");
+    ensure_private_directory(&settings_dir)?;
+    let settings = serde_json::to_vec_pretty(&image_permission_settings(
+        provider_environment.model_provider(),
+    ))
+    .map_err(|_| "failed to serialize Antigravity image permissions".to_string())?;
+    write_private_file(&settings_dir.join("settings.json"), &settings)?;
+
+    let workspace = request.run_dir.join("workspace");
+    if workspace.exists() {
+        return Err("the private Antigravity image workspace is not fresh".to_string());
+    }
+    ensure_private_directory(&workspace)?;
+    let agent_directory = workspace
+        .join(".agents")
+        .join("agents")
+        .join(IMAGE_AGENT_NAME);
+    ensure_private_directory(&agent_directory)?;
+    write_private_file(
+        &agent_directory.join("agent.md"),
+        image_agent_source().as_bytes(),
+    )?;
+
+    let private_files = vec![
+        PreparedPrivateFile::capture(&settings_dir.join("settings.json"), &home)?,
+        PreparedPrivateFile::capture(&agent_directory.join("agent.md"), &workspace)?,
+    ];
+    Ok((home, workspace, private_files))
+}
+
+fn frozen_image_process_spec(
+    executable: &Path,
+    request: &PreparedLocalImageRequest,
+    provider_environment: &AntigravityProviderEnvironment,
+    home: &Path,
+    workspace: &Path,
+) -> Result<FrozenProcessSpec, String> {
+    let args = image_process_args(request)?;
+    let mut command = Command::new(executable);
+    apply_minimal_environment(&mut command);
+    apply_private_environment(&mut command, home);
+    provider_environment.apply(&mut command);
+    command.args(args).current_dir(workspace);
+    FrozenProcessSpec::capture(&command)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ImagePayload {
+    Path(String),
+    Encoded(String),
+}
+
+fn locate_image_payload(value: &Value, depth: usize) -> Option<ImagePayload> {
+    if depth > 4 {
+        return None;
+    }
+    match value {
+        Value::Object(object) => {
+            for key in [
+                "data",
+                "base64",
+                "image_data",
+                "imageData",
+                "encoded",
+                "encoded_data",
+                "encodedData",
+            ] {
+                if let Some(data) = object.get(key).and_then(Value::as_str) {
+                    return Some(ImagePayload::Encoded(data.to_string()));
+                }
+            }
+            for key in [
+                "path",
+                "file_path",
+                "filePath",
+                "saved_path",
+                "savedPath",
+                "output_path",
+                "outputPath",
+            ] {
+                if let Some(path) = object.get(key).and_then(Value::as_str) {
+                    return Some(ImagePayload::Path(path.to_string()));
+                }
+            }
+            for key in ["image", "result", "output", "artifact", "content", "images"] {
+                let Some(nested) = object.get(key) else {
+                    continue;
+                };
+                if let Some(payload) = locate_image_payload(nested, depth + 1) {
+                    return Some(payload);
+                }
+            }
+        }
+        Value::Array(values) => {
+            for nested in values.iter().take(8) {
+                if let Some(payload) = locate_image_payload(nested, depth + 1) {
+                    return Some(payload);
+                }
+            }
+        }
+        _ => {}
+    }
+    None
+}
+
+fn image_metadata_string(value: &Value, keys: &[&str], depth: usize) -> Option<String> {
+    if depth > 4 {
+        return None;
+    }
+    if let Some(object) = value.as_object() {
+        for key in keys {
+            if let Some(text) = object.get(*key).and_then(Value::as_str) {
+                return Some(text.to_string());
+            }
+        }
+        for key in ["image", "result", "output", "artifact", "content", "images"] {
+            if let Some(nested) = object.get(key) {
+                if let Some(text) = image_metadata_string(nested, keys, depth + 1) {
+                    return Some(text);
+                }
+            }
+        }
+    } else if let Some(values) = value.as_array() {
+        for nested in values.iter().take(8) {
+            if let Some(text) = image_metadata_string(nested, keys, depth + 1) {
+                return Some(text);
+            }
+        }
+    }
+    None
+}
+
+fn image_mime_type(bytes: &[u8]) -> Result<&'static str, String> {
+    if bytes.len() >= 20
+        && bytes.starts_with(b"\x89PNG\r\n\x1a\n")
+        && &bytes[12..16] == b"IHDR"
+        && bytes.ends_with(b"\x00\x00\x00\x00IEND\xaeB`\x82")
+    {
+        return Ok("image/png");
+    }
+    if bytes.len() >= 4 && bytes.starts_with(&[0xff, 0xd8, 0xff]) && bytes.ends_with(&[0xff, 0xd9])
+    {
+        return Ok("image/jpeg");
+    }
+    if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        let declared = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
+        if declared.checked_add(8) == Some(bytes.len()) {
+            return Ok("image/webp");
+        }
+    }
+    Err("Antigravity image output has an invalid or unsupported signature".to_string())
+}
+
+fn image_extension(mime_type: &str) -> &'static str {
+    match mime_type {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/webp" => "webp",
+        _ => "bin",
+    }
+}
+
+fn decode_image_data(value: &str) -> Result<(Vec<u8>, Option<String>), String> {
+    let value = value.trim();
+    let (encoded, declared_mime) = if let Some((header, encoded)) = value.split_once(',') {
+        let header_lower = header.to_ascii_lowercase();
+        if !header_lower.starts_with("data:image/") || !header_lower.contains(";base64") {
+            return Err("Antigravity image output data URL is unsupported".to_string());
+        }
+        let declared = header
+            .strip_prefix("data:")
+            .and_then(|value| value.split(';').next())
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        (encoded, declared)
+    } else {
+        (value, None)
+    };
+    let bytes = BASE64
+        .decode(encoded.as_bytes())
+        .map_err(|_| "Antigravity image output was not valid base64".to_string())?;
+    if bytes.is_empty() || bytes.len() > MAX_IMAGE_OUTPUT_BYTES {
+        return Err("Antigravity image output exceeds the size limit".to_string());
+    }
+    Ok((bytes, declared_mime))
+}
+
+fn safe_image_file_name(value: Option<String>, mime_type: &str) -> String {
+    value
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= MAX_IMAGE_VALUE_BYTES
+                && Path::new(value).file_name().and_then(|name| name.to_str()) == Some(value)
+                && !value.chars().any(char::is_control)
+        })
+        .unwrap_or_else(|| format!("generated.{}", image_extension(mime_type)))
+}
+
+fn parse_image_tool_output(
+    output: &Value,
+    run_dir: &Path,
+    workspace_dir: &Path,
+    call_id: &str,
+) -> Result<GeneratedImageBytes, String> {
+    if output.is_null() {
+        return Err("Antigravity image tool completed without an image output".to_string());
+    }
+    if let Some(error) = output.get("error").filter(|value| !value.is_null()) {
+        return Err(if let Some(error) = error.as_str() {
+            format!("Antigravity image tool failed: {error}")
+        } else {
+            IMAGE_RUN_ERROR.to_string()
+        });
+    }
+    let payload = match output {
+        Value::String(value) if value.trim_start().starts_with("data:image/") => {
+            ImagePayload::Encoded(value.clone())
+        }
+        Value::String(value) => ImagePayload::Path(value.clone()),
+        _ => locate_image_payload(output, 0)
+            .ok_or_else(|| "Antigravity image tool completed without an image file".to_string())?,
+    };
+    let declared_mime = image_metadata_string(
+        output,
+        &["mime_type", "mimeType", "content_type", "contentType"],
+        0,
+    );
+    let id = image_metadata_string(output, &["id", "image_id", "imageId"], 0)
+        .unwrap_or_else(|| call_id.to_string());
+    if id.is_empty() || id.len() > MAX_IMAGE_VALUE_BYTES || id.chars().any(char::is_control) {
+        return Err("Antigravity image output id is invalid".to_string());
+    }
+    let revised_prompt = image_metadata_string(output, &["revised_prompt", "revisedPrompt"], 0)
+        .filter(|value| {
+            value.len() <= MAX_IMAGE_VALUE_BYTES && !value.chars().any(char::is_control)
+        });
+
+    let (mime_type, bytes, file_name) = match payload {
+        ImagePayload::Path(path) => {
+            if path.is_empty() || path.contains('\0') {
+                return Err("Antigravity image output path is invalid".to_string());
+            }
+            let path = PathBuf::from(path);
+            let path = if path.is_absolute() {
+                path
+            } else {
+                workspace_dir.join(path)
+            };
+            let (mime_type, bytes, file_name) = read_generated_image(run_dir, &path)?;
+            if let Some(declared_mime) = declared_mime.as_deref() {
+                if declared_mime != mime_type {
+                    return Err("Antigravity image output MIME type does not match its file".into());
+                }
+            }
+            (mime_type.to_string(), bytes, file_name)
+        }
+        ImagePayload::Encoded(value) => {
+            let (bytes, data_url_mime) = decode_image_data(&value)?;
+            let mime_type = image_mime_type(&bytes)?;
+            for declared in [data_url_mime.as_deref(), declared_mime.as_deref()]
+                .into_iter()
+                .flatten()
+            {
+                if declared != mime_type {
+                    return Err(
+                        "Antigravity image output MIME type does not match its bytes".into(),
+                    );
+                }
+            }
+            let file_name = safe_image_file_name(
+                image_metadata_string(output, &["file_name", "fileName"], 0),
+                mime_type,
+            );
+            (mime_type.to_string(), bytes, file_name)
+        }
+    };
+    if bytes.is_empty() || bytes.len() > MAX_IMAGE_OUTPUT_BYTES {
+        return Err("Antigravity image output exceeds the size limit".to_string());
+    }
+    Ok(GeneratedImageBytes {
+        id,
+        mime_type: mime_type.to_string(),
+        bytes,
+        revised_prompt,
+        file_name: Some(file_name),
+    })
+}
+
+fn image_result_error(result: &Value, uses_gemini_api_key: bool) -> AdapterError {
+    let error = result
+        .get("error")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if [
+        "quota",
+        "rate limit",
+        "rate_limit",
+        "usage limit",
+        "limit exceeded",
+    ]
+    .iter()
+    .any(|needle| error.contains(needle))
+    {
+        return AdapterError::coded(
+            LocalCliFailureCode::ProcessExit,
+            "Antigravity image generation quota was exhausted.",
+        );
+    }
+    classify_result_error(result, uses_gemini_api_key, false)
+}
+
+fn attest_image_init(
+    value: &Value,
+    expected_cwd: &Path,
+    request: &PreparedLocalImageRequest,
+) -> Result<String, AdapterError> {
+    if value.get("event").and_then(Value::as_str) != Some("init") {
+        return Err("Antigravity image task did not emit init".into());
+    }
+    let init = value
+        .get("init")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "Antigravity image init event was malformed".to_string())?;
+    let cwd = init
+        .get("cwd")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Antigravity image init omitted its working directory".to_string())?;
+    if normalized_path(cwd)? != expected_cwd {
+        return Err("Antigravity image task started outside its private workspace".into());
+    }
+    if init.get("permission_mode").and_then(Value::as_str) != Some("strict") {
+        return Err("Antigravity image task did not activate strict permission mode".into());
+    }
+    if init.get("agent").and_then(Value::as_str) != Some(IMAGE_AGENT_NAME) {
+        return Err("Antigravity image task did not activate its isolated agent".into());
+    }
+    if let Some(expected_model) = request.model.as_deref().filter(|value| !value.is_empty()) {
+        if init.get("model").and_then(Value::as_str) != Some(expected_model) {
+            return Err("Antigravity image task did not activate the selected model".into());
+        }
+    }
+    let tools = init
+        .get("tools")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "Antigravity image init omitted its tool inventory".to_string())?;
+    if tools.len() != 1 || tools.first().and_then(Value::as_str) != Some(IMAGE_TOOL) {
+        return Err("Antigravity image task exposed a capability other than generate_image".into());
+    }
+    let conversation_id = value
+        .get("conversation_id")
+        .or_else(|| init.get("conversation_id"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Antigravity image init omitted its conversation id".to_string())?;
+    validate_session_id(conversation_id)?;
+    Ok(conversation_id.to_string())
+}
+
+fn image_tool_error(info: &Value) -> Option<AdapterError> {
+    let error = info.get("error").filter(|value| !value.is_null())?;
+    if contains_permission_signal(error) {
+        Some(AdapterError::coded(
+            LocalCliFailureCode::ProviderApprovalRejected,
+            "Antigravity image generation permission was rejected.",
+        ))
+    } else {
+        Some(IMAGE_RUN_ERROR.into())
+    }
+}
+
+async fn run_image_protocol(
+    request: &PreparedLocalImageRequest,
+    expected_cwd: &Path,
+    uses_gemini_api_key: bool,
+    reader: &mut BufReader<tokio::process::ChildStdout>,
+) -> Result<GeneratedImageBytes, AdapterError> {
+    let mut budget = ProtocolOutputBudget::default();
+    let conversation_id = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
+        loop {
+            let value = read_value(reader, &mut budget, &request.cancellation).await?;
+            if let Some(event) = value.get("event").and_then(Value::as_str) {
+                if event == "init" {
+                    return attest_image_init(&value, expected_cwd, request);
+                }
+                if is_allowlisted_stream_metadata_event(event)
+                    && !contains_capability_semantics(&value)
+                {
+                    continue;
+                }
+            }
+            if value.get("event").and_then(Value::as_str) == Some("result") {
+                let result = value
+                    .get("result")
+                    .filter(|result| result.is_object())
+                    .ok_or_else(|| {
+                        "Antigravity image result before init was malformed".to_string()
+                    })?;
+                return Err(image_result_error(result, uses_gemini_api_key));
+            }
+            return Err("Antigravity image task emitted capability data before init".into());
+        }
+    })
+    .await
+    .map_err(|_| "Antigravity image init timed out".to_string())??;
+
+    let mut generated = None;
+    loop {
+        let value = read_value(reader, &mut budget, &request.cancellation).await?;
+        match value.get("event").and_then(Value::as_str) {
+            Some("step_update") => {
+                let step = value
+                    .get("step_update")
+                    .and_then(Value::as_object)
+                    .ok_or_else(|| "Antigravity image step update was malformed".to_string())?;
+                if step.get("conversation_id").and_then(Value::as_str)
+                    != Some(conversation_id.as_str())
+                {
+                    return Err("Antigravity image step changed conversation ids".into());
+                }
+                if step
+                    .get("subagent_info")
+                    .is_some_and(|value| !value.is_null())
+                {
+                    return Err(AdapterError::coded(
+                        LocalCliFailureCode::IsolationViolation,
+                        "Antigravity image task attempted to start a subagent",
+                    ));
+                }
+                match step.get("step_type").and_then(Value::as_str) {
+                    Some("tool") => {
+                        let name =
+                            step.get("tool_name")
+                                .and_then(Value::as_str)
+                                .ok_or_else(|| {
+                                    "Antigravity image tool update omitted its name".to_string()
+                                })?;
+                        if name != IMAGE_TOOL {
+                            return Err(AdapterError::coded(
+                                LocalCliFailureCode::IsolationViolation,
+                                format!("Antigravity image task attempted unauthorized capability {name}"),
+                            ));
+                        }
+                        let info = step
+                            .get("tool_info")
+                            .and_then(Value::as_object)
+                            .ok_or_else(|| {
+                                "Antigravity image tool update omitted tool_info".to_string()
+                            })?;
+                        if let Some(info_name) = info.get("name").and_then(Value::as_str) {
+                            if info_name != IMAGE_TOOL {
+                                return Err(
+                                    "Antigravity image tool changed its canonical name".into()
+                                );
+                            }
+                        }
+                        let state = step.get("state").and_then(Value::as_str).ok_or_else(|| {
+                            "Antigravity image tool update omitted its state".to_string()
+                        })?;
+                        match state {
+                            "ACTIVE" | "RUNNING" => {
+                                if info.get("output").is_some() || info.get("result").is_some() {
+                                    return Err(
+                                        "Antigravity image tool exposed output before completion"
+                                            .into(),
+                                    );
+                                }
+                            }
+                            "DONE" | "SUCCESS" => {
+                                if let Some(error) = image_tool_error(&Value::Object(info.clone()))
+                                {
+                                    return Err(error);
+                                }
+                                if generated.is_some() {
+                                    return Err(
+                                        "Antigravity image task completed more than one image"
+                                            .into(),
+                                    );
+                                }
+                                let output = info
+                                    .get("output")
+                                    .or_else(|| info.get("result"))
+                                    .ok_or_else(|| {
+                                        "Antigravity image tool completed without output"
+                                            .to_string()
+                                    })?;
+                                let call_id = step
+                                    .get("step_index")
+                                    .and_then(Value::as_u64)
+                                    .map(|index| format!("agy-image-step-{index}"))
+                                    .unwrap_or_else(|| "agy-image-tool".to_string());
+                                generated = Some(parse_image_tool_output(
+                                    output,
+                                    &request.run_dir,
+                                    expected_cwd,
+                                    &call_id,
+                                )?);
+                            }
+                            "FAILED" | "ERROR" => {
+                                if let Some(error) = image_tool_error(&Value::Object(info.clone()))
+                                {
+                                    return Err(error);
+                                }
+                                return Err(IMAGE_RUN_ERROR.into());
+                            }
+                            _ => {
+                                return Err(
+                                    "Antigravity image tool emitted an unsupported state".into()
+                                )
+                            }
+                        }
+                    }
+                    Some("agent_response")
+                    | Some("thinking")
+                    | Some("reasoning")
+                    | Some("checkpoint") => {}
+                    Some(step_type) => {
+                        return Err(AdapterError::coded(
+                            LocalCliFailureCode::IsolationViolation,
+                            format!(
+                                "Antigravity image task emitted unsupported step type {step_type}"
+                            ),
+                        ));
+                    }
+                    None => return Err("Antigravity image step update omitted its type".into()),
+                }
+            }
+            Some("result") => {
+                let result = value
+                    .get("result")
+                    .and_then(Value::as_object)
+                    .ok_or_else(|| "Antigravity image result was malformed".to_string())?;
+                let status = result
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let actual_conversation = result
+                    .get("conversation_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if actual_conversation != conversation_id {
+                    return Err("Antigravity image result changed conversation ids".into());
+                }
+                match status {
+                    "SUCCESS" => {
+                        if let Some(error) = result.get("error").filter(|value| !value.is_null()) {
+                            if contains_permission_signal(error) {
+                                return Err(AdapterError::coded(
+                                    LocalCliFailureCode::ProviderApprovalRejected,
+                                    "Antigravity image generation permission was rejected.",
+                                ));
+                            }
+                            return Err(image_result_error(
+                                &Value::Object(result.clone()),
+                                uses_gemini_api_key,
+                            ));
+                        }
+                        return generated.ok_or_else(|| {
+                            "Antigravity image task completed without a generated image".into()
+                        });
+                    }
+                    "CANCELED" | "INTERRUPTED" => {
+                        return Err(AdapterError::coded(
+                            LocalCliFailureCode::Cancelled,
+                            "local image task cancelled",
+                        ));
+                    }
+                    _ => {
+                        return Err(image_result_error(
+                            &Value::Object(result.clone()),
+                            uses_gemini_api_key,
+                        ))
+                    }
+                }
+            }
+            Some("init") => return Err("Antigravity image task emitted init more than once".into()),
+            Some(event)
+                if is_allowlisted_stream_metadata_event(event)
+                    && !contains_capability_semantics(&value) => {}
+            Some(_) | None => {
+                return Err(AdapterError::coded(
+                    LocalCliFailureCode::IsolationViolation,
+                    "Antigravity image task emitted an unsupported stream event",
+                ));
+            }
+        }
+    }
+}
+
+async fn stop_image_process(
+    supervisor: RunSupervisor,
+    result: Result<GeneratedImageBytes, AdapterError>,
+    failure_context: &str,
+) -> Result<GeneratedImageBytes, AdapterError> {
+    let mut output = None;
+    let terminal = result.map(|value| {
+        output = Some(value);
+        ProtocolOutcome {
+            session_id: None,
+            aborted: true,
+        }
+    });
+    supervisor.finish(terminal, failure_context).await?;
+    output.ok_or_else(|| "Antigravity image process completed without an output".into())
+}
+
+pub(crate) async fn generate_image(
+    executable: PathBuf,
+    request: PreparedLocalImageRequest,
+) -> Result<GeneratedImageBytes, AdapterError> {
+    if !request.references.is_empty() {
+        return Err(AdapterError::coded(
+            LocalCliFailureCode::CliUnsupported,
+            "Antigravity local image editing is unsupported",
+        ));
+    }
+    if request.cancellation.is_cancelled() {
+        return Err(AdapterError::coded(
+            LocalCliFailureCode::Cancelled,
+            "local image task cancelled",
+        ));
+    }
+    let provider_environment = load_provider_environment()?;
+    let (home, workspace, private_files) = prepare_image_files(&request, &provider_environment)?;
+    for private_file in &private_files {
+        private_file.verify_unchanged()?;
+    }
+    let process_spec = frozen_image_process_spec(
+        &executable,
+        &request,
+        &provider_environment,
+        &home,
+        &workspace,
+    )?;
+    let process = RunSupervisor::spawn(process_spec, request.cancellation.child_token())?;
+    let supervisor = process.supervisor;
+    // The image prompt is a command-line argument. Closing stdin prevents a
+    // headless CLI from waiting for an unrelated stream-json user message.
+    drop(process.stdin);
+    let mut reader = BufReader::new(process.stdout);
+    let expected_cwd = std::fs::canonicalize(&workspace)
+        .map_err(|_| "failed to resolve the private Antigravity image workspace".to_string())?;
+    let result = supervisor
+        .monitor(run_image_protocol(
+            &request,
+            &expected_cwd,
+            provider_environment.uses_gemini_api_key(),
+            &mut reader,
+        ))
+        .await;
+    stop_image_process(
+        supervisor,
+        result,
+        "Antigravity image process exited unsuccessfully",
+    )
+    .await
 }
 
 fn apply_private_environment(command: &mut Command, home: &Path) {
@@ -1868,27 +2710,6 @@ pub(crate) async fn launch_prepared(
     prepared: PreparedAntigravityRun,
 ) -> Result<ProtocolOutcome, AdapterError> {
     launch_prepared_with_prelaunch(prepared, || std::future::ready(())).await
-}
-
-#[cfg(test)]
-async fn run_with_prelaunch<F, Fut>(
-    context: ProtocolContext,
-    provider_environment: AntigravityProviderEnvironment,
-    prelaunch: F,
-) -> Result<ProtocolOutcome, AdapterError>
-where
-    F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = ()>,
-{
-    let fingerprint = configuration_fingerprint_from_environment("defaults", &provider_environment);
-    let prepared = prepare_run_with_configuration(
-        context,
-        LoadedAntigravityConfiguration {
-            environment: provider_environment,
-            fingerprint,
-        },
-    )?;
-    launch_prepared_with_prelaunch(prepared, prelaunch).await
 }
 
 #[cfg(test)]
@@ -2061,6 +2882,20 @@ mod tests {
         })
     }
 
+    fn image_request(run_dir: &Path) -> PreparedLocalImageRequest {
+        PreparedLocalImageRequest {
+            model: None,
+            effort: None,
+            prompt: "Draw a small fox".to_string(),
+            references: Vec::new(),
+            run_dir: run_dir.to_path_buf(),
+            cancellation: CancellationToken::new(),
+        }
+    }
+
+    const TEST_IMAGE_PNG: &[u8] =
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDRpayload\x00\x00\x00\x00IEND\xaeB`\x82";
+
     #[test]
     fn identity_discovers_official_install_locations() {
         assert_eq!(IDENTITY.command_name, "agy");
@@ -2210,7 +3045,9 @@ mod tests {
         let agent = agent_source(&request).unwrap();
         assert!(agent.contains("mcp__open_builder__search_docs"));
         assert!(agent.contains("subagent: false"));
-        assert!(!agent.contains("read_url\""));
+        assert!(!agent.contains(NATIVE_SEARCH_TOOL));
+        assert!(!agent.contains(NATIVE_URL_TOOL));
+        assert!(!agent.contains(LEGACY_NATIVE_URL_TOOL));
 
         let settings = permission_settings(&request, None);
         assert_eq!(settings["toolPermission"], "strict");
@@ -2220,26 +3057,290 @@ mod tests {
             settings["permissions"]["allow"],
             json!(["mcp(open_builder/search_docs)"])
         );
-        assert!(settings["permissions"]["deny"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("read_url(*)")));
+        let denied = settings["permissions"]["deny"].as_array().unwrap();
+        for permission in ["search_web(*)", "read_url_content(*)", "read_url(*)"] {
+            assert!(
+                denied.contains(&json!(permission)),
+                "missing deny: {permission}"
+            );
+        }
     }
 
     #[test]
-    fn native_search_only_adds_read_only_url_permission() {
+    fn image_worker_exposes_only_generate_image_and_denies_other_capabilities() {
+        let agent = image_agent_source();
+        assert!(agent.contains("name: open-builder-image"));
+        assert!(agent.contains("subagent: false"));
+        assert!(agent.contains("generate_image"));
+        for denied in [
+            "files",
+            "shell commands",
+            "browsers",
+            "MCP servers",
+            "web search",
+            "URL readers",
+            "subagents",
+        ] {
+            assert!(
+                agent.contains(denied),
+                "missing worker prohibition: {denied}"
+            );
+        }
+
+        let settings = image_permission_settings(None);
+        assert_eq!(settings["toolPermission"], "strict");
+        assert_eq!(
+            settings["permissions"]["allow"],
+            json!(["generate_image(*)"])
+        );
+        let denied = settings["permissions"]["deny"].as_array().unwrap();
+        for capability in [
+            "read_file(*)",
+            "write_file(*)",
+            "command(*)",
+            "browser(*)",
+            "mcp(*)",
+            "search_web(*)",
+            "read_url_content(*)",
+            "subagent(*)",
+        ] {
+            assert!(
+                denied.contains(&json!(capability)),
+                "missing deny: {capability}"
+            );
+        }
+    }
+
+    #[test]
+    fn image_process_args_use_stream_json_and_reject_unsafe_preferences() {
+        let root = std::env::temp_dir().join(format!(
+            "open-builder-agy-image-args-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let request = image_request(&root);
+        let args = image_process_args(&request).unwrap();
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--output-format", "stream-json"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--agent", IMAGE_AGENT_NAME]));
+        assert!(args.iter().any(|arg| arg == "--print"));
+        assert_eq!(args.last().map(String::as_str), Some("Draw a small fox"));
+
+        let mut invalid = request;
+        invalid.model = Some("unsafe model".to_string());
+        assert!(image_process_args(&invalid).is_err());
+    }
+
+    #[test]
+    fn image_init_requires_exact_generate_image_inventory() {
+        let root = std::env::temp_dir().join(format!(
+            "open-builder-agy-image-init-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let request = image_request(&root);
+        let expected_cwd = std::fs::canonicalize(&root).unwrap();
+        let conversation_id = "c3b66b04-872b-4fbe-a3a4-058a026ef20a";
+        let init = json!({
+            "event":"init",
+            "conversation_id":conversation_id,
+            "init":{
+                "cwd":expected_cwd,
+                "tools":[IMAGE_TOOL],
+                "permission_mode":"strict",
+                "agent":IMAGE_AGENT_NAME
+            }
+        });
+        assert_eq!(
+            attest_image_init(&init, &expected_cwd, &request).unwrap(),
+            conversation_id
+        );
+
+        for tools in [
+            json!([IMAGE_TOOL, NATIVE_SEARCH_TOOL]),
+            json!([NATIVE_SEARCH_TOOL]),
+            json!([]),
+        ] {
+            let mut invalid = init.clone();
+            invalid["init"]["tools"] = tools;
+            assert!(attest_image_init(&invalid, &expected_cwd, &request).is_err());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn image_output_accepts_nested_images_and_strictly_validates_bytes() {
+        let root = std::env::temp_dir().join(format!(
+            "open-builder-agy-image-output-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let encoded = BASE64.encode(TEST_IMAGE_PNG);
+        let output = json!({
+            "images":[{
+                "id":"image-nested",
+                "mimeType":"image/png",
+                "data":encoded,
+                "revisedPrompt":"A small fox"
+            }]
+        });
+        let image = parse_image_tool_output(&output, &root, &root, "agy-image-step-1").unwrap();
+        assert_eq!(image.id, "image-nested");
+        assert_eq!(image.mime_type, "image/png");
+        assert_eq!(image.bytes, TEST_IMAGE_PNG);
+        assert_eq!(image.revised_prompt.as_deref(), Some("A small fox"));
+
+        let invalid = json!({"data":BASE64.encode(b"not an image")});
+        assert!(parse_image_tool_output(&invalid, &root, &root, "agy-image-step-2").is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn image_output_paths_are_confined_to_the_task_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "open-builder-agy-image-path-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let outside = std::env::temp_dir().join(format!(
+            "open-builder-agy-image-outside-{}.png",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("generated.png"), TEST_IMAGE_PNG).unwrap();
+        std::fs::write(&outside, TEST_IMAGE_PNG).unwrap();
+        let inside = parse_image_tool_output(
+            &json!({"path":"generated.png", "id":"image-path"}),
+            &root,
+            &root,
+            "agy-image-step-3",
+        )
+        .unwrap();
+        assert_eq!(inside.file_name.as_deref(), Some("generated.png"));
+        assert!(parse_image_tool_output(
+            &json!({"path":outside}),
+            &root,
+            &root,
+            "agy-image-step-4",
+        )
+        .is_err());
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_file(outside).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn image_protocol_requires_completed_tool_event_before_success() {
+        use tokio::process::Command;
+
+        let root = std::env::temp_dir().join(format!(
+            "open-builder-agy-image-protocol-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let request = image_request(&root);
+        let conversation_id = "c3b66b04-872b-4fbe-a3a4-058a026ef20a";
+        let output = BASE64.encode(TEST_IMAGE_PNG);
+        let events = [
+            json!({"event":"init","conversation_id":conversation_id,"init":{"cwd":std::fs::canonicalize(&root).unwrap(),"tools":[IMAGE_TOOL],"permission_mode":"strict","agent":IMAGE_AGENT_NAME}}),
+            json!({"event":"step_update","step_update":{"conversation_id":conversation_id,"step_type":"tool","tool_name":IMAGE_TOOL,"state":"ACTIVE","step_index":1,"tool_info":{"name":IMAGE_TOOL}}}),
+            json!({"event":"step_update","step_update":{"conversation_id":conversation_id,"step_type":"tool","tool_name":IMAGE_TOOL,"state":"DONE","step_index":1,"tool_info":{"name":IMAGE_TOOL,"output":{"images":[{"id":"image-protocol","mimeType":"image/png","data":output}]}}}}),
+            json!({"event":"result","result":{"status":"SUCCESS","conversation_id":conversation_id}}),
+        ];
+        let lines = events
+            .iter()
+            .map(|event| serde_json::to_string(event).unwrap())
+            .collect::<Vec<_>>();
+        let script = "printf '%s\\n' \"$1\" \"$2\" \"$3\" \"$4\"";
+        let mut child = Command::new("sh")
+            .args(["-c", script, "fake"])
+            .args(&lines)
+            .current_dir(&root)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let mut reader = BufReader::new(stdout);
+        let image = run_image_protocol(
+            &request,
+            &std::fs::canonicalize(&root).unwrap(),
+            false,
+            &mut reader,
+        )
+        .await
+        .unwrap();
+        assert_eq!(image.id, "image-protocol");
+        assert_eq!(image.bytes, TEST_IMAGE_PNG);
+        assert!(child.wait().await.unwrap().success());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_search_permissions_allow_canonical_and_legacy_read_only_tools() {
         let mut request = request();
         request.native_search = true;
         let settings = permission_settings(&request, None);
-        assert!(settings["permissions"]["allow"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("read_url(*)")));
-        assert!(!settings["permissions"]["deny"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("read_url(*)")));
-        assert!(agent_source(&request).unwrap().contains("\"read_url\""));
+        let allow = settings["permissions"]["allow"].as_array().unwrap();
+        let deny = settings["permissions"]["deny"].as_array().unwrap();
+        for permission in ["search_web(*)", "read_url_content(*)", "read_url(*)"] {
+            assert!(
+                allow.contains(&json!(permission)),
+                "missing allow: {permission}"
+            );
+            assert!(!deny.contains(&json!(permission)));
+        }
+        let agent = agent_source(&request).unwrap();
+        assert!(agent.contains(&format!("\"{NATIVE_SEARCH_TOOL}\"")));
+        assert!(agent.contains(&format!("\"{NATIVE_URL_TOOL}\"")));
+        assert!(!agent.contains(&format!("\"{LEGACY_NATIVE_URL_TOOL}\"")));
+    }
+
+    #[test]
+    fn native_search_requires_search_and_url_tools_in_the_attested_inventory() {
+        let expected = BTreeSet::new();
+        assert_eq!(
+            native_search_tools_from_inventory(
+                &BTreeSet::from([NATIVE_SEARCH_TOOL.to_string(), NATIVE_URL_TOOL.to_string(),]),
+                &expected,
+                true,
+            )
+            .unwrap(),
+            BTreeSet::from([NATIVE_SEARCH_TOOL.to_string(), NATIVE_URL_TOOL.to_string(),])
+        );
+        assert_eq!(
+            native_search_tools_from_inventory(
+                &BTreeSet::from([
+                    NATIVE_SEARCH_TOOL.to_string(),
+                    LEGACY_NATIVE_URL_TOOL.to_string(),
+                ]),
+                &expected,
+                true,
+            )
+            .unwrap(),
+            BTreeSet::from([
+                NATIVE_SEARCH_TOOL.to_string(),
+                LEGACY_NATIVE_URL_TOOL.to_string(),
+            ])
+        );
+        let url_only = native_search_tools_from_inventory(
+            &BTreeSet::from([LEGACY_NATIVE_URL_TOOL.to_string()]),
+            &expected,
+            true,
+        )
+        .expect_err("URL access alone must not advertise native search");
+        assert!(url_only.contains(NATIVE_SEARCH_TOOL));
+    }
+
+    #[test]
+    fn native_search_inventory_is_rejected_when_disabled() {
+        let error = native_search_tools_from_inventory(
+            &BTreeSet::from([NATIVE_SEARCH_TOOL.to_string(), NATIVE_URL_TOOL.to_string()]),
+            &BTreeSet::new(),
+            false,
+        )
+        .expect_err("disabled native search must reject provider inventory");
+        assert!(error.contains("disabled"));
     }
 
     #[test]
@@ -2543,6 +3644,66 @@ mod tests {
         assert!(decode_step(&reasoning, "id", &BTreeSet::new(), &request)
             .unwrap()
             .contains(&RuntimeEvent::Reasoning("considering".to_string())));
+
+        let mut native_request = request.clone();
+        native_request.native_search = true;
+        let native_tools =
+            BTreeSet::from([NATIVE_SEARCH_TOOL.to_string(), NATIVE_URL_TOOL.to_string()]);
+        let started = json!({
+            "event":"step_update",
+            "step_update":{
+                "conversation_id":"id",
+                "step_index":3,
+                "step_type":"tool",
+                "tool_name":NATIVE_SEARCH_TOOL,
+                "state":"ACTIVE",
+                "tool_info":{
+                    "name":NATIVE_SEARCH_TOOL,
+                    "parameters":{"query":"verified run"},
+                    "output":{"ignored":true}
+                }
+            }
+        });
+        assert!(matches!(
+            decode_step(&started, "id", &native_tools, &native_request)
+                .unwrap()
+                .as_slice(),
+            [RuntimeEvent::Tool {
+                native: true,
+                name,
+                phase,
+                arguments: Some(Value::Object(_)),
+                result: None,
+                ..
+            }] if name == NATIVE_SEARCH_TOOL && phase == "started"
+        ));
+        let completed = json!({
+            "event":"step_update",
+            "step_update":{
+                "conversation_id":"id",
+                "step_index":3,
+                "step_type":"tool",
+                "tool_name":NATIVE_SEARCH_TOOL,
+                "state":"DONE",
+                "tool_info":{
+                    "name":NATIVE_SEARCH_TOOL,
+                    "parameters":{"query":"verified run"},
+                    "output":{"results":[{"url":"https://example.test"}]}
+                }
+            }
+        });
+        assert!(matches!(
+            decode_step(&completed, "id", &native_tools, &native_request)
+                .unwrap()
+                .as_slice(),
+            [RuntimeEvent::Tool {
+                native: true,
+                name,
+                phase,
+                result: Some(Value::Object(_)),
+                ..
+            }] if name == NATIVE_SEARCH_TOOL && phase == "completed"
+        ));
     }
 
     #[test]
@@ -2561,6 +3722,35 @@ mod tests {
         )
         .is_err());
         assert!(validate_runtime_tool("read_url", &json!({}), &expected, &request).is_err());
+        assert!(
+            validate_runtime_tool(NATIVE_SEARCH_TOOL, &json!({}), &expected, &request).is_err()
+        );
+
+        let mut native_request = request.clone();
+        native_request.native_search = true;
+        let native_expected =
+            BTreeSet::from([NATIVE_SEARCH_TOOL.to_string(), NATIVE_URL_TOOL.to_string()]);
+        assert!(validate_runtime_tool(
+            NATIVE_SEARCH_TOOL,
+            &json!({}),
+            &native_expected,
+            &native_request
+        )
+        .unwrap());
+        assert!(validate_runtime_tool(
+            NATIVE_URL_TOOL,
+            &json!({}),
+            &native_expected,
+            &native_request
+        )
+        .unwrap());
+        assert!(validate_runtime_tool(
+            LEGACY_NATIVE_URL_TOOL,
+            &json!({}),
+            &native_expected,
+            &native_request
+        )
+        .is_err());
 
         assert!(!validate_runtime_tool(
             "call_mcp_tool",
@@ -2907,7 +4097,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn independent_runs_are_not_serialized_by_a_provider_wide_lock() {
+    async fn independent_runs_prepare_without_a_provider_wide_lock() {
         let (first_root, first_executable) = compile_contract_cli("success-concurrent-first");
         let (second_root, second_executable) = compile_contract_cli("success-concurrent-second");
         let shared_session_dir = first_root.join("shared-session-state");
@@ -2916,7 +4106,7 @@ mod tests {
         let (first_channel, _first_events) = event_channel();
         let mut first_request = request();
         first_request.tools.clear();
-        first_request.native_search = true;
+        first_request.native_search = false;
         first_request.scope.id = "conversation-one".to_string();
         let mut first_context =
             protocol_context(&first_root, first_executable, first_request, first_channel);
@@ -2925,7 +4115,7 @@ mod tests {
         let (second_channel, _second_events) = event_channel();
         let mut second_request = request();
         second_request.tools.clear();
-        second_request.native_search = true;
+        second_request.native_search = false;
         second_request.scope.id = "conversation-two".to_string();
         let mut second_context = protocol_context(
             &second_root,
@@ -2941,29 +4131,22 @@ mod tests {
         let first_rendezvous = rendezvous.clone();
         let second_rendezvous = rendezvous.clone();
 
+        let first_prelaunch = async move {
+            first_rendezvous.wait().await;
+            prepare_run_files(&first_context, &AntigravityProviderEnvironment::default())
+        };
+        let second_prelaunch = async move {
+            second_rendezvous.wait().await;
+            prepare_run_files(&second_context, &AntigravityProviderEnvironment::default())
+        };
         let runs = tokio::time::timeout(Duration::from_secs(10), async move {
-            tokio::join!(
-                run_with_prelaunch(
-                    first_context,
-                    AntigravityProviderEnvironment::default(),
-                    move || async move {
-                        first_rendezvous.wait().await;
-                    },
-                ),
-                run_with_prelaunch(
-                    second_context,
-                    AntigravityProviderEnvironment::default(),
-                    move || async move {
-                        second_rendezvous.wait().await;
-                    },
-                ),
-            )
+            tokio::join!(first_prelaunch, second_prelaunch)
         })
         .await
         .expect("independent runs must both reach the prelaunch rendezvous");
 
-        assert!(runs.0.unwrap().session_id.is_some());
-        assert!(runs.1.unwrap().session_id.is_some());
+        assert!(runs.0.is_ok());
+        assert!(runs.1.is_ok());
         assert_ne!(first_home, second_home);
         assert!(first_home
             .join(".gemini/antigravity-cli/settings.json")
@@ -3056,7 +4239,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn real_fake_process_rejects_unknown_antigravity_capability_event() {
+    async fn real_fake_process_rejects_unverified_native_search_inventory() {
         let (root, executable) = compile_contract_cli("unknown");
         let (channel, _events) = event_channel();
         let mut request = request();
@@ -3064,13 +4247,10 @@ mod tests {
         request.native_search = true;
         let context = protocol_context(&root, executable, request, channel);
         let error = match execute_contract(&context).await {
-            Ok(_) => panic!("unknown Antigravity capability event must fail closed"),
+            Ok(_) => panic!("URL-only Antigravity inventory must fail closed"),
             Err(error) => error,
         };
-        assert!(
-            error.message.contains("provider approval rejected"),
-            "{error}"
-        );
+        assert!(error.message.contains(NATIVE_SEARCH_TOOL), "{error}");
         std::fs::remove_dir_all(root).unwrap();
     }
 

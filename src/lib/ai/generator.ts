@@ -1017,6 +1017,7 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
     let contentAccum = "";
     let thinkingAccum = "";
     const toolCallsAccum: ToolCall[] = [];
+    const invalidHostToolCalls = new Map<string, string>();
 
     const normalizeStreamError = (error: unknown, fallback: string): Error => {
       if (error instanceof Error) return error;
@@ -1082,7 +1083,10 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
           break;
 
         case "tool-call":
-          if (!this.toolRun.providerOwnedNames.has(part.toolName)) {
+          if (
+            !this.toolRun.providerOwnedNames.has(part.toolName) &&
+            part.providerExecuted !== true
+          ) {
             toolCallsAccum.push({
               id: part.toolCallId,
               type: "function",
@@ -1091,6 +1095,9 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
                 arguments: JSON.stringify(part.input),
               },
             });
+            if (part.invalid === true) {
+              invalidHostToolCalls.set(part.toolCallId, part.toolName);
+            }
           }
           break;
 
@@ -1098,6 +1105,14 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
           throw normalizeStreamError(part.error, "The model stream failed.");
 
         case "tool-error":
+          if (
+            part.providerExecuted !== true &&
+            !this.toolRun.providerOwnedNames.has(part.toolName) &&
+            invalidHostToolCalls.get(part.toolCallId) === part.toolName
+          ) {
+            invalidHostToolCalls.delete(part.toolCallId);
+            break;
+          }
           throw normalizeStreamError(
             part.error,
             `Tool "${part.toolName}" failed while streaming.`,

@@ -1,5 +1,6 @@
 import type {
   AssetSearchSettings,
+  AISettings,
   WebSearchSettings,
 } from "../../../store/settings";
 import { AssetSearchTab } from "./AssetSearchTab";
@@ -11,6 +12,8 @@ interface SearchServicesTabProps {
   assetSearchForm: AssetSearchSettings;
   setAssetSearchForm: (value: AssetSearchSettings) => void;
   apiType: string;
+  runtime?: AISettings["runtime"];
+  localNativeSearchAvailable?: boolean;
 }
 
 export function SearchServicesTab({
@@ -19,6 +22,8 @@ export function SearchServicesTab({
   assetSearchForm,
   setAssetSearchForm,
   apiType,
+  runtime,
+  localNativeSearchAvailable,
 }: SearchServicesTabProps) {
   return (
     <>
@@ -27,13 +32,12 @@ export function SearchServicesTab({
           form={webSearchForm}
           setForm={setWebSearchForm}
           apiType={apiType}
+          runtime={runtime}
+          localNativeSearchAvailable={localNativeSearchAvailable}
         />
       </section>
 
-      <section
-        className="space-y-4"
-        aria-labelledby="asset-search-heading"
-      >
+      <section className="space-y-4" aria-labelledby="asset-search-heading">
         <AssetSearchTab form={assetSearchForm} setForm={setAssetSearchForm} />
       </section>
     </>

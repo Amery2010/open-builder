@@ -15,6 +15,7 @@ use crate::local_agent_adapter::{
     ResolvedAdapterProbe,
 };
 use crate::local_agent_bridge::ToolBridge;
+use crate::local_agent_media::ActiveImageTask;
 use crate::local_agent_models::{CatalogAuthority, LaunchValidation, ModelStrategy};
 use crate::local_agent_runtime::{
     infer_failure_phase, AdapterError, InstallationIdentity, LocalCliFailure, LocalCliFailureCode,
@@ -108,6 +109,9 @@ pub struct LocalAgentCapabilities {
     pub(crate) reasoning: bool,
     pub(crate) tools: bool,
     pub(crate) native_search: bool,
+    pub(crate) image_generation: bool,
+    pub(crate) image_editing: bool,
+    pub(crate) media_capabilities_verified: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -547,7 +551,8 @@ impl From<tauri::ipc::Channel<LocalAgentEvent>> for TrackedChannel {
 pub struct LocalAgentState {
     runs: Arc<Mutex<HashMap<String, ActiveRun>>>,
     bridge: Arc<ToolBridge>,
-    model_strategy: Arc<ModelStrategy>,
+    pub(crate) model_strategy: Arc<ModelStrategy>,
+    pub(crate) image_tasks: Arc<Mutex<HashMap<String, ActiveImageTask>>>,
     cleaned_run_roots: Mutex<HashSet<LocalAgentProvider>>,
 }
 
@@ -557,13 +562,42 @@ impl Default for LocalAgentState {
             runs: Arc::new(Mutex::new(HashMap::new())),
             bridge: Arc::new(ToolBridge::default()),
             model_strategy: Arc::new(ModelStrategy::default()),
+            image_tasks: Arc::new(Mutex::new(HashMap::new())),
             cleaned_run_roots: Mutex::new(HashSet::new()),
         }
     }
 }
 
 impl LocalAgentState {
-    fn ensure_stale_runs_cleaned(
+    pub(crate) fn claim_image_task_authority(
+        &self,
+        run_id: &str,
+        call_id: &str,
+        provider: LocalAgentProvider,
+    ) -> Result<CancellationToken, String> {
+        let runs = self
+            .runs
+            .lock()
+            .map_err(|_| "local agent run lock poisoned".to_string())?;
+        let run = runs
+            .get(run_id)
+            .ok_or_else(|| "local agent run is not active".to_string())?;
+        if run.provider != provider
+            || run.scope.kind != LocalAgentRunScopeKind::Conversation
+            || run.cancellation.is_cancelled()
+        {
+            return Err("local agent run does not authorize this image task".to_string());
+        }
+        let cancellation = self
+            .bridge
+            .claim_pending_tool(run_id, call_id, "generate_image")?;
+        if cancellation.is_cancelled() {
+            return Err("local agent image tool call is cancelled".to_string());
+        }
+        Ok(cancellation)
+    }
+
+    pub(crate) fn ensure_stale_runs_cleaned(
         &self,
         app: &AppHandle,
         provider: LocalAgentProvider,
@@ -581,6 +615,15 @@ impl LocalAgentState {
     }
 
     pub async fn shutdown_gracefully(&self) {
+        let image_tasks = self
+            .image_tasks
+            .lock()
+            .map(|mut tasks| tasks.drain().map(|(_, task)| task).collect::<Vec<_>>())
+            .unwrap_or_default();
+        for task in image_tasks {
+            task.cancellation.cancel();
+            let _ = std::fs::remove_dir_all(task.run_dir);
+        }
         let active = self
             .runs
             .lock()
@@ -604,6 +647,12 @@ impl LocalAgentState {
     }
 
     pub fn shutdown_now(&self) {
+        if let Ok(mut tasks) = self.image_tasks.lock() {
+            for (_, task) in tasks.drain() {
+                task.cancellation.cancel();
+                let _ = std::fs::remove_dir_all(task.run_dir);
+            }
+        }
         if let Ok(mut runs) = self.runs.lock() {
             for (_, run) in runs.drain() {
                 run.cancellation.cancel();
@@ -803,7 +852,7 @@ fn executable_candidates(provider: LocalAgentProvider) -> Vec<(PathBuf, String)>
     candidates
 }
 
-fn resolve_executable(
+pub(crate) fn resolve_executable(
     app: &AppHandle,
     provider: LocalAgentProvider,
 ) -> Result<Option<(PathBuf, String)>, String> {
@@ -838,7 +887,7 @@ async fn probe_path(
                 efforts,
                 catalog_authority,
                 verification_required: provider_verification_required,
-                message,
+                message: provider_message,
             },
         preference_decision,
         launch_validation,
@@ -866,6 +915,44 @@ async fn probe_path(
     let installation_fingerprint = InstallationIdentity::capture(&path)
         .ok()
         .map(|identity| identity.fingerprint().to_string());
+    let capabilities =
+        if provider == LocalAgentProvider::Codex && availability == LocalAgentAvailability::Ready {
+            crate::local_agent_codex::probe_image_capabilities(&path).await
+        } else {
+            provider.capabilities()
+        };
+    let message = match launch_validation {
+        LaunchValidation::Rejected { message: selection } => match provider_message {
+            Some(message) if message != selection => Some(format!("{message} {selection}")),
+            Some(message) => Some(message),
+            None => Some(selection),
+        },
+        LaunchValidation::Allowed { .. } => provider_message,
+    };
+    let media_provider = matches!(
+        provider,
+        LocalAgentProvider::Codex | LocalAgentProvider::Antigravity
+    );
+    let media_message = if media_provider
+        && availability == LocalAgentAvailability::Ready
+        && capabilities.media_capabilities_verified
+        && !capabilities.image_generation
+    {
+        Some("The selected local CLI provider does not support image generation.")
+    } else if media_provider
+        && availability == LocalAgentAvailability::Ready
+        && !capabilities.media_capabilities_verified
+    {
+        Some("Local image generation capability could not be verified.")
+    } else {
+        None
+    };
+    let message = match (message, media_message) {
+        (Some(message), Some(media)) => Some(format!("{message} {media}")),
+        (Some(message), None) => Some(message),
+        (None, Some(media)) => Some(media.to_string()),
+        (None, None) => None,
+    };
     LocalAgentProbe {
         provider,
         availability,
@@ -881,15 +968,8 @@ async fn probe_path(
         models,
         efforts,
         preference_decision,
-        capabilities: provider.capabilities(),
-        message: match launch_validation {
-            LaunchValidation::Rejected { message: selection } => match message {
-                Some(message) if message != selection => Some(format!("{message} {selection}")),
-                Some(message) => Some(message),
-                None => Some(selection),
-            },
-            LaunchValidation::Allowed { .. } => message,
-        },
+        capabilities,
+        message,
     }
 }
 
@@ -1094,7 +1174,10 @@ fn provider_data_directory(
     Ok(path)
 }
 
-fn create_run_directory(app: &AppHandle, provider: LocalAgentProvider) -> Result<PathBuf, String> {
+pub(crate) fn create_run_directory(
+    app: &AppHandle,
+    provider: LocalAgentProvider,
+) -> Result<PathBuf, String> {
     let runs = runs_directory(app, provider)?;
     let path = runs.join(uuid::Uuid::new_v4().to_string());
     std::fs::create_dir(&path)

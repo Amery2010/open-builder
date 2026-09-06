@@ -22,18 +22,11 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
-import type { Translations } from "../../i18n";
 import { HOST_TOOL_RECORDS } from "./tools-schema";
 
 export interface ToolMeta {
   iconComponent: LucideIcon;
   iconClass: string;
-  /** Optional formatter for the tool-card title bar. Returning `undefined`
-   * falls through to the localized tool name. */
-  titleBuilder?: (
-    args: Record<string, unknown>,
-    t: Translations,
-  ) => string | undefined;
 }
 
 type IconPresentation = Pick<ToolMeta, "iconComponent" | "iconClass">;
@@ -92,14 +85,6 @@ const catalogMetadata: Record<string, ToolMeta> = Object.fromEntries(
       record.name,
       {
         ...icon,
-        titleBuilder: (args: Record<string, unknown>, t: Translations) => {
-          const summary = record.presentation.summarizeArguments(args);
-          if (!summary) return undefined;
-          const localized = (t.tool.names as Record<string, string>)[
-            record.name
-          ];
-          return `${localized ?? record.presentation.name.en}: ${summary}`;
-        },
       } satisfies ToolMeta,
     ];
   }),
@@ -109,14 +94,7 @@ const catalogMetadata: Record<string, ToolMeta> = Object.fromEntries(
  * reintroducing either tool into executable Catalog authority. */
 const legacyMetadata: Record<string, ToolMeta> = {
   read_file: { iconComponent: Eye, iconClass: "text-blue-400" },
-  apply_design_system: {
-    iconComponent: Palette,
-    iconClass: "text-violet-500",
-    titleBuilder: (args, t) =>
-      typeof args.system_id === "string"
-        ? `${t.tool.names.apply_design_system}: ${args.system_id}`
-        : undefined,
-  },
+  apply_design_system: { iconComponent: Palette, iconClass: "text-violet-500" },
 };
 
 export const TOOL_METADATA: Record<string, ToolMeta> = {

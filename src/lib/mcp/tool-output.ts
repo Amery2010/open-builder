@@ -93,6 +93,12 @@ export function mcpToolExecutionOutputToModelOutput(
           text: `[MCP resource link: ${part.name} <${part.uri}>; not fetched]`,
         });
         break;
+      case "local_image":
+        value.push({
+          type: "text",
+          text: `[Local generated image: ${part.name}; reference id ${part.id}]`,
+        });
+        break;
       case "placeholder":
         value.push({
           type: "text",

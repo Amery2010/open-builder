@@ -15,10 +15,22 @@ interface WebSearchTabProps {
   form: WebSearchSettings;
   setForm: (v: WebSearchSettings) => void;
   apiType: string;
+  runtime?: "api" | "localCli";
+  localNativeSearchAvailable?: boolean;
 }
 
-export function WebSearchTab({ form, setForm, apiType }: WebSearchTabProps) {
+export function WebSearchTab({
+  form,
+  setForm,
+  apiType,
+  runtime = "api",
+  localNativeSearchAvailable = false,
+}: WebSearchTabProps) {
   const t = useT();
+  const showBuiltinSearch =
+    runtime === "localCli"
+      ? localNativeSearchAvailable
+      : apiType !== "openai-compatible";
   return (
     <>
       <div className="space-y-2">
@@ -37,7 +49,7 @@ export function WebSearchTab({ form, setForm, apiType }: WebSearchTabProps) {
             <SelectItem value="disabled">
               {t.settings.webSearch.disabled}
             </SelectItem>
-            {apiType !== "openai-compatible" && (
+            {showBuiltinSearch && (
               <SelectItem value="builtin">
                 {t.settings.webSearch.builtin}
               </SelectItem>

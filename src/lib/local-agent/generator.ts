@@ -17,7 +17,12 @@ import type {
 } from "../ai/generator-types";
 import type { ExecutionMode } from "../ai/tools-schema";
 import type { Conversation, LocalAgentSessionRef } from "../../types";
-import { resolveAttachmentForModel } from "../attachments/store";
+import {
+  deleteAttachment,
+  resolveAttachmentForModel,
+  storeAttachmentBlob,
+} from "../attachments/store";
+import { compressLocalImage } from "../images/compress-local-image";
 import { formatUntrustedReferenceContext } from "../ai/messages";
 import { normalizeToolExecutionOutput } from "../utils/tool-result";
 import { PLAN_APPROVED_PREFIX } from "../ai/plan-mode";
@@ -41,12 +46,18 @@ import type {
   LocalCliHostToolOutcome,
   LocalCliPreparedMetadata,
   LocalCliUsage,
+  LocalImageReferenceInput,
   LocalToolAnnotations,
   LocalToolContent,
   LocalToolResolution,
   LocalToolSpec,
 } from "./types";
-import { localAgentSupportsNativeSearch } from "./providers";
+import {
+  localAgentImageCapabilities,
+  localAgentSupportsNativeSearch,
+} from "./providers";
+import { generateLocalImage } from "./media";
+import { useSettingsStore } from "../../store/settings";
 
 const LOCAL_RUNTIME_INSTRUCTIONS = `
 
@@ -57,6 +68,7 @@ The provider's native read-only or strict filesystem mode applies only to its na
 Never route project work through the native shell, filesystem, hooks, plugins, or external MCP configuration.
 Destructive ProjectFiles operations may pause while the Open Builder Host asks the user for permission. Only that Host decision grants authority. Never use ask_user_question or provider-native permission prompts as a substitute, and do not repeat an identical denied request in the same run.
 Read listed attachments with read_attachment, using the opaque attachment id.
+Use generate_image for provider-native image creation. Pass only listed opaque image ids as reference_ids. To use a generated image in an initialized project, call import_generated_image and then reference the returned managed module path from project code.
 screenshot_to_code is deliberately unavailable here: inspect the attachment yourself and build with the normal project tools.
 `;
 
@@ -117,6 +129,88 @@ interface LocalTurnBudget {
  * model actually calls read_attachment, and cached for the rest of the run. */
 type AttachmentIndexEntry = AttachmentRef | ResolvedAttachment;
 
+interface GenerateImageArguments {
+  prompt: string;
+  referenceIds: string[];
+}
+
+function parseGenerateImageArguments(
+  value: unknown,
+): GenerateImageArguments | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const input = value as Record<string, unknown>;
+  const prompt = typeof input.prompt === "string" ? input.prompt.trim() : "";
+  const rawReferences = input.reference_ids;
+  if (!prompt || prompt.length > 8_000) return null;
+  if (
+    rawReferences !== undefined &&
+    (!Array.isArray(rawReferences) ||
+      rawReferences.length > 5 ||
+      rawReferences.some(
+        (id) => typeof id !== "string" || !id || id.length > 256,
+      ))
+  ) {
+    return null;
+  }
+  return {
+    prompt,
+    referenceIds: [...new Set((rawReferences as string[] | undefined) ?? [])],
+  };
+}
+
+function generatedImageBlob(data: string, mimeType: string): Blob {
+  let binary: string;
+  try {
+    binary = globalThis.atob(data);
+  } catch {
+    throw new Error("The local CLI returned invalid image data.");
+  }
+  const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  return new Blob([bytes], { type: mimeType });
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(
+    "",
+  );
+}
+
+async function blobSha256(blob: Blob): Promise<string> {
+  const digest = await globalThis.crypto.subtle.digest(
+    "SHA-256",
+    await blob.arrayBuffer(),
+  );
+  return bytesToHex(new Uint8Array(digest));
+}
+
+function generatedImageName(
+  value: string | undefined,
+  mimeType: string,
+): string {
+  const extension =
+    mimeType === "image/jpeg"
+      ? "jpg"
+      : mimeType === "image/webp"
+        ? "webp"
+        : "png";
+  const stem = (value ?? "generated-image")
+    .replace(/\.[A-Za-z0-9]+$/, "")
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+  return `${stem || "generated-image"}.${extension}`;
+}
+
+function generatedImageIds(messages: readonly Message[]): Set<string> {
+  return new Set(
+    messages.flatMap((message) =>
+      (message.toolOutput?.content ?? []).flatMap((part) =>
+        part.type === "local_image" ? [part.id] : [],
+      ),
+    ),
+  );
+}
+
 function isResolvedAttachment(
   entry: AttachmentIndexEntry,
 ): entry is ResolvedAttachment {
@@ -170,6 +264,11 @@ function toLocalContent(content: ToolExecutionContent): LocalToolContent {
     case "resource":
     case "resource_link":
       return content;
+    case "local_image":
+      return {
+        type: "text",
+        text: `Generated image ${content.name} is stored locally as ${content.id}.`,
+      };
     case "placeholder":
       return {
         type: "text",
@@ -197,6 +296,16 @@ function collectAttachmentIndex(
   for (const message of messages) {
     for (const attachment of message.metadata?.attachments ?? []) {
       if (!index.has(attachment.id)) index.set(attachment.id, attachment);
+    }
+    for (const content of message.toolOutput?.content ?? []) {
+      if (content.type !== "local_image" || index.has(content.id)) continue;
+      index.set(content.id, {
+        id: content.id,
+        type: "image",
+        name: content.name,
+        mimeType: content.mimeType,
+        size: content.size,
+      });
     }
   }
   return index;
@@ -252,6 +361,55 @@ function consumeToolBudget(
   if (budget.toolCalls >= budget.maxToolCalls) budget.exhausted = true;
   return null;
 }
+
+const GENERATE_IMAGE_TOOL_SPEC: LocalToolSpec = {
+  name: "generate_image",
+  description:
+    "Generate an image with the selected local CLI. Optionally edit up to five images listed for this conversation by passing their opaque ids.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      prompt: { type: "string", minLength: 1, maxLength: 8_000 },
+      reference_ids: {
+        type: "array",
+        items: { type: "string", minLength: 1, maxLength: 256 },
+        uniqueItems: true,
+        maxItems: 5,
+      },
+    },
+    required: ["prompt"],
+    additionalProperties: false,
+  },
+  annotations: {
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: false,
+    openWorldHint: true,
+  },
+  hostApproval: "session",
+};
+
+const IMPORT_GENERATED_IMAGE_TOOL_SPEC: LocalToolSpec = {
+  name: "import_generated_image",
+  description:
+    "Copy a generated image into the initialized project and create a managed JavaScript module that project source can import.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      image_id: { type: "string", minLength: 1, maxLength: 256 },
+      path: { type: "string", minLength: 1, maxLength: 512 },
+    },
+    required: ["image_id"],
+    additionalProperties: false,
+  },
+  annotations: {
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: false,
+    openWorldHint: false,
+  },
+  hostApproval: "session",
+};
 
 export class LocalAgentGenerator implements GenerationBackend {
   private readonly host: WebAppGenerator;
@@ -635,9 +793,15 @@ export class LocalAgentGenerator implements GenerationBackend {
       this.config.nativeSearch &&
       this.nativeSearchAllowed &&
       (runContext.mode === "chat" || runContext.mode === "plan");
-    const attachmentSpecs: LocalToolSpec[] = [];
+    const conversation = this.conversationSnapshot();
+    const generatedIds = generatedImageIds([
+      ...conversation.messages,
+      ...this.host.getMessages(),
+    ]);
+    const imageCapabilities = localAgentImageCapabilities(this.config.provider);
+    const extraSpecs: LocalToolSpec[] = [];
     if (attachmentIndex.size > 0) {
-      attachmentSpecs.push({
+      extraSpecs.push({
         name: "read_attachment",
         description:
           "Read an Open Builder attachment by its opaque id. Returns text, an image, or an embedded PDF resource.",
@@ -656,13 +820,23 @@ export class LocalAgentGenerator implements GenerationBackend {
         hostApproval: "none",
       });
     }
+    if (runContext.mode === "chat" && imageCapabilities.imageGeneration) {
+      extraSpecs.push(GENERATE_IMAGE_TOOL_SPEC);
+    }
+    if (
+      runContext.mode === "chat" &&
+      conversation.isProjectInitialized &&
+      (imageCapabilities.imageGeneration || generatedIds.size > 0)
+    ) {
+      extraSpecs.push(IMPORT_GENERATED_IMAGE_TOOL_SPEC);
+    }
     const authority = await createLocalToolAuthoritySnapshot({
       tools,
       mode: runContext.mode,
       platform: runContext.platform,
       allowedMcpAliases: runContext.allowedMcpAliases,
       annotations: this.localToolAnnotations,
-      extraSpecs: attachmentSpecs,
+      extraSpecs,
       hostRun,
     });
     const toolSpecs = [...authority.specs];
@@ -714,6 +888,7 @@ export class LocalAgentGenerator implements GenerationBackend {
     let error: Error | null = null;
     let streamedChars = 0;
     const nativeStarted = new Set<string>();
+    const nativeCompleted = new Set<string>();
     const nativeRejected = new Set<string>();
 
     const appendAssistant = (toolCall?: ToolCall) => {
@@ -795,6 +970,223 @@ export class LocalAgentGenerator implements GenerationBackend {
               text: "Error: attachment is unavailable for this run.",
               isError: true,
             });
+        this.events.onToolResult?.(
+          event.name,
+          event.arguments,
+          output.text,
+          event.callId,
+          output,
+        );
+      } else if (event.name === "generate_image") {
+        const input = parseGenerateImageArguments(event.arguments);
+        if (!input) {
+          output = normalizeToolExecutionOutput({
+            text: "Error: generate_image requires a non-empty prompt and at most five opaque reference_ids.",
+            isError: true,
+          });
+        } else if (
+          input.referenceIds.length > 0 &&
+          !imageCapabilities.imageEditing
+        ) {
+          output = normalizeToolExecutionOutput({
+            text: `${this.config.provider} CLI does not support reference-image editing through its structured local protocol.`,
+            isError: true,
+          });
+        } else {
+          const references: LocalImageReferenceInput[] = [];
+          let referenceError: ToolExecutionOutput | undefined;
+          for (const id of input.referenceIds) {
+            const attachment = await resolveIndexedAttachment(
+              attachmentIndex,
+              id,
+            );
+            if (
+              !attachment ||
+              attachment.type !== "image" ||
+              !["image/png", "image/jpeg", "image/webp"].includes(
+                attachment.mimeType,
+              )
+            ) {
+              references.length = 0;
+              referenceError = normalizeToolExecutionOutput({
+                text: `Error: reference image "${id}" is unavailable or unsupported for this run.`,
+                isError: true,
+              });
+              break;
+            }
+            const parsed = contentData(attachment.content);
+            references.push({
+              id: attachment.id,
+              name: attachment.name,
+              mimeType:
+                attachment.mimeType as LocalImageReferenceInput["mimeType"],
+              data: parsed.data,
+            });
+          }
+          if (referenceError) {
+            output = referenceError;
+          } else {
+            try {
+              const { imageCompressionEnabled, imageCompressionQuality } =
+                useSettingsStore.getState().system;
+              const image = await generateLocalImage(
+                {
+                  taskId: `${event.runId}:${event.callId}`,
+                  provider: this.config.provider,
+                  model: this.config.model,
+                  effort: this.config.effort,
+                  prompt: input.prompt,
+                  references,
+                },
+                this.activeSignal ?? undefined,
+              );
+              const blob = generatedImageBlob(image.data, image.mimeType);
+              if (blob.size !== image.size) {
+                throw new Error(
+                  "The local CLI image size did not match its verified metadata.",
+                );
+              }
+              const name = generatedImageName(image.fileName, image.mimeType);
+              const compressed = await compressLocalImage(
+                new File([blob], name, {
+                  type: image.mimeType,
+                  lastModified: 0,
+                }),
+                {
+                  enabled: imageCompressionEnabled,
+                  quality: imageCompressionQuality,
+                },
+                this.activeSignal ?? undefined,
+              );
+              const sha256 = await blobSha256(compressed);
+              const stored = await storeAttachmentBlob(
+                compressed,
+                "image",
+                compressed.name,
+                { createPreviewUrl: false },
+              );
+              if (this.activeSignal?.aborted) {
+                await deleteAttachment(stored.id);
+                throw new DOMException(
+                  "The local image generation task was cancelled.",
+                  "AbortError",
+                );
+              }
+              const reference: AttachmentRef = {
+                id: stored.id,
+                type: "image",
+                name: stored.name,
+                mimeType: stored.mimeType,
+                size: stored.size,
+              };
+              attachmentIndex.set(reference.id, reference);
+              generatedIds.add(reference.id);
+              const structuredContent = {
+                kind: "local_generated_image_v1",
+                imageId: reference.id,
+                providerImageId: image.id,
+                name: reference.name,
+                mimeType: reference.mimeType,
+                size: reference.size,
+                sha256,
+                providerSha256: image.sha256,
+                ...(image.revisedPrompt
+                  ? { revisedPrompt: image.revisedPrompt }
+                  : {}),
+              };
+              output = normalizeToolExecutionOutput({
+                text: JSON.stringify(structuredContent),
+                structuredContent,
+                content: [
+                  {
+                    type: "local_image",
+                    id: reference.id,
+                    name: reference.name,
+                    mimeType: reference.mimeType,
+                    size: reference.size,
+                  },
+                ],
+              });
+              hadSideEffect = true;
+            } catch (cause) {
+              const aborted =
+                cause instanceof Error && cause.name === "AbortError";
+              output = normalizeToolExecutionOutput({
+                text: aborted
+                  ? "Error: local image generation was cancelled."
+                  : `Error: ${cause instanceof Error ? cause.message : "local image generation failed."}`,
+                isError: true,
+              });
+              // A failed provider request may still have consumed image quota.
+              hadSideEffect = !aborted;
+            }
+          }
+        }
+        this.events.onToolResult?.(
+          event.name,
+          event.arguments,
+          output.text,
+          event.callId,
+          output,
+        );
+      } else if (event.name === "import_generated_image") {
+        const raw =
+          event.arguments &&
+          typeof event.arguments === "object" &&
+          !Array.isArray(event.arguments)
+            ? (event.arguments as Record<string, unknown>)
+            : {};
+        const imageId =
+          typeof raw.image_id === "string" ? raw.image_id.trim() : "";
+        const path = typeof raw.path === "string" ? raw.path.trim() : undefined;
+        const reference = imageId ? attachmentIndex.get(imageId) : undefined;
+        if (
+          !imageId ||
+          !generatedIds.has(imageId) ||
+          !reference ||
+          reference.type !== "image" ||
+          (path !== undefined && (!path || path.length > 512))
+        ) {
+          output = normalizeToolExecutionOutput({
+            text: "Error: import_generated_image requires a generated image id from this conversation and an optional safe project path.",
+            isError: true,
+          });
+        } else {
+          try {
+            const { importGeneratedImageAsset } =
+              await import("../project-assets/import");
+            const imported = await importGeneratedImageAsset({
+              conversationId: this.config.conversationId ?? conversation.id,
+              imageId,
+              mimeType: reference.mimeType,
+              name: reference.name,
+              ...(path ? { path } : {}),
+            });
+            const current = this.config.getConversation?.();
+            if (current) this.host.setFiles(current.files);
+            changes = [{ path: imported.modulePath, action: "created" }];
+            const structuredContent = {
+              kind: "project_image_asset_v1",
+              imageId,
+              path: imported.asset.path,
+              modulePath: imported.modulePath,
+              publicPath: imported.publicPath,
+              mimeType: imported.asset.mimeType,
+              size: imported.asset.size,
+              digest: imported.asset.digest,
+            };
+            output = normalizeToolExecutionOutput({
+              text: JSON.stringify(structuredContent),
+              structuredContent,
+            });
+            hadSideEffect = true;
+          } catch (cause) {
+            output = normalizeToolExecutionOutput({
+              text: `Error: ${cause instanceof Error ? cause.message : "generated image import failed."}`,
+              isError: true,
+            });
+          }
+        }
         this.events.onToolResult?.(
           event.name,
           event.arguments,
@@ -898,6 +1290,13 @@ export class LocalAgentGenerator implements GenerationBackend {
         case "nativeTool": {
           hadActivity = true;
           if (event.phase === "started") {
+            if (
+              nativeStarted.has(event.callId) ||
+              nativeCompleted.has(event.callId) ||
+              nativeRejected.has(event.callId)
+            ) {
+              break;
+            }
             const budgetError = consumeToolBudget(budget, event.name);
             if (budgetError) {
               nativeRejected.add(event.callId);
@@ -908,6 +1307,7 @@ export class LocalAgentGenerator implements GenerationBackend {
             this.events.onToolCall?.(event.name, event.callId);
           } else {
             if (nativeRejected.delete(event.callId)) break;
+            if (nativeCompleted.has(event.callId)) break;
             if (!nativeStarted.has(event.callId)) {
               const budgetError = consumeToolBudget(budget, event.name);
               if (budgetError) {
@@ -917,9 +1317,10 @@ export class LocalAgentGenerator implements GenerationBackend {
               this.events.onToolCall?.(event.name, event.callId);
             }
             nativeStarted.delete(event.callId);
+            nativeCompleted.add(event.callId);
             const resultText = event.result
               ? JSON.stringify(event.result)
-              : "Native CLI search completed.";
+              : `${event.name} completed without structured results.`;
             this.events.onToolResult?.(
               event.name,
               event.arguments ?? {},

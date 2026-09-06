@@ -8,8 +8,6 @@ import type {
   SkillLoadItem,
 } from "../../types";
 import { getT, type Translations } from "../../i18n";
-import { truncate } from "./truncate";
-import { TOOL_METADATA } from "../ai/tool-metadata";
 import { agnesToolNameFromAlias } from "../mcp/agnes/aliases";
 import {
   AGNES_MCP_SERVER_ID,
@@ -376,30 +374,6 @@ export function mergeMessages(
                   : `${t.tool.unknownTool} · ${tc.function.name}`;
               if (toolOutput?.source?.kind === "mcp") {
                 title = `${toolOutput.source.serverName} · ${toolOutput.source.toolTitle || toolOutput.source.toolName}`;
-              } else if (isReadFiles) {
-                title = `${t.tool.found}${paths?.length ?? 0} ${t.tool.files}`;
-              } else if (args.query) {
-                title = `${title}: ${args.query}`;
-              } else if (args.packageName) {
-                title = `${title}: ${args.packageName}`;
-              } else if (args.urls) {
-                title = `${t.tool.found}${(args.urls as string[])?.length ?? 0} ${t.tool.pages}`;
-              } else if (tc.function.name === "dispatch_subagent") {
-                const subName =
-                  typeof args.subagent === "string" ? args.subagent : "";
-                const subTask =
-                  typeof args.task === "string" ? truncate(args.task, 60) : "";
-                const subDisplay =
-                  t.subagent.names[subName as keyof typeof t.subagent.names] ??
-                  subName ??
-                  "subagent";
-                title = subTask ? `${subDisplay}: ${subTask}` : subDisplay;
-              } else {
-                const custom = TOOL_METADATA[tc.function.name]?.titleBuilder?.(
-                  args,
-                  t,
-                );
-                if (custom !== undefined) title = custom;
               }
 
               otherBlocks.push({

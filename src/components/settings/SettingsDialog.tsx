@@ -15,11 +15,15 @@ import {
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { useT } from "../../i18n";
+import { useSettingsStore } from "../../store/settings";
 import { ModelTab } from "./tabs/ModelTab";
 import { SearchServicesTab } from "./tabs/SearchServicesTab";
 import { SystemTab } from "./tabs/SystemTab";
 import { StorageTab } from "./tabs/StorageTab";
-import { AdvancedTab } from "./tabs/AdvancedTab";
+import {
+  AdvancedTab,
+  validateImageCompressionQualityDraft,
+} from "./tabs/AdvancedTab";
 import { CUSTOM_SYSTEM_PROMPT_MAX_CHARS } from "../../lib/ai/custom-system-prompt";
 
 interface SettingsDialogProps {
@@ -97,7 +101,17 @@ export function SettingsDialog({
   const [assetSearchForm, setAssetSearchForm] =
     useState<AssetSearchSettings>(assetSearchSettings);
   const [systemForm, setSystemForm] = useState<SystemSettings>(systemSettings);
+  const [imageCompressionQualityDraft, setImageCompressionQualityDraft] =
+    useState(() => String(systemSettings.imageCompressionQuality));
   const [showValidation, setShowValidation] = useState(false);
+  const localCliObservation = useSettingsStore(
+    (state) =>
+      state.localCliObservationCache.providers[formData.localAgent.provider],
+  );
+  const localNativeSearchAvailable =
+    formData.runtime === "localCli" &&
+    localCliObservation?.status !== "unavailable" &&
+    localCliObservation?.capabilities.nativeSearch === true;
 
   const modelErrors = useMemo(
     () => validateAISettingsDraft(formData, t.settings.validation),
@@ -107,6 +121,14 @@ export function SettingsDialog({
     systemForm.customSystemPrompt.length > CUSTOM_SYSTEM_PROMPT_MAX_CHARS
       ? t.settings.customSystemPrompt.tooLong
       : undefined;
+  const imageCompressionQualityError = useMemo(
+    () =>
+      validateImageCompressionQualityDraft(
+        imageCompressionQualityDraft,
+        t.settings.imageCompression,
+      ),
+    [imageCompressionQualityDraft, t.settings.imageCompression],
+  );
 
   useEffect(() => {
     if (!isOpen) return;
@@ -114,6 +136,9 @@ export function SettingsDialog({
     setWebSearchForm(webSearchSettings);
     setAssetSearchForm(assetSearchSettings);
     setSystemForm(systemSettings);
+    setImageCompressionQualityDraft(
+      String(systemSettings.imageCompressionQuality),
+    );
     setShowValidation(false);
   }, [
     isOpen,
@@ -125,7 +150,12 @@ export function SettingsDialog({
 
   const handleSave = () => {
     setShowValidation(true);
-    if (Object.keys(modelErrors).length > 0 || customSystemPromptError) return;
+    if (
+      Object.keys(modelErrors).length > 0 ||
+      customSystemPromptError ||
+      imageCompressionQualityError
+    )
+      return;
     onSave(formData);
     onSaveWebSearch(webSearchForm);
     onSaveAssetSearch(assetSearchForm);
@@ -207,6 +237,8 @@ export function SettingsDialog({
               assetSearchForm={assetSearchForm}
               setAssetSearchForm={setAssetSearchForm}
               apiType={formData.apiType}
+              runtime={formData.runtime}
+              localNativeSearchAvailable={localNativeSearchAvailable}
             />
           </TabsContent>
 
@@ -234,6 +266,10 @@ export function SettingsDialog({
               customSystemPromptError={customSystemPromptError}
               runtimeChangeLocked={runtimeChangeLocked}
               fullPermissionsLabels={t.settings.fullPermissions}
+              imageCompressionQualityDraft={imageCompressionQualityDraft}
+              onImageCompressionQualityDraftChange={
+                setImageCompressionQualityDraft
+              }
             />
           </TabsContent>
         </Tabs>
@@ -241,7 +277,8 @@ export function SettingsDialog({
         <DialogFooter className="sticky bottom-0 z-10 shrink-0 flex-row justify-end border-t bg-background px-4 py-3 sm:static sm:border-t-0 sm:px-0 sm:py-0">
           {showValidation &&
             (Object.keys(modelErrors).length > 0 ||
-              customSystemPromptError) && (
+              customSystemPromptError ||
+              imageCompressionQualityError) && (
               <p className="mr-auto text-xs text-destructive" role="alert">
                 {t.settings.validation.summary}
               </p>

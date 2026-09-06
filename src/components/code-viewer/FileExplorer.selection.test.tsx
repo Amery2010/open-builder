@@ -26,6 +26,11 @@ describe("FileExplorer selection", () => {
     );
 
     const folder = screen.getByRole("button", { name: "src" });
+    const fileIcons = document.querySelectorAll('img[aria-hidden="true"]');
+    expect(fileIcons.length).toBeGreaterThan(0);
+    for (const icon of fileIcons) {
+      expect(icon).toHaveAttribute("alt", "");
+    }
     expect(screen.getByRole("button", { name: "App.tsx" })).toBeVisible();
 
     await user.click(folder);
