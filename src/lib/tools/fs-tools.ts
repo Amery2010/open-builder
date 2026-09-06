@@ -17,6 +17,11 @@ import {
   OPEN_BUILDER_TEMPLATE_NAMES,
   preserveTemplateRuntimeDependencies,
 } from "./sandpack-template-manifest";
+import {
+  applyPrototypeStarter,
+  PROTOTYPE_RUNTIME_TEMPLATE,
+  PROTOTYPE_TEMPLATE_NAME,
+} from "../design/prototype-starter";
 
 type SandboxTemplateFile = string | { code: string };
 type SandboxTemplate = {
@@ -170,6 +175,19 @@ function rejectProtectedGenericPath(path: string): FsToolResult | null {
   return null;
 }
 
+function rejectProtectedGenericMutationPath(path: string): FsToolResult | null {
+  const protectedPath = rejectProtectedGenericPath(path);
+  if (protectedPath) return protectedPath;
+  if (path.toLowerCase() === "design-project.json") {
+    return {
+      result:
+        'Error: "design-project.json" is managed by update_project_design. Generic file tools may read it but cannot modify it.',
+      changes: [],
+    };
+  }
+  return null;
+}
+
 function validateSearchPattern(pattern: unknown):
   | {
       ok: true;
@@ -235,14 +253,21 @@ export interface FsToolResult {
 }
 
 export async function fsInitProject(template: string): Promise<FsToolResult> {
-  if (!isOpenBuilderTemplateName(template)) {
+  const runtimeTemplate =
+    template === PROTOTYPE_TEMPLATE_NAME
+      ? PROTOTYPE_RUNTIME_TEMPLATE
+      : template;
+  if (!isOpenBuilderTemplateName(runtimeTemplate)) {
     return {
-      result: `Error: unknown template "${template}". Use one of: ${OPEN_BUILDER_TEMPLATE_NAMES.join(", ")}`,
+      result: `Error: unknown template "${template}". Use one of: ${[
+        ...OPEN_BUILDER_TEMPLATE_NAMES,
+        PROTOTYPE_TEMPLATE_NAME,
+      ].join(", ")}`,
       changes: [],
     };
   }
   const templates = await loadSandboxTemplates();
-  const tmpl = templates[template];
+  const tmpl = templates[runtimeTemplate];
   if (!tmpl) {
     return {
       result: `Error: template "${template}" is unavailable in the installed Sandpack runtime`,
@@ -258,20 +283,33 @@ export async function fsInitProject(template: string): Promise<FsToolResult> {
     newFiles[normalizedPath] = code;
     changes.push({ path: normalizedPath, action: "created" });
   }
-  const appliedProfile = applyOpenBuilderTemplateProfile(template, newFiles);
+  const appliedProfile = applyOpenBuilderTemplateProfile(
+    runtimeTemplate,
+    newFiles,
+  );
   if (!appliedProfile.ok) {
     return {
       result: `Error: ${appliedProfile.error}`,
       changes: [],
     };
   }
+  const initializedFiles =
+    template === PROTOTYPE_TEMPLATE_NAME
+      ? applyPrototypeStarter(newFiles)
+      : newFiles;
+  if (initializedFiles !== newFiles) {
+    changes.length = 0;
+    for (const path of Object.keys(initializedFiles)) {
+      changes.push({ path, action: "created" });
+    }
+  }
   return {
     result:
-      `OK — initialized project with template "${template}" (${Object.keys(newFiles).length} files); ` +
+      `OK — initialized project with template "${template}" (${Object.keys(initializedFiles).length} files); ` +
       `applied Open Builder ${appliedProfile.status} dependency profile v${OPEN_BUILDER_TEMPLATE_MANIFEST_VERSION}`,
     changes,
-    newFiles,
-    templateChange: { template },
+    newFiles: initializedFiles,
+    templateChange: { template: runtimeTemplate },
   };
 }
 
@@ -358,7 +396,7 @@ export function fsWriteFile(
   if (!checkedContent.ok) {
     return { result: `Error: ${checkedContent.error}`, changes: [] };
   }
-  const envRejected = rejectProtectedGenericPath(checked.path);
+  const envRejected = rejectProtectedGenericMutationPath(checked.path);
   if (envRejected) return envRejected;
   const action: FileChange["action"] =
     checked.path in files ? "modified" : "created";
@@ -376,7 +414,7 @@ export function fsPatchFile(
 ): FsToolResult {
   const checked = normalizeProjectPath(path);
   if (!checked.ok) return { result: `Error: ${checked.error}`, changes: [] };
-  const envRejected = rejectProtectedGenericPath(checked.path);
+  const envRejected = rejectProtectedGenericMutationPath(checked.path);
   if (envRejected) return envRejected;
   if (!(checked.path in files)) {
     return { result: `Error: file not found — "${checked.path}"`, changes: [] };
@@ -522,7 +560,7 @@ export function fsSearchInFiles(
 export function fsDeleteFile(path: string, files: ProjectFiles): FsToolResult {
   const checked = normalizeProjectPath(path);
   if (!checked.ok) return { result: `Error: ${checked.error}`, changes: [] };
-  const envRejected = rejectProtectedGenericPath(checked.path);
+  const envRejected = rejectProtectedGenericMutationPath(checked.path);
   if (envRejected) return envRejected;
   if (!(checked.path in files)) {
     return { result: `Error: file not found — "${checked.path}"`, changes: [] };
@@ -548,8 +586,8 @@ export function fsRenameFile(
   if (!checkedNew.ok)
     return { result: `Error: new_path ${checkedNew.error}`, changes: [] };
   const envRejected =
-    rejectProtectedGenericPath(checkedOld.path) ??
-    rejectProtectedGenericPath(checkedNew.path);
+    rejectProtectedGenericMutationPath(checkedOld.path) ??
+    rejectProtectedGenericMutationPath(checkedNew.path);
   if (envRejected) return envRejected;
   if (checkedOld.path === checkedNew.path) {
     return {

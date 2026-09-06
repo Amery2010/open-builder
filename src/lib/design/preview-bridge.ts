@@ -1,5 +1,20 @@
 import type { DesignSelectionContext, ProjectFiles } from "../../types";
 import { EDITABLE_DESIGN_TOKENS } from "./tokens";
+import {
+  isSafePrototypePreviewRoute,
+  prototypePreviewTargetsEqual,
+  sanitizePrototypePreviewTarget,
+  PROTOTYPE_PREVIEW_ROUTE_MAX_LENGTH,
+  type PrototypePreviewTarget,
+} from "./preview-runtime";
+export type { PrototypePreviewTarget } from "./preview-runtime";
+export {
+  isSafePrototypePreviewRoute,
+  prototypePreviewTargetsEqual,
+  sanitizePrototypePreviewTarget,
+  PROTOTYPE_PREVIEW_ID_MAX_LENGTH,
+  PROTOTYPE_PREVIEW_ROUTE_MAX_LENGTH,
+} from "./preview-runtime";
 export { formatDesignSelectionForModel } from "./selection-context";
 
 export const DESIGN_BRIDGE_PROTOCOL_VERSION = 1 as const;
@@ -77,6 +92,10 @@ export interface DesignPreviewSemanticElement {
 
 export interface DesignPreviewSemanticSnapshot {
   route: string;
+  /** Identity supplied by the host when a prototype target is captured. */
+  prototypeIdentity?: PrototypePreviewTarget;
+  /** @deprecated Use prototypeIdentity. Kept for fixture/adaptor compatibility. */
+  prototype?: PrototypePreviewTarget;
   title?: string;
   viewport: { width: number; height: number; devicePixelRatio: number };
   document: {
@@ -115,18 +134,59 @@ export interface DesignBridgeCaptureExpectation {
   viewportName: DesignReviewViewportName;
   viewportWidth: number;
   viewportHeight: number;
+  target?: PrototypePreviewTarget;
 }
+
+export interface DesignBridgeNavigationExpectation {
+  generation: string;
+  nonce: string;
+  requestId: string;
+  target: PrototypePreviewTarget;
+}
+
+export interface DesignBridgeNavigationRequest {
+  type: "open-builder:design-bridge-navigate";
+  version: number;
+  generation: string;
+  nonce: string;
+  requestId: string;
+  target: PrototypePreviewTarget;
+}
+
+export interface DesignBridgeDataResetRequest {
+  type: "open-builder:design-bridge-reset-data";
+  version: number;
+  generation: string;
+  nonce: string;
+}
+
+export type DesignBridgeNavigationResponse =
+  | {
+      ok: true;
+      target: PrototypePreviewTarget;
+      route: string;
+    }
+  | { ok: false; error: string };
 
 export type DesignBridgeCaptureResponse =
   | { ok: true; result: DesignBridgeCaptureResult }
   | { ok: false; error: string };
 
 export type DesignBridgeParentMessage =
+  | DesignBridgeNavigationRequest
+  | DesignBridgeDataResetRequest
   | {
       type: "open-builder:design-bridge-ready";
       version: number;
       generation: string;
       captureRuntimeAvailable: boolean;
+      route: string;
+    }
+  | {
+      type: "open-builder:design-bridge-route";
+      version: number;
+      generation: string;
+      route: string;
     }
   | {
       type: "open-builder:design-bridge-selection";
@@ -154,6 +214,22 @@ export type DesignBridgeParentMessage =
       nonce: string;
       requestId: string;
       error: unknown;
+    }
+  | {
+      type: "open-builder:design-bridge-navigation-result";
+      version: number;
+      generation: string;
+      nonce: string;
+      requestId: string;
+      payload: unknown;
+    }
+  | {
+      type: "open-builder:design-bridge-navigation-error";
+      version: number;
+      generation: string;
+      nonce: string;
+      requestId: string;
+      error: unknown;
     };
 
 function previewBridgeClientSource(
@@ -172,6 +248,7 @@ function previewBridgeClientSource(
   var CAPTURE_MAX_PIXELS = ${DESIGN_BRIDGE_CAPTURE_MAX_PIXELS};
   var CAPTURE_PATH = ${JSON.stringify(DESIGN_CAPTURE_RUNTIME_VIRTUAL_PATH)};
   var DESIGN_TOKEN_NAMES = ${JSON.stringify(DESIGN_RUNTIME_TOKEN_NAMES)};
+  var PROTOTYPE_ROUTE_MAX_LENGTH = ${PROTOTYPE_PREVIEW_ROUTE_MAX_LENGTH};
   var CAPTURE_MESSAGE_MAX_BYTES = Math.ceil(IMAGE_MAX_BYTES * 4 / 3) + SEMANTIC_MAX_BYTES + 4096;
   var installedKey = "__OPEN_BUILDER_DESIGN_BRIDGE_V1__";
   if (window[installedKey]) return;
@@ -180,6 +257,7 @@ function previewBridgeClientSource(
   var active = false;
   var parentOrigin = "*";
   var captureInFlight = false;
+  var navigationInFlight = false;
   var captureLibraryPromise = null;
   var runtimeIds = new WeakMap();
   var runtimeIdCounter = 0;
@@ -199,6 +277,25 @@ function previewBridgeClientSource(
   }
   function validId(value) {
     return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(value);
+  }
+  function safeHashRoute(value) {
+    if (typeof value === "string" && value.length > 0 && value.length <= PROTOTYPE_ROUTE_MAX_LENGTH && !/(?:javascript|data|vbscript)\\s*:/i.test(value) && /^\\/(?:[A-Za-z0-9._~!$&'()*+,;=:@/?]|%[0-9A-Fa-f]{2})*$/.test(value.slice(1)) && value.charAt(0) === "#") {
+      var path = value.slice(2).split("?", 1)[0] || "";
+      return value.indexOf("//") < 0 && path.split("/").every(function (segment) { return segment !== "." && segment !== ".."; });
+    }
+    return false;
+  }
+  function safePrototypeTarget(value) {
+    return !!value && typeof value === "object" && validId(value.pageId) && safeHashRoute(value.route) && validId(value.scenarioId);
+  }
+  function samePrototypeTarget(left, right) {
+    return safePrototypeTarget(left) && safePrototypeTarget(right) &&
+      left.pageId === right.pageId && left.route === right.route && left.scenarioId === right.scenarioId;
+  }
+  function previewRoute() {
+    var hash = typeof window.location.hash === "string" ? window.location.hash : "";
+    if (safeHashRoute(hash)) return hash;
+    return clean(window.location.pathname || "/", 256) || "/";
   }
   function finite(value, fallback) {
     return typeof value === "number" && isFinite(value) ? value : fallback;
@@ -334,7 +431,7 @@ function previewBridgeClientSource(
       tagName: element.tagName.toLowerCase(),
       text: text || undefined,
       aria: Object.keys(aria).length ? aria : undefined,
-      route: clean(window.location.pathname || "/", 256) || "/",
+      route: previewRoute(),
       attributes: Object.keys(attributes).length ? attributes : undefined
     };
   }
@@ -500,7 +597,7 @@ function previewBridgeClientSource(
     value.accessibility = accessibilityInfo(element);
     return value;
   }
-  function semanticSnapshot() {
+  function semanticSnapshot(prototypeIdentity) {
     var root = document.documentElement;
     var rootStyle = getComputedStyle(root);
     var designTokens = { computed: {}, inline: {} };
@@ -514,7 +611,7 @@ function previewBridgeClientSource(
       "main,header,nav,footer,section,h1,h2,h3,h4,h5,h6,button,a,area,input,select,textarea,summary,img,[role],[tabindex],[contenteditable='true'],[data-ob-id]"
     ), 0, 120);
     var snapshot = {
-      route: clean(window.location.pathname || "/", 256) || "/",
+      route: previewRoute(),
       title: clean(document.title || "", 200) || undefined,
       viewport: {
         width: Math.max(1, Math.round(window.innerWidth)),
@@ -529,11 +626,83 @@ function previewBridgeClientSource(
         language: clean(root.getAttribute("lang"), 35) || undefined
       },
       designTokens: designTokens,
+      prototypeIdentity: safePrototypeTarget(prototypeIdentity) ? {
+        pageId: prototypeIdentity.pageId,
+        route: prototypeIdentity.route,
+        scenarioId: prototypeIdentity.scenarioId
+      } : undefined,
       elements: candidates.map(semanticElement).filter(Boolean)
     };
     while (snapshot.elements.length && byteLength(snapshot) > SEMANTIC_MAX_BYTES) snapshot.elements.pop();
     if (byteLength(snapshot) > SEMANTIC_MAX_BYTES) throw new Error("Semantic preview state exceeded its size limit.");
     return snapshot;
+  }
+  function sendNavigationResult(data, origin, route) {
+    var message = {
+      type: "open-builder:design-bridge-navigation-result",
+      version: VERSION,
+      generation: GENERATION,
+      nonce: data.nonce,
+      requestId: data.requestId,
+      payload: {
+        target: {
+          pageId: data.target.pageId,
+          route: data.target.route,
+          scenarioId: data.target.scenarioId
+        },
+        route: route
+      }
+    };
+    if (byteLength(message) <= MAX_BYTES) window.parent.postMessage(message, origin);
+  }
+  function sendNavigationError(data, origin, error) {
+    var message = {
+      type: "open-builder:design-bridge-navigation-error",
+      version: VERSION,
+      generation: GENERATION,
+      nonce: data.nonce,
+      requestId: data.requestId,
+      error: clean(error && error.message ? error.message : String(error), 400) || "Preview navigation failed."
+    };
+    if (byteLength(message) <= MAX_BYTES) window.parent.postMessage(message, origin);
+  }
+  function navigate(data, origin) {
+    if (navigationInFlight) {
+      sendNavigationError(data, origin, new Error("A preview navigation request is already running."));
+      return;
+    }
+    navigationInFlight = true;
+    var targetRoute = data.target.route;
+    var finish = function () {
+      navigationInFlight = false;
+      var actualRoute = previewRoute();
+      if (actualRoute !== targetRoute) {
+        sendNavigationError(data, origin, new Error("Preview router did not reach the requested route."));
+        return;
+      }
+      sendNavigationResult(data, origin, actualRoute);
+    };
+    try {
+      if (window.location.hash !== targetRoute) window.location.hash = targetRoute.slice(1);
+      nextPaint().then(finish, function (error) {
+        navigationInFlight = false;
+        sendNavigationError(data, origin, error);
+      });
+    } catch (error) {
+      navigationInFlight = false;
+      sendNavigationError(data, origin, error);
+    }
+  }
+  function announceRoute() {
+    var route = previewRoute();
+    if (!safeHashRoute(route)) return;
+    var message = {
+      type: "open-builder:design-bridge-route",
+      version: VERSION,
+      generation: GENERATION,
+      route: route
+    };
+    if (byteLength(message) <= MAX_BYTES) window.parent.postMessage(message, "*");
   }
   async function capture(data, origin) {
     var captureNonce = data.nonce;
@@ -567,7 +736,7 @@ function previewBridgeClientSource(
         CAPTURE_MAX_HEIGHT,
         Math.floor(CAPTURE_MAX_PIXELS / Math.max(1, window.innerWidth))
       ));
-      var snapshot = semanticSnapshot();
+      var snapshot = semanticSnapshot(data.target);
       var canvas = await htmlToImage.toCanvas(root, {
         cacheBust: true,
         pixelRatio: 1,
@@ -635,16 +804,30 @@ function previewBridgeClientSource(
   document.addEventListener("pointermove", onMove, true);
   document.addEventListener("click", onClick, true);
   document.addEventListener("keydown", onKey, true);
+  window.addEventListener("hashchange", function () {
+    nextPaint().then(announceRoute);
+  });
   window.addEventListener("message", function (event) {
     if (event.source !== window.parent) return;
     var data = event.data;
     if (!data || data.version !== VERSION || byteLength(data) > MAX_BYTES || !validId(data.nonce)) return;
     var eventOrigin = event.origin && event.origin !== "null" ? event.origin : "*";
+    if (data.type === "open-builder:design-bridge-reset-data") {
+      if (data.generation !== GENERATION) return;
+      window.dispatchEvent(new Event("open-builder:prototype-reset-data"));
+      return;
+    }
+    if (data.type === "open-builder:design-bridge-navigate") {
+      if (data.generation !== GENERATION || !validId(data.requestId) || !safePrototypeTarget(data.target)) return;
+      navigate(data, eventOrigin);
+      return;
+    }
     if (data.type === "open-builder:design-bridge-capture") {
       if (data.generation !== GENERATION || !validId(data.requestId) || !data.viewport ||
           ["desktop", "tablet", "mobile"].indexOf(data.viewport.name) < 0 ||
           !Number.isInteger(data.viewport.width) || data.viewport.width < 240 || data.viewport.width > 2000) return;
       if (!Number.isInteger(data.viewport.height) || data.viewport.height < 240 || data.viewport.height > 2000) return;
+      if (data.target !== undefined && !safePrototypeTarget(data.target)) return;
       capture(data, eventOrigin).catch(function (error) { captureError(data, eventOrigin, error); });
       return;
     }
@@ -659,7 +842,8 @@ function previewBridgeClientSource(
     type: "open-builder:design-bridge-ready",
     version: VERSION,
     generation: GENERATION,
-    captureRuntimeAvailable: CAPTURE_RUNTIME_AVAILABLE
+    captureRuntimeAvailable: CAPTURE_RUNTIME_AVAILABLE,
+    route: previewRoute()
   }, "*");
 })();\n`;
 }
@@ -736,6 +920,18 @@ function cleanText(value: unknown, max: number): string | undefined {
   return cleaned;
 }
 
+function sanitizePreviewRoute(value: unknown): string {
+  const cleaned = cleanText(value, PROTOTYPE_PREVIEW_ROUTE_MAX_LENGTH);
+  if (!cleaned) return "/";
+  if (isSafePrototypePreviewRoute(cleaned)) return cleaned;
+  const path = cleaned.split(/[?#]/, 1)[0] ?? "/";
+  return path.startsWith("/") && !path.startsWith("//") ? path : "/";
+}
+
+export function getDesignPreviewRoute(value: unknown): string {
+  return sanitizePreviewRoute(value);
+}
+
 function safeRecord<K extends string>(
   value: unknown,
   keys: readonly K[],
@@ -781,8 +977,7 @@ export function sanitizeDesignSelectionPayload(
   }
   const text = cleanText(raw.text, 240);
   const label = cleanText(raw.label, 160) ?? text ?? raw.elementId;
-  const routeValue = cleanText(raw.route, 256)?.split(/[?#]/, 1)[0] ?? "/";
-  const route = routeValue.startsWith("/") ? routeValue : "/";
+  const route = sanitizePreviewRoute(raw.route);
   if (
     raw.idSource !== undefined &&
     raw.idSource !== "explicit" &&
@@ -1091,7 +1286,30 @@ function sanitizeSemanticSnapshot(
     });
   }
 
-  const routeValue = cleanText(raw.route, 256)?.split(/[?#]/, 1)[0] ?? "/";
+  const routeValue = sanitizePreviewRoute(raw.route);
+  const rawPrototypeIdentity =
+    raw.prototypeIdentity !== undefined ? raw.prototypeIdentity : raw.prototype;
+  const prototypeIdentity =
+    rawPrototypeIdentity === undefined
+      ? undefined
+      : sanitizePrototypePreviewTarget(rawPrototypeIdentity);
+  const legacyPrototypeIdentity =
+    raw.prototype === undefined
+      ? undefined
+      : sanitizePrototypePreviewTarget(raw.prototype);
+  if (
+    rawPrototypeIdentity !== undefined &&
+    (!prototypeIdentity ||
+      (raw.prototypeIdentity !== undefined &&
+        raw.prototype !== undefined &&
+        (!legacyPrototypeIdentity ||
+          !prototypePreviewTargetsEqual(
+            prototypeIdentity,
+            legacyPrototypeIdentity,
+          ))))
+  ) {
+    return null;
+  }
   const languageValue = cleanText(documentState.language, 35);
   const language =
     languageValue && /^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$/.test(languageValue)
@@ -1129,7 +1347,8 @@ function sanitizeSemanticSnapshot(
     designTokens = { computed, inline };
   }
   const snapshot: DesignPreviewSemanticSnapshot = {
-    route: routeValue.startsWith("/") ? routeValue : "/",
+    route: routeValue,
+    ...(prototypeIdentity ? { prototypeIdentity } : {}),
     ...(cleanText(raw.title, 200) ? { title: cleanText(raw.title, 200) } : {}),
     viewport: {
       width: viewportWidth,
@@ -1207,6 +1426,12 @@ export function parseDesignBridgeCaptureResponse(
   value: unknown,
   expected: DesignBridgeCaptureExpectation,
 ): DesignBridgeCaptureResponse | null {
+  const sanitizedExpectedTarget =
+    expected.target === undefined
+      ? undefined
+      : sanitizePrototypePreviewTarget(expected.target);
+  if (expected.target !== undefined && !sanitizedExpectedTarget) return null;
+  const expectedTarget = sanitizedExpectedTarget ?? undefined;
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const raw = value as Record<string, unknown>;
   if (
@@ -1257,6 +1482,18 @@ export function parseDesignBridgeCaptureResponse(
   );
   const fullHeight = safeFiniteNumber(viewport.fullHeight, 1, 1_000_000, true);
   const semanticSnapshot = sanitizeSemanticSnapshot(payload.semanticSnapshot);
+  if (!semanticSnapshot) return null;
+  if (
+    expectedTarget !== undefined &&
+    (semanticSnapshot.route !== expectedTarget.route ||
+      !semanticSnapshot.prototypeIdentity ||
+      !prototypePreviewTargetsEqual(
+        semanticSnapshot.prototypeIdentity,
+        expectedTarget,
+      ))
+  ) {
+    return null;
+  }
   if (
     image === null ||
     image.bytes <= 0 ||
@@ -1272,7 +1509,6 @@ export function parseDesignBridgeCaptureResponse(
     capturedHeight === null ||
     fullHeight === null ||
     typeof viewport.truncated !== "boolean" ||
-    !semanticSnapshot ||
     Math.abs(image.width - expected.viewportWidth) > 4 ||
     image.width !== width ||
     image.height !== capturedHeight ||
@@ -1298,6 +1534,78 @@ export function parseDesignBridgeCaptureResponse(
       semanticSnapshot,
     },
   };
+}
+
+export function parseDesignBridgeNavigationResponse(
+  value: unknown,
+  expected: DesignBridgeNavigationExpectation,
+): DesignBridgeNavigationResponse | null {
+  const expectedTarget = sanitizePrototypePreviewTarget(expected.target);
+  if (
+    !expectedTarget ||
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value)
+  ) {
+    return null;
+  }
+  const raw = value as Record<string, unknown>;
+  if (
+    raw.version !== DESIGN_BRIDGE_PROTOCOL_VERSION ||
+    raw.generation !== expected.generation ||
+    raw.nonce !== expected.nonce ||
+    raw.requestId !== expected.requestId
+  ) {
+    return null;
+  }
+  if (raw.type === "open-builder:design-bridge-navigation-error") {
+    const size = jsonByteLength(raw);
+    const error = cleanText(raw.error, 400);
+    return size !== null && size <= DESIGN_BRIDGE_PAYLOAD_MAX_BYTES && error
+      ? { ok: false, error }
+      : null;
+  }
+  if (raw.type !== "open-builder:design-bridge-navigation-result") return null;
+  const size = jsonByteLength(raw);
+  if (
+    size === null ||
+    size > DESIGN_BRIDGE_PAYLOAD_MAX_BYTES ||
+    !raw.payload ||
+    typeof raw.payload !== "object" ||
+    Array.isArray(raw.payload)
+  ) {
+    return null;
+  }
+  const payload = raw.payload as Record<string, unknown>;
+  const target = sanitizePrototypePreviewTarget(payload.target);
+  const route = payload.route;
+  if (
+    !target ||
+    !prototypePreviewTargetsEqual(target, expectedTarget) ||
+    typeof route !== "string" ||
+    !isSafePrototypePreviewRoute(route) ||
+    route !== expectedTarget.route
+  ) {
+    return null;
+  }
+  return { ok: true, target, route };
+}
+
+export function parseDesignBridgeRouteMessage(
+  value: unknown,
+  expectedGeneration: string,
+): string | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  const size = jsonByteLength(raw);
+  return raw.type === "open-builder:design-bridge-route" &&
+    raw.version === DESIGN_BRIDGE_PROTOCOL_VERSION &&
+    raw.generation === expectedGeneration &&
+    size !== null &&
+    size <= DESIGN_BRIDGE_PAYLOAD_MAX_BYTES &&
+    isSafePrototypePreviewRoute(raw.route)
+    ? (raw.route as string)
+    : null;
 }
 
 export function getDesignBridgeTargetOrigin(

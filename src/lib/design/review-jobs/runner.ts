@@ -46,6 +46,9 @@ function cloneJobInput(input: DesignReviewJobInput): DesignReviewJobInput {
     ...input,
     files: { ...input.files },
     screenshots: clone(input.screenshots),
+    expectedCoverage: input.expectedCoverage
+      ? clone(input.expectedCoverage)
+      : undefined,
     requirementsMessages: input.requirementsMessages
       ? clone(input.requirementsMessages)
       : undefined,
@@ -99,9 +102,21 @@ export class DesignReviewJobRunner {
       phase: input.phase,
       sourceDigest: input.sourceDigest,
       sourceProjectDigest: input.sourceProjectDigest,
+      blueprintRevision: input.blueprintRevision,
       provider: providerRef(input),
       captureErrors: input.captureErrors,
       capturedCount: input.screenshots.length,
+      expectedCoverage: input.expectedCoverage,
+      capturedCoverage: input.screenshots.flatMap((screenshot) =>
+        screenshot.target && screenshot.viewport
+          ? [
+              {
+                ...screenshot.target,
+                viewport: screenshot.viewport.name,
+              },
+            ]
+          : [],
+      ),
       retryOf: input.retryOf,
       status: "capturing",
     });
@@ -223,6 +238,7 @@ export class DesignReviewJobRunner {
         provider: job.input.provider,
         requirementsMessages: job.input.requirementsMessages,
         automaticEvidence: job.input.automaticEvidence,
+        expectedCoverage: job.input.expectedCoverage,
         events: {
           onRetry: (attempt, maxAttempts) => {
             if (this.cancelled.has(job.runId)) return;

@@ -23,6 +23,7 @@ import {
   getDesignReviewScreenshotByteLength,
   parseDesignReviewReportText,
   type DesignReviewReport,
+  type DesignReviewCoverageTarget,
   type DesignReviewScreenshot,
 } from "../review";
 import { SUBMIT_DESIGN_REVIEW_TOOL } from "../review-tool";
@@ -48,6 +49,7 @@ export interface IsolatedDesignReviewOptions {
   locale: ResolvedLocale;
   files: ProjectFiles;
   screenshots: readonly DesignReviewScreenshot[];
+  expectedCoverage?: readonly DesignReviewCoverageTarget[];
   provider: DesignReviewBackendConfig;
   requirementsMessages?: readonly Message[];
   automaticEvidence?: AutomaticDesignReviewEvidence;
@@ -186,7 +188,10 @@ export function createIsolatedDesignReviewSession(
       buildDesignReviewRequirementsContext([
         ...(options.requirementsMessages ?? []),
       ]) +
-      buildDesignReviewSemanticContext(options.screenshots) +
+      buildDesignReviewSemanticContext(
+        options.screenshots,
+        options.expectedCoverage,
+      ) +
       (options.automaticEvidence
         ? buildAutomaticDesignReviewContext(options.automaticEvidence)
         : ""),

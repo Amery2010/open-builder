@@ -25,11 +25,7 @@ describe("replaySnapshots", () => {
         conversationId: "conv-1",
         messageId: "assistant-1",
         patches: {
-          "src/App.tsx": createPatch(
-            "src/App.tsx",
-            "old app\n",
-            "new app\n",
-          ),
+          "src/App.tsx": createPatch("src/App.tsx", "old app\n", "new app\n"),
         },
         addedFiles: { "src/main.tsx": "mount();\n" },
         deletedFiles: ["README.md"],
@@ -41,6 +37,50 @@ describe("replaySnapshots", () => {
     expect(replaySnapshots(chain, "change")).toEqual({
       "src/App.tsx": "new app\n",
       "src/main.tsx": "mount();\n",
+    });
+  });
+
+  it("restores design-project.json with the same snapshot chain as source files", () => {
+    const first =
+      '{"schemaVersion":"open-builder-design-project/v1","revision":1}\n';
+    const second =
+      '{"schemaVersion":"open-builder-design-project/v1","revision":2}\n';
+    const chain: ProjectSnapshot[] = [
+      {
+        id: "initial",
+        conversationId: "conv-design",
+        messageId: "assistant-0",
+        patches: {},
+        addedFiles: { "design-project.json": first, "src/App.tsx": "one\n" },
+        deletedFiles: [],
+        createdAt: 1,
+        kind: "checkpoint",
+        fullFiles: {
+          "design-project.json": first,
+          "src/App.tsx": "one\n",
+        },
+      },
+      {
+        id: "updated",
+        conversationId: "conv-design",
+        messageId: "assistant-1",
+        patches: {
+          "design-project.json": createPatch(
+            "design-project.json",
+            first,
+            second,
+          ),
+        },
+        addedFiles: {},
+        deletedFiles: [],
+        createdAt: 2,
+        kind: "patch",
+      },
+    ];
+
+    expect(replaySnapshots(chain, "updated")).toMatchObject({
+      "design-project.json": second,
+      "src/App.tsx": "one\n",
     });
   });
 

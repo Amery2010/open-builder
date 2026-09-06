@@ -6,7 +6,9 @@ import { SUBAGENT_REGISTRY } from "../ai/subagents/registry";
 import type { SubagentDefinition } from "../ai/subagents/types";
 import {
   createDesignContractController,
+  designContractSchema,
   type DesignContract,
+  type DesignBlueprintScope,
 } from "./run-contract";
 
 function skill(id: string): SkillEntry {
@@ -37,6 +39,21 @@ function contract(overrides: Partial<DesignContract> = {}): DesignContract {
     },
     preserve: ["Routes, data contracts, permissions, and accessibility"],
     acceptance: ["All changed UI consumes semantic tokens"],
+    ...overrides,
+  };
+}
+
+function blueprint(
+  overrides: Partial<DesignBlueprintScope> = {},
+): DesignBlueprintScope {
+  return {
+    revision: "blueprint-r3",
+    target_page_ids: ["settings", "dashboard"],
+    shared_scope: {
+      file_paths: ["src/components/AppShell.tsx", "src/styles/tokens.css"],
+      ui_ids: ["app-shell", "primary-nav"],
+    },
+    batch_phase: "core_flow",
     ...overrides,
   };
 }
@@ -76,6 +93,29 @@ describe("Design contract controller", () => {
       }),
     ).toMatchObject({ surface_mode: "operate", system_id: "graphite" });
     expect(controller.authorizeProjectWrite("write_file")).toBeUndefined();
+  });
+
+  it("allows only the validated blueprint Host update while repairing invalid authority", () => {
+    const controller = createDesignContractController();
+    const skills = createSkillActiveContext();
+    skills.activate(skill("design-product-ui"));
+    controller.reset({ enabled: true, allowProjectDesignRepair: true });
+
+    expect(
+      controller.authorizeProjectWrite("update_project_design", {}),
+    ).toBeUndefined();
+    expect(
+      controller.authorizeProjectWrite("write_file", {
+        path: "src/App.tsx",
+        content: "blocked",
+      }),
+    ).toContain("Design contract required");
+    expect(() =>
+      controller.submit(contract(), {
+        expectedSystemId: "graphite",
+        skillContext: skills,
+      }),
+    ).toThrow("Repair the invalid project design");
   });
 
   it("allows known read-only subagents before the contract and fails closed otherwise", () => {
@@ -183,5 +223,262 @@ describe("Design contract controller", () => {
         contract(),
       ),
     ).toThrow("no longer matches");
+  });
+
+  it("binds an optional blueprint to its revision and known page/shared scope", () => {
+    const controller = createDesignContractController();
+    const skills = createSkillActiveContext();
+    skills.activate(skill("design-product-ui"));
+    controller.reset({
+      enabled: true,
+      expectedBlueprintRevision: "blueprint-r3",
+      knownBlueprintPageIds: ["settings", "dashboard", "reports"],
+      knownBlueprintSharedFilePaths: [
+        "src/components/AppShell.tsx",
+        "src/styles/tokens.css",
+      ],
+      knownBlueprintSharedUiIds: ["app-shell", "primary-nav", "footer"],
+    });
+
+    const accepted = controller.submit(contract({ blueprint: blueprint() }), {
+      expectedSystemId: "graphite",
+      skillContext: skills,
+      expectedBlueprintRevision: "blueprint-r3",
+      knownBlueprintPageIds: ["settings", "dashboard"],
+      knownBlueprintSharedFilePaths: [
+        "src/components/AppShell.tsx",
+        "src/styles/tokens.css",
+      ],
+      knownBlueprintSharedUiIds: ["app-shell", "primary-nav"],
+    });
+
+    expect(accepted.blueprint).toEqual(blueprint());
+    expect(
+      controller.authorizeProjectWrite("write_file", {
+        path: "src/components/AppShell.tsx",
+        content: "updated",
+      }),
+    ).toBeUndefined();
+    expect(
+      controller.authorizeProjectWrite("write_file", {
+        path: "src/pages/Reports.tsx",
+        content: "out of scope",
+      }),
+    ).toContain("outside the selected page files");
+    for (const path of ["DESIGN.md", "tokens.css"]) {
+      expect(
+        controller.authorizeProjectWrite("write_file", {
+          path,
+          content: "authoritative",
+        }),
+      ).toBeUndefined();
+    }
+    expect(
+      controller.authorizeProjectWrite("write_file", {
+        path: "design-project.json",
+        content: "{}",
+      }),
+    ).toContain("outside the selected page files");
+    expect(controller.authorizeProjectWrite("install_component", {})).toContain(
+      "cannot be proven to be in scope",
+    );
+  });
+
+  it("fails closed for stale, unknown, duplicate, unsafe, and invalid blueprint values", () => {
+    const controller = createDesignContractController();
+    const skills = createSkillActiveContext();
+    skills.activate(skill("design-product-ui"));
+    controller.reset({
+      enabled: true,
+      expectedBlueprintRevision: "blueprint-r3",
+      knownBlueprintPageIds: ["settings", "dashboard"],
+      knownBlueprintSharedFilePaths: ["src/components/AppShell.tsx"],
+      knownBlueprintSharedUiIds: ["app-shell"],
+    });
+    const submit = (scope: DesignBlueprintScope) =>
+      controller.submit(contract({ blueprint: scope }), {
+        expectedSystemId: "graphite",
+        skillContext: skills,
+      });
+
+    expect(() => submit(blueprint({ revision: "blueprint-r2" }))).toThrow(
+      /stale|current blueprint/i,
+    );
+    expect(() => submit(blueprint({ target_page_ids: ["unknown"] }))).toThrow(
+      "unknown page",
+    );
+    expect(() =>
+      submit(
+        blueprint({
+          shared_scope: {
+            file_paths: ["src/other.ts"],
+            ui_ids: ["app-shell"],
+          },
+        }),
+      ),
+    ).toThrow("unknown path");
+    expect(() =>
+      submit(
+        blueprint({
+          shared_scope: {
+            file_paths: ["src/components/AppShell.tsx"],
+            ui_ids: ["unknown-ui"],
+          },
+        }),
+      ),
+    ).toThrow("unknown id");
+
+    expect(() =>
+      designContractSchema.parse(
+        contract({
+          blueprint: blueprint({ target_page_ids: ["settings", "settings"] }),
+        }),
+      ),
+    ).toThrow("duplicate");
+    expect(() =>
+      designContractSchema.parse(
+        contract({
+          blueprint: blueprint({
+            shared_scope: {
+              file_paths: [
+                "src/components/AppShell.tsx",
+                "src\\components\\AppShell.tsx",
+              ],
+              ui_ids: ["app-shell"],
+            },
+          }),
+        }),
+      ),
+    ).toThrow("duplicate");
+    expect(() =>
+      designContractSchema.parse(
+        contract({
+          blueprint: blueprint({
+            shared_scope: {
+              file_paths: ["../secrets.txt"],
+              ui_ids: ["app-shell"],
+            },
+          }),
+        }),
+      ),
+    ).toThrow(/traversal|unsafe/i);
+    expect(() =>
+      designContractSchema.parse(
+        contract({
+          blueprint: blueprint({ batch_phase: "not-a-phase" as never }),
+        }),
+      ),
+    ).toThrow();
+  });
+
+  it("reuses a blueprint contract only while its revision and scope remain bound", () => {
+    const controller = createDesignContractController();
+    const reusable = contract({ blueprint: blueprint() });
+    controller.reset(
+      {
+        enabled: true,
+        expectedBlueprintRevision: "blueprint-r3",
+        knownBlueprintPageIds: ["settings", "dashboard"],
+        knownBlueprintSharedFilePaths: [
+          "src/components/AppShell.tsx",
+          "src/styles/tokens.css",
+        ],
+        knownBlueprintSharedUiIds: ["app-shell", "primary-nav"],
+      },
+      reusable,
+    );
+    expect(controller.getContract()).toEqual(reusable);
+
+    expect(() =>
+      controller.reset(
+        {
+          enabled: true,
+          expectedBlueprintRevision: "blueprint-r4",
+          knownBlueprintPageIds: ["settings", "dashboard"],
+          knownBlueprintSharedFilePaths: [
+            "src/components/AppShell.tsx",
+            "src/styles/tokens.css",
+          ],
+          knownBlueprintSharedUiIds: ["app-shell", "primary-nav"],
+        },
+        reusable,
+      ),
+    ).toThrow(/stale|current blueprint/i);
+  });
+
+  it("supports explicit path tools and keeps legacy runs unrestricted", () => {
+    const controller = createDesignContractController();
+    const skills = createSkillActiveContext();
+    skills.activate(skill("design-product-ui"));
+    controller.reset({
+      enabled: true,
+      expectedBlueprintRevision: 1,
+      knownBlueprintPageIds: ["settings"],
+      knownBlueprintSharedFilePaths: [
+        "src/components/AppShell.tsx",
+        "src/styles",
+      ],
+      knownBlueprintSharedUiIds: [],
+      knownBlueprintPageFilePaths: {
+        settings: ["src/pages/Settings.tsx"],
+      },
+    });
+    controller.submit(
+      contract({
+        blueprint: blueprint({
+          revision: 1,
+          target_page_ids: ["settings"],
+          shared_scope: {
+            file_paths: ["src/components/AppShell.tsx", "src/styles"],
+            ui_ids: [],
+          },
+        }),
+      }),
+      { expectedSystemId: "graphite", skillContext: skills },
+    );
+
+    expect(
+      controller.authorizeProjectWrite("write_file", {
+        path: "src/pages/Settings.tsx",
+        content: "selected page",
+      }),
+    ).toBeUndefined();
+    expect(
+      controller.authorizeProjectWrite("write_file", {
+        path: "src/pages/Dashboard.tsx",
+        content: "another page",
+      }),
+    ).toContain("outside the selected page files");
+    expect(
+      controller.authorizeProjectWrite("rename_file", {
+        old_path: "src/components/AppShell.tsx",
+        new_path: "src/components/AppShell.tsx",
+      }),
+    ).toBeUndefined();
+    expect(
+      controller.authorizeProjectWrite("move_file", {
+        path: "src/components/AppShell.tsx",
+        target_dir: "src/styles",
+      }),
+    ).toContain("outside the selected page files");
+    expect(
+      controller.authorizeProjectWrite("write_file", {
+        path: "../escape.ts",
+        content: "unsafe",
+      }),
+    ).toContain("unsafe");
+
+    const legacy = createDesignContractController();
+    legacy.reset({ enabled: true });
+    legacy.submit(contract(), {
+      expectedSystemId: "graphite",
+      skillContext: skills,
+    });
+    expect(
+      legacy.authorizeProjectWrite("write_file", {
+        path: "src/pages/AnyPage.tsx",
+        content: "legacy behavior",
+      }),
+    ).toBeUndefined();
   });
 });

@@ -54,7 +54,7 @@ The Tauri desktop build (macOS / Windows / Linux) provides local runtime capabil
 - **Project Health Check** — Run `/health` to inspect structure, dependencies, runtime logs, accessibility, and responsive risks; isolated Automatic QA performs a restricted project check without MCP or preview-console access
 - **Context Compression** — Use `/compact` or the command palette to summarize long conversations and reduce token usage
 - **Plan Mode** — Explore the code and submit an implementation plan for approval before writing files; `ask_user_question` supports both independent clarification batches and one-question-at-a-time stress-test interviews
-- **Design Mode** — Generate runnable marketing sites and multi-screen product interfaces with per-project Code / Plan / Design modes, curated or custom design systems, responsive interactions, and explicit design self-checks
+- **Design Mode** — Generate runnable marketing sites and complete multi-page product prototypes with real navigation, shared mock data, page and scenario controls, curated or custom design systems, and explicit design self-checks
 - **Subagent Collaboration** — Built-in read-only subagents for code exploration, review, dependency advice, bug investigation, and UI critique
 - **Built-in Search** — Supports enabling the model's built-in search service
 - **Desktop API Proxy** — Tauri can forward approved HTTP/HTTPS provider requests that would otherwise be blocked by browser CORS; static Web deployments still depend on provider CORS support
@@ -108,7 +108,10 @@ The Tauri desktop build (macOS / Windows / Linux) provides local runtime capabil
 
 Design mode keeps its output in the current conversation's normal project file tree and Sandpack preview; it does not create a separate artifact store. The Code label retains the existing internal `"auto"` value for compatibility. The mode and its automatic decision, selected system, and applied system are remembered per project. Entering Plan from Design returns to Design after approval.
 
-- New visual projects default to `vite-react-ts`; explicitly requested lightweight static pages can use `static`.
+- New visual projects default to `vite-react-ts`; a new complete product prototype uses the dedicated `vite-react-ts-prototype` starter with React Router `HashRouter`, shared resettable mock data, and a static-export-friendly runtime. Existing and imported projects keep the current Design workflow.
+- Complete prototypes store their validated product outline in the root `design-project.json`. This file owns stable page, layout, shared UI, flow, scenario, and build-progress IDs; `DESIGN.md` and `tokens.css` continue to own the visual contract.
+- The preview workspace adds a collapsible page tree plus page and scenario selectors. Page navigation preserves shared mock-data edits, while changing a scenario or using **Reset data** restores the prototype's initial data.
+- Design generation binds each batch to the current blueprint revision and selected page/shared-file scope. Completed pages and flows are checkpointed in the blueprint so `/continue` can resume without rebuilding recorded work.
 - The built-in catalog contains 12 curated, unofficial visual references with separate full-frame 640×480 WebP previews: Linear, Stripe, Claude, GitHub, IBM, Figma, Notion, Shopify, Apple, Spotify, The Verge, and WeChat. Choosing a different system for an initialized project immediately starts its AI application workflow; an empty project keeps the choice as the reference for its next Design request.
 - When the selector remains **Auto**, one isolated no-tool model decision runs before the next Design generation. It can choose a bundled, imported, or custom system, or explicitly choose **None**. A validated result remains with that project until it is manually replaced or re-evaluated; an invalid result is retried on the next request.
 - Custom systems require a name plus three visible rule groups. The current API or Local CLI model compiles them without project files or tools; strict JSON, CSS, semantic-token, and complete-package validation must pass before the system is saved and selected. Custom and imported systems share the generic full-frame WebP preview.
@@ -125,7 +128,7 @@ Design mode keeps its output in the current conversation's normal project file t
 | Visual review                           | User-uploaded screenshots                        | User-uploaded screenshots                                            |
 | Local processes / stdio / Skill scripts | Unavailable in a static Web deployment           | Subject to the existing desktop capability and approval restrictions |
 
-Design Review is deliberately separate from Automatic QA. Its restricted run can only list, read, and search project files and submit up to eight structured findings; it cannot write files, use MCP or network tools, load Skills, or run scripts. No fix runs until the user selects findings and clicks **Apply selected fixes**.
+Design Review is deliberately separate from Automatic QA. Its restricted run can only list, read, and search project files and submit up to eight structured findings; it cannot write files, use MCP or network tools, load Skills, or run scripts. Complete-prototype reviews bind evidence to the project generation, blueprint revision, page, scenario, and viewport. They capture declared targets serially in a temporary preview iframe, mark uncaptured targets as unreviewed, and mark prior evidence stale after the project changes. No fix runs until the user selects findings and clicks **Apply selected fixes**.
 
 ### MCP and Platform Capabilities (Optional)
 

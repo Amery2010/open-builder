@@ -37,6 +37,7 @@ import { useConversationStore } from "../store/conversation";
 import { DesignSystemPanel } from "./design/DesignSystemPanel";
 import { DesignTokenPanel } from "./design/DesignTokenPanel";
 import { DesignReviewDialog } from "./design/DesignReviewDialog";
+import { ProjectDesignOutlineDialog } from "./design/ProjectDesignOutlineDialog";
 import { useDesignSelectionStore } from "../store/design-selection";
 import {
   createDesignBridgeNonce,
@@ -50,10 +51,13 @@ import {
   injectDesignBridge,
   isDesignBridgeOriginAllowed,
   parseDesignBridgeCaptureResponse,
+  parseDesignBridgeNavigationResponse,
+  parseDesignBridgeRouteMessage,
   sanitizeDesignSelectionPayload,
   stripDesignBridge,
   type DesignBridgeCaptureExpectation,
   type DesignBridgeCaptureResult,
+  type DesignBridgeNavigationExpectation,
   type DesignBridgeParentMessage,
 } from "../lib/design/preview-bridge";
 import {
@@ -69,6 +73,7 @@ import {
   withPreviewCaptureLock,
   type PreviewCaptureCollection,
   type PreviewRuntimeAdapter,
+  type PrototypePreviewTarget,
 } from "../lib/design/preview-runtime";
 import type { DesignTokenChange } from "../lib/design/token-mutation";
 import { mutateConversationDesignTokens } from "../lib/design/token-mutation-host";
@@ -76,14 +81,35 @@ import {
   exportProjectToUniqueDirectory,
   supportsDesktopDesignTools,
 } from "../lib/design/desktop";
-import type {
-  DesignReviewFinding,
-  DesignReviewScreenshot,
+import {
+  type DesignReviewFinding,
+  type DesignReviewScreenshot,
 } from "../lib/design/review";
 import { useDesignReviewStore } from "../store/design-review";
+import { useProjectDesignWorkspaceStore } from "../store/project-design-workspace";
 import type { AutomaticDesignReviewEvidence } from "../lib/design/automatic-review";
-import type { DesignReviewRun } from "../lib/design/review-jobs/types";
+import { computeDesignReviewSourceDigest } from "../lib/design/review-jobs/digest";
+import {
+  isDesignReviewTerminalStatus,
+  type DesignReviewRun,
+} from "../lib/design/review-jobs/types";
 import { DEFAULT_TITLE } from "../store/conversation";
+import {
+  applyProjectDesignUpdate,
+  deriveImpactPages,
+  PROJECT_DESIGN_PATH,
+  readProjectDesign,
+  resolveProjectDesignPreviewTarget,
+  resolveProjectDesignPreviewRoute,
+  type ProjectDesign,
+} from "../lib/design/project-design";
+import { isPrototypeProject } from "../lib/design/prototype-starter";
+import { buildPrototypeReviewCapturePlan } from "../lib/design/prototype-review-plan";
+import { createIsolatedPreviewSession } from "../lib/design/prototype-preview-session";
+import {
+  ProjectDesignNavigator,
+  type ProjectDesignReviewStatus,
+} from "./design/ProjectDesignNavigator";
 import { flushPendingSandpackFileChanges } from "./code-viewer/sandpack-file-changes";
 import {
   SandpackActionButton,
@@ -97,6 +123,46 @@ interface PendingDesignCapture {
   reject: (error: Error) => void;
   timeout: number;
   removeAbortListener: () => void;
+}
+
+interface PendingDesignNavigation {
+  expectation: DesignBridgeNavigationExpectation;
+  resolve: (target: PrototypePreviewTarget) => void;
+  reject: (error: Error) => void;
+  timeout: number;
+  removeAbortListener: () => void;
+}
+
+const EMPTY_DESIGN_REVIEW_RUNS: readonly DesignReviewRun[] = [];
+
+function pageReviewStatus(
+  pageId: string,
+  runs: readonly DesignReviewRun[],
+  blueprintRevision: string | number,
+): ProjectDesignReviewStatus {
+  const latest = runs.find((run) =>
+    run.coverage?.some((entry) => entry.pageId === pageId),
+  );
+  if (!latest) return "unreviewed";
+  if (
+    latest.blueprintRevision !== undefined &&
+    !Object.is(latest.blueprintRevision, blueprintRevision)
+  ) {
+    return "stale";
+  }
+  if (latest.freshness === "stale") return "stale";
+  if (!isDesignReviewTerminalStatus(latest.status)) return "in-review";
+  const pageCoverage = latest.coverage?.filter(
+    (entry) => entry.pageId === pageId,
+  );
+  if (!pageCoverage?.length) return "unreviewed";
+  if (pageCoverage.some((entry) => entry.status === "needs-fix")) {
+    return "changes-requested";
+  }
+  if (pageCoverage.every((entry) => entry.status === "passed")) {
+    return "approved";
+  }
+  return "unreviewed";
 }
 
 function afterPreviewPaint(): Promise<void> {
@@ -211,6 +277,14 @@ export function CodeViewer({
   const [designTokensOpen, setDesignTokensOpen] = useState(false);
   const [designSelectionActive, setDesignSelectionActive] = useState(false);
   const [designReviewOpen, setDesignReviewOpen] = useState(false);
+  const [projectDesignOutlineOpen, setProjectDesignOutlineOpen] =
+    useState(false);
+  const [selectedPrototypePageId, setSelectedPrototypePageId] = useState<
+    string | undefined
+  >();
+  const [selectedPrototypeScenarioId, setSelectedPrototypeScenarioId] =
+    useState<string | undefined>();
+  const [prototypeResetPending, setPrototypeResetPending] = useState(false);
   const [captureRuntimeSource, setCaptureRuntimeSource] = useState<
     string | null
   >(null);
@@ -230,7 +304,9 @@ export function CodeViewer({
   const bridgeNonceRef = useRef<string | null>(null);
   const bridgeRetryTimersRef = useRef<number[]>([]);
   const pendingCaptureRef = useRef<PendingDesignCapture | null>(null);
+  const pendingNavigationRef = useRef<PendingDesignNavigation | null>(null);
   const captureAbortRef = useRef<AbortController | null>(null);
+  const prototypeNavigationAbortRef = useRef<AbortController | null>(null);
   const captureTaskRef = useRef<Promise<void> | null>(null);
   const manualRetryOfRef = useRef<string | null>(null);
   const softRefreshRef = useRef<(() => void) | null>(null);
@@ -250,6 +326,12 @@ export function CodeViewer({
   const setDesignSelection = useDesignSelectionStore(
     (state) => state.setSelection,
   );
+  const setProjectDesignWorkspaceSelection = useProjectDesignWorkspaceStore(
+    (state) => state.setSelection,
+  );
+  const clearProjectDesignWorkspaceSelection = useProjectDesignWorkspaceStore(
+    (state) => state.clearSelection,
+  );
   const automaticCaptureRequestId = useDesignReviewStore(
     (state) => state.automatic?.captureRequestId,
   );
@@ -259,11 +341,155 @@ export function CodeViewer({
   const automaticStage = useDesignReviewStore(
     (state) => state.automatic?.stage,
   );
+  const designReviewRuns = useDesignReviewStore(
+    (state) =>
+      state.runsByConversation?.[conversationId] ?? EMPTY_DESIGN_REVIEW_RUNS,
+  );
   const dialogRequestId = useDesignReviewStore(
     (state) => state.dialogRequestId,
   );
   const handledAutomaticCaptureRef = useRef<number | undefined>(undefined);
   const handledDialogRequestRef = useRef(0);
+  const projectDesign = useMemo(() => readProjectDesign(files), [files]);
+  const prototypeProject = isPrototypeProject(files);
+  const prototypeWorkspaceEnabled =
+    workspaceMode === "design" && prototypeProject;
+  useEffect(() => {
+    if (!prototypeWorkspaceEnabled || projectDesign.status !== "ready") {
+      setSelectedPrototypePageId(undefined);
+      setSelectedPrototypeScenarioId(undefined);
+      return;
+    }
+    const page =
+      projectDesign.design.pages.find(
+        (candidate) => candidate.id === selectedPrototypePageId,
+      ) ?? projectDesign.design.pages[0];
+    if (!page) return;
+    if (page.id !== selectedPrototypePageId) {
+      setSelectedPrototypePageId(page.id);
+    }
+    const availableScenarios = new Set([
+      page.defaultScenario,
+      ...page.scenarioIds,
+    ]);
+    if (
+      !selectedPrototypeScenarioId ||
+      !availableScenarios.has(selectedPrototypeScenarioId)
+    ) {
+      setSelectedPrototypeScenarioId(page.defaultScenario);
+    }
+  }, [
+    projectDesign,
+    prototypeWorkspaceEnabled,
+    selectedPrototypePageId,
+    selectedPrototypeScenarioId,
+  ]);
+  useEffect(() => {
+    if (
+      !prototypeWorkspaceEnabled ||
+      projectDesign.status !== "ready" ||
+      !selectedPrototypePageId ||
+      !selectedPrototypeScenarioId
+    ) {
+      clearProjectDesignWorkspaceSelection(conversationId);
+      return;
+    }
+    const target = resolveProjectDesignPreviewTarget(
+      projectDesign.design,
+      selectedPrototypePageId,
+      selectedPrototypeScenarioId,
+    );
+    if (!target) {
+      clearProjectDesignWorkspaceSelection(conversationId);
+      return;
+    }
+    setProjectDesignWorkspaceSelection(conversationId, {
+      pageId: target.pageId,
+      scenarioId: target.scenarioId,
+    });
+  }, [
+    clearProjectDesignWorkspaceSelection,
+    conversationId,
+    projectDesign,
+    prototypeWorkspaceEnabled,
+    selectedPrototypePageId,
+    selectedPrototypeScenarioId,
+    setProjectDesignWorkspaceSelection,
+  ]);
+  const projectDesignNavigatorModel = useMemo(() => {
+    if (projectDesign.status !== "ready") {
+      return {
+        blueprint: {
+          status: projectDesign.status,
+          ...(projectDesign.status === "invalid"
+            ? { message: projectDesign.error }
+            : {}),
+        },
+        pages: [],
+      } as const;
+    }
+    const design = projectDesign.design;
+    const scenarios = new Map(
+      design.scenarios.map((scenario) => [scenario.id, scenario]),
+    );
+    const completedPages = new Set(design.buildProgress.completedPageIds);
+    const selectedPage = design.pages.find(
+      (page) => page.id === selectedPrototypePageId,
+    );
+    const affectedPages = selectedPage
+      ? deriveImpactPages(design, [
+          ...(selectedPage.layoutId ? [selectedPage.layoutId] : []),
+          ...selectedPage.sharedUiRefs,
+        ])
+      : [];
+    return {
+      blueprint: { status: "ready" as const },
+      selectedPageId: selectedPrototypePageId,
+      selectedSceneId: selectedPrototypeScenarioId,
+      pages: design.pages.map((page) => ({
+        id: page.id,
+        parentId: page.parentId ?? undefined,
+        name: page.name,
+        responsibility: page.responsibility,
+        buildProgress: completedPages.has(page.id) ? 100 : 0,
+        buildStatus: completedPages.has(page.id)
+          ? ("complete" as const)
+          : design.buildProgress.status === "blocked"
+            ? ("blocked" as const)
+            : ("not-started" as const),
+        reviewStatus: pageReviewStatus(
+          page.id,
+          designReviewRuns,
+          design.revision,
+        ),
+        scenes: [...new Set([page.defaultScenario, ...page.scenarioIds])]
+          .map((scenarioId) => scenarios.get(scenarioId))
+          .filter((scenario) => scenario !== undefined)
+          .map((scenario) => ({
+            id: scenario.id,
+            name: scenario.name,
+            description: scenario.kind,
+          })),
+      })),
+      ...(affectedPages.length > 1
+        ? {
+            sharedLayoutImpact: {
+              description: t.prototypeWorkspace.sharedImpactDescription.replace(
+                "{count}",
+                String(affectedPages.length),
+              ),
+              affectedPages: affectedPages.length,
+            },
+          }
+        : {}),
+    };
+  }, [
+    designReviewRuns,
+    projectDesign,
+    selectedPrototypePageId,
+    selectedPrototypeScenarioId,
+    t.prototypeWorkspace.sharedImpactDescription,
+  ]);
 
   const deviceDimensions = captureViewport
     ? { width: captureViewport.width, height: captureViewport.height }
@@ -357,6 +583,21 @@ export function CodeViewer({
       cancelled = true;
     };
   }, [conversationId, files, previewMode, template]);
+  useEffect(() => {
+    if (workspaceMode !== "design" || !previewEnabled) return;
+    let cancelled = false;
+    void loadDesignCaptureRuntimeSource().then(
+      (source) => {
+        if (!cancelled) setCaptureRuntimeSource(source);
+      },
+      () => {
+        // The Review UI reports runtime loading failures when capture starts.
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [previewEnabled, workspaceMode]);
   const bridgeInjection = useMemo(
     () =>
       workspaceMode === "design"
@@ -446,6 +687,134 @@ export function CodeViewer({
     if (pendingCaptureRef.current === pending) pendingCaptureRef.current = null;
   }, []);
 
+  const clearPendingNavigation = useCallback(
+    (pending: PendingDesignNavigation) => {
+      window.clearTimeout(pending.timeout);
+      pending.removeAbortListener();
+      if (pendingNavigationRef.current === pending) {
+        pendingNavigationRef.current = null;
+      }
+    },
+    [],
+  );
+
+  const waitForDesignBridge = useCallback(
+    async (generation: string, signal: AbortSignal) => {
+      const deadline = performance.now() + 5_000;
+      while (
+        (!designBridgeReadyRef.current ||
+          bridgeGenerationRef.current !== generation) &&
+        performance.now() < deadline
+      ) {
+        signal.throwIfAborted();
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 25));
+      }
+      if (
+        !designBridgeReadyRef.current ||
+        bridgeGenerationRef.current !== generation
+      ) {
+        throw new Error("The preview bridge is not ready for navigation.");
+      }
+    },
+    [],
+  );
+
+  const waitForDesignCaptureRuntime = useCallback(
+    async (generation: string, signal: AbortSignal) => {
+      const deadline = performance.now() + DESIGN_BRIDGE_CAPTURE_TIMEOUT_MS;
+      while (
+        (!designBridgeReadyRef.current ||
+          !captureRuntimeReadyRef.current ||
+          bridgeGenerationRef.current !== generation) &&
+        performance.now() < deadline
+      ) {
+        signal.throwIfAborted();
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 25));
+      }
+      if (
+        !designBridgeReadyRef.current ||
+        !captureRuntimeReadyRef.current ||
+        bridgeGenerationRef.current !== generation
+      ) {
+        throw new Error("The preview capture runtime is not ready.");
+      }
+    },
+    [],
+  );
+
+  const requestPreviewNavigation = useCallback(
+    (
+      target: PrototypePreviewTarget,
+      generation: string,
+      signal: AbortSignal,
+    ) => {
+      const iframe = getPreviewIframe();
+      if (!iframe?.contentWindow) {
+        return Promise.reject(new Error("Preview iframe is not available."));
+      }
+      const contentWindow = iframe.contentWindow;
+      const targetOrigin = getDesignBridgeTargetOrigin(
+        iframe.src,
+        window.location.href,
+      );
+      if (!targetOrigin) {
+        return Promise.reject(new Error("Preview iframe origin is invalid."));
+      }
+      if (pendingNavigationRef.current) {
+        return Promise.reject(
+          new Error("A preview navigation request is already running."),
+        );
+      }
+      const expectation: DesignBridgeNavigationExpectation = {
+        generation,
+        nonce: createDesignBridgeNonce(),
+        requestId: createDesignBridgeNonce(),
+        target,
+      };
+      return new Promise<PrototypePreviewTarget>((resolve, reject) => {
+        const abort = () => {
+          const pending = pendingNavigationRef.current;
+          if (!pending || pending.expectation !== expectation) return;
+          clearPendingNavigation(pending);
+          reject(
+            new DOMException("Preview navigation was cancelled.", "AbortError"),
+          );
+        };
+        const timeout = window.setTimeout(() => {
+          const pending = pendingNavigationRef.current;
+          if (!pending || pending.expectation !== expectation) return;
+          clearPendingNavigation(pending);
+          reject(new Error("Preview navigation timed out."));
+        }, DESIGN_BRIDGE_CAPTURE_TIMEOUT_MS);
+        const pending: PendingDesignNavigation = {
+          expectation,
+          resolve,
+          reject,
+          timeout,
+          removeAbortListener: () => signal.removeEventListener("abort", abort),
+        };
+        pendingNavigationRef.current = pending;
+        signal.addEventListener("abort", abort, { once: true });
+        if (signal.aborted) {
+          abort();
+          return;
+        }
+        contentWindow.postMessage(
+          {
+            type: "open-builder:design-bridge-navigate",
+            version: DESIGN_BRIDGE_PROTOCOL_VERSION,
+            generation,
+            nonce: expectation.nonce,
+            requestId: expectation.requestId,
+            target,
+          },
+          targetOrigin,
+        );
+      });
+    },
+    [clearPendingNavigation, getPreviewIframe],
+  );
+
   const postBridgeControl = useCallback(
     (active: boolean, nonce: string) => {
       const iframe = getPreviewIframe();
@@ -461,6 +830,29 @@ export function CodeViewer({
           version: DESIGN_BRIDGE_PROTOCOL_VERSION,
           nonce,
           active,
+        },
+        targetOrigin,
+      );
+      return true;
+    },
+    [getPreviewIframe],
+  );
+
+  const postPrototypeDataReset = useCallback(
+    (generation: string) => {
+      const iframe = getPreviewIframe();
+      if (!iframe?.contentWindow) return false;
+      const targetOrigin = getDesignBridgeTargetOrigin(
+        iframe.src,
+        window.location.href,
+      );
+      if (!targetOrigin) return false;
+      iframe.contentWindow.postMessage(
+        {
+          type: "open-builder:design-bridge-reset-data",
+          version: DESIGN_BRIDGE_PROTOCOL_VERSION,
+          generation,
+          nonce: createDesignBridgeNonce(),
         },
         targetOrigin,
       );
@@ -503,6 +895,7 @@ export function CodeViewer({
       viewport: DesignReviewViewport,
       generation: string,
       signal: AbortSignal,
+      target?: PrototypePreviewTarget,
     ) => {
       const iframe = getPreviewIframe();
       if (!iframe?.contentWindow) {
@@ -527,6 +920,7 @@ export function CodeViewer({
         viewportName: viewport.name,
         viewportWidth: viewport.width,
         viewportHeight: viewport.height,
+        ...(target ? { target } : {}),
       };
       return new Promise<DesignBridgeCaptureResult>((resolve, reject) => {
         const abort = () => {
@@ -569,6 +963,7 @@ export function CodeViewer({
                 width: viewport.width,
                 height: viewport.height,
               },
+              ...(target ? { target } : {}),
             },
             targetOrigin,
           );
@@ -612,6 +1007,22 @@ export function CodeViewer({
         else pending.reject(new Error(response.error));
         return;
       }
+      const pendingNavigation = pendingNavigationRef.current;
+      if (
+        pendingNavigation &&
+        (message?.type === "open-builder:design-bridge-navigation-result" ||
+          message?.type === "open-builder:design-bridge-navigation-error")
+      ) {
+        const response = parseDesignBridgeNavigationResponse(
+          message,
+          pendingNavigation.expectation,
+        );
+        if (!response) return;
+        clearPendingNavigation(pendingNavigation);
+        if (response.ok) pendingNavigation.resolve(response.target);
+        else pendingNavigation.reject(new Error(response.error));
+        return;
+      }
       let serialized: string;
       try {
         serialized = JSON.stringify(event.data);
@@ -626,6 +1037,27 @@ export function CodeViewer({
       }
       if (!message || message.version !== DESIGN_BRIDGE_PROTOCOL_VERSION)
         return;
+      if (message.type === "open-builder:design-bridge-route") {
+        const generation = previewGenerationRef.current;
+        const route = generation
+          ? parseDesignBridgeRouteMessage(message, generation)
+          : null;
+        if (
+          route &&
+          prototypeWorkspaceEnabled &&
+          projectDesign.status === "ready"
+        ) {
+          const target = resolveProjectDesignPreviewRoute(
+            projectDesign.design,
+            route,
+          );
+          if (target) {
+            setSelectedPrototypePageId(target.pageId);
+            setSelectedPrototypeScenarioId(target.scenarioId);
+          }
+        }
+        return;
+      }
       if (message.type === "open-builder:design-bridge-ready") {
         bridgeGenerationRef.current = message.generation;
         designBridgeReadyRef.current =
@@ -634,6 +1066,34 @@ export function CodeViewer({
           designBridgeReadyRef.current &&
           message.captureRuntimeAvailable === true;
         setDesignBridgeReady(designBridgeReadyRef.current);
+        if (
+          designBridgeReadyRef.current &&
+          prototypeWorkspaceEnabled &&
+          projectDesign.status === "ready"
+        ) {
+          const observed = resolveProjectDesignPreviewRoute(
+            projectDesign.design,
+            message.route,
+          );
+          const target =
+            observed ??
+            resolveProjectDesignPreviewRoute(
+              projectDesign.design,
+              projectDesign.design.pages[0]?.route ?? "",
+            );
+          if (target) {
+            setSelectedPrototypePageId(target.pageId);
+            setSelectedPrototypeScenarioId(target.scenarioId);
+            if (!observed) {
+              const controller = new AbortController();
+              void requestPreviewNavigation(
+                target,
+                message.generation,
+                controller.signal,
+              ).catch(() => {});
+            }
+          }
+        }
         const nonce = bridgeNonceRef.current;
         if (nonce && designSelectionActive) postBridgeControl(true, nonce);
         return;
@@ -656,10 +1116,14 @@ export function CodeViewer({
   }, [
     conversationId,
     clearPendingCapture,
+    clearPendingNavigation,
     deactivateDesignSelection,
     designSelectionActive,
     getPreviewIframe,
     postBridgeControl,
+    projectDesign,
+    prototypeWorkspaceEnabled,
+    requestPreviewNavigation,
     setDesignSelection,
   ]);
 
@@ -686,6 +1150,14 @@ export function CodeViewer({
     () => () => {
       clearBridgeRetryTimers();
       captureAbortRef.current?.abort();
+      prototypeNavigationAbortRef.current?.abort();
+      const navigation = pendingNavigationRef.current;
+      if (navigation) {
+        clearPendingNavigation(navigation);
+        navigation.reject(
+          new DOMException("Preview navigation was cancelled.", "AbortError"),
+        );
+      }
       const pending = pendingCaptureRef.current;
       if (pending) {
         clearPendingCapture(pending);
@@ -694,7 +1166,7 @@ export function CodeViewer({
         );
       }
     },
-    [clearBridgeRetryTimers, clearPendingCapture],
+    [clearBridgeRetryTimers, clearPendingCapture, clearPendingNavigation],
   );
 
   const bridgeUnavailableReason =
@@ -725,6 +1197,33 @@ export function CodeViewer({
     setDesignTokensOpen(false);
     setDesignSystemsOpen(true);
   }, []);
+
+  const saveProjectDesignOutline = useCallback(
+    async (nextDesign: ProjectDesign) => {
+      if (projectDesign.status !== "ready") {
+        throw new Error("The project design is not available.");
+      }
+      const result = applyProjectDesignUpdate(
+        files,
+        nextDesign,
+        projectDesign.design.revision,
+      );
+      if (!result.ok) throw new Error(result.error);
+      invalidateAutomaticReview();
+      onFileChange(
+        conversationId,
+        PROJECT_DESIGN_PATH,
+        result.files[PROJECT_DESIGN_PATH],
+      );
+    },
+    [
+      conversationId,
+      files,
+      invalidateAutomaticReview,
+      onFileChange,
+      projectDesign,
+    ],
+  );
 
   const handleExportDirectory = useCallback(async () => {
     if (isGenerating) return;
@@ -818,6 +1317,7 @@ export function CodeViewer({
       viewports: readonly DeviceSize[],
       generation: string,
       signal: AbortSignal,
+      target?: PrototypePreviewTarget,
       onProgress?: (
         completed: number,
         total: number,
@@ -869,11 +1369,11 @@ export function CodeViewer({
             await waitForPreviewViewport(viewport, generation, signal);
           },
           captureViewport: (viewport) =>
-            requestPreviewCapture(viewport, generation, signal),
+            requestPreviewCapture(viewport, generation, signal, target),
           onProgress,
           restore: restorePreview,
         });
-        return { generation, ...collection };
+        return { generation, ...(target ? { target } : {}), ...collection };
       } finally {
         await restorePreview();
       }
@@ -901,8 +1401,17 @@ export function CodeViewer({
     adapter: {
       getGeneration: () => previewGenerationRef.current,
       prepare: preparePreviewRuntime,
-      capture: (viewports, generation, signal) =>
-        capturePreviewCollection(viewports, generation, signal),
+      navigateToTarget: async (target, generation, signal) => {
+        await waitForDesignBridge(generation, signal);
+        await requestPreviewNavigation(target, generation, signal);
+        signal.throwIfAborted();
+        softRefreshRef.current?.();
+        await afterPreviewPaint();
+        await waitForDesignBridge(generation, signal);
+        return requestPreviewNavigation(target, generation, signal);
+      },
+      capture: (viewports, generation, signal, target) =>
+        capturePreviewCollection(viewports, generation, signal, target),
     },
   };
   useEffect(() => {
@@ -922,10 +1431,12 @@ export function CodeViewer({
       },
       prepare: (generation, signal) =>
         currentAdapter().prepare(generation, signal),
-      capture: (viewports, generation, signal) =>
-        currentAdapter().capture(viewports, generation, signal),
+      navigateToTarget: (target, generation, signal) =>
+        currentAdapter().navigateToTarget!(target, generation, signal),
+      capture: (viewports, generation, signal, target) =>
+        currentAdapter().capture(viewports, generation, signal, target),
     });
-  }, [conversationId]);
+  }, [conversationId, requestPreviewNavigation, waitForDesignBridge]);
 
   const submitManualDesignReview = useCallback(
     (screenshots: readonly DesignReviewScreenshot[]) => {
@@ -947,7 +1458,16 @@ export function CodeViewer({
           ? reviewStore.automatic?.evidence
           : undefined;
         if (!options.automatic) reviewStore.clearAutomatic();
-        reviewStore.beginCapture(DESIGN_REVIEW_VIEWPORTS.length);
+        const prototypePlan =
+          prototypeWorkspaceEnabled && projectDesign.status === "ready"
+            ? buildPrototypeReviewCapturePlan(
+                projectDesign.design,
+                automaticEvidence?.affectedPageIds,
+              )
+            : null;
+        reviewStore.beginCapture(
+          prototypePlan?.length ?? DESIGN_REVIEW_VIEWPORTS.length,
+        );
         if (!bridgeInjection.supported) {
           const message =
             (bridgeUnavailableReason ??
@@ -973,6 +1493,18 @@ export function CodeViewer({
           return;
         }
         try {
+          if (automaticEvidence?.sourceDigest) {
+            const currentDigest = await computeDesignReviewSourceDigest({
+              files,
+              designSystem: designState?.appliedSystem ?? null,
+              designContract: automaticEvidence.contract,
+            });
+            if (currentDigest !== automaticEvidence.sourceDigest) {
+              throw new Error(
+                "The project changed before automatic Design Review capture started.",
+              );
+            }
+          }
           const generation = previewGenerationRef.current;
           if (!generation) {
             throw new Error("The current preview generation is not ready.");
@@ -982,11 +1514,72 @@ export function CodeViewer({
             owner: options.automatic ? "automatic-review" : "manual-review",
             signal: controller.signal,
             run: async (adapter, signal) => {
+              if (prototypePlan) {
+                await waitForDesignCaptureRuntime(generation, signal);
+                const sourceFrame = getPreviewIframe();
+                if (!sourceFrame) {
+                  throw new Error("Preview iframe is not available.");
+                }
+                let isolated = await createIsolatedPreviewSession(
+                  sourceFrame,
+                  generation,
+                  signal,
+                );
+                let activeScenarioId: string | undefined;
+                const captures: DesignBridgeCaptureResult[] = [];
+                const errors: string[] = [];
+                try {
+                  for (const [index, item] of prototypePlan.entries()) {
+                    try {
+                      if (
+                        activeScenarioId !== undefined &&
+                        activeScenarioId !== item.target.scenarioId
+                      ) {
+                        isolated.dispose();
+                        isolated = await createIsolatedPreviewSession(
+                          sourceFrame,
+                          generation,
+                          signal,
+                        );
+                      }
+                      activeScenarioId = item.target.scenarioId;
+                      await isolated.setViewport(item.viewport);
+                      await isolated.navigate(item.target);
+                      captures.push(
+                        await isolated.capture(item.viewport, item.target),
+                      );
+                    } catch (error) {
+                      if ((error as { name?: string })?.name === "AbortError") {
+                        throw error;
+                      }
+                      errors.push(
+                        `${item.target.pageId}/${item.target.scenarioId}/${item.viewport.name}: ${
+                          error instanceof Error ? error.message : String(error)
+                        }`,
+                      );
+                    }
+                    useDesignReviewStore.getState().updateCaptureProgress({
+                      completed: index + 1,
+                      total: prototypePlan.length,
+                      viewport: `${item.target.pageId}/${item.target.scenarioId}/${item.viewport.name}`,
+                    });
+                  }
+                } finally {
+                  isolated.dispose();
+                }
+                if (adapter.getGeneration() !== generation) {
+                  throw new Error(
+                    "The project changed while prototype review evidence was captured.",
+                  );
+                }
+                return { generation, captures, errors };
+              }
               await adapter.prepare(generation, signal);
               return capturePreviewCollection(
                 DESIGN_REVIEW_VIEWPORTS.map((viewport) => viewport.name),
                 generation,
                 signal,
+                undefined,
                 (completed, total, viewport) => {
                   useDesignReviewStore.getState().updateCaptureProgress({
                     completed,
@@ -998,14 +1591,27 @@ export function CodeViewer({
             },
           });
           controller.signal.throwIfAborted();
+          if (
+            collection.generation !== generation ||
+            previewGenerationRef.current !== generation
+          ) {
+            throw new Error(
+              "The project changed before prototype review evidence completed.",
+            );
+          }
           const screenshots: DesignReviewScreenshot[] = collection.captures.map(
             (capture) => ({
               dataUrl: capture.dataUrl,
               mimeType: capture.mimeType,
-              name: `preview-${capture.viewport.name}-${capture.viewport.width}x${capture.viewport.height}.webp`,
+              name: capture.semanticSnapshot.prototypeIdentity
+                ? `preview-${capture.semanticSnapshot.prototypeIdentity.pageId}-${capture.semanticSnapshot.prototypeIdentity.scenarioId}-${capture.viewport.name}.webp`
+                : `preview-${capture.viewport.name}-${capture.viewport.width}x${capture.viewport.height}.webp`,
               source: "automatic",
               viewport: capture.viewport,
               semanticSnapshot: capture.semanticSnapshot,
+              ...(capture.semanticSnapshot.prototypeIdentity
+                ? { target: capture.semanticSnapshot.prototypeIdentity }
+                : {}),
             }),
           );
           if (
@@ -1108,9 +1714,14 @@ export function CodeViewer({
       bridgeUnavailableReason,
       capturePreviewCollection,
       conversationId,
+      designState?.appliedSystem,
+      files,
+      getPreviewIframe,
       onAutomaticDesignReview,
       onAutomaticDesignReviewUnavailable,
+      projectDesign,
       submitManualDesignReview,
+      waitForDesignCaptureRuntime,
     ],
   );
 
@@ -1204,6 +1815,81 @@ export function CodeViewer({
     softRefreshRef.current?.();
   }, [conversationId]);
 
+  const navigatePrototype = useCallback(
+    async (pageId: string, scenarioId?: string) => {
+      if (!prototypeWorkspaceEnabled || projectDesign.status !== "ready") {
+        return;
+      }
+      const page = projectDesign.design.pages.find(
+        (candidate) => candidate.id === pageId,
+      );
+      if (!page) return;
+      const nextScenarioId = scenarioId ?? page.defaultScenario;
+      if (
+        !new Set([page.defaultScenario, ...page.scenarioIds]).has(
+          nextScenarioId,
+        )
+      ) {
+        return;
+      }
+      const generation = previewGenerationRef.current;
+      if (!generation) return;
+      const target: PrototypePreviewTarget = {
+        pageId,
+        route: `#${page.route}?scenario=${nextScenarioId}`,
+        scenarioId: nextScenarioId,
+      };
+      const resetForScenarioChange =
+        selectedPrototypeScenarioId !== nextScenarioId;
+      prototypeNavigationAbortRef.current?.abort();
+      const controller = new AbortController();
+      prototypeNavigationAbortRef.current = controller;
+      setSelectedPrototypePageId(pageId);
+      setSelectedPrototypeScenarioId(nextScenarioId);
+      try {
+        await waitForDesignBridge(generation, controller.signal);
+        await requestPreviewNavigation(target, generation, controller.signal);
+        controller.signal.throwIfAborted();
+        if (resetForScenarioChange && !postPrototypeDataReset(generation)) {
+          softRefreshRef.current?.();
+        }
+        if (resetForScenarioChange) await afterPreviewPaint();
+      } catch (error) {
+        if ((error as { name?: string })?.name !== "AbortError") {
+          setDesktopActionMessage(
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+      } finally {
+        if (prototypeNavigationAbortRef.current === controller) {
+          prototypeNavigationAbortRef.current = null;
+        }
+      }
+    },
+    [
+      projectDesign,
+      postPrototypeDataReset,
+      prototypeWorkspaceEnabled,
+      requestPreviewNavigation,
+      selectedPrototypeScenarioId,
+      waitForDesignBridge,
+    ],
+  );
+
+  const resetPrototypeData = useCallback(async () => {
+    setPrototypeResetPending(true);
+    try {
+      flushPendingSandpackFileChanges(conversationId);
+      const generation = previewGenerationRef.current;
+      if (!generation || !postPrototypeDataReset(generation)) {
+        softRefreshRef.current?.();
+      }
+      await afterPreviewPaint();
+    } finally {
+      setPrototypeResetPending(false);
+    }
+  }, [conversationId, postPrototypeDataReset]);
+
   const registerSoftRefresh = useCallback((refresh: (() => void) | null) => {
     softRefreshRef.current = refresh;
   }, []);
@@ -1216,6 +1902,48 @@ export function CodeViewer({
     },
     [onApplyDesignReviewFixes],
   );
+
+  const prototypeToolbarNavigation = useMemo(() => {
+    if (!prototypeWorkspaceEnabled || projectDesign.status !== "ready") {
+      return undefined;
+    }
+    const selectedPage = projectDesign.design.pages.find(
+      (page) => page.id === selectedPrototypePageId,
+    );
+    const scenarios = new Map(
+      projectDesign.design.scenarios.map((scenario) => [scenario.id, scenario]),
+    );
+    return {
+      pages: projectDesign.design.pages.map((page) => ({
+        id: page.id,
+        name: page.name,
+      })),
+      scenarios: selectedPage
+        ? [
+            ...new Set([
+              selectedPage.defaultScenario,
+              ...selectedPage.scenarioIds,
+            ]),
+          ]
+            .map((id) => scenarios.get(id))
+            .filter((scenario) => scenario !== undefined)
+            .map((scenario) => ({ id: scenario.id, name: scenario.name }))
+        : [],
+      selectedPageId: selectedPrototypePageId,
+      selectedScenarioId: selectedPrototypeScenarioId,
+      onPageSelect: (pageId: string) => void navigatePrototype(pageId),
+      onScenarioSelect: (scenarioId: string) => {
+        if (selectedPrototypePageId) {
+          void navigatePrototype(selectedPrototypePageId, scenarioId);
+        }
+      },
+    };
+  }, [
+    navigatePrototype,
+    projectDesign,
+    selectedPrototypePageId,
+    selectedPrototypeScenarioId,
+  ]);
 
   const requestedCurrentFile = currentFile.replace(/^\/+/, "");
   const effectiveCurrentFile =
@@ -1305,6 +2033,7 @@ export function CodeViewer({
             : activateDesignSelection()
         }
         designSelectionUnavailableReason={bridgeUnavailableReason}
+        prototypeNavigation={prototypeToolbarNavigation}
       />
 
       {workspaceMode === "design" && onApplyDesignSystem && (
@@ -1339,154 +2068,230 @@ export function CodeViewer({
           isGenerating={isGenerating}
         />
       )}
+      {prototypeWorkspaceEnabled && projectDesign.status === "ready" && (
+        <ProjectDesignOutlineDialog
+          open={projectDesignOutlineOpen}
+          design={projectDesign.design}
+          onOpenChange={setProjectDesignOutlineOpen}
+          onSave={saveProjectDesignOutline}
+        />
+      )}
 
-      <div className="flex-1 overflow-hidden relative bg-muted/50">
-        {workspaceMode === "design" && automaticStage && !designReviewOpen && (
-          <div
-            role="status"
-            className="absolute right-3 top-3 z-40 max-w-md rounded-lg border bg-background/95 px-3 py-2 text-xs shadow-lg backdrop-blur"
-          >
-            {t.designReview.automaticStages[automaticStage]}
-          </div>
-        )}
-        {desktopActionMessage && (
-          <div
-            role="status"
-            className="absolute right-3 top-3 z-40 max-w-md rounded-lg border bg-background/95 px-3 py-2 text-xs shadow-lg backdrop-blur"
-          >
-            {desktopActionMessage}
-          </div>
-        )}
-        <SandpackProvider
-          key={sandpackKey}
-          template={
-            (previewEnabled ? template : "static") as SandpackPredefinedTemplate
-          }
-          theme={isDark ? "dark" : "light"}
-          files={sandpackFiles}
-          options={{ activeFile: sandpackCurrentFile }}
-          style={{ height: "100%" }}
-        >
-          <SandpackRefreshRegistration onChange={registerSoftRefresh} />
-          <SandpackListener
-            conversationId={conversationId}
-            requestedActiveFile={sandpackCurrentFile}
-            onFileChange={handleSandpackFileChange}
+      <div className="relative flex flex-1 overflow-hidden bg-muted/50">
+        {prototypeWorkspaceEnabled && effectiveViewMode === "preview" && (
+          <ProjectDesignNavigator
+            model={projectDesignNavigatorModel}
+            onPageSelect={(pageId) => void navigatePrototype(pageId)}
+            onSceneSelect={(pageId, scenarioId) =>
+              void navigatePrototype(pageId, scenarioId)
+            }
+            onResetData={resetPrototypeData}
+            onEditBlueprint={
+              isGenerating ? undefined : () => setProjectDesignOutlineOpen(true)
+            }
+            resetPending={prototypeResetPending}
+            labels={{
+              title: t.prototypeWorkspace.title,
+              open: t.prototypeWorkspace.open,
+              close: t.prototypeWorkspace.close,
+              collapse: t.prototypeWorkspace.collapse,
+              expand: t.prototypeWorkspace.expand,
+              pages: t.prototypeWorkspace.pages,
+              pageTree: t.prototypeWorkspace.pageTree,
+              pageCount: (count) =>
+                t.prototypeWorkspace.pageCount.replace(
+                  "{count}",
+                  String(count),
+                ),
+              buildProgress: t.prototypeWorkspace.buildProgress,
+              reviewStatus: t.prototypeWorkspace.reviewStatus,
+              sharedLayoutImpact: t.prototypeWorkspace.sharedImpact,
+              missingBlueprintTitle: t.prototypeWorkspace.missingTitle,
+              missingBlueprintDescription:
+                t.prototypeWorkspace.missingDescription,
+              invalidBlueprintTitle: t.prototypeWorkspace.invalidTitle,
+              invalidBlueprintDescription:
+                t.prototypeWorkspace.invalidDescription,
+              noPagesTitle: t.prototypeWorkspace.noPages,
+              noPagesDescription: t.prototypeWorkspace.noPagesDescription,
+              noScenes: t.prototypeWorkspace.noScenarios,
+              resetData: t.prototypeWorkspace.resetData,
+              resetting: t.prototypeWorkspace.resetting,
+              resetDataDescription: t.prototypeWorkspace.resetDataDescription,
+              editBlueprint: t.prototypeWorkspace.editBlueprint,
+              buildStatuses: {
+                "not-started": t.prototypeWorkspace.buildStatuses.notStarted,
+                "in-progress": t.prototypeWorkspace.buildStatuses.inProgress,
+                complete: t.prototypeWorkspace.buildStatuses.complete,
+                blocked: t.prototypeWorkspace.buildStatuses.blocked,
+              },
+              reviewStatuses: {
+                unreviewed: t.prototypeWorkspace.reviewStatuses.unreviewed,
+                "in-review": t.prototypeWorkspace.reviewStatuses.inReview,
+                approved: t.prototypeWorkspace.reviewStatuses.approved,
+                "changes-requested":
+                  t.prototypeWorkspace.reviewStatuses.changesRequested,
+                stale: t.prototypeWorkspace.reviewStatuses.stale,
+              },
+            }}
           />
-          <SandpackLayout>
-            {/* Preview */}
-            {previewEnabled && (
+        )}
+        <div className="relative min-w-0 flex-1 overflow-hidden">
+          {workspaceMode === "design" &&
+            automaticStage &&
+            !designReviewOpen && (
               <div
-                ref={previewHostRef}
-                className={cn(
-                  "h-full w-full",
-                  effectiveViewMode === "preview" ? "block" : "hidden",
-                  previewHostOverflowClass,
-                )}
+                role="status"
+                className="absolute right-3 top-3 z-40 max-w-md rounded-lg border bg-background/95 px-3 py-2 text-xs shadow-lg backdrop-blur"
               >
+                {t.designReview.automaticStages[automaticStage]}
+              </div>
+            )}
+          {desktopActionMessage && (
+            <div
+              role="status"
+              className="absolute right-3 top-3 z-40 max-w-md rounded-lg border bg-background/95 px-3 py-2 text-xs shadow-lg backdrop-blur"
+            >
+              {desktopActionMessage}
+            </div>
+          )}
+          <SandpackProvider
+            key={sandpackKey}
+            template={
+              (previewEnabled
+                ? template
+                : "static") as SandpackPredefinedTemplate
+            }
+            theme={isDark ? "dark" : "light"}
+            files={sandpackFiles}
+            options={{ activeFile: sandpackCurrentFile }}
+            style={{ height: "100%" }}
+          >
+            <SandpackRefreshRegistration onChange={registerSoftRefresh} />
+            <SandpackListener
+              conversationId={conversationId}
+              requestedActiveFile={sandpackCurrentFile}
+              onFileChange={handleSandpackFileChange}
+            />
+            <SandpackLayout>
+              {/* Preview */}
+              {previewEnabled && (
                 <div
-                  className={cn("mx-auto", fixedPreview && "relative")}
-                  style={previewFrameStyle}
+                  ref={previewHostRef}
+                  className={cn(
+                    "h-full w-full",
+                    effectiveViewMode === "preview" ? "block" : "hidden",
+                    previewHostOverflowClass,
+                  )}
                 >
                   <div
-                    className={cn(
-                      "grid grid-rows-3 h-full",
-                      fixedPreview &&
-                        "overflow-hidden rounded-lg border bg-background shadow-lg",
-                      captureViewport &&
-                        "absolute left-0 top-0 rounded-none border-0 shadow-none transition-none",
-                    )}
-                    style={previewSurfaceStyle}
+                    className={cn("mx-auto", fixedPreview && "relative")}
+                    style={previewFrameStyle}
                   >
                     <div
                       className={cn(
-                        "relative transition-[width,height,transform,opacity] duration-300 ease-in-out",
-                        showConsole ? "row-span-2" : "row-span-3",
+                        "grid grid-rows-3 h-full",
+                        fixedPreview &&
+                          "overflow-hidden rounded-lg border bg-background shadow-lg",
+                        captureViewport &&
+                          "absolute left-0 top-0 rounded-none border-0 shadow-none transition-none",
                       )}
+                      style={previewSurfaceStyle}
                     >
-                      <SandpackPreview
+                      <div
                         className={cn(
-                          "preview-content-zoom",
-                          previewScale !== 1 && "preview-content-scaled",
+                          "relative transition-[width,height,transform,opacity] duration-300 ease-in-out",
+                          showConsole ? "row-span-2" : "row-span-3",
                         )}
-                        style={previewContentStyle}
-                        showNavigator={!captureViewport}
-                        showOpenInCodeSandbox={false}
-                        showRefreshButton={false}
-                        showRestartButton={false}
-                      />
-                      <div className="preview-viewport-actions absolute bottom-2 right-2 z-20 flex gap-2">
-                        <SandpackActionButton
-                          label={showConsole ? t.console.hide : t.console.show}
-                          pressed={showConsole}
-                          onClick={() => setShowConsole((visible) => !visible)}
-                        >
-                          <Terminal size={16} />
-                        </SandpackActionButton>
-                        <SandpackRefreshAction
-                          label={t.toolbar.reloadPreview}
-                          onBeforeRefresh={() =>
-                            flushPendingSandpackFileChanges(conversationId)
-                          }
+                      >
+                        <SandpackPreview
+                          className={cn(
+                            "preview-content-zoom",
+                            previewScale !== 1 && "preview-content-scaled",
+                          )}
+                          style={previewContentStyle}
+                          showNavigator={!captureViewport}
+                          showOpenInCodeSandbox={false}
+                          showRefreshButton={false}
+                          showRestartButton={false}
+                        />
+                        <div className="preview-viewport-actions absolute bottom-2 right-2 z-20 flex gap-2">
+                          <SandpackActionButton
+                            label={
+                              showConsole ? t.console.hide : t.console.show
+                            }
+                            pressed={showConsole}
+                            onClick={() =>
+                              setShowConsole((visible) => !visible)
+                            }
+                          >
+                            <Terminal size={16} />
+                          </SandpackActionButton>
+                          <SandpackRefreshAction
+                            label={t.toolbar.reloadPreview}
+                            onBeforeRefresh={() =>
+                              flushPendingSandpackFileChanges(conversationId)
+                            }
+                          />
+                        </div>
+                      </div>
+                      <div
+                        className={cn(
+                          "overflow-hidden border-t",
+                          showConsole ? "row-span-1" : "max-h-0 border-t-0",
+                        )}
+                      >
+                        <SandpackConsole
+                          showSyntaxError={true}
+                          showRestartButton={false}
                         />
                       </div>
                     </div>
-                    <div
-                      className={cn(
-                        "overflow-hidden border-t",
-                        showConsole ? "row-span-1" : "max-h-0 border-t-0",
-                      )}
-                    >
-                      <SandpackConsole
-                        showSyntaxError={true}
-                        showRestartButton={false}
-                      />
-                    </div>
                   </div>
                 </div>
-              </div>
-            )}
-
-            {/* Code editor */}
-            <div
-              className={cn(
-                "h-full w-full overflow-hidden",
-                effectiveViewMode === "code" ? "flex" : "hidden",
               )}
-            >
-              <div className="w-56 border-r h-full shrink-0 overflow-hidden flex flex-col">
-                <FileExplorer
-                  files={previewFiles}
-                  currentFile={currentFile}
-                  onFileSelect={onFileSelect}
-                  onCreateFile={handleCreateFile}
-                  onCreateFolder={handleCreateFolder}
-                  onRenameFile={(oldPath, newPath) => {
-                    invalidateAutomaticReview();
-                    onRenameFile(oldPath, newPath);
-                  }}
-                  onDeleteFile={(path) => {
-                    invalidateAutomaticReview();
-                    onDeleteFile(path);
-                  }}
-                  onMoveFile={(sourcePath, targetFolder) => {
-                    invalidateAutomaticReview();
-                    onMoveFile(sourcePath, targetFolder);
-                  }}
-                />
+
+              {/* Code editor */}
+              <div
+                className={cn(
+                  "h-full w-full overflow-hidden",
+                  effectiveViewMode === "code" ? "flex" : "hidden",
+                )}
+              >
+                <div className="w-56 border-r h-full shrink-0 overflow-hidden flex flex-col">
+                  <FileExplorer
+                    files={previewFiles}
+                    currentFile={currentFile}
+                    onFileSelect={onFileSelect}
+                    onCreateFile={handleCreateFile}
+                    onCreateFolder={handleCreateFolder}
+                    onRenameFile={(oldPath, newPath) => {
+                      invalidateAutomaticReview();
+                      onRenameFile(oldPath, newPath);
+                    }}
+                    onDeleteFile={(path) => {
+                      invalidateAutomaticReview();
+                      onDeleteFile(path);
+                    }}
+                    onMoveFile={(sourcePath, targetFolder) => {
+                      invalidateAutomaticReview();
+                      onMoveFile(sourcePath, targetFolder);
+                    }}
+                  />
+                </div>
+                <div className="flex flex-col flex-1 h-full overflow-x-auto min-w-0">
+                  <SandpackCodeEditor
+                    showTabs={false}
+                    showLineNumbers
+                    showInlineErrors
+                    wrapContent={false}
+                    closableTabs={false}
+                  />
+                </div>
               </div>
-              <div className="flex flex-col flex-1 h-full overflow-x-auto min-w-0">
-                <SandpackCodeEditor
-                  showTabs={false}
-                  showLineNumbers
-                  showInlineErrors
-                  wrapContent={false}
-                  closableTabs={false}
-                />
-              </div>
-            </div>
-          </SandpackLayout>
-        </SandpackProvider>
+            </SandpackLayout>
+          </SandpackProvider>
+        </div>
       </div>
     </div>
   );

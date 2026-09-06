@@ -19,6 +19,8 @@ export interface AutomaticDesignReviewEvidence {
   phase: AutomaticDesignReviewPhase;
   originalRequest: string;
   contract: DesignContract;
+  blueprintRevision?: string | number;
+  affectedPageIds?: string[];
   appliedSystem: Pick<
     DesignSystemRef,
     "id" | "name" | "version" | "digest"
@@ -163,6 +165,8 @@ export function buildAutomaticDesignReviewContext(
     phase: evidence.phase,
     originalRequest: evidence.originalRequest.slice(0, 16_000),
     contract: boundedContract(evidence.contract),
+    blueprintRevision: evidence.blueprintRevision,
+    affectedPageIds: evidence.affectedPageIds?.slice(0, 200),
     appliedSystem: evidence.appliedSystem,
     designSystemStaticReport: boundedDesignReport(evidence.designReport),
     projectHealthReport: boundedHealthReport(evidence.healthReport),

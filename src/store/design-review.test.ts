@@ -158,6 +158,28 @@ describe("Design review automation state", () => {
     expect(normalized.conversation[0]).not.toHaveProperty("files");
   });
 
+  it("drops invalid persisted blueprint revisions and prototype routes", () => {
+    const run = persistedRun({
+      status: "succeeded",
+      blueprintRevision: "x".repeat(129),
+      coverage: [
+        {
+          pageId: "dashboard",
+          route: "javascript:alert(1)",
+          scenarioId: "default",
+          viewport: "desktop",
+          status: "passed",
+        },
+      ],
+    });
+    const normalized = normalizePersistedDesignReviewRuns({
+      conversation: [run],
+    });
+
+    expect(normalized.conversation[0].blueprintRevision).toBeUndefined();
+    expect(normalized.conversation[0].coverage).toBeUndefined();
+  });
+
   it("retains only the latest 20 terminal runs per conversation", () => {
     const runs = Array.from({ length: 23 }, (_, index) =>
       persistedRun({
@@ -296,6 +318,71 @@ describe("Design review automation state", () => {
       useDesignReviewStore.getState().runsByConversation.conversation[0];
     expect(run.freshness).toBe("stale");
     expect(run.logs.at(-1)?.event).toBe("stale");
+  });
+
+  it("tracks page, scenario, and viewport coverage through review completion", () => {
+    const store = useDesignReviewStore.getState();
+    store.createRun({
+      id: "review-coverage",
+      conversationId: "conversation",
+      kind: "automatic",
+      sourceDigest: "a".repeat(64),
+      provider: { runtime: "api", provider: "openai", model: "gpt" },
+      expectedCoverage: [
+        {
+          pageId: "dashboard",
+          route: "#/dashboard?scenario=default",
+          scenarioId: "default",
+          viewport: "desktop",
+        },
+        {
+          pageId: "settings",
+          route: "#/settings?scenario=error",
+          scenarioId: "error",
+          viewport: "mobile",
+        },
+      ],
+      capturedCoverage: [
+        {
+          pageId: "dashboard",
+          route: "#/dashboard?scenario=default",
+          scenarioId: "default",
+          viewport: "desktop",
+        },
+      ],
+    });
+
+    expect(
+      useDesignReviewStore.getState().runsByConversation.conversation[0]
+        .coverage,
+    ).toEqual([
+      expect.objectContaining({ pageId: "dashboard", status: "captured" }),
+      expect.objectContaining({ pageId: "settings", status: "unreviewed" }),
+    ]);
+
+    store.completeRun("review-coverage", {
+      overview: "Dashboard needs a visual fix.",
+      findings: [
+        {
+          id: "dashboard-spacing",
+          priority: "P1",
+          dimension: "visual_hierarchy",
+          title: "Spacing",
+          evidence: "The primary action is crowded.",
+          recommendation: "Add space around the action.",
+          page_id: "dashboard",
+          scenario_id: "default",
+        },
+      ],
+    });
+
+    expect(
+      useDesignReviewStore.getState().runsByConversation.conversation[0]
+        .coverage,
+    ).toEqual([
+      expect.objectContaining({ pageId: "dashboard", status: "needs-fix" }),
+      expect.objectContaining({ pageId: "settings", status: "unreviewed" }),
+    ]);
   });
 
   it("can detect project changes after reload without retaining source files", () => {

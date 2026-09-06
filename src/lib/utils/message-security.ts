@@ -50,15 +50,46 @@ function parseArguments(raw: string | unknown): unknown {
   }
 }
 
+function summarizeProjectDesignArguments(
+  value: Record<string, unknown>,
+): Record<string, unknown> {
+  const document =
+    value.document &&
+    typeof value.document === "object" &&
+    !Array.isArray(value.document)
+      ? (value.document as Record<string, unknown>)
+      : undefined;
+  return {
+    ...(value.expected_revision !== undefined
+      ? { expected_revision: value.expected_revision }
+      : {}),
+    document: document
+      ? {
+          schemaVersion: document.schemaVersion,
+          revision: document.revision,
+          pageCount: Array.isArray(document.pages) ? document.pages.length : 0,
+          flowCount: Array.isArray(document.flows) ? document.flows.length : 0,
+          scenarioCount: Array.isArray(document.scenarios)
+            ? document.scenarios.length
+            : 0,
+        }
+      : {},
+  };
+}
+
 export function sanitizeToolArguments(
   toolName: string,
   raw: string | unknown,
 ): unknown {
   const parsed = parseArguments(raw);
-  if (toolName !== "manage_env" || !parsed || typeof parsed !== "object") {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     return parsed;
   }
   const record = parsed as Record<string, unknown>;
+  if (toolName === "update_project_design") {
+    return summarizeProjectDesignArguments(record);
+  }
+  if (toolName !== "manage_env") return parsed;
   const operations = Array.isArray(record.operations)
     ? record.operations.map((operation) => {
         if (!operation || typeof operation !== "object") return operation;
@@ -68,6 +99,40 @@ export function sanitizeToolArguments(
       })
     : record.operations;
   return { ...record, operations };
+}
+
+function sanitizePrototypeTargetMetadata(
+  value: unknown,
+): { pageId: string; route: string; scenarioId: string } | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const target = value as Record<string, unknown>;
+  if (
+    typeof target.pageId !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(target.pageId) ||
+    typeof target.scenarioId !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(target.scenarioId) ||
+    typeof target.route !== "string" ||
+    target.route.length > 256 ||
+    !/^#\/(?:[A-Za-z0-9._~!$&'()*+,;=:@/?]|%[0-9A-Fa-f]{2})*$/.test(
+      target.route,
+    ) ||
+    target.route.includes("//") ||
+    target.route
+      .slice(2)
+      .split("?", 1)[0]
+      .split("/")
+      .some((segment) => segment === "." || segment === "..") ||
+    /(?:javascript|data|vbscript)\s*:/i.test(target.route)
+  ) {
+    return undefined;
+  }
+  return {
+    pageId: target.pageId,
+    route: target.route,
+    scenarioId: target.scenarioId,
+  };
 }
 
 export function serializeToolArgumentsForHistory(
@@ -197,6 +262,9 @@ function sanitizePreviewEvidenceStructuredContent(
     const image = item.image as Record<string, unknown> | undefined;
     const viewport = item.viewport as Record<string, unknown> | undefined;
     const semantic = item.semantic as Record<string, unknown> | undefined;
+    const prototypeIdentity = sanitizePrototypeTargetMetadata(
+      semantic?.prototypeIdentity,
+    );
     const bytes = boundedNumber(image?.bytes, 1, 1_500 * 1024);
     const width = boundedNumber(viewport?.width, 1, 2_000);
     const height = boundedNumber(viewport?.height, 1, 2_000);
@@ -237,6 +305,7 @@ function sanitizePreviewEvidenceStructuredContent(
         },
         semantic: {
           route: redactSensitiveText(semantic.route).slice(0, 256),
+          ...(prototypeIdentity ? { prototypeIdentity } : {}),
           ...(typeof semantic.title === "string"
             ? { title: redactSensitiveText(semantic.title).slice(0, 200) }
             : {}),
@@ -255,6 +324,7 @@ function sanitizePreviewEvidenceStructuredContent(
     typeof raw.errorCode === "string"
       ? raw.errorCode.replace(/[^a-z0-9_-]/gi, "").slice(0, 64)
       : undefined;
+  const target = sanitizePrototypeTargetMetadata(raw.target);
   return {
     kind: "preview_evidence_v1",
     status: raw.status,
@@ -262,6 +332,7 @@ function sanitizePreviewEvidenceStructuredContent(
     evidence,
     errors,
     placeholder: PREVIEW_EVIDENCE_PLACEHOLDER,
+    ...(target ? { target } : {}),
     ...(errorCode ? { errorCode } : {}),
   };
 }

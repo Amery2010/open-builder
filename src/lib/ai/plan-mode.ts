@@ -17,7 +17,7 @@ Write in the user's language. Ground the plan in files and dependencies you actu
 export const PLAN_MODE_SYSTEM_SUFFIX = `
 
 ## PLAN MODE ACTIVE
-Plan Mode overrides any ordinary workflow advice to skip planning for small changes. Research and plan only. Every write tool (init_project, manage_dependencies, write_file, patch_file, delete_file, rename_file, move_file, manage_env, install_component, screenshot_to_code, apply_design_style, update_design_tokens, execute_skill_script) is withheld until the user approves your plan.
+Plan Mode overrides any ordinary workflow advice to skip planning for small changes. Research and plan only. Every write tool (init_project, manage_dependencies, write_file, patch_file, delete_file, rename_file, move_file, manage_env, install_component, screenshot_to_code, apply_design_style, update_design_tokens, update_project_design, execute_skill_script) is withheld until the user approves your plan.
 1. Read the project with list_files / read_files / search_in_files until the plan is grounded in the current implementation.
 2. Follow this shared ask_user_question contract. In Plan Mode, a completed interview leads to a decision-complete plan rather than implementation:
 

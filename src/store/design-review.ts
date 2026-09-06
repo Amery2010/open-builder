@@ -2,10 +2,13 @@ import localforage from "localforage";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 import {
+  coverageTargetKey,
   designReviewReportSchema,
+  type DesignReviewCoverageTarget,
   type DesignReviewReport,
   type DesignReviewScreenshot,
 } from "../lib/design/review";
+import { isSafePrototypePreviewRoute } from "../lib/design/preview-runtime";
 import type {
   AutomaticDesignReviewEvidence,
   AutomaticDesignReviewStage,
@@ -16,6 +19,7 @@ import {
   type DesignReviewLogEntry,
   type DesignReviewProviderRef,
   type DesignReviewRun,
+  type DesignReviewCoverageEntry,
   type DesignReviewRunKind,
   type DesignReviewRunStatus,
 } from "../lib/design/review-jobs/types";
@@ -46,9 +50,12 @@ export interface CreateDesignReviewRunInput {
   status?: Extract<DesignReviewRunStatus, "capturing" | "queued">;
   sourceDigest: string;
   sourceProjectDigest?: string;
+  blueprintRevision?: string | number;
   provider: DesignReviewProviderRef;
   captureErrors?: readonly string[];
   capturedCount?: number;
+  expectedCoverage?: readonly DesignReviewCoverageTarget[];
+  capturedCoverage?: readonly DesignReviewCoverageTarget[];
   retryOf?: string;
   now?: number;
 }
@@ -170,8 +177,20 @@ function interruptRun(run: DesignReviewRun, now: number): DesignReviewRun {
 
 function normalizePersistedRun(run: DesignReviewRun): DesignReviewRun {
   const parsedReport = designReviewReportSchema.safeParse(run.report);
+  const blueprintRevision =
+    (typeof run.blueprintRevision === "number" &&
+      Number.isSafeInteger(run.blueprintRevision) &&
+      run.blueprintRevision >= 0) ||
+    (typeof run.blueprintRevision === "string" &&
+      run.blueprintRevision.length > 0 &&
+      run.blueprintRevision.length <= 128)
+      ? run.blueprintRevision
+      : undefined;
   return {
     ...run,
+    ...(blueprintRevision !== undefined
+      ? { blueprintRevision }
+      : { blueprintRevision: undefined }),
     provider: {
       runtime: run.provider?.runtime === "local" ? "local" : "api",
       provider: sanitizeDesignReviewLogText(run.provider?.provider),
@@ -193,10 +212,78 @@ function normalizePersistedRun(run: DesignReviewRun): DesignReviewRun {
     ...(parsedReport.success
       ? { report: parsedReport.data }
       : { report: undefined }),
+    coverage: normalizeCoverage(run.coverage),
     ...(run.error
       ? { error: sanitizeDesignReviewLogText(run.error) }
       : { error: undefined }),
   };
+}
+
+function normalizeCoverage(
+  coverage: readonly DesignReviewCoverageEntry[] | undefined,
+): DesignReviewCoverageEntry[] | undefined {
+  if (!Array.isArray(coverage)) return undefined;
+  const statuses = new Set(["unreviewed", "captured", "passed", "needs-fix"]);
+  const seen = new Set<string>();
+  const normalized = coverage.flatMap((entry) => {
+    if (
+      !entry ||
+      !/^[a-z0-9][a-z0-9-]{0,79}$/.test(entry.pageId) ||
+      !/^[a-z0-9][a-z0-9-]{0,79}$/.test(entry.scenarioId) ||
+      !isSafePrototypePreviewRoute(entry.route) ||
+      !["desktop", "tablet", "mobile"].includes(entry.viewport) ||
+      !statuses.has(entry.status)
+    ) {
+      return [];
+    }
+    const key = coverageTargetKey(entry);
+    if (seen.has(key)) return [];
+    seen.add(key);
+    return [{ ...entry }];
+  });
+  return normalized.length > 0 ? normalized : undefined;
+}
+
+function initialCoverage(
+  expected: readonly DesignReviewCoverageTarget[] | undefined,
+  captured: readonly DesignReviewCoverageTarget[] | undefined,
+): DesignReviewCoverageEntry[] | undefined {
+  const capturedKeys = new Set((captured ?? []).map(coverageTargetKey));
+  const targets = [...(expected ?? []), ...(captured ?? [])];
+  const seen = new Set<string>();
+  const entries = targets.flatMap((target) => {
+    const key = coverageTargetKey(target);
+    if (seen.has(key)) return [];
+    seen.add(key);
+    return [
+      {
+        ...target,
+        status: capturedKeys.has(key) ? "captured" : "unreviewed",
+      } satisfies DesignReviewCoverageEntry,
+    ];
+  });
+  return normalizeCoverage(entries);
+}
+
+function completedCoverage(
+  coverage: readonly DesignReviewCoverageEntry[] | undefined,
+  report: DesignReviewReport,
+): DesignReviewCoverageEntry[] | undefined {
+  if (!coverage) return undefined;
+  const unattributedFinding = report.findings.some(
+    (finding) => !finding.page_id,
+  );
+  return coverage.map((entry) => {
+    if (entry.status === "unreviewed") return entry;
+    const hasFinding =
+      unattributedFinding ||
+      report.findings.some(
+        (finding) =>
+          finding.page_id === entry.pageId &&
+          (!finding.scenario_id || finding.scenario_id === entry.scenarioId),
+      );
+    return { ...entry, status: hasFinding ? "needs-fix" : "passed" };
+  });
 }
 
 export function normalizePersistedDesignReviewRuns(
@@ -369,6 +456,14 @@ export const useDesignReviewStore = create<DesignReviewState>()(
           ...(input.sourceProjectDigest
             ? { sourceProjectDigest: input.sourceProjectDigest }
             : {}),
+          ...((typeof input.blueprintRevision === "number" &&
+            Number.isSafeInteger(input.blueprintRevision) &&
+            input.blueprintRevision >= 0) ||
+          (typeof input.blueprintRevision === "string" &&
+            input.blueprintRevision.length > 0 &&
+            input.blueprintRevision.length <= 128)
+            ? { blueprintRevision: input.blueprintRevision }
+            : {}),
           provider: {
             runtime: input.provider.runtime,
             provider: sanitizeDesignReviewLogText(input.provider.provider),
@@ -406,6 +501,10 @@ export const useDesignReviewStore = create<DesignReviewState>()(
                   ),
                 ]),
           ],
+          coverage: initialCoverage(
+            input.expectedCoverage,
+            input.capturedCoverage,
+          ),
           ...(input.retryOf ? { retryOf: input.retryOf } : {}),
           createdAt: now,
           updatedAt: now,
@@ -461,6 +560,7 @@ export const useDesignReviewStore = create<DesignReviewState>()(
               ...run,
               status: "succeeded",
               report,
+              coverage: completedCoverage(run.coverage, report),
               error: undefined,
               updatedAt: now,
               completedAt: now,

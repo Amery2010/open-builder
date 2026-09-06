@@ -34,6 +34,26 @@ _Avoid_: Pixel diff, snapshot renderer
 
 ## Design language
 
+**Project Design Blueprint**:
+The validated root `design-project.json` authority for a complete prototype's product goal, stable pages, shared layouts and UI, flows, scenarios, and build checkpoint. It travels with project files, snapshots, copies, and exports; Conversation state does not own another copy.
+_Avoid_: Design system, chat outline, runtime route table
+
+**Prototype Page**:
+A stable blueprint page ID with one canonical application route, responsibility, shared references, applicable scenarios, and source-file scope.
+_Avoid_: Browser tab, screenshot, generated component
+
+**Prototype Scenario**:
+A declarative, named state for a Prototype Page, such as default, loading, empty, error, validation, or success. Selecting a scenario resets the prototype's shared mock data and never executes scenario-supplied script.
+_Avoid_: Arbitrary JavaScript, test runner, URL pathname
+
+**Prototype Build Batch**:
+One revision-bound unit of Design work scoped to selected page files and declared shared files. Its completed pages and flows are recorded in the Project Design Blueprint before the next batch or a later `/continue` run.
+_Avoid_: Model turn, unrestricted project rewrite, release milestone
+
+**Prototype Review Coverage**:
+The persisted status for one blueprint revision, Prototype Page, Prototype Scenario, and viewport. Captured targets can become passed or needs-fix; missing targets remain unreviewed, and project changes make prior evidence stale.
+_Avoid_: WCAG certification, deployment proof, screenshot archive
+
 **Design Token Contract**:
 The validated root `tokens.css` contract attached to the currently applied Design system.
 _Avoid_: Arbitrary CSS variables, theme file

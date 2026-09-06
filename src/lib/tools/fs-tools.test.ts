@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   FS_TOOL_LIMITS,
   fsInitProject,
+  fsDeleteFile,
   fsListFiles,
   fsManageDependencies,
   fsPatchFile,
@@ -87,6 +88,35 @@ describe("fsInitProject", () => {
     });
   });
 
+  it("initializes the multi-page prototype starter on the Vite React runtime", async () => {
+    const result = await fsInitProject("vite-react-ts-prototype");
+    const packageJson = JSON.parse(result.newFiles?.["package.json"] ?? "{}");
+
+    expect(result.templateChange).toEqual({ template: "vite-react-ts" });
+    expect(packageJson.dependencies["react-router-dom"]).toBe("^7.18.3");
+    expect(packageJson.openBuilder).toEqual({
+      profile: "complete-prototype",
+      schemaVersion: 1,
+    });
+    expect(result.newFiles?.["App.tsx"]).toContain("HashRouter");
+    expect(result.newFiles?.["prototype/PrototypeData.tsx"]).toContain(
+      "resetData",
+    );
+    expect(result.newFiles?.["prototype/PrototypeData.tsx"]).toContain(
+      'window.addEventListener("hashchange", resetForScenarioChange)',
+    );
+    expect(result.newFiles?.["README.md"]).toContain("pnpm build");
+    expect(
+      JSON.parse(result.newFiles?.["tsconfig.json"] ?? "{}").include,
+    ).toEqual(["**/*.ts", "**/*.tsx"]);
+    expect(
+      JSON.parse(result.newFiles?.["tsconfig.json"] ?? "{}").exclude,
+    ).toEqual(["vite.config.ts", "node_modules", "dist"]);
+    expect(result.newFiles?.["prototype/PrototypeHome.tsx"]).toContain(
+      'params.get("scenario")',
+    );
+  });
+
   it.each([
     ["solid", "solid-js", "1.9.15"],
     ["vite-preact", "preact", "^10.29.8"],
@@ -139,6 +169,30 @@ describe("fsInitProject", () => {
 
       expect(result.changes).toEqual([]);
       expect(result.result).toContain("managed by manage_env");
+    });
+
+    it("keeps design-project.json readable but reserves all mutations for its Host interface", () => {
+      const files = { "design-project.json": '{"revision":1}' };
+
+      expect(fsReadFiles(["design-project.json"], files).result).toContain(
+        '"revision":1',
+      );
+      expect(fsWriteFile("design-project.json", "{}", files).result).toContain(
+        "update_project_design",
+      );
+      expect(
+        fsPatchFile(
+          "design-project.json",
+          [{ search: "1", replace: "2" }],
+          files,
+        ).result,
+      ).toContain("update_project_design");
+      expect(fsDeleteFile("design-project.json", files).result).toContain(
+        "update_project_design",
+      );
+      expect(
+        fsRenameFile("design-project.json", "outline.json", files).result,
+      ).toContain("update_project_design");
     });
   });
 });

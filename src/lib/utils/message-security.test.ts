@@ -29,6 +29,35 @@ describe("message security", () => {
     expect(serialized).toContain("[REDACTED]");
   });
 
+  it("persists only a bounded project blueprint argument summary", () => {
+    const serialized = serializeToolArgumentsForHistory(
+      "update_project_design",
+      {
+        expected_revision: 3,
+        document: {
+          schemaVersion: "open-builder-design-project/v1",
+          revision: 4,
+          productGoal: "A very detailed product goal that should not persist",
+          pages: [{ id: "dashboard" }],
+          flows: [{ id: "onboarding" }],
+          scenarios: [{ id: "default" }, { id: "empty" }],
+        },
+      },
+    );
+
+    expect(serialized).not.toContain("very detailed product goal");
+    expect(JSON.parse(serialized)).toEqual({
+      expected_revision: 3,
+      document: {
+        schemaVersion: "open-builder-design-project/v1",
+        revision: 4,
+        pageCount: 1,
+        flowCount: 1,
+        scenarioCount: 2,
+      },
+    });
+  });
+
   it("omits legacy reads of protected project files", () => {
     const sentinel = "sentinel-secret-value";
     const result = sanitizeToolResultForHistory(
@@ -79,6 +108,11 @@ describe("message security", () => {
       kind: "preview_evidence_v1",
       status: "complete",
       generation,
+      target: {
+        pageId: "pricing",
+        route: "#/pricing?scenario=default",
+        scenarioId: "default",
+      },
       evidence: [
         {
           view: "mobile",
@@ -92,7 +126,12 @@ describe("message security", () => {
             truncated: false,
           },
           semantic: {
-            route: "/pricing",
+            route: "#/pricing?scenario=default",
+            prototypeIdentity: {
+              pageId: "pricing",
+              route: "#/pricing?scenario=default",
+              scenarioId: "default",
+            },
             horizontalOverflow: false,
             fonts: "ready",
             elementCount: 12,
@@ -128,7 +167,14 @@ describe("message security", () => {
     expect(output?.structuredContent).toMatchObject({
       kind: "preview_evidence_v1",
       generation,
-      evidence: [{ view: "mobile", image: { digest: imageDigest } }],
+      target: { pageId: "pricing", scenarioId: "default" },
+      evidence: [
+        {
+          view: "mobile",
+          image: { digest: imageDigest },
+          semantic: { prototypeIdentity: { pageId: "pricing" } },
+        },
+      ],
     });
     expect(output?.content).toEqual([
       expect.objectContaining({ type: "placeholder" }),

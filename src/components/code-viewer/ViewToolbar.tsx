@@ -62,6 +62,14 @@ interface ViewToolbarProps {
   onExportDirectory?: () => void;
   onOpenDesignReview?: () => void;
   isGenerating?: boolean;
+  prototypeNavigation?: {
+    pages: readonly { id: string; name: string }[];
+    scenarios: readonly { id: string; name: string }[];
+    selectedPageId?: string;
+    selectedScenarioId?: string;
+    onPageSelect: (pageId: string) => void;
+    onScenarioSelect: (scenarioId: string) => void;
+  };
 }
 
 async function downloadAsZip(files: ProjectFiles) {
@@ -131,6 +139,7 @@ export function ViewToolbar({
   onExportDirectory,
   onOpenDesignReview,
   isGenerating = false,
+  prototypeNavigation,
 }: ViewToolbarProps) {
   const t = useT();
   return (
@@ -157,6 +166,47 @@ export function ViewToolbar({
           {t.toolbar.code}
         </Button>
       </div>
+
+      {previewEnabled && viewMode === "preview" && prototypeNavigation && (
+        <div className="mx-2 hidden min-w-0 items-center gap-1 lg:flex">
+          <label className="sr-only" htmlFor="prototype-page-select">
+            {t.prototypeWorkspace.pages}
+          </label>
+          <select
+            id="prototype-page-select"
+            aria-label={t.prototypeWorkspace.pages}
+            className="h-8 max-w-40 rounded-md border bg-background px-2 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            value={prototypeNavigation.selectedPageId ?? ""}
+            onChange={(event) =>
+              prototypeNavigation.onPageSelect(event.currentTarget.value)
+            }
+          >
+            {prototypeNavigation.pages.map((page) => (
+              <option key={page.id} value={page.id}>
+                {page.name}
+              </option>
+            ))}
+          </select>
+          <label className="sr-only" htmlFor="prototype-scenario-select">
+            {t.prototypeWorkspace.scenario}
+          </label>
+          <select
+            id="prototype-scenario-select"
+            aria-label={t.prototypeWorkspace.scenario}
+            className="h-8 max-w-36 rounded-md border bg-background px-2 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            value={prototypeNavigation.selectedScenarioId ?? ""}
+            onChange={(event) =>
+              prototypeNavigation.onScenarioSelect(event.currentTarget.value)
+            }
+          >
+            {prototypeNavigation.scenarios.map((scenario) => (
+              <option key={scenario.id} value={scenario.id}>
+                {scenario.name}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
 
       <div className="flex items-center gap-2">
         {previewEnabled && viewMode === "preview" && (

@@ -9,11 +9,15 @@ import {
   captureRegisteredPreview,
   computePreviewGeneration,
   PreviewRuntimeError,
+  isSafePrototypePreviewRoute,
+  sanitizePrototypePreviewTarget,
+  prototypePreviewTargetsEqual,
 } from "./preview-runtime";
 import type {
   DesignBridgeCaptureResult,
   DesignPreviewSemanticSnapshot,
 } from "./preview-bridge";
+import type { PrototypePreviewTarget } from "./preview-runtime";
 
 export const PREVIEW_EVIDENCE_KIND = "preview_evidence_v1" as const;
 
@@ -27,6 +31,7 @@ export interface PreviewEvidenceSummaryItem {
   viewport: DesignBridgeCaptureResult["viewport"];
   semantic: {
     route: string;
+    prototypeIdentity?: PrototypePreviewTarget;
     title?: string;
     horizontalOverflow: boolean;
     fonts: DesignPreviewSemanticSnapshot["document"]["fonts"];
@@ -38,6 +43,8 @@ export interface PreviewEvidenceSummary {
   kind: typeof PREVIEW_EVIDENCE_KIND;
   status: "complete" | "partial" | "error";
   generation: string;
+  /** Target shared by every capture in this collection, when requested. */
+  target?: PrototypePreviewTarget;
   evidence: PreviewEvidenceSummaryItem[];
   errors: string[];
   placeholder: string;
@@ -68,6 +75,39 @@ export function isPreviewEvidenceSummary(
     (candidate.errorCode !== undefined &&
       (typeof candidate.errorCode !== "string" ||
         !/^[a-z0-9_-]{1,64}$/.test(candidate.errorCode)))
+  ) {
+    return false;
+  }
+  const sanitizedTarget =
+    candidate.target === undefined
+      ? undefined
+      : sanitizePrototypePreviewTarget(candidate.target);
+  if (candidate.target !== undefined && !sanitizedTarget) return false;
+  const semanticIdentities = candidate.evidence
+    .map((entry) => entry?.semantic?.prototypeIdentity)
+    .filter(
+      (identity): identity is PrototypePreviewTarget => identity !== undefined,
+    );
+  const inferredTarget = semanticIdentities[0]
+    ? sanitizePrototypePreviewTarget(semanticIdentities[0])
+    : undefined;
+  if (
+    semanticIdentities.length > 0 &&
+    (semanticIdentities.length !== candidate.evidence.length ||
+      !inferredTarget ||
+      semanticIdentities.some(
+        (identity) =>
+          !sanitizePrototypePreviewTarget(identity) ||
+          !prototypePreviewTargetsEqual(identity, inferredTarget),
+      ))
+  ) {
+    return false;
+  }
+  const target = sanitizedTarget ?? inferredTarget ?? undefined;
+  if (
+    sanitizedTarget &&
+    inferredTarget &&
+    !prototypePreviewTargetsEqual(sanitizedTarget, inferredTarget)
   ) {
     return false;
   }
@@ -117,8 +157,25 @@ export function isPreviewEvidenceSummary(
       entry.viewport.truncated ===
         entry.viewport.capturedHeight < entry.viewport.fullHeight &&
       typeof entry.semantic?.route === "string" &&
-      entry.semantic.route.startsWith("/") &&
+      ((entry.semantic.route.startsWith("/") &&
+        !entry.semantic.route.startsWith("//")) ||
+        isSafePrototypePreviewRoute(entry.semantic.route)) &&
       entry.semantic.route.length <= 256 &&
+      (entry.semantic.prototypeIdentity === undefined ||
+        (target !== undefined &&
+          sanitizePrototypePreviewTarget(entry.semantic.prototypeIdentity) !==
+            null &&
+          prototypePreviewTargetsEqual(
+            entry.semantic.prototypeIdentity,
+            target,
+          ))) &&
+      (target === undefined ||
+        (entry.semantic.route === target.route &&
+          entry.semantic.prototypeIdentity !== undefined &&
+          prototypePreviewTargetsEqual(
+            entry.semantic.prototypeIdentity,
+            target,
+          ))) &&
       (entry.semantic.title === undefined ||
         (typeof entry.semantic.title === "string" &&
           entry.semantic.title.length <= 200)) &&
@@ -139,6 +196,7 @@ export interface CapturePreviewEvidenceInput {
   template: string;
   previewMode: ProjectPreviewMode;
   viewports: readonly PreviewView[];
+  target?: PrototypePreviewTarget;
   signal?: AbortSignal;
 }
 
@@ -203,6 +261,14 @@ async function summarizeCapture(
     viewport: { ...capture.viewport },
     semantic: {
       route: capture.semanticSnapshot.route,
+      ...((capture.semanticSnapshot.prototypeIdentity ??
+      capture.semanticSnapshot.prototype)
+        ? {
+            prototypeIdentity:
+              capture.semanticSnapshot.prototypeIdentity ??
+              capture.semanticSnapshot.prototype,
+          }
+        : {}),
       ...(capture.semanticSnapshot.title
         ? { title: capture.semanticSnapshot.title }
         : {}),
@@ -217,11 +283,13 @@ function errorOutput(
   generation: string,
   errorCode: string,
   message: string,
+  target?: PrototypePreviewTarget,
 ): ToolExecutionOutput {
   const summary: PreviewEvidenceSummary = {
     kind: PREVIEW_EVIDENCE_KIND,
     status: "error",
     generation,
+    ...(target ? { target } : {}),
     evidence: [],
     errors: [message],
     placeholder: PLACEHOLDER,
@@ -242,11 +310,24 @@ export async function capturePreviewEvidence(
 ): Promise<ToolExecutionOutput> {
   const viewports = checkedViewports(input.viewports);
   const generation = await computePreviewGeneration(input);
+  const sanitizedTarget =
+    input.target === undefined
+      ? undefined
+      : sanitizePrototypePreviewTarget(input.target);
+  if (input.target !== undefined && !sanitizedTarget) {
+    return errorOutput(
+      generation,
+      "invalid_target",
+      "The preview target is invalid or its route is not a safe hash route.",
+    );
+  }
+  const target = sanitizedTarget ?? undefined;
   if (input.previewMode === "code-only") {
     return errorOutput(
       generation,
       "unavailable",
       "Preview evidence is unavailable for code-only projects.",
+      target ?? undefined,
     );
   }
 
@@ -255,6 +336,7 @@ export async function capturePreviewEvidence(
       conversationId: input.conversationId,
       generation,
       viewports,
+      target,
       signal: input.signal,
     });
     const evidence = await Promise.all(
@@ -265,6 +347,7 @@ export async function capturePreviewEvidence(
         generation,
         "capture_failed",
         collection.errors.join(" ") || "Preview capture returned no evidence.",
+        target ?? undefined,
       );
     }
 
@@ -272,6 +355,7 @@ export async function capturePreviewEvidence(
       kind: PREVIEW_EVIDENCE_KIND,
       status: collection.errors.length ? "partial" : "complete",
       generation,
+      ...(target ? { target } : {}),
       evidence,
       errors: [...collection.errors],
       placeholder: PLACEHOLDER,
@@ -301,12 +385,18 @@ export async function capturePreviewEvidence(
   } catch (error) {
     if ((error as { name?: string })?.name === "AbortError") throw error;
     if (error instanceof PreviewRuntimeError) {
-      return errorOutput(generation, error.code, error.message);
+      return errorOutput(
+        generation,
+        error.code,
+        error.message,
+        target ?? undefined,
+      );
     }
     return errorOutput(
       generation,
       "capture_failed",
       error instanceof Error ? error.message : String(error),
+      target ?? undefined,
     );
   }
 }

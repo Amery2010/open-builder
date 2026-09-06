@@ -2,7 +2,11 @@ import type { Message, ProjectFiles } from "../../ai/generator-types";
 import type { OpenAIClientConfig } from "../../ai/client";
 import type { LocalAgentClientConfig } from "../../local-agent/generator";
 import type { AutomaticDesignReviewEvidence } from "../automatic-review";
-import type { DesignReviewReport, DesignReviewScreenshot } from "../review";
+import type {
+  DesignReviewCoverageTarget,
+  DesignReviewReport,
+  DesignReviewScreenshot,
+} from "../review";
 import type { ResolvedLocale } from "../../../i18n";
 
 export const DESIGN_REVIEW_TERMINAL_STATUSES = [
@@ -25,6 +29,13 @@ export type DesignReviewRunStatus =
 
 export type DesignReviewFreshness = "fresh" | "stale";
 export type DesignReviewRunKind = "manual" | "automatic";
+
+export type DesignReviewCoverageStatus =
+  "unreviewed" | "captured" | "passed" | "needs-fix";
+
+export interface DesignReviewCoverageEntry extends DesignReviewCoverageTarget {
+  status: DesignReviewCoverageStatus;
+}
 
 export type DesignReviewLogEvent =
   | "capture_complete"
@@ -68,9 +79,11 @@ export interface DesignReviewRun {
   sourceDigest: string;
   /** Files plus applied Design-system digest, used for stale checks after reload. */
   sourceProjectDigest?: string;
+  blueprintRevision?: string | number;
   provider: DesignReviewProviderRef;
   logs: DesignReviewLogEntry[];
   report?: DesignReviewReport;
+  coverage?: DesignReviewCoverageEntry[];
   error?: string;
   retryOf?: string;
   createdAt: number;
@@ -96,8 +109,10 @@ export interface DesignReviewJobInput {
   phase?: "initial" | "verify";
   sourceDigest: string;
   sourceProjectDigest?: string;
+  blueprintRevision?: string | number;
   files: ProjectFiles;
   screenshots: readonly DesignReviewScreenshot[];
+  expectedCoverage?: readonly DesignReviewCoverageTarget[];
   provider: DesignReviewBackendConfig;
   requirementsMessages?: readonly Message[];
   automaticEvidence?: AutomaticDesignReviewEvidence;

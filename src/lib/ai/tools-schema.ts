@@ -56,6 +56,7 @@ export const BUILTIN_TOOLS = {
       "vite (Vite vanilla), " +
       "vite-react (Vite + React JS), " +
       "vite-react-ts (Vite + React TypeScript), " +
+      "vite-react-ts-prototype (Vite + React TypeScript multi-page prototype starter), " +
       "vite-preact (Vite + Preact JS), " +
       "vite-preact-ts (Vite + Preact TypeScript), " +
       "vite-vue (Vite + Vue JS), " +
@@ -446,11 +447,34 @@ export const DESIGN_HOST_TOOLS = {
         }),
     }),
   }),
+  update_project_design: tool({
+    description:
+      "Validate and atomically write the root design-project.json blueprint. Provide expected_revision when updating an existing blueprint so stale writes fail closed.",
+    inputSchema: z
+      .object({
+        document: z.record(z.string(), z.unknown()),
+        expected_revision: z
+          .union([
+            z.number().int().nonnegative(),
+            z.string().trim().min(1).max(128),
+          ])
+          .optional(),
+      })
+      .strict(),
+  }),
   capture_preview_evidence: tool({
     description:
-      "Capture bounded screenshot and semantic evidence for explicitly selected preview viewports on the current route.",
+      "Capture bounded screenshot and semantic evidence for explicitly selected preview viewports. For a complete prototype, provide a validated page, route, and scenario target from design-project.json.",
     inputSchema: z.object({
       viewports: previewViewportsSchema,
+      target: z
+        .object({
+          pageId: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/),
+          route: z.string().trim().min(1).max(256),
+          scenarioId: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/),
+        })
+        .strict()
+        .optional(),
     }),
   }),
   ...DESIGN_DIAGNOSTIC_TOOLS,
@@ -512,6 +536,7 @@ const TOOL_ZH_NAMES: Readonly<Record<string, string>> = Object.freeze({
   submit_design_contract: "提交设计契约",
   set_default_preview_view: "设置默认预览视图",
   update_design_tokens: "更新设计令牌",
+  update_project_design: "更新项目设计蓝图",
   capture_preview_evidence: "捕获预览证据",
   inspect_design_consistency: "检查设计一致性",
   measure_preview_layout: "测量预览布局",
@@ -547,6 +572,7 @@ const TOOL_ICON_KEYS: Readonly<Record<string, string>> = Object.freeze({
   submit_design_contract: "design-contract",
   set_default_preview_view: "preview",
   update_design_tokens: "design",
+  update_project_design: "design-contract",
   capture_preview_evidence: "evidence",
   inspect_design_consistency: "design",
   measure_preview_layout: "preview",
@@ -804,6 +830,13 @@ export const HOST_TOOL_RECORDS: readonly HostToolRecord[] = Object.freeze([
   ),
   hostRecord(
     "update_design_tokens",
+    "project",
+    ["write_project", "conversation"],
+    CHAT_ONLY,
+    { profiles: ["design"], retention: "summary-only" },
+  ),
+  hostRecord(
+    "update_project_design",
     "project",
     ["write_project", "conversation"],
     CHAT_ONLY,

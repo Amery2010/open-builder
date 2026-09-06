@@ -5,7 +5,12 @@ const SAFE_ENV_TEMPLATE_NAMES = new Set([
   ".env.sample",
   ".env.template",
 ]);
-const AUTHORITY_FILE_NAMES = new Set(["agents.md", "claude.md", "design.md"]);
+const AUTHORITY_FILE_NAMES = new Set([
+  "agents.md",
+  "claude.md",
+  "design.md",
+  "design-project.json",
+]);
 const PRIVATE_FILE_NAMES = new Set([
   ".npmrc",
   ".pypirc",

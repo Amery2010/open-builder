@@ -9,10 +9,15 @@ import {
   DESIGN_CAPTURE_RUNTIME_VIRTUAL_PATH,
   DESIGN_RUNTIME_TOKEN_NAMES,
   formatDesignSelectionForModel,
+  getDesignPreviewRoute,
   getDesignBridgeTargetOrigin,
   injectDesignBridge,
+  isSafePrototypePreviewRoute,
   isDesignBridgeOriginAllowed,
+  parseDesignBridgeNavigationResponse,
+  parseDesignBridgeRouteMessage,
   parseDesignBridgeCaptureResponse,
+  sanitizePrototypePreviewTarget,
   sanitizeDesignSelectionPayload,
   stripDesignBridge,
 } from "./preview-bridge";
@@ -317,6 +322,12 @@ describe("Design preview bridge", () => {
     );
     expect(result.files[DESIGN_BRIDGE_VIRTUAL_PATH]).toContain(
       'var GENERATION = "generation-a";',
+    );
+    expect(result.files[DESIGN_BRIDGE_VIRTUAL_PATH]).toContain(
+      "open-builder:design-bridge-navigate",
+    );
+    expect(result.files[DESIGN_BRIDGE_VIRTUAL_PATH]).toContain(
+      "window.location.hash",
     );
   });
 
@@ -679,6 +690,212 @@ describe("Design preview bridge", () => {
         expectation,
       ),
     ).toBeNull();
+    const target = {
+      pageId: "pricing",
+      route: "#/pricing",
+      scenarioId: "default",
+    };
+    const targetMessage = {
+      ...message,
+      payload: {
+        ...message.payload,
+        semanticSnapshot: {
+          ...message.payload.semanticSnapshot,
+          route: "#/pricing",
+          prototypeIdentity: target,
+        },
+      },
+    };
+    expect(
+      parseDesignBridgeCaptureResponse(targetMessage, {
+        ...expectation,
+        target,
+      }),
+    ).toMatchObject({
+      ok: true,
+      result: {
+        semanticSnapshot: { route: "#/pricing", prototypeIdentity: target },
+      },
+    });
+    expect(
+      parseDesignBridgeCaptureResponse(targetMessage, {
+        ...expectation,
+        target: { ...target, scenarioId: "empty" },
+      }),
+    ).toBeNull();
+  });
+
+  it("validates declarative targets and HashRouter navigation responses", () => {
+    const target = {
+      pageId: "dashboard",
+      route: "#/dashboard?mode=review",
+      scenarioId: "populated",
+    };
+    expect(isSafePrototypePreviewRoute("#/dashboard")).toBe(true);
+    expect(isSafePrototypePreviewRoute("https://attacker.example/")).toBe(
+      false,
+    );
+    expect(isSafePrototypePreviewRoute("javascript:alert(1)")).toBe(false);
+    expect(isSafePrototypePreviewRoute("#/javascript:alert(1)")).toBe(false);
+    expect(isSafePrototypePreviewRoute("#/../settings")).toBe(false);
+    expect(isSafePrototypePreviewRoute("#//attacker.example")).toBe(false);
+    expect(
+      sanitizePrototypePreviewTarget({
+        ...target,
+        route: "#/" + "a".repeat(256),
+      }),
+    ).toBeNull();
+    expect(getDesignPreviewRoute(target.route)).toBe(target.route);
+
+    const expectation = {
+      generation: "generation-a",
+      nonce: "0123456789abcdef0123456789abcdef",
+      requestId: "abcdef0123456789abcdef0123456789",
+      target,
+    };
+    const message = {
+      type: "open-builder:design-bridge-navigation-result",
+      version: 1,
+      generation: expectation.generation,
+      nonce: expectation.nonce,
+      requestId: expectation.requestId,
+      payload: { target, route: target.route },
+    };
+    expect(parseDesignBridgeNavigationResponse(message, expectation)).toEqual({
+      ok: true,
+      target,
+      route: target.route,
+    });
+    expect(
+      parseDesignBridgeRouteMessage(
+        {
+          type: "open-builder:design-bridge-route",
+          version: 1,
+          generation: "generation-a",
+          route: target.route,
+        },
+        "generation-a",
+      ),
+    ).toBe(target.route);
+    expect(
+      parseDesignBridgeRouteMessage(
+        {
+          type: "open-builder:design-bridge-route",
+          version: 1,
+          generation: "stale",
+          route: target.route,
+        },
+        "generation-a",
+      ),
+    ).toBeNull();
+    expect(
+      parseDesignBridgeNavigationResponse(
+        { ...message, generation: "stale-generation" },
+        expectation,
+      ),
+    ).toBeNull();
+    expect(
+      parseDesignBridgeNavigationResponse(
+        {
+          ...message,
+          payload: {
+            target: { ...target, scenarioId: "empty" },
+            route: target.route,
+          },
+        },
+        expectation,
+      ),
+    ).toBeNull();
+    expect(
+      parseDesignBridgeNavigationResponse(
+        {
+          ...message,
+          payload: {
+            target: { ...target, route: "javascript:alert(1)" },
+            route: "javascript:alert(1)",
+          },
+        },
+        expectation,
+      ),
+    ).toBeNull();
+  });
+
+  it("exposes only a fixed prototype data reset event", () => {
+    const result = injectDesignBridge(
+      { "index.html": "<!doctype html><body></body>" },
+      "static",
+      true,
+      undefined,
+      "generation-a",
+    );
+    const source = result.files[DESIGN_BRIDGE_VIRTUAL_PATH];
+
+    expect(source).toContain(
+      'data.type === "open-builder:design-bridge-reset-data"',
+    );
+    expect(source).toContain(
+      'window.dispatchEvent(new Event("open-builder:prototype-reset-data"))',
+    );
+    expect(source).toContain("data.generation !== GENERATION");
+    expect(source).not.toContain("eval(data");
+  });
+
+  it("navigates an injected preview through its HashRouter location", async () => {
+    const iframe = document.createElement("iframe");
+    document.body.appendChild(iframe);
+    const previewWindow = iframe.contentWindow as
+      (Window & typeof globalThis) | null;
+    const previewDocument = iframe.contentDocument;
+    if (!previewWindow || !previewDocument) {
+      throw new Error("Preview iframe did not initialize.");
+    }
+    previewDocument.open();
+    previewDocument.write("<!doctype html><body><main>Dashboard</main></body>");
+    previewDocument.close();
+    const messages: Record<string, unknown>[] = [];
+    Object.defineProperty(previewWindow, "parent", {
+      configurable: true,
+      value: previewWindow,
+    });
+    previewWindow.postMessage = ((message: Record<string, unknown>) => {
+      messages.push(message);
+    }) as typeof previewWindow.postMessage;
+    const target = {
+      pageId: "dashboard",
+      route: "#/dashboard",
+      scenarioId: "default",
+    };
+    const result = injectDesignBridge(
+      { "index.html": "<!doctype html><body></body>" },
+      "static",
+      true,
+      undefined,
+      "generation-a",
+    );
+    previewWindow.eval(result.files[DESIGN_BRIDGE_VIRTUAL_PATH]);
+    previewWindow.dispatchEvent(
+      new previewWindow.MessageEvent("message", {
+        data: {
+          type: "open-builder:design-bridge-navigate",
+          version: 1,
+          generation: "generation-a",
+          nonce: "0123456789abcdef0123456789abcdef",
+          requestId: "abcdef0123456789abcdef0123456789",
+          target,
+        },
+        origin: "https://builder.example.test",
+        source: previewWindow,
+      }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(messages).toContainEqual(
+      expect.objectContaining({
+        type: "open-builder:design-bridge-navigation-result",
+        generation: "generation-a",
+        payload: { target, route: "#/dashboard" },
+      }),
+    );
+    iframe.remove();
   });
 
   it("rejects decoded WebP dimensions above the six-megapixel limit", () => {

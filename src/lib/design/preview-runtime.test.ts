@@ -6,6 +6,8 @@ import {
   isPreviewCaptureBusy,
   PreviewRuntimeError,
   registerPreviewRuntime,
+  sanitizePrototypePreviewTarget,
+  type PrototypePreviewTarget,
   withPreviewCaptureLock,
   type PreviewRuntimeAdapter,
 } from "./preview-runtime";
@@ -146,6 +148,94 @@ describe("preview runtime registry", () => {
     });
     unregisterReplacement();
     await expect(replaced).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("keeps a target capture bound to page and scenario identity", async () => {
+    const target: PrototypePreviewTarget = {
+      pageId: "dashboard",
+      route: "#/dashboard",
+      scenarioId: "populated",
+    };
+    const wrongTarget: PrototypePreviewTarget = {
+      ...target,
+      scenarioId: "empty",
+    };
+    const capture = vi.fn(async () => ({
+      generation: "generation-a",
+      target,
+      captures: [],
+      errors: [],
+    }));
+    const prepareTarget = vi.fn(
+      async (requested: PrototypePreviewTarget) => requested,
+    );
+    const unregister = registerPreviewRuntime("conversation-target", {
+      ...adapter(),
+      prepareTarget,
+      capture,
+    });
+
+    await expect(
+      captureRegisteredPreview({
+        conversationId: "conversation-target",
+        generation: "generation-a",
+        target,
+        viewports: ["desktop"],
+      }),
+    ).resolves.toMatchObject({ generation: "generation-a", target });
+    expect(prepareTarget).toHaveBeenCalledWith(
+      target,
+      "generation-a",
+      expect.any(AbortSignal),
+    );
+    expect(capture).toHaveBeenCalledWith(
+      ["desktop"],
+      "generation-a",
+      expect.any(AbortSignal),
+      target,
+    );
+
+    capture.mockResolvedValueOnce({
+      generation: "generation-a",
+      target: wrongTarget,
+      captures: [],
+      errors: [],
+    });
+    await expect(
+      captureRegisteredPreview({
+        conversationId: "conversation-target",
+        generation: "generation-a",
+        target,
+        viewports: ["desktop"],
+      }),
+    ).rejects.toMatchObject({ code: "target_identity_mismatch" });
+    unregister();
+  });
+
+  it("rejects unsafe prototype target routes before invoking the adapter", async () => {
+    const runtime = adapter();
+    const unregister = registerPreviewRuntime("conversation-unsafe", runtime);
+    expect(
+      sanitizePrototypePreviewTarget({
+        pageId: "home",
+        route: "javascript:alert(1)",
+        scenarioId: "default",
+      }),
+    ).toBeNull();
+    await expect(
+      captureRegisteredPreview({
+        conversationId: "conversation-unsafe",
+        generation: "generation-a",
+        target: {
+          pageId: "home",
+          route: "#/" + "a".repeat(256),
+          scenarioId: "default",
+        },
+        viewports: ["desktop"],
+      }),
+    ).rejects.toMatchObject({ code: "invalid_target" });
+    expect(runtime.prepare).not.toHaveBeenCalled();
+    unregister();
   });
 
   it("hashes project source deterministically and includes preview metadata", async () => {

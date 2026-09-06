@@ -13,6 +13,8 @@ tags:
 
 Build application interfaces that help people complete real tasks with low ambiguity. This skill covers dashboards, editors, settings, forms, search, data views, administration, navigation, and multi-step workflows. Their page-level task mode is `operate`. Use `art-direct-web` for `persuade`, `read`, or `experience` surfaces; load both for a genuinely mixed target.
 
+For a new complete product prototype, use the validated root `design-project.json` as the product blueprint. Keep page IDs, routes, shared layouts, shared UI references, flows, scenarios, and build progress current as each batch completes. Record each batch as a checkpoint with actual artifacts and validation outcome; only a passed checkpoint counts as complete. The blueprint describes product structure and delivery state; `DESIGN.md` and `tokens.css` remain the visual authority.
+
 Before the first UI write in Design mode, inspect the active project and submit the run-local Design contract. Distinguish `create` (a new product surface), `extend` (a bounded addition within the current visual language), and `migrate` (the applied Design system replaces conflicting visual Tokens, styles, component grammar, and layout expression inside the named target). An applied Design system is visually authoritative in that target. A selected-but-unapplied system is reference only and cannot authorize a restyle.
 
 In every change mode, preserve product truth: routes, data and state ownership, information architecture, content contracts, permissions, analytics hooks, integration selectors, accessibility semantics, and working behavior unless the user's request independently changes them. Migration is visual-system work, not permission to rebuild the product model.

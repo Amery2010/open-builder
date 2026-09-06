@@ -6,7 +6,10 @@ import {
   PREVIEW_EVIDENCE_KIND,
 } from "./preview-evidence";
 import { registerPreviewRuntime } from "./preview-runtime";
-import type { DesignBridgeCaptureResult } from "./preview-bridge";
+import type {
+  DesignBridgeCaptureResult,
+  PrototypePreviewTarget,
+} from "./preview-bridge";
 
 const unregisters: Array<() => void> = [];
 afterEach(() => {
@@ -34,7 +37,10 @@ function webpDataUrl(width: number, height: number): string {
   )}`;
 }
 
-function capture(view: PreviewView): DesignBridgeCaptureResult {
+function capture(
+  view: PreviewView,
+  target?: PrototypePreviewTarget,
+): DesignBridgeCaptureResult {
   const width = view === "desktop" ? 1440 : view === "tablet" ? 768 : 375;
   const height = view === "desktop" ? 900 : view === "tablet" ? 1024 : 667;
   return {
@@ -50,7 +56,8 @@ function capture(view: PreviewView): DesignBridgeCaptureResult {
       truncated: false,
     },
     semanticSnapshot: {
-      route: "/pricing",
+      route: target?.route ?? "/pricing",
+      ...(target ? { prototypeIdentity: target } : {}),
       viewport: { width, height, devicePixelRatio: 1 },
       document: {
         scrollWidth: width,
@@ -140,6 +147,89 @@ describe("preview evidence tool output", () => {
     ).rejects.toThrow("Duplicate preview viewport");
   });
 
+  it("persists the requested page and scenario with every capture", async () => {
+    const target: PrototypePreviewTarget = {
+      pageId: "dashboard",
+      route: "#/dashboard",
+      scenarioId: "populated",
+    };
+    let currentGeneration: string | undefined;
+    unregisters.push(
+      registerPreviewRuntime("conversation-target", {
+        getGeneration: () => currentGeneration,
+        prepare: async (generation) => {
+          currentGeneration = generation;
+        },
+        capture: async (viewports, generation, _signal, requestedTarget) => ({
+          generation,
+          target: requestedTarget,
+          captures: viewports.map((view) => ({
+            ...capture(view, requestedTarget),
+            generation,
+          })),
+          errors: [],
+        }),
+      }),
+    );
+
+    const output = await capturePreviewEvidence({
+      conversationId: "conversation-target",
+      ...project,
+      target,
+      viewports: ["desktop"],
+    });
+    expect(output.structuredContent).toMatchObject({
+      kind: PREVIEW_EVIDENCE_KIND,
+      target,
+      evidence: [
+        {
+          semantic: {
+            route: target.route,
+            prototypeIdentity: target,
+          },
+        },
+      ],
+    });
+    expect(isPreviewEvidenceSummary(output.structuredContent)).toBe(true);
+    expect(output.content?.[0]).toMatchObject({
+      type: "text",
+      text: expect.stringContaining('"prototypeIdentity"'),
+    });
+  });
+
+  it("returns a target identity error when an adapter reports another scenario", async () => {
+    const target: PrototypePreviewTarget = {
+      pageId: "dashboard",
+      route: "#/dashboard",
+      scenarioId: "populated",
+    };
+    const mismatched = { ...target, scenarioId: "empty" };
+    let currentGeneration: string | undefined;
+    unregisters.push(
+      registerPreviewRuntime("conversation-mismatch", {
+        getGeneration: () => currentGeneration,
+        prepare: async (generation) => {
+          currentGeneration = generation;
+        },
+        capture: async (viewports, generation) => ({
+          generation,
+          captures: viewports.map((view) => capture(view, mismatched)),
+          errors: [],
+        }),
+      }),
+    );
+    const output = await capturePreviewEvidence({
+      conversationId: "conversation-mismatch",
+      ...project,
+      target,
+      viewports: ["desktop"],
+    });
+    expect(output).toMatchObject({
+      isError: true,
+      structuredContent: { errorCode: "target_identity_mismatch", target },
+    });
+  });
+
   it("rejects inconsistent persisted evidence metadata", () => {
     const base = {
       kind: PREVIEW_EVIDENCE_KIND,
@@ -202,5 +292,34 @@ describe("preview evidence tool output", () => {
     expect(isPreviewEvidenceSummary({ ...base, status: "partial" })).toBe(
       false,
     );
+    expect(
+      isPreviewEvidenceSummary({
+        ...base,
+        target: {
+          pageId: "home",
+          route: "#/home",
+          scenarioId: "default",
+        },
+      }),
+    ).toBe(false);
+    expect(
+      isPreviewEvidenceSummary({
+        ...base,
+        evidence: [
+          {
+            ...base.evidence[0],
+            semantic: {
+              ...base.evidence[0].semantic,
+              prototypeIdentity: {
+                pageId: "home",
+                route: "#/home",
+                scenarioId: "default",
+              },
+              route: "#/home",
+            },
+          },
+        ],
+      }),
+    ).toBe(true);
   });
 });

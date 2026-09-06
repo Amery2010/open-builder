@@ -215,4 +215,53 @@ describe("structured Design Review", () => {
     expect(context).toContain('"captured":["desktop"]');
     expect(context).toContain('"missing":["tablet","mobile"]');
   });
+
+  it("binds prototype coverage to page, scenario, and viewport identities", () => {
+    const target = {
+      pageId: "dashboard",
+      route: "#/dashboard?scenario=default",
+      scenarioId: "default",
+    };
+    const context = buildDesignReviewSemanticContext(
+      [
+        {
+          dataUrl: pngDataUrl,
+          target,
+          viewport: {
+            name: "desktop",
+            width: 1440,
+            height: 900,
+            capturedHeight: 900,
+            fullHeight: 900,
+            truncated: false,
+          },
+          semanticSnapshot: {
+            route: target.route,
+            prototypeIdentity: target,
+            viewport: { width: 1440, height: 900, devicePixelRatio: 1 },
+            document: {
+              scrollWidth: 1440,
+              scrollHeight: 900,
+              horizontalOverflow: false,
+              fonts: "ready",
+            },
+            elements: [],
+          },
+        },
+      ],
+      [
+        { ...target, viewport: "desktop" },
+        {
+          pageId: "dashboard",
+          route: "#/dashboard?scenario=empty",
+          scenarioId: "empty",
+          viewport: "desktop",
+        },
+      ],
+    );
+
+    expect(context).toContain('"prototypeCoverage"');
+    expect(context).toContain('"scenarioId":"default"');
+    expect(context).toContain('"scenarioId":"empty"');
+  });
 });

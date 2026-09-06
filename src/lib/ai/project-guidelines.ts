@@ -8,7 +8,12 @@ import type { ProjectFiles } from "./generator-types";
 
 // Recognized root-level filenames, lowercase. Display order is the array order:
 // agent rules first, design specs last.
-const GUIDELINE_FILES = ["agents.md", "claude.md", "design.md"] as const;
+const GUIDELINE_FILES = [
+  "agents.md",
+  "claude.md",
+  "design.md",
+  "design-project.json",
+] as const;
 
 /** Build a project-reference notice for the system prompt.
  *  Scans only the project root (paths without a slash) for the recognized

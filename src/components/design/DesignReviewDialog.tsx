@@ -184,6 +184,20 @@ export function DesignReviewDialog({
   const capturing = status === "capturing" && !selectedRun;
   const reviewing = status === "reviewing" && !selectedRun;
   const runInProgress = Boolean(activeRun);
+  const coverageSummary = selectedRun?.coverage
+    ? {
+        passed: selectedRun.coverage.filter(
+          (entry) => entry.status === "passed",
+        ).length,
+        needsFix: selectedRun.coverage.filter(
+          (entry) => entry.status === "needs-fix",
+        ).length,
+        unreviewed: selectedRun.coverage.filter(
+          (entry) =>
+            entry.status === "unreviewed" || entry.status === "captured",
+        ).length,
+      }
+    : undefined;
 
   const handleDeleteRun = async (run: DesignReviewRun) => {
     if (isDesignReviewRunActive(run)) return;
@@ -317,6 +331,20 @@ export function DesignReviewDialog({
                 <p className="mt-3 text-xs text-amber-700 dark:text-amber-400">
                   {selectedRun.error}
                 </p>
+              )}
+              {coverageSummary && (
+                <div className="mt-3 rounded-lg border bg-background/70 px-3 py-2 text-xs">
+                  <p className="font-medium">{t.designReview.coverage}</p>
+                  <p className="mt-1 text-muted-foreground">
+                    {t.designReview.coverageSummary
+                      .replace("{passed}", String(coverageSummary.passed))
+                      .replace("{needsFix}", String(coverageSummary.needsFix))
+                      .replace(
+                        "{unreviewed}",
+                        String(coverageSummary.unreviewed),
+                      )}
+                  </p>
+                </div>
               )}
               <ol
                 aria-label={t.designReview.executionLog}

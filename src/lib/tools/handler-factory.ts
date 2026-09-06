@@ -64,6 +64,11 @@ import {
 import { SUBMIT_DESIGN_REVIEW_TOOL } from "../design/review-tool";
 import { SUBMIT_DESIGN_CONTRACT_TOOL } from "../design/run-contract-tool";
 import type { DesignAdherenceInput } from "../design/adherence";
+import {
+  applyProjectDesignUpdate,
+  PROJECT_DESIGN_PATH,
+} from "../design/project-design";
+import { isPrototypeProject } from "../design/prototype-starter";
 
 export interface ToolFeatures {
   builtinSearch: boolean;
@@ -107,6 +112,7 @@ export interface BuildToolHandlersArgs {
     Omit<DesignAdherenceInput, "files"> | undefined;
   setDefaultPreviewView?: NonNullable<GeneratorOptions["customToolHandler"]>;
   updateDesignTokens?: NonNullable<GeneratorOptions["customToolHandler"]>;
+  onProjectDesignUpdated?: (files: ProjectFiles) => void;
   capturePreviewEvidence?: NonNullable<GeneratorOptions["customToolHandler"]>;
   designDiagnostics?: NonNullable<GeneratorOptions["customToolHandler"]>;
 }
@@ -136,6 +142,7 @@ export async function buildToolHandlers(
     getDesignHealthContext,
     setDefaultPreviewView,
     updateDesignTokens,
+    onProjectDesignUpdated,
     capturePreviewEvidence,
     designDiagnostics,
   } = args;
@@ -193,6 +200,56 @@ export async function buildToolHandlers(
         getConsoleLogs,
         getDesignContext: getDesignHealthContext,
       })
+    : null;
+  const updateProjectDesignHandler = guardedFilesBridge
+    ? (handlerArgs: unknown): ToolExecutionOutput => {
+        const input = handlerArgs as {
+          document?: unknown;
+          expected_revision?: string | number;
+        };
+        const currentFiles = guardedFilesBridge.getFiles();
+        if (!isPrototypeProject(currentFiles)) {
+          return {
+            text: JSON.stringify({
+              ok: false,
+              error:
+                "Project Design is available only after initializing the complete prototype starter.",
+            }),
+            isError: true,
+          };
+        }
+        const updated = applyProjectDesignUpdate(
+          currentFiles,
+          input.document,
+          input.expected_revision,
+        );
+        if (!updated.ok) {
+          return {
+            text: JSON.stringify({
+              ok: false,
+              error: updated.error,
+              issues: updated.issues,
+            }),
+            isError: true,
+          };
+        }
+        guardedFilesBridge.onFilesChanged(updated.files, [
+          {
+            path: PROJECT_DESIGN_PATH,
+            action: updated.action,
+          },
+        ]);
+        onProjectDesignUpdated?.(updated.files);
+        const result = {
+          ok: true as const,
+          path: PROJECT_DESIGN_PATH,
+          revision: updated.design.revision,
+          pages: updated.design.pages.length,
+          flows: updated.design.flows.length,
+          progress: updated.design.buildProgress,
+        };
+        return { text: JSON.stringify(result), structuredContent: result };
+      }
     : null;
   const submitDesignReviewHandler = onDesignReviewSubmitted
     ? createSubmitDesignReviewHandler(onDesignReviewSubmitted)
@@ -299,6 +356,11 @@ export async function buildToolHandlers(
       updateDesignTokens("update_design_tokens", handlerArgs, context),
     );
   }
+  if (updateProjectDesignHandler) {
+    runtimeHandlers.set("update_project_design", (handlerArgs) =>
+      updateProjectDesignHandler(handlerArgs),
+    );
+  }
   if (capturePreviewEvidence) {
     runtimeHandlers.set("capture_preview_evidence", (handlerArgs, context) =>
       capturePreviewEvidence("capture_preview_evidence", handlerArgs, context),
@@ -342,6 +404,9 @@ export async function buildToolHandlers(
       : {}),
     ...(updateDesignTokens
       ? { update_design_tokens: DESIGN_HOST_TOOLS.update_design_tokens }
+      : {}),
+    ...(updateProjectDesignHandler
+      ? { update_project_design: DESIGN_HOST_TOOLS.update_project_design }
       : {}),
     ...(capturePreviewEvidence
       ? {
