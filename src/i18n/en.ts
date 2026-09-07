@@ -235,6 +235,9 @@ export const en: typeof zh = {
       templates: "Templates",
       mcp: "MCP servers",
       attachments: "Attachments",
+      designSystems: "Imported Design systems",
+      projectAssets: "Project images",
+      estimateUnavailable: "Estimate unavailable",
       messages: "messages",
       memories: "memories",
       skills: "skills",
@@ -258,7 +261,7 @@ export const en: typeof zh = {
       confirm: "Confirm Reset",
       cancel: "Cancel",
       warning:
-        "This resets settings and deletes conversations, snapshots, memories, templates, MCP data, Skill metadata/files, and attachments. This cannot be undone.",
+        "This resets settings and deletes conversations, snapshots, memories, templates, MCP data, imported Design systems, Skill metadata/files, attachments, and project images. This cannot be undone.",
       failed: "Clear failed",
     },
   },
@@ -357,6 +360,8 @@ export const en: typeof zh = {
     placeholder: "Describe the app you want...",
     autoQaActivity: "Automatic QA activity",
     autoDesignFixActivity: "Automatic Design repair",
+    automaticRetryUnavailable:
+      "Automatic background work cannot be resumed with Retry because its limited authority has ended. Send a new request or run the review again.",
     uploadImage: "Upload image",
     uploadFile: "Upload file",
     uploadProject: "Upload project",
@@ -1064,6 +1069,7 @@ export const en: typeof zh = {
     files: "Files",
     assets: "Assets",
     image: "Image",
+    removeAsset: "Remove project image {name}",
     newFile: "New File",
     newFolder: "New Folder",
     rename: "Rename",
@@ -1101,6 +1107,25 @@ export const en: typeof zh = {
     reviewDesign: "Review design",
     exportedDirectory: "Exported to {path}",
     exportDirectoryFailed: "Directory export failed: {message}",
+  },
+  previewRecovery: {
+    unavailableTitle: "Preview unavailable",
+    renderDescription:
+      "The project preview could not be rendered. Repair the file below and the preview will recover automatically.",
+    assetDescription:
+      "A project image could not be loaded, so the preview is disabled to avoid showing an incomplete project.",
+    mobileRenderDescription:
+      "The project preview could not be rendered. Repair the project files and retry the preview.",
+    preparingAssets: "Preparing preview images…",
+    retry: "Retry preview",
+    editFile: "Edit {name}",
+    editPath: "Edit {path}",
+    repair: "Repair preview",
+    focusEditor: "Focus editor",
+    removeFile: "Remove {name}",
+    openCodeHint: "Open the code view to inspect and repair the project files.",
+    protectedContent:
+      "Inline repair is disabled because this preview copy hides protected values. Remove the file or edit it through its dedicated settings flow.",
   },
   prototypeWorkspace: {
     title: "Project design",
@@ -1327,6 +1352,9 @@ export const en: typeof zh = {
       failed: "Failed",
       cancelled: "Cancelled",
       interrupted: "Interrupted",
+      deferred: "Waiting",
+      superseded: "Superseded",
+      unavailable: "Unavailable",
     },
     automaticStages: {
       capturing: "Automatic Design review: capturing responsive evidence…",
@@ -1335,6 +1363,12 @@ export const en: typeof zh = {
       verifying: "Automatic Design review: capturing the verification pass…",
       complete: "Automatic Design review complete — no remaining findings.",
       warning: "Automatic Design review needs attention; the report is open.",
+      deferred:
+        "Automatic Design review is waiting for the current review to finish…",
+      superseded:
+        "Automatic Design review stopped because its project evidence is no longer current.",
+      unavailable:
+        "Automatic Design review could not produce a current report; review the error and retry.",
     },
     reviewUnavailable: "Design review unavailable",
     screenshotAlt: "Design review screenshot {name}",

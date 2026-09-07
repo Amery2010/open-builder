@@ -9,7 +9,32 @@ import type { DesignReviewFinding, DesignReviewReport } from "./review";
 
 export type AutomaticDesignReviewPhase = "initial" | "verify";
 export type AutomaticDesignReviewStage =
-  "capturing" | "reviewing" | "fixing" | "verifying" | "complete" | "warning";
+  | "capturing"
+  | "reviewing"
+  | "fixing"
+  | "verifying"
+  | "complete"
+  | "warning"
+  | "deferred"
+  | "superseded"
+  | "unavailable";
+
+export type AutomaticDesignReviewOutcome =
+  "clean" | "findings" | "deferred" | "superseded";
+
+export function automaticDesignReviewStageForOutcome(
+  outcome: AutomaticDesignReviewOutcome,
+): AutomaticDesignReviewStage {
+  switch (outcome) {
+    case "clean":
+      return "complete";
+    case "findings":
+      return "warning";
+    case "deferred":
+    case "superseded":
+      return outcome;
+  }
+}
 
 export interface AutomaticDesignReviewEvidence {
   requestId: string;
@@ -56,6 +81,8 @@ export function canEnterAutomaticDesignRepair(input: {
   fresh: boolean;
   activeConversation: boolean;
   currentReview: boolean;
+  currentProject: boolean;
+  designMode: boolean;
   chatIdle: boolean;
   hasNewerUserRequest: boolean;
 }): boolean {
@@ -63,6 +90,8 @@ export function canEnterAutomaticDesignRepair(input: {
     input.fresh &&
     input.activeConversation &&
     input.currentReview &&
+    input.currentProject &&
+    input.designMode &&
     input.chatIdle &&
     !input.hasNewerUserRequest
   );

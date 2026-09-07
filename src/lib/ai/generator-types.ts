@@ -72,6 +72,9 @@ export interface MessageMetadata {
   origin?: "auto_qa" | "design_review" | "design_auto_fix";
   attachments?: AttachmentRef[];
   designSelection?: DesignSelectionContext;
+  /** Host-owned Design change-mode policy retained so Retry can reconstruct
+   * the request boundary without treating a prior contract as new authority. */
+  designExpectedChangeModes?: Array<"create" | "extend" | "migrate">;
   /** UI-only reference for an automatic Design Review activity block. */
   reviewJobId?: string;
   /** Compact fallback retained after the detailed review job is pruned. */
@@ -85,7 +88,10 @@ export interface MessageMetadata {
       | "succeeded"
       | "failed"
       | "cancelled"
-      | "interrupted";
+      | "interrupted"
+      | "deferred"
+      | "superseded"
+      | "unavailable";
     findingCount?: number;
     stale?: boolean;
   };

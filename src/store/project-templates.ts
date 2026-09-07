@@ -8,9 +8,15 @@ import {
   isProjectTemplateUsable,
   normalizeTemplateTags,
   sanitizeTemplateName,
+  verifyProjectTemplate,
 } from "../lib/utils/project-templates";
+import {
+  collectProjectAssetBlobRefs,
+  releaseUnreferencedProjectAssetBlobs,
+  withProjectAssetOwnershipLock,
+} from "../lib/project-assets/core";
 
-const PROJECT_TEMPLATE_STORE_VERSION = 2;
+const PROJECT_TEMPLATE_STORE_VERSION = 3;
 
 type PersistedProjectTemplateState = {
   templates?: Record<string, ProjectTemplate>;
@@ -26,7 +32,7 @@ function markLegacyTemplatesPendingUpgrade<T>(state: T): T {
     templates: Object.fromEntries(
       Object.entries(templates).map(([id, template]) => [
         id,
-        template.schemaVersion === 2
+        template.schemaVersion === 2 || template.schemaVersion === 3
           ? template
           : {
               ...template,
@@ -45,6 +51,7 @@ function markLegacyTemplatesPendingUpgrade<T>(state: T): T {
 const projectTemplateMigrations: MigrationStep[] = [
   (state) => state,
   markLegacyTemplatesPendingUpgrade,
+  (state) => state,
 ];
 
 export function migrateProjectTemplateState<T>(
@@ -99,96 +106,122 @@ export const useProjectTemplateStore = create<ProjectTemplateState>()(
         if (!isProjectTemplateUsable(template)) {
           throw new Error("Project template has not passed safe preparation.");
         }
-        const duplicate = Object.values(get().templates).find(
-          (candidate) =>
-            candidate.contentDigest === template.contentDigest &&
-            candidate.schemaVersion === 2,
-        );
-        if (duplicate) return { status: "noop", id: duplicate.id };
-        const templates = { ...get().templates, [template.id]: template };
-        await persistTemplates(templates);
-        set((s) => ({
-          templates: { ...s.templates, [template.id]: template },
-        }));
-        return { status: "added", id: template.id };
+        return withProjectAssetOwnershipLock(async () => {
+          const duplicate = Object.values(get().templates).find(
+            (candidate) =>
+              candidate.contentDigest === template.contentDigest &&
+              (candidate.schemaVersion === 2 || candidate.schemaVersion === 3),
+          );
+          await verifyProjectTemplate(duplicate ?? template);
+          if (duplicate) return { status: "noop" as const, id: duplicate.id };
+          const templates = { ...get().templates, [template.id]: template };
+          await persistTemplates(templates);
+          set({ templates });
+          return { status: "added" as const, id: template.id };
+        });
       },
 
       updateTemplate: async (id, patch) => {
         assertHydrated(get());
-        const existing = get().templates[id];
-        if (!existing) return false;
-        const next: ProjectTemplate = {
-          ...existing,
-          ...patch,
-          name:
-            patch.name === undefined
-              ? existing.name
-              : sanitizeTemplateName(patch.name),
-          description:
-            patch.description === undefined
-              ? existing.description
-              : patch.description.trim() || undefined,
-          tags:
-            patch.tags === undefined
-              ? existing.tags
-              : normalizeTemplateTags(patch.tags),
-          updatedAt: Date.now(),
-        };
-        const templates = { ...get().templates, [id]: next };
-        await persistTemplates(templates);
-        set({ templates });
-        return true;
+        return withProjectAssetOwnershipLock(async () => {
+          const existing = get().templates[id];
+          if (!existing) return false;
+          const next: ProjectTemplate = {
+            ...existing,
+            ...patch,
+            name:
+              patch.name === undefined
+                ? existing.name
+                : sanitizeTemplateName(patch.name),
+            description:
+              patch.description === undefined
+                ? existing.description
+                : patch.description.trim() || undefined,
+            tags:
+              patch.tags === undefined
+                ? existing.tags
+                : normalizeTemplateTags(patch.tags),
+            updatedAt: Date.now(),
+          };
+          const templates = { ...get().templates, [id]: next };
+          await persistTemplates(templates);
+          set({ templates });
+          return true;
+        });
       },
 
       replaceTemplate: async (id, template) => {
         assertHydrated(get());
-        const existing = get().templates[id];
-        if (!existing) throw new Error("Project template not found.");
         if (!isProjectTemplateUsable(template)) {
           throw new Error("Project template has not passed safe preparation.");
         }
-        if (existing.contentDigest === template.contentDigest) return "noop";
-        const next: ProjectTemplate = {
-          ...template,
-          id,
-          name: existing.name,
-          description: existing.description,
-          tags: existing.tags,
-          createdAt: existing.createdAt,
-          updatedAt: Date.now(),
-          useCount: existing.useCount ?? 0,
-          lastUsedAt: existing.lastUsedAt,
-        };
-        const templates = { ...get().templates, [id]: next };
-        await persistTemplates(templates);
-        set({ templates });
-        return "updated";
+        const result = await withProjectAssetOwnershipLock(async () => {
+          const existing = get().templates[id];
+          if (!existing) throw new Error("Project template not found.");
+          await verifyProjectTemplate(template);
+          if (existing.contentDigest === template.contentDigest) {
+            return { status: "noop" as const };
+          }
+          const next: ProjectTemplate = {
+            ...template,
+            id,
+            name: existing.name,
+            description: existing.description,
+            tags: existing.tags,
+            createdAt: existing.createdAt,
+            updatedAt: Date.now(),
+            useCount: existing.useCount ?? 0,
+            lastUsedAt: existing.lastUsedAt,
+          };
+          const templates = { ...get().templates, [id]: next };
+          await persistTemplates(templates);
+          set({ templates });
+          return { status: "updated" as const, released: existing.assets };
+        });
+        if (result.status === "updated") {
+          await releaseTemplateAssetCandidates(result.released).catch(
+            (error) => {
+              console.warn("Failed to release replaced Starter assets:", error);
+            },
+          );
+        }
+        return result.status;
       },
 
       deleteTemplate: async (id) => {
         assertHydrated(get());
-        if (!get().templates[id]) return false;
-        const { [id]: _deleted, ...templates } = get().templates;
-        await persistTemplates(templates);
-        set({ templates });
+        const deleted = await withProjectAssetOwnershipLock(async () => {
+          const existing = get().templates[id];
+          if (!existing) return undefined;
+          const { [id]: _deleted, ...templates } = get().templates;
+          await persistTemplates(templates);
+          set({ templates });
+          return existing;
+        });
+        if (!deleted) return false;
+        await releaseTemplateAssetCandidates(deleted.assets).catch((error) => {
+          console.warn("Failed to release deleted Starter assets:", error);
+        });
         return true;
       },
 
       markTemplateUsed: async (id, now) => {
         assertHydrated(get());
-        const existing = get().templates[id];
-        if (!existing) return false;
-        const templates = {
-          ...get().templates,
-          [id]: {
-            ...existing,
-            lastUsedAt: now,
-            useCount: (existing.useCount ?? 0) + 1,
-          },
-        };
-        await persistTemplates(templates);
-        set({ templates });
-        return true;
+        return withProjectAssetOwnershipLock(async () => {
+          const existing = get().templates[id];
+          if (!existing) return false;
+          const templates = {
+            ...get().templates,
+            [id]: {
+              ...existing,
+              lastUsedAt: now,
+              useCount: (existing.useCount ?? 0) + 1,
+            },
+          };
+          await persistTemplates(templates);
+          set({ templates });
+          return true;
+        });
       },
 
       getTemplate: (id) => get().templates[id],
@@ -226,4 +259,36 @@ async function persistTemplates(templates: Record<string, ProjectTemplate>) {
       version: PROJECT_TEMPLATE_STORE_VERSION,
     }),
   );
+}
+
+async function releaseTemplateAssetCandidates(
+  assets: ProjectTemplate["assets"],
+): Promise<void> {
+  const candidateRefs = collectProjectAssetBlobRefs([assets]);
+  if (candidateRefs.size === 0) return;
+  const [{ useConversationStore }, { useSnapshotStore }] = await Promise.all([
+    import("./conversation"),
+    import("./snapshot"),
+  ]);
+  await releaseUnreferencedProjectAssetBlobs(candidateRefs, () => {
+    const conversations = useConversationStore.getState();
+    const snapshots = useSnapshotStore.getState();
+    const templates = useProjectTemplateStore.getState();
+    if (
+      !conversations._hasHydrated ||
+      !snapshots._hasHydrated ||
+      !templates._hasHydrated
+    ) {
+      return null;
+    }
+    return [
+      ...Object.values(conversations.conversations).map(
+        (conversation) => conversation.assets,
+      ),
+      ...Object.values(snapshots.snapshots)
+        .flat()
+        .map((snapshot) => snapshot.assets),
+      ...Object.values(templates.templates).map((template) => template.assets),
+    ];
+  });
 }

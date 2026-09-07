@@ -344,7 +344,7 @@ export interface ProjectAsset {
   digest: string;
   /** Managed text module that application source can import. */
   modulePath: string;
-  /** Browser path used by an exported project. */
+  /** Absolute browser URL for public/ assets; source-imported assets use "". */
   publicPath: string;
 }
 
@@ -357,6 +357,9 @@ export interface ProjectTemplate {
   name: string;
   description?: string;
   files: _ProjectFiles;
+  /** Binary asset references owned by this Starter. Schema v3 records include
+   * this table in their content digest; older records implicitly contain none. */
+  assets?: ProjectAssets;
   template: string;
   previewMode?: ProjectPreviewMode;
   /** Presentation metadata only; intentionally excluded from contentDigest. */
@@ -364,7 +367,7 @@ export interface ProjectTemplate {
   sourceConversationId?: string;
   tags: string[];
   /** Records without this field are retained v1 templates. */
-  schemaVersion?: 1 | 2;
+  schemaVersion?: 1 | 2 | 3;
   contentDigest?: string;
   activeFile?: string;
   designState?: ConversationDesignState;

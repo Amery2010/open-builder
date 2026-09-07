@@ -94,21 +94,31 @@ describe("Design review automation state", () => {
     expect(second).toBeGreaterThan(first ?? 0);
   });
 
-  it("keeps clean completion non-modal and requests the dialog for warnings", () => {
+  it("records each automatic terminal outcome without calling failures clean", () => {
     useDesignReviewStore.getState().requestAutomaticCapture(evidence);
     const initialDialogRequest =
       useDesignReviewStore.getState().dialogRequestId;
-    useDesignReviewStore.getState().finishAutomatic(false);
+    useDesignReviewStore.getState().finishAutomatic("clean");
     expect(useDesignReviewStore.getState().automatic?.stage).toBe("complete");
     expect(useDesignReviewStore.getState().dialogRequestId).toBe(
       initialDialogRequest,
     );
 
-    useDesignReviewStore.getState().finishAutomatic(true);
+    useDesignReviewStore.getState().finishAutomatic("findings");
     expect(useDesignReviewStore.getState().automatic?.stage).toBe("warning");
     expect(useDesignReviewStore.getState().dialogRequestId).toBeGreaterThan(
       initialDialogRequest,
     );
+
+    useDesignReviewStore.getState().finishAutomatic("deferred");
+    expect(useDesignReviewStore.getState().automatic?.stage).toBe("deferred");
+    useDesignReviewStore.getState().finishAutomatic("superseded");
+    expect(useDesignReviewStore.getState().automatic?.stage).toBe("superseded");
+    useDesignReviewStore.getState().failAutomatic("Review failed");
+    expect(useDesignReviewStore.getState().automatic?.stage).toBe(
+      "unavailable",
+    );
+    expect(useDesignReviewStore.getState().error).toBe("Review failed");
   });
 
   it("allows at most one nonterminal run per conversation", () => {

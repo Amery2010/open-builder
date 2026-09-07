@@ -122,18 +122,38 @@ function releaseSnapshotAssetCandidates(
   if (candidateRefs.size === 0) return;
   void Promise.all([
     import("./conversation"),
+    import("./project-templates"),
     import("../lib/project-assets/core"),
   ])
     .then(
-      ([{ useConversationStore }, { releaseUnreferencedProjectAssetBlobs }]) =>
-        releaseUnreferencedProjectAssetBlobs(candidateRefs, [
-          ...Object.values(useConversationStore.getState().conversations).map(
-            (conversation) => conversation.assets,
-          ),
-          ...Object.values(useSnapshotStore.getState().snapshots)
-            .flat()
-            .map((snapshot) => snapshot.assets),
-        ]),
+      ([
+        { useConversationStore },
+        { useProjectTemplateStore },
+        { releaseUnreferencedProjectAssetBlobs },
+      ]) =>
+        releaseUnreferencedProjectAssetBlobs(candidateRefs, () => {
+          const conversations = useConversationStore.getState();
+          const snapshots = useSnapshotStore.getState();
+          const templates = useProjectTemplateStore.getState();
+          if (
+            !conversations._hasHydrated ||
+            !snapshots._hasHydrated ||
+            !templates._hasHydrated
+          ) {
+            return null;
+          }
+          return [
+            ...Object.values(conversations.conversations).map(
+              (conversation) => conversation.assets,
+            ),
+            ...Object.values(snapshots.snapshots)
+              .flat()
+              .map((snapshot) => snapshot.assets),
+            ...Object.values(templates.templates).map(
+              (template) => template.assets,
+            ),
+          ];
+        }),
     )
     .catch((error) => {
       console.warn("Failed to release snapshot project assets:", error);

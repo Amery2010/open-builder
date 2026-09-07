@@ -1,11 +1,18 @@
 import type {
   Conversation,
   ConversationDesignState,
+  ProjectAssets,
   ProjectFiles,
   ProjectTemplate,
 } from "../../types";
 import { normalizePreviewView } from "../../types";
 import { inspectDesignTokenContract } from "../design/tokens";
+import {
+  addProjectAssetModules,
+  createProjectAssetModule,
+  validateProjectAssets,
+  verifyProjectAssetBlobs,
+} from "../project-assets/core";
 import { isOpenBuilderTemplateName } from "../tools/sandpack-template-manifest";
 import {
   isSensitiveProjectPath,
@@ -47,6 +54,7 @@ export type ProjectTemplateUsability =
 
 interface ProjectTemplateSource {
   files: ProjectFiles;
+  assets?: ProjectAssets;
   template: string;
   previewMode?: Conversation["previewMode"];
   defaultPreviewView?: Conversation["defaultPreviewView"];
@@ -74,6 +82,7 @@ export async function prepareProjectTemplateFromConversation(
   return prepareProjectTemplateSource(
     {
       files: conversation.files,
+      assets: conversation.assets,
       template: conversation.template,
       previewMode: conversation.previewMode,
       defaultPreviewView: conversation.defaultPreviewView,
@@ -94,6 +103,7 @@ export async function prepareProjectTemplateUpgrade(
   return prepareProjectTemplateSource(
     {
       files: template.files,
+      assets: template.assets,
       template: template.template,
       previewMode: template.previewMode,
       defaultPreviewView: template.defaultPreviewView,
@@ -127,7 +137,7 @@ async function prepareProjectTemplateSource(
 
   const excludedPaths: string[] = [];
   const redactedPaths: string[] = [];
-  const files: ProjectFiles = {};
+  let files: ProjectFiles = {};
   for (const path of Object.keys(source.files).sort()) {
     if (isSensitiveProjectPath(path)) {
       excludedPaths.push(path);
@@ -138,6 +148,12 @@ async function prepareProjectTemplateSource(
     if (redacted !== content) redactedPaths.push(path);
     files[path] = redacted;
   }
+
+  const assets = cloneProjectAssets(source.assets);
+  const assetValidation = validateProjectAssets(assets);
+  if (!assetValidation.ok) throw new Error(assetValidation.error);
+  files = addProjectAssetModules(files, assets);
+  await verifyProjectAssetBlobs(assets);
 
   const validation = validateProjectTemplateFiles(files);
   if (!validation.ok) throw new Error(validation.error);
@@ -157,6 +173,7 @@ async function prepareProjectTemplateSource(
   const defaultPreviewView = normalizePreviewView(source.defaultPreviewView);
   const contentDigest = await digestTemplateContent({
     files,
+    assets,
     template: source.template,
     previewMode,
     activeFile,
@@ -170,13 +187,14 @@ async function prepareProjectTemplateSource(
       name: sanitizeTemplateName(input.name),
       description: normalizeOptionalText(input.description),
       files,
+      assets,
       template: source.template,
       previewMode,
       defaultPreviewView,
       sourceConversationId: source.sourceConversationId,
       sourceUpdatedAt: source.sourceUpdatedAt,
       tags: normalizeTemplateTags(input.tags ?? []),
-      schemaVersion: 2,
+      schemaVersion: 3,
       contentDigest,
       activeFile,
       designState,
@@ -198,28 +216,14 @@ export async function createConversationFromProjectTemplate(
   template: ProjectTemplate,
   input: { id: string; now: number },
 ): Promise<Conversation> {
-  if (!isProjectTemplateUsable(template)) {
-    throw new Error(
-      "This template must be safely upgraded before it can be used.",
-    );
-  }
-  const verifiedDigest = await digestTemplateContent({
-    files: template.files,
-    template: template.template,
-    previewMode: template.previewMode ?? "sandpack",
-    activeFile: template.activeFile,
-    designState: template.designState,
-  });
-  if (verifiedDigest !== template.contentDigest) {
-    throw new Error(
-      "Project template content digest does not match its files.",
-    );
-  }
+  await verifyProjectTemplate(template);
+  const assets = cloneProjectAssets(template.assets);
   return {
     id: input.id,
     title: template.name,
     messages: [],
     files: cloneProjectFiles(template.files),
+    assets,
     template: template.template,
     previewMode: template.previewMode ?? "sandpack",
     defaultPreviewView: normalizePreviewView(template.defaultPreviewView),
@@ -230,7 +234,8 @@ export async function createConversationFromProjectTemplate(
         : Object.keys(template.files)[0],
     designState: cloneTemplateDesignState(template.designState),
     templateOrigin:
-      template.contentDigest && template.schemaVersion === 2
+      template.contentDigest &&
+      (template.schemaVersion === 2 || template.schemaVersion === 3)
         ? {
             templateId: template.id,
             templateName: template.name,
@@ -244,6 +249,30 @@ export async function createConversationFromProjectTemplate(
   };
 }
 
+export async function verifyProjectTemplate(
+  template: ProjectTemplate,
+): Promise<void> {
+  if (!isProjectTemplateUsable(template)) {
+    throw new Error(
+      "This template must be safely upgraded before it can be used.",
+    );
+  }
+  const verifiedDigest = await digestTemplateContent({
+    files: template.files,
+    ...(template.schemaVersion === 3 ? { assets: template.assets ?? {} } : {}),
+    template: template.template,
+    previewMode: template.previewMode ?? "sandpack",
+    activeFile: template.activeFile,
+    designState: template.designState,
+  });
+  if (verifiedDigest !== template.contentDigest) {
+    throw new Error(
+      "Project template content digest does not match its content.",
+    );
+  }
+  await verifyProjectAssetBlobs(template.assets ?? {});
+}
+
 export function isProjectTemplateUsable(template: ProjectTemplate): boolean {
   return getProjectTemplateUsability(template).ok;
 }
@@ -254,7 +283,7 @@ export function getProjectTemplateUsability(
   if (!isOpenBuilderTemplateName(template.template)) {
     return { ok: false, reason: "unsupported-runtime" };
   }
-  if (template.schemaVersion !== 2) {
+  if (template.schemaVersion !== 2 && template.schemaVersion !== 3) {
     return { ok: false, reason: "legacy-pending-upgrade" };
   }
   if (template.safety?.status !== "safe") {
@@ -269,6 +298,13 @@ export function getProjectTemplateUsability(
   if (
     !validateProjectFiles(template.files).ok ||
     !validateProjectTemplateFiles(template.files).ok
+  ) {
+    return { ok: false, reason: "invalid-files" };
+  }
+  if (
+    (template.schemaVersion === 2 &&
+      Object.keys(template.assets ?? {}).length > 0) ||
+    !hasValidTemplateAssets(template)
   ) {
     return { ok: false, reason: "invalid-files" };
   }
@@ -312,15 +348,15 @@ export function getProjectTemplateAnalysis(
 }
 
 export function getProjectTemplateStats(
-  template: Pick<ProjectTemplate, "files">,
+  template: Pick<ProjectTemplate, "files" | "assets">,
 ): TemplateStats {
   const files = Object.values(template.files);
+  const assets = Object.values(template.assets ?? {});
   return {
-    fileCount: files.length,
-    totalBytes: files.reduce(
-      (total, content) => total + byteLength(content),
-      0,
-    ),
+    fileCount: files.length + assets.length,
+    totalBytes:
+      files.reduce((total, content) => total + byteLength(content), 0) +
+      assets.reduce((total, asset) => total + asset.size, 0),
   };
 }
 
@@ -370,6 +406,29 @@ export function sanitizeTemplateName(name: string): string {
 
 export function cloneProjectFiles(files: ProjectFiles): ProjectFiles {
   return { ...files };
+}
+
+export function cloneProjectAssets(assets?: ProjectAssets): ProjectAssets {
+  return Object.fromEntries(
+    Object.entries(assets ?? {}).map(([path, asset]) => [path, { ...asset }]),
+  );
+}
+
+function hasValidTemplateAssets(template: ProjectTemplate): boolean {
+  if (
+    template.assets !== undefined &&
+    (!template.assets ||
+      typeof template.assets !== "object" ||
+      Array.isArray(template.assets))
+  ) {
+    return false;
+  }
+  const assets = template.assets ?? {};
+  if (!validateProjectAssets(assets).ok) return false;
+  return Object.values(assets).every(
+    (asset) =>
+      template.files[asset.modulePath] === createProjectAssetModule(asset),
+  );
 }
 
 function normalizeOptionalText(value?: string) {
@@ -474,6 +533,7 @@ function parsePackageJson(
 
 async function digestTemplateContent(value: {
   files: ProjectFiles;
+  assets?: ProjectAssets;
   template: string;
   previewMode: string;
   activeFile?: string;

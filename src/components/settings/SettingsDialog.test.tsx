@@ -73,6 +73,8 @@ describe("SettingsDialog", () => {
       </TooltipProvider>,
     );
 
+    await user.clear(screen.getByLabelText("Model Name"));
+    await user.type(screen.getByLabelText("Model Name"), "test-model");
     await user.click(screen.getByRole("button", { name: "Save" }));
     expect(onSave).not.toHaveBeenCalled();
     expect(screen.getByLabelText("API Key")).toHaveAttribute(
@@ -85,8 +87,6 @@ describe("SettingsDialog", () => {
       screen.getByLabelText("API Base URL"),
       "https://api.example.com",
     );
-    await user.clear(screen.getByLabelText("Model Name"));
-    await user.type(screen.getByLabelText("Model Name"), "test-model");
 
     await user.click(screen.getByRole("tab", { name: "Advanced" }));
     expect(screen.queryByText("Permission activity")).not.toBeInTheDocument();

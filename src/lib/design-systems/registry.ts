@@ -14,6 +14,7 @@ export interface DesignSystemStorageAdapter {
   listIds(): Promise<string[]>;
   read(id: string): Promise<DesignSystemInputFile[]>;
   write(id: string, files: readonly DesignSystemInputFile[]): Promise<void>;
+  clear(): Promise<void>;
 }
 
 export class MemoryDesignSystemStorage implements DesignSystemStorageAdapter {
@@ -42,6 +43,10 @@ export class MemoryDesignSystemStorage implements DesignSystemStorageAdapter {
       files.map((file) => ({ ...file })),
     );
   }
+
+  async clear(): Promise<void> {
+    this.packages.clear();
+  }
 }
 
 export class OpfsDesignSystemStorage implements DesignSystemStorageAdapter {
@@ -56,6 +61,7 @@ export class OpfsDesignSystemStorage implements DesignSystemStorageAdapter {
   }
 
   async listIds(): Promise<string[]> {
+    if (!navigator.storage?.getDirectory) return [];
     let root: FileSystemDirectoryHandle;
     try {
       root = await this.root(false);
@@ -111,6 +117,21 @@ export class OpfsDesignSystemStorage implements DesignSystemStorageAdapter {
       throw error;
     }
   }
+
+  async clear(): Promise<void> {
+    if (!navigator.storage?.getDirectory) return;
+    const originRoot = await navigator.storage.getDirectory();
+    try {
+      await originRoot.removeEntry("open-builder-design-systems", {
+        recursive: true,
+      });
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "NotFoundError") {
+        return;
+      }
+      throw error;
+    }
+  }
 }
 
 class PlatformDesignSystemStorage implements DesignSystemStorageAdapter {
@@ -138,6 +159,10 @@ class PlatformDesignSystemStorage implements DesignSystemStorageAdapter {
     files: readonly DesignSystemInputFile[],
   ): Promise<void> {
     return (await this.adapter()).write(id, files);
+  }
+
+  async clear(): Promise<void> {
+    return (await this.adapter()).clear();
   }
 }
 
@@ -205,6 +230,40 @@ export class DesignSystemRegistry {
       () => undefined,
     );
     return operation;
+  }
+
+  clearImported(): Promise<void> {
+    const operation = this.importTail.then(() =>
+      this.withCrossContextImportLock(() => this.storage.clear()),
+    );
+    this.importTail = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
+  }
+
+  async estimateImportedStorage(): Promise<{
+    count: number;
+    bytes: number;
+    invalid: number;
+  }> {
+    const ids = await this.storage.listIds();
+    let bytes = 0;
+    let invalid = 0;
+    for (const id of ids) {
+      try {
+        const files = await this.storage.read(id);
+        bytes += files.reduce(
+          (total, file) =>
+            total + new TextEncoder().encode(file.content).byteLength,
+          0,
+        );
+      } catch {
+        invalid += 1;
+      }
+    }
+    return { count: ids.length, bytes, invalid };
   }
 
   private withCrossContextImportLock<T>(

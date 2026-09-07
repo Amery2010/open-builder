@@ -73,4 +73,15 @@ export class TauriDesignSystemStorage implements DesignSystemStorageAdapter {
       throw error;
     }
   }
+
+  async clear(): Promise<void> {
+    const fs = await loadFs();
+    if (!(await fs.exists(ROOT, { baseDir: fs.BaseDirectory.AppData }))) {
+      return;
+    }
+    await fs.remove(ROOT, {
+      baseDir: fs.BaseDirectory.AppData,
+      recursive: true,
+    });
+  }
 }

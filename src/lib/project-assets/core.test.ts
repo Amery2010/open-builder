@@ -30,13 +30,18 @@ vi.mock("localforage", () => ({
 
 import {
   addProjectAssetModules,
+  clearProjectAssetStorage,
   createProjectAssetRecord,
+  createProjectAssetModule,
   detectProjectAssetMimeType,
   getProjectAssetBlob,
+  normalizeProjectAssets,
   projectFilesForSandpack,
   readProjectAssetBytes,
+  releaseUnreferencedProjectAssetBlobs,
   stageProjectAsset,
   storeStagedProjectAsset,
+  validateProjectAssets,
 } from "./core";
 import { buildProjectZip } from "./archive";
 
@@ -45,7 +50,9 @@ const pngBytes = new Uint8Array([
 ]);
 
 describe("project assets", () => {
-  beforeEach(() => stores.clear());
+  beforeEach(() => {
+    for (const store of stores.values()) store.clear();
+  });
 
   it("accepts matching PNG bytes and rejects a misleading extension", async () => {
     expect(detectProjectAssetMimeType(pngBytes)).toBe("image/png");
@@ -103,5 +110,249 @@ describe("project assets", () => {
     expect(await zip.file(asset.modulePath)?.async("string")).toBe(
       files[asset.modulePath],
     );
+  });
+
+  it("uses the project path when deriving stable modules for duplicate images", async () => {
+    const first = await stageProjectAsset(
+      "public/a/logo.png",
+      new Blob([Uint8Array.from(pngBytes).buffer], { type: "image/png" }),
+      "image/png",
+    );
+    const second = await stageProjectAsset(
+      "public/b/logo.png",
+      new Blob([Uint8Array.from(pngBytes).buffer], { type: "image/png" }),
+      "image/png",
+    );
+    const firstAsset = createProjectAssetRecord(
+      first,
+      await storeStagedProjectAsset(first),
+    );
+    const secondAsset = createProjectAssetRecord(
+      second,
+      await storeStagedProjectAsset(second),
+    );
+    const recreated = createProjectAssetRecord(first, firstAsset.blobRef);
+    const assets = {
+      [firstAsset.path]: firstAsset,
+      [secondAsset.path]: secondAsset,
+    };
+
+    expect(firstAsset.blobRef).toBe(secondAsset.blobRef);
+    expect(firstAsset.modulePath).not.toBe(secondAsset.modulePath);
+    expect(recreated.modulePath).toBe(firstAsset.modulePath);
+    expect(validateProjectAssets(assets)).toMatchObject({ ok: true });
+    expect(() => addProjectAssetModules({}, assets)).not.toThrow();
+
+    const existing = {
+      ...firstAsset,
+      modulePath: `src/generated-assets/logo-${firstAsset.digest.slice(0, 8)}.js`,
+    };
+    expect(normalizeProjectAssets({ [existing.path]: existing })).toEqual({
+      [existing.path]: existing,
+    });
+  });
+
+  it("keeps source assets as relative module imports and reserves absolute URLs for public assets", async () => {
+    const sourceStaged = await stageProjectAsset(
+      "src/assets/logo.png",
+      new Blob([Uint8Array.from(pngBytes).buffer], { type: "image/png" }),
+      "image/png",
+    );
+    const publicStaged = await stageProjectAsset(
+      "public/src/assets/logo.png",
+      new Blob([Uint8Array.from(pngBytes).buffer], { type: "image/png" }),
+      "image/png",
+    );
+    const sourceAsset = createProjectAssetRecord(
+      sourceStaged,
+      await storeStagedProjectAsset(sourceStaged),
+    );
+    const publicAsset = createProjectAssetRecord(
+      publicStaged,
+      await storeStagedProjectAsset(publicStaged),
+    );
+
+    expect(sourceAsset.publicPath).toBe("");
+    expect(createProjectAssetModule(sourceAsset)).toContain(
+      'export { default } from "../assets/logo.png"',
+    );
+    expect(publicAsset.publicPath).toBe("/src/assets/logo.png");
+    expect(
+      validateProjectAssets({
+        [sourceAsset.path]: sourceAsset,
+        [publicAsset.path]: publicAsset,
+      }),
+    ).toMatchObject({ ok: true });
+    await expect(
+      stageProjectAsset(
+        "public/logo.png?raw",
+        new Blob([Uint8Array.from(pngBytes).buffer], { type: "image/png" }),
+        "image/png",
+      ),
+    ).rejects.toThrow(/unsafe/i);
+  });
+
+  it("upgrades legacy source URLs without changing their managed module path", async () => {
+    const staged = await stageProjectAsset(
+      "src/assets/logo.png",
+      new Blob([Uint8Array.from(pngBytes).buffer], { type: "image/png" }),
+      "image/png",
+    );
+    const current = createProjectAssetRecord(
+      staged,
+      await storeStagedProjectAsset(staged),
+    );
+    const legacy = { ...current, publicPath: `/${current.path}` };
+    const legacyModule =
+      `// Managed by Open Builder for ${legacy.path}.\n` +
+      `export default ${JSON.stringify(legacy.publicPath)};\n`;
+
+    const normalized = normalizeProjectAssets({ [legacy.path]: legacy });
+    expect(normalized[legacy.path]).toEqual({ ...legacy, publicPath: "" });
+    expect(normalized[legacy.path].modulePath).toBe(legacy.modulePath);
+    expect(
+      addProjectAssetModules({ [legacy.modulePath]: legacyModule }, normalized)[
+        legacy.modulePath
+      ],
+    ).toBe(createProjectAssetModule(normalized[legacy.path]));
+  });
+
+  it("projects canonical JS, TS, CSS, and public asset references for preview only", async () => {
+    const publicStaged = await stageProjectAsset(
+      "public/logo.png",
+      new Blob([Uint8Array.from(pngBytes).buffer], { type: "image/png" }),
+      "image/png",
+    );
+    const sourceStaged = await stageProjectAsset(
+      "src/assets/icon.png",
+      new Blob([Uint8Array.from(pngBytes).buffer], { type: "image/png" }),
+      "image/png",
+    );
+    const publicAsset = createProjectAssetRecord(
+      publicStaged,
+      await storeStagedProjectAsset(publicStaged),
+    );
+    const sourceAsset = createProjectAssetRecord(
+      sourceStaged,
+      await storeStagedProjectAsset(sourceStaged),
+    );
+    const canonical = addProjectAssetModules(
+      {
+        "src/App.tsx": [
+          'import icon from "./assets/icon.png";',
+          'const logo = "/logo.png";',
+          "export default () => <><img src={icon} /><img src={logo} /></>;",
+        ].join("\n"),
+        "src/legacy.js": [
+          'import iconUrl from "./assets/icon.png";',
+          'const icon = require("./assets/icon.png");',
+          "export { icon, iconUrl };",
+        ].join("\n"),
+        "src/views/Page.ts": 'export { default } from "../assets/icon.png";',
+        "src/styles.css": [
+          ".icon { background: url('./assets/icon.png'); }",
+          '.logo { mask-image: url("/logo.png"); }',
+          '.label::before { content: "url(/logo.png)"; }',
+        ].join("\n"),
+        "index.html":
+          '<p>https://example.com</p><img src="/logo.png" srcset="/logo.png 1x, logo.png 2x"><img src=./logo.png>',
+      },
+      {
+        [publicAsset.path]: publicAsset,
+        [sourceAsset.path]: sourceAsset,
+      },
+    );
+
+    const preview = await projectFilesForSandpack(canonical, {
+      [publicAsset.path]: publicAsset,
+      [sourceAsset.path]: sourceAsset,
+    });
+
+    expect(preview["src/App.tsx"]).toContain(
+      `from "./generated-assets/${sourceAsset.modulePath.split("/").pop()}"`,
+    );
+    expect(preview["src/App.tsx"]).toContain(
+      'const logo = "data:image/png;base64,',
+    );
+    expect(preview["src/legacy.js"]).toContain(
+      `from "./generated-assets/${sourceAsset.modulePath.split("/").pop()}"`,
+    );
+    expect(preview["src/legacy.js"]).toContain(
+      `require("./generated-assets/${sourceAsset.modulePath.split("/").pop()}")`,
+    );
+    expect(preview["src/views/Page.ts"]).toContain(
+      `from "../generated-assets/${sourceAsset.modulePath.split("/").pop()}"`,
+    );
+    expect(preview["src/styles.css"]).toContain(
+      "background: url('data:image/png;base64,",
+    );
+    expect(preview["src/styles.css"]).toContain(
+      'mask-image: url("data:image/png;base64,',
+    );
+    expect(preview["src/styles.css"]).toContain('content: "url(/logo.png)"');
+    expect(preview["index.html"]).toContain("https://example.com");
+    expect(preview["index.html"]).toContain('src="data:image/png;base64,');
+    expect(preview["index.html"]).toContain(" 1x, data:image/png;base64,");
+    expect(preview["index.html"]).toContain("src=data:image/png;base64,");
+    expect(preview["index.html"]).not.toContain("logo.png");
+    expect(preview[sourceAsset.modulePath]).toContain("data:image/png;base64,");
+    expect(canonical["src/App.tsx"]).toContain('from "./assets/icon.png"');
+    expect(canonical["src/styles.css"]).toContain("./assets/icon.png");
+  });
+
+  it("fails the whole preview projection when an asset Blob is missing or corrupt", async () => {
+    const staged = await stageProjectAsset(
+      "public/logo.png",
+      new Blob([Uint8Array.from(pngBytes).buffer], { type: "image/png" }),
+      "image/png",
+    );
+    const asset = createProjectAssetRecord(
+      staged,
+      await storeStagedProjectAsset(staged),
+    );
+    const files = addProjectAssetModules(
+      { "src/App.tsx": 'export const logo = "/logo.png";' },
+      { [asset.path]: asset },
+    );
+
+    stores.get("project-assets")?.delete(asset.blobRef);
+    await expect(
+      projectFilesForSandpack(files, { [asset.path]: asset }),
+    ).rejects.toThrow(/unavailable locally/i);
+
+    stores.get("project-assets")?.set(
+      asset.blobRef,
+      new Blob([Uint8Array.from([...pngBytes, 9]).buffer], {
+        type: "image/png",
+      }),
+    );
+    await expect(
+      projectFilesForSandpack(files, { [asset.path]: asset }),
+    ).rejects.toThrow(/integrity checks/i);
+  });
+
+  it("retains opportunistic cleanup candidates until explicit clearing", async () => {
+    const staged = await stageProjectAsset(
+      "public/retained.png",
+      new Blob([Uint8Array.from(pngBytes).buffer], { type: "image/png" }),
+      "image/png",
+    );
+    const asset = createProjectAssetRecord(
+      staged,
+      await storeStagedProjectAsset(staged),
+    );
+    await releaseUnreferencedProjectAssetBlobs([asset.blobRef], () => [
+      { [asset.path]: asset },
+    ]);
+    expect(await getProjectAssetBlob(asset.blobRef)).toBeInstanceOf(Blob);
+
+    await releaseUnreferencedProjectAssetBlobs([asset.blobRef], () => null);
+    expect(await getProjectAssetBlob(asset.blobRef)).toBeInstanceOf(Blob);
+
+    await releaseUnreferencedProjectAssetBlobs([asset.blobRef], () => []);
+    expect(await getProjectAssetBlob(asset.blobRef)).toBeInstanceOf(Blob);
+
+    await clearProjectAssetStorage();
+    expect(await getProjectAssetBlob(asset.blobRef)).toBeNull();
   });
 });

@@ -23,6 +23,8 @@ export interface StagedProjectAsset {
   mimeType: ProjectAssetMimeType;
   size: number;
   digest: string;
+  /** SHA-256 of the normalized path and content digest. */
+  moduleDigest: string;
 }
 
 const projectAssetBlobs = localforage.createInstance({
@@ -30,6 +32,22 @@ const projectAssetBlobs = localforage.createInstance({
   storeName: "project-assets",
   description: "Content-addressed binary project assets",
 });
+
+let projectAssetOwnershipTail: Promise<void> = Promise.resolve();
+
+/** Serializes same-context durable owner changes and explicit global clearing.
+ * This does not claim cross-tab exclusion; opportunistic Blob reclamation is
+ * deliberately disabled below because it needs a durable multi-store lock. */
+export function withProjectAssetOwnershipLock<T>(
+  operation: () => Promise<T>,
+): Promise<T> {
+  const result = projectAssetOwnershipTail.then(operation, operation);
+  projectAssetOwnershipTail = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  return result;
+}
 
 function bytesToHex(bytes: Uint8Array): string {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(
@@ -110,6 +128,7 @@ export function normalizeProjectAssetPath(path: string): string {
   if (
     !normalized ||
     path.includes("\\") ||
+    /[?#]/.test(normalized) ||
     /^[a-zA-Z]:\//.test(normalized) ||
     /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u.test(normalized) ||
     normalized.length > PROJECT_FILE_LIMITS.maxPathChars ||
@@ -124,7 +143,11 @@ export function normalizeProjectAssetPath(path: string): string {
   return normalized;
 }
 
-function validateAssetRecord(path: string, asset: ProjectAsset): boolean {
+function validateAssetRecordForPublicPath(
+  path: string,
+  asset: ProjectAsset,
+  expectedPublicPath: string,
+): boolean {
   try {
     const moduleParts = asset.modulePath.split("/");
     return (
@@ -144,11 +167,36 @@ function validateAssetRecord(path: string, asset: ProjectAsset): boolean {
       !asset.modulePath.includes("\\") &&
       !moduleParts.some((part) => !part || part === "." || part === "..") &&
       typeof asset.publicPath === "string" &&
-      asset.publicPath === projectAssetPublicPath(path)
+      asset.publicPath === expectedPublicPath
     );
   } catch {
     return false;
   }
+}
+
+function validateAssetRecord(path: string, asset: ProjectAsset): boolean {
+  return validateAssetRecordForPublicPath(
+    path,
+    asset,
+    projectAssetPublicPath(path),
+  );
+}
+
+function normalizeAssetRecord(
+  path: string,
+  asset: ProjectAsset,
+): ProjectAsset | null {
+  if (validateAssetRecord(path, asset)) return asset;
+  // Pre-v3 source assets used an absolute URL even though their exported file
+  // lived outside public/. Preserve their stable module path and ownership,
+  // then upgrade only the URL contract used by the managed module.
+  if (
+    !path.startsWith("public/") &&
+    validateAssetRecordForPublicPath(path, asset, `/${path}`)
+  ) {
+    return { ...asset, publicPath: "" };
+  }
+  return null;
 }
 
 export function normalizeProjectAssets(value: unknown): ProjectAssets {
@@ -161,11 +209,12 @@ export function normalizeProjectAssets(value: unknown): ProjectAssets {
       changed = true;
       continue;
     }
-    const asset = candidate as ProjectAsset;
-    if (!validateAssetRecord(path, asset)) {
+    const asset = normalizeAssetRecord(path, candidate as ProjectAsset);
+    if (!asset) {
       changed = true;
       continue;
     }
+    if (asset !== candidate) changed = true;
     totalBytes += asset.size;
     if (
       Object.keys(assets).length >= PROJECT_ASSET_LIMITS.maxAssets ||
@@ -193,6 +242,7 @@ export function validateProjectAssets(
   }
   let totalBytes = 0;
   const modulePaths = new Set<string>();
+  const publicPaths = new Set<string>();
   for (const [path, asset] of entries) {
     if (!validateAssetRecord(path, asset)) {
       return { ok: false, error: `Project asset "${path}" is invalid.` };
@@ -204,6 +254,15 @@ export function validateProjectAssets(
       };
     }
     modulePaths.add(asset.modulePath);
+    if (asset.publicPath) {
+      if (publicPaths.has(asset.publicPath)) {
+        return {
+          ok: false,
+          error: `Multiple project assets use public URL "${asset.publicPath}".`,
+        };
+      }
+      publicPaths.add(asset.publicPath);
+    }
     totalBytes += asset.size;
     if (totalBytes > PROJECT_ASSET_LIMITS.maxTotalBytes) {
       return {
@@ -243,12 +302,16 @@ export async function stageProjectAsset(
       `Project asset "${normalizedPath}" does not match its declared MIME type.`,
     );
   }
+  const digest = await sha256(bytes);
   return {
     path: normalizedPath,
     blob: new Blob([Uint8Array.from(bytes).buffer], { type: detectedMimeType }),
     mimeType: detectedMimeType,
     size: bytes.byteLength,
-    digest: await sha256(bytes),
+    digest,
+    moduleDigest: await sha256(
+      new TextEncoder().encode(`${normalizedPath}\u0000${digest}`),
+    ),
   };
 }
 
@@ -285,14 +348,20 @@ export async function clearProjectAssetStorage(): Promise<void> {
 export async function estimateProjectAssetStorage(): Promise<{
   count: number;
   bytes: number;
+  invalid: number;
 }> {
   let count = 0;
   let bytes = 0;
-  await projectAssetBlobs.iterate<Blob, void>((blob) => {
+  let invalid = 0;
+  await projectAssetBlobs.iterate<unknown, void>((value) => {
     count += 1;
-    bytes += blob.size;
+    if (value instanceof Blob && Number.isFinite(value.size)) {
+      bytes += value.size;
+    } else {
+      invalid += 1;
+    }
   });
-  return { count, bytes };
+  return { count, bytes, invalid };
 }
 
 export function collectProjectAssetBlobRefs(
@@ -305,16 +374,20 @@ export function collectProjectAssetBlobRefs(
   );
 }
 
-export async function releaseUnreferencedProjectAssetBlobs(
+export function releaseUnreferencedProjectAssetBlobs(
   candidateRefs: Iterable<string>,
-  retainedCollections: readonly (ProjectAssets | undefined)[],
+  retainedCollections:
+    | readonly (ProjectAssets | undefined)[]
+    | (() => readonly (ProjectAssets | undefined)[] | null),
 ): Promise<void> {
-  const retained = collectProjectAssetBlobRefs(retainedCollections);
-  await Promise.all(
-    [...new Set(candidateRefs)]
-      .filter((blobRef) => !retained.has(blobRef))
-      .map(deleteProjectAssetBlob),
-  );
+  // Conversation, snapshot, and Starter owners live in separate durable
+  // stores and may be open in another tab. A memory-only reference snapshot
+  // cannot prove that a Blob is unowned without racing an owner commit. Keep
+  // candidates until the explicit Clear All flow has durably removed every
+  // owner domain; storage estimation makes the retained bytes visible.
+  void candidateRefs;
+  void retainedCollections;
+  return Promise.resolve();
 }
 
 function safeModuleStem(path: string): string {
@@ -330,7 +403,7 @@ function safeModuleStem(path: string): string {
 }
 
 export function projectAssetPublicPath(path: string): string {
-  return path.startsWith("public/") ? `/${path.slice(7)}` : `/${path}`;
+  return path.startsWith("public/") ? `/${path.slice(7)}` : "";
 }
 
 export function createProjectAssetRecord(
@@ -343,13 +416,23 @@ export function createProjectAssetRecord(
     mimeType: staged.mimeType,
     size: staged.size,
     digest: staged.digest,
-    modulePath: `src/generated-assets/${safeModuleStem(staged.path)}-${staged.digest.slice(0, 8)}.js`,
+    modulePath: `src/generated-assets/${safeModuleStem(staged.path)}-${staged.moduleDigest}.js`,
     publicPath: projectAssetPublicPath(staged.path),
   };
 }
 
 export function createProjectAssetModule(asset: ProjectAsset): string {
-  return `// Managed by Open Builder for ${asset.path}.\nexport default ${JSON.stringify(asset.publicPath)};\n`;
+  const body = asset.publicPath
+    ? `export default ${JSON.stringify(asset.publicPath)};`
+    : `export { default } from ${JSON.stringify(relativeModuleSpecifier(asset.modulePath, asset.path))};`;
+  return `// Managed by Open Builder for ${asset.path}.\n${body}\n`;
+}
+
+function createLegacySourceAssetModule(asset: ProjectAsset): string {
+  return (
+    `// Managed by Open Builder for ${asset.path}.\n` +
+    `export default ${JSON.stringify(`/${asset.path}`)};\n`
+  );
 }
 
 export function addProjectAssetModules(
@@ -365,7 +448,11 @@ export function addProjectAssetModules(
     }
     const content = createProjectAssetModule(asset);
     const existing = nextFiles[asset.modulePath];
-    if (existing !== undefined && existing !== content) {
+    if (
+      existing !== undefined &&
+      existing !== content &&
+      !(!asset.publicPath && existing === createLegacySourceAssetModule(asset))
+    ) {
       throw new Error(
         `Project file "${asset.modulePath}" conflicts with a managed asset module.`,
       );
@@ -410,24 +497,426 @@ function blobToDataUrl(blob: Blob, mimeType: string): Promise<string> {
   });
 }
 
+interface PreviewAssetProjection {
+  asset: ProjectAsset;
+  dataUrl: string;
+}
+
+interface SourceReplacement {
+  start: number;
+  end: number;
+  value: string;
+}
+
+interface JavaScriptToken {
+  kind: "word" | "punctuation" | "string";
+  value: string;
+  start: number;
+  end: number;
+  escaped?: boolean;
+}
+
+function normalizeRelativePath(
+  fromPath: string,
+  reference: string,
+): string | null {
+  const base = fromPath.split("/").slice(0, -1);
+  for (const part of reference.split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") {
+      if (base.length === 0) return null;
+      base.pop();
+      continue;
+    }
+    base.push(part);
+  }
+  return base.join("/");
+}
+
+function resolvePreviewAsset(
+  sourcePath: string,
+  reference: string,
+  projections: readonly PreviewAssetProjection[],
+): PreviewAssetProjection | undefined {
+  if (!reference || /^(?:[a-z][a-z0-9+.-]*:|#|\/\/)/i.test(reference)) {
+    return undefined;
+  }
+  const withoutSuffix = reference.replace(/[?#].*$/, "");
+  if (!withoutSuffix) return undefined;
+
+  if (withoutSuffix.startsWith("/")) {
+    return projections.find(
+      ({ asset }) => asset.publicPath && asset.publicPath === withoutSuffix,
+    );
+  }
+
+  const candidate = withoutSuffix.startsWith("@/")
+    ? `src/${withoutSuffix.slice(2)}`
+    : withoutSuffix.startsWith("./") || withoutSuffix.startsWith("../")
+      ? normalizeRelativePath(sourcePath, withoutSuffix)
+      : withoutSuffix;
+  if (!candidate) return undefined;
+  return (
+    projections.find(({ asset }) => asset.path === candidate) ??
+    projections.find(
+      ({ asset }) =>
+        asset.publicPath && asset.publicPath.slice(1) === candidate,
+    )
+  );
+}
+
+function relativeModuleSpecifier(fromPath: string, modulePath: string): string {
+  const from = fromPath.split("/").slice(0, -1);
+  const to = modulePath.split("/");
+  let shared = 0;
+  while (
+    shared < from.length &&
+    shared < to.length &&
+    from[shared] === to[shared]
+  ) {
+    shared += 1;
+  }
+  const relative = [
+    ...Array.from({ length: from.length - shared }, () => ".."),
+    ...to.slice(shared),
+  ].join("/");
+  return relative.startsWith(".") ? relative : `./${relative}`;
+}
+
+function applySourceReplacements(
+  source: string,
+  replacements: readonly SourceReplacement[],
+): string {
+  let output = source;
+  for (const replacement of [...replacements].sort(
+    (left, right) => right.start - left.start,
+  )) {
+    output =
+      output.slice(0, replacement.start) +
+      replacement.value +
+      output.slice(replacement.end);
+  }
+  return output;
+}
+
+function scanJavaScriptTokens(
+  source: string,
+  recognizeComments = true,
+): JavaScriptToken[] {
+  const tokens: JavaScriptToken[] = [];
+  let index = 0;
+  while (index < source.length) {
+    const character = source[index];
+    if (/\s/.test(character)) {
+      index += 1;
+      continue;
+    }
+    if (recognizeComments && character === "/" && source[index + 1] === "/") {
+      index += 2;
+      while (index < source.length && source[index] !== "\n") index += 1;
+      continue;
+    }
+    if (recognizeComments && character === "/" && source[index + 1] === "*") {
+      const end = source.indexOf("*/", index + 2);
+      index = end < 0 ? source.length : end + 2;
+      continue;
+    }
+    if (character === '"' || character === "'" || character === "`") {
+      const quote = character;
+      const start = index + 1;
+      let escaped = false;
+      let dynamicTemplate = false;
+      index += 1;
+      while (index < source.length) {
+        if (source[index] === "\\") {
+          escaped = true;
+          index += 2;
+          continue;
+        }
+        if (
+          quote === "`" &&
+          source[index] === "$" &&
+          source[index + 1] === "{"
+        ) {
+          dynamicTemplate = true;
+        }
+        if (source[index] === quote) break;
+        index += 1;
+      }
+      const end = index;
+      if (index < source.length) index += 1;
+      tokens.push({
+        kind: "string",
+        value: source.slice(start, end),
+        start,
+        end,
+        escaped: escaped || dynamicTemplate,
+      });
+      continue;
+    }
+    if (/[A-Za-z_$]/.test(character)) {
+      const start = index;
+      index += 1;
+      while (index < source.length && /[A-Za-z0-9_$]/.test(source[index])) {
+        index += 1;
+      }
+      tokens.push({
+        kind: "word",
+        value: source.slice(start, index),
+        start,
+        end: index,
+      });
+      continue;
+    }
+    tokens.push({
+      kind: "punctuation",
+      value: character,
+      start: index,
+      end: index + 1,
+    });
+    index += 1;
+  }
+  return tokens;
+}
+
+function isModuleSpecifier(tokens: readonly JavaScriptToken[], index: number) {
+  const previous = tokens[index - 1];
+  const beforePrevious = tokens[index - 2];
+  return (
+    previous?.value === "from" ||
+    previous?.value === "import" ||
+    (previous?.value === "(" &&
+      (beforePrevious?.value === "import" ||
+        beforePrevious?.value === "require"))
+  );
+}
+
+function rewriteJavaScriptAssetReferences(
+  sourcePath: string,
+  source: string,
+  projections: readonly PreviewAssetProjection[],
+  recognizeComments = true,
+): string {
+  const tokens = scanJavaScriptTokens(source, recognizeComments);
+  const replacements: SourceReplacement[] = [];
+  tokens.forEach((token, index) => {
+    if (token.kind !== "string" || token.escaped) return;
+    const projection = resolvePreviewAsset(
+      sourcePath,
+      token.value,
+      projections,
+    );
+    if (!projection) return;
+    replacements.push({
+      start: token.start,
+      end: token.end,
+      value: isModuleSpecifier(tokens, index)
+        ? relativeModuleSpecifier(sourcePath, projection.asset.modulePath)
+        : projection.dataUrl,
+    });
+  });
+  return applySourceReplacements(source, replacements);
+}
+
+function rewriteCssAssetReferences(
+  sourcePath: string,
+  source: string,
+  projections: readonly PreviewAssetProjection[],
+): string {
+  const replacements: SourceReplacement[] = [];
+  let index = 0;
+  while (index < source.length) {
+    if (source[index] === '"' || source[index] === "'") {
+      const quote = source[index++];
+      while (index < source.length && source[index] !== quote) {
+        index += source[index] === "\\" ? 2 : 1;
+      }
+      if (index < source.length) index += 1;
+      continue;
+    }
+    if (source[index] === "/" && source[index + 1] === "*") {
+      const end = source.indexOf("*/", index + 2);
+      index = end < 0 ? source.length : end + 2;
+      continue;
+    }
+    if (
+      source.slice(index, index + 3).toLowerCase() !== "url" ||
+      /[A-Za-z0-9_-]/.test(source[index - 1] ?? "")
+    ) {
+      index += 1;
+      continue;
+    }
+    let cursor = index + 3;
+    while (/\s/.test(source[cursor] ?? "")) cursor += 1;
+    if (source[cursor] !== "(") {
+      index += 3;
+      continue;
+    }
+    cursor += 1;
+    while (/\s/.test(source[cursor] ?? "")) cursor += 1;
+    const quote =
+      source[cursor] === '"' || source[cursor] === "'"
+        ? source[cursor++]
+        : undefined;
+    const valueStart = cursor;
+    if (quote) {
+      while (cursor < source.length && source[cursor] !== quote) {
+        cursor += source[cursor] === "\\" ? 2 : 1;
+      }
+    } else {
+      while (cursor < source.length && source[cursor] !== ")") cursor += 1;
+    }
+    const rawEnd = cursor;
+    const raw = source.slice(valueStart, rawEnd);
+    const leadingWhitespace = raw.length - raw.trimStart().length;
+    const trailingWhitespace = raw.length - raw.trimEnd().length;
+    const reference = raw.trim();
+    const projection = resolvePreviewAsset(sourcePath, reference, projections);
+    if (projection && !reference.includes("\\")) {
+      replacements.push({
+        start: valueStart + leadingWhitespace,
+        end: rawEnd - trailingWhitespace,
+        value: projection.dataUrl,
+      });
+    }
+    index = cursor < source.length ? cursor + 1 : cursor;
+  }
+  return applySourceReplacements(source, replacements);
+}
+
+function rewriteMarkupSrcsetReferences(
+  sourcePath: string,
+  source: string,
+  projections: readonly PreviewAssetProjection[],
+): string {
+  return source.replace(
+    /(\bsrcset\s*=\s*)(["'])([\s\S]*?)\2/gi,
+    (match, prefix: string, quote: string, value: string) => {
+      const rewritten = value
+        .split(",")
+        .map((candidate) => {
+          const parts = /^(\s*)(\S+)([\s\S]*)$/.exec(candidate);
+          if (!parts) return candidate;
+          const projection = resolvePreviewAsset(
+            sourcePath,
+            parts[2],
+            projections,
+          );
+          return projection
+            ? `${parts[1]}${projection.dataUrl}${parts[3]}`
+            : candidate;
+        })
+        .join(",");
+      return rewritten === value
+        ? match
+        : `${prefix}${quote}${rewritten}${quote}`;
+    },
+  );
+}
+
+function rewriteUnquotedMarkupAssetReferences(
+  sourcePath: string,
+  source: string,
+  projections: readonly PreviewAssetProjection[],
+): string {
+  return source.replace(
+    /(\b(?:src|href|poster)\s*=\s*)([^\s"'`=<>]+)/gi,
+    (match, prefix: string, reference: string) => {
+      const projection = resolvePreviewAsset(
+        sourcePath,
+        reference,
+        projections,
+      );
+      return projection ? `${prefix}${projection.dataUrl}` : match;
+    },
+  );
+}
+
+function rewriteMarkupAssetReferences(
+  sourcePath: string,
+  source: string,
+  projections: readonly PreviewAssetProjection[],
+): string {
+  const srcsetProjected = rewriteMarkupSrcsetReferences(
+    sourcePath,
+    source,
+    projections,
+  );
+  const unquotedProjected = rewriteUnquotedMarkupAssetReferences(
+    sourcePath,
+    srcsetProjected,
+    projections,
+  );
+  // Markup is not JavaScript lexical space: `//` can occur in plain URL text.
+  // Reuse only the bounded literal/module replacement pass with comment
+  // recognition disabled.
+  return rewriteJavaScriptAssetReferences(
+    sourcePath,
+    unquotedProjected,
+    projections,
+    false,
+  );
+}
+
+function projectSourceForPreview(
+  sourcePath: string,
+  source: string,
+  projections: readonly PreviewAssetProjection[],
+): string {
+  const extension = sourcePath.split(".").pop()?.toLowerCase();
+  if (["css", "scss", "sass", "less"].includes(extension ?? "")) {
+    return rewriteCssAssetReferences(sourcePath, source, projections);
+  }
+  if (["html", "vue", "svelte", "astro", "mdx"].includes(extension ?? "")) {
+    return rewriteMarkupAssetReferences(sourcePath, source, projections);
+  }
+  if (
+    ["js", "jsx", "ts", "tsx", "mjs", "cjs", "mts", "cts"].includes(
+      extension ?? "",
+    )
+  ) {
+    return rewriteJavaScriptAssetReferences(sourcePath, source, projections);
+  }
+  return source;
+}
+
 export async function projectFilesForSandpack(
   files: ProjectFiles,
   assets: ProjectAssets,
 ): Promise<ProjectFiles> {
-  const derived = { ...files };
-  await Promise.all(
+  const validation = validateProjectAssets(assets);
+  if (!validation.ok) throw new Error(validation.error);
+  const dataUrls = new Map<string, Promise<string>>();
+  const projections = await Promise.all(
     Object.values(assets).map(async (asset) => {
-      const blob = await getProjectAssetBlob(asset.blobRef);
-      if (!blob) {
-        throw new Error(
-          `Project asset "${asset.path}" is unavailable locally.`,
+      const cacheKey = [asset.blobRef, asset.mimeType, String(asset.size)].join(
+        ":",
+      );
+      let dataUrl = dataUrls.get(cacheKey);
+      if (!dataUrl) {
+        dataUrl = readProjectAssetBytes(asset).then((bytes) =>
+          blobToDataUrl(
+            new Blob([Uint8Array.from(bytes).buffer], {
+              type: asset.mimeType,
+            }),
+            asset.mimeType,
+          ),
         );
+        dataUrls.set(cacheKey, dataUrl);
       }
-      const dataUrl = await blobToDataUrl(blob, asset.mimeType);
-      derived[asset.modulePath] =
-        `// Preview-only project asset.\nexport default ${JSON.stringify(dataUrl)};\n`;
+      return { asset, dataUrl: await dataUrl };
     }),
   );
+  const derived = Object.fromEntries(
+    Object.entries(files).map(([path, source]) => [
+      path,
+      projectSourceForPreview(path, source, projections),
+    ]),
+  );
+  for (const { asset, dataUrl } of projections) {
+    derived[asset.modulePath] =
+      `// Preview-only project asset.\nexport default ${JSON.stringify(dataUrl)};\n`;
+  }
   return derived;
 }
 
@@ -449,4 +938,12 @@ export async function readProjectAssetBytes(
     throw new Error(`Project asset "${asset.path}" failed integrity checks.`);
   }
   return bytes;
+}
+
+export async function verifyProjectAssetBlobs(
+  assets: ProjectAssets,
+): Promise<void> {
+  const validation = validateProjectAssets(assets);
+  if (!validation.ok) throw new Error(validation.error);
+  await Promise.all(Object.values(assets).map(readProjectAssetBytes));
 }

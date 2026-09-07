@@ -26,11 +26,14 @@ import { stopAgnesVideoTasks } from "../mcp/agnes/video-task-manager";
 import {
   clearProjectAssetStorage,
   estimateProjectAssetStorage,
+  withProjectAssetOwnershipLock,
 } from "../project-assets/core";
+import { getDesignSystemRegistry } from "../design-systems/registry";
 
 export interface StorageEstimate {
   bytes: number;
   items: number;
+  error?: string;
 }
 
 export interface StorageDomain {
@@ -43,11 +46,43 @@ export interface StorageDomain {
     | "templates"
     | "mcp"
     | "skills"
+    | "designSystems"
     | "attachments"
     | "projectAssets";
   estimate(): Promise<StorageEstimate>;
   clear(): Promise<void>;
   export(): Promise<unknown>;
+}
+
+export interface StorageClearFailure {
+  id: StorageDomain["id"];
+  error: string;
+}
+
+export interface StorageClearSkip {
+  id: StorageDomain["id"];
+  reason: string;
+}
+
+export interface StorageClearResult {
+  cleared: StorageDomain["id"][];
+  failed: StorageClearFailure[];
+  skipped: StorageClearSkip[];
+}
+
+export class StorageClearError extends Error {
+  constructor(readonly result: StorageClearResult) {
+    const details = [
+      ...result.failed.map(
+        ({ id, error }) => `Failed to clear storage domain "${id}": ${error}`,
+      ),
+      ...result.skipped.map(
+        ({ id, reason }) => `Skipped storage domain "${id}": ${reason}`,
+      ),
+    ];
+    super(details.join("; "));
+    this.name = "StorageClearError";
+  }
 }
 
 function jsonEstimate(value: unknown, items: number): StorageEstimate {
@@ -217,6 +252,27 @@ export const STORAGE_DOMAINS: readonly StorageDomain[] = [
     export: async () => redactStorageExport(useSkillsStore.getState().skills),
   },
   {
+    id: "designSystems",
+    estimate: async () => {
+      const { count, bytes, invalid } =
+        await getDesignSystemRegistry().estimateImportedStorage();
+      return {
+        items: count,
+        bytes,
+        ...(invalid > 0
+          ? {
+              error: `${invalid} imported Design system package(s) are incomplete.`,
+            }
+          : {}),
+      };
+    },
+    clear: async () => getDesignSystemRegistry().clearImported(),
+    export: async () => ({
+      note: "Imported Design system files are excluded from generic storage export.",
+      ...(await getDesignSystemRegistry().estimateImportedStorage()),
+    }),
+  },
+  {
     id: "attachments",
     estimate: async () => {
       const { count, bytes } = await estimateAttachmentStorage();
@@ -231,8 +287,14 @@ export const STORAGE_DOMAINS: readonly StorageDomain[] = [
   {
     id: "projectAssets",
     estimate: async () => {
-      const { count, bytes } = await estimateProjectAssetStorage();
-      return { items: count, bytes };
+      const { count, bytes, invalid } = await estimateProjectAssetStorage();
+      return {
+        items: count,
+        bytes,
+        ...(invalid > 0
+          ? { error: `${invalid} stored project image value(s) are invalid.` }
+          : {}),
+      };
     },
     clear: clearProjectAssetStorage,
     export: async () => ({
@@ -247,10 +309,20 @@ export async function estimateStorageDomains(): Promise<
 > {
   return Object.fromEntries(
     await Promise.all(
-      STORAGE_DOMAINS.map(async (domain) => [
-        domain.id,
-        await domain.estimate(),
-      ]),
+      STORAGE_DOMAINS.map(async (domain) => {
+        try {
+          return [domain.id, await domain.estimate()] as const;
+        } catch (error) {
+          return [
+            domain.id,
+            {
+              items: 0,
+              bytes: 0,
+              error: error instanceof Error ? error.message : String(error),
+            },
+          ] as const;
+        }
+      }),
     ),
   ) as Record<StorageDomain["id"], StorageEstimate>;
 }
@@ -280,12 +352,43 @@ export async function clearAllStorageDomains(): Promise<string[]> {
       cancelAllNativeSseStreams(),
     ]);
 
-    const cleared: string[] = [];
-    for (const domain of STORAGE_DOMAINS) {
-      await domain.clear();
-      cleared.push(domain.id);
-    }
-    return cleared;
+    return await withProjectAssetOwnershipLock(async () => {
+      const result: StorageClearResult = {
+        cleared: [],
+        failed: [],
+        skipped: [],
+      };
+      const failed = new Set<StorageDomain["id"]>();
+      for (const domain of STORAGE_DOMAINS) {
+        const requiredOwners =
+          domain.id === "attachments"
+            ? (["conversations"] as const)
+            : domain.id === "projectAssets"
+              ? (["conversations", "snapshots", "templates"] as const)
+              : ([] as const);
+        const unavailableOwners = requiredOwners.filter((id) => failed.has(id));
+        if (unavailableOwners.length > 0) {
+          result.skipped.push({
+            id: domain.id,
+            reason: `owner domain(s) did not clear: ${unavailableOwners.join(", ")}`,
+          });
+          continue;
+        }
+        try {
+          await domain.clear();
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          failed.add(domain.id);
+          result.failed.push({ id: domain.id, error: detail });
+          continue;
+        }
+        result.cleared.push(domain.id);
+      }
+      if (result.failed.length > 0 || result.skipped.length > 0) {
+        throw new StorageClearError(result);
+      }
+      return result.cleared;
+    });
   } finally {
     nativeSseRevocation.finish(sseRevocation);
     nativeSkillScriptRevocation.finish(skillRevocation);

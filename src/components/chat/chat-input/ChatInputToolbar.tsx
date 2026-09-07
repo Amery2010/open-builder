@@ -218,6 +218,7 @@ export function ChatInputToolbar({
                     type="button"
                     variant="ghost"
                     size="sm"
+                    disabled={isGenerating}
                     className="h-7 gap-1 px-2 text-xs text-muted-foreground hover:text-foreground"
                     aria-label={t.chat.planMode.modeMenuLabel}
                   >
@@ -271,6 +272,7 @@ export function ChatInputToolbar({
               return (
                 <DropdownMenuItem
                   key={String(mode.value)}
+                  disabled={isGenerating}
                   onSelect={() => setWorkspaceMode(mode.value)}
                   className="items-start gap-2.5 py-2"
                 >

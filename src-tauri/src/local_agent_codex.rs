@@ -1802,13 +1802,10 @@ pub(crate) async fn probe_image_capabilities(executable: &Path) -> LocalAgentCap
         Err(error) => Err(error.into()),
     };
     let _ = std::fs::remove_dir_all(&root);
-    match result {
-        Ok(enabled) => {
-            capabilities.image_generation = enabled;
-            capabilities.image_editing = enabled;
-            capabilities.media_capabilities_verified = true;
-        }
-        Err(_) => {}
+    if let Ok(enabled) = result {
+        capabilities.image_generation = enabled;
+        capabilities.image_editing = enabled;
+        capabilities.media_capabilities_verified = true;
     }
     capabilities
 }
@@ -2749,19 +2746,13 @@ mod tests {
 
     #[test]
     fn image_capability_response_requires_an_explicit_boolean() {
-        assert_eq!(
-            parse_image_capability(&json!({
-                "namespaceTools": true,
-                "imageGeneration": true,
-                "webSearch": true
-            }))
-            .unwrap(),
-            true
-        );
-        assert_eq!(
-            parse_image_capability(&json!({"imageGeneration":false})).unwrap(),
-            false
-        );
+        assert!(parse_image_capability(&json!({
+            "namespaceTools": true,
+            "imageGeneration": true,
+            "webSearch": true
+        }))
+        .unwrap());
+        assert!(!parse_image_capability(&json!({"imageGeneration":false})).unwrap());
         assert!(parse_image_capability(&json!({})).is_err());
         assert!(parse_image_capability(&json!({"imageGeneration":"yes"})).is_err());
     }

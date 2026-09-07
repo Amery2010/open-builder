@@ -104,6 +104,42 @@ export function validateProjectFiles(files: ProjectFiles):
   return { ok: true, stats };
 }
 
+/** Discard malformed persisted entries before any renderer or prompt
+ * projection can assume that ProjectFiles contains text. Valid records retain
+ * their original object identity to avoid unnecessary store updates. */
+export function normalizeProjectFiles(value: unknown): ProjectFiles {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const entries = Object.entries(value);
+  const files: ProjectFiles = {};
+  let totalBytes = 0;
+  let changed = false;
+
+  for (const [path, content] of entries) {
+    if (
+      typeof content !== "string" ||
+      validateProjectPath(path) !== null ||
+      Object.keys(files).length >= PROJECT_FILE_LIMITS.maxFiles
+    ) {
+      changed = true;
+      continue;
+    }
+    const size = byteLength(content);
+    if (
+      size > PROJECT_FILE_LIMITS.maxFileBytes ||
+      totalBytes + size > PROJECT_FILE_LIMITS.maxTotalBytes
+    ) {
+      changed = true;
+      continue;
+    }
+    files[path] = content;
+    totalBytes += size;
+  }
+
+  return !changed && entries.length === Object.keys(files).length
+    ? (value as ProjectFiles)
+    : files;
+}
+
 export function buildProjectFilesPromptListing(files: ProjectFiles): string {
   const paths = Object.keys(files).sort();
   if (paths.length === 0) return "\n\nThe project is empty - no files yet.";

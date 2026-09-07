@@ -97,3 +97,25 @@ export const ALWAYS_ALLOWED_TOOL_NAMES: ReadonlySet<string> = new Set([
   "dispatch_subagent",
   "submit_design_contract",
 ]);
+
+/** Returns the live allowed-tools denial shared by Web and Local hosts. */
+export function activeSkillToolRestrictionError(
+  toolName: string,
+  active: SkillActiveContext | null,
+): string | undefined {
+  if (
+    !active?.restrictTools ||
+    ALWAYS_ALLOWED_TOOL_NAMES.has(toolName) ||
+    active.allowedTools.includes(toolName)
+  ) {
+    return undefined;
+  }
+  const activeNames = active.skills
+    .map((skill) => `"${skill.skillName}"`)
+    .join(", ");
+  return (
+    `Tool "${toolName}" is not in the active skills ${activeNames} ` +
+    `allowed-tools. Available now: ${active.allowedTools.join(", ")}. ` +
+    "Work within these tools, call read_skill on a different skill, or wait for the next user message."
+  );
+}

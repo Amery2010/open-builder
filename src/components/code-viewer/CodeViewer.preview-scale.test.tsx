@@ -7,8 +7,15 @@ import userEvent from "@testing-library/user-event";
 import type { CSSProperties, PropsWithChildren } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+let sandpackProviderError: Error | null = null;
+const projectFilesForSandpackMock = vi.hoisted(() => vi.fn());
+const getProjectAssetBlobMock = vi.hoisted(() => vi.fn());
+
 vi.mock("@codesandbox/sandpack-react", () => ({
-  SandpackProvider: ({ children }: PropsWithChildren) => <>{children}</>,
+  SandpackProvider: ({ children }: PropsWithChildren) => {
+    if (sandpackProviderError) throw sandpackProviderError;
+    return <>{children}</>;
+  },
   SandpackLayout: ({ children }: PropsWithChildren) => <>{children}</>,
   SandpackCodeEditor: () => <div data-testid="sandpack-editor" />,
   SandpackPreview: ({
@@ -27,6 +34,11 @@ vi.mock("@codesandbox/sandpack-react", () => ({
     </div>
   ),
   SandpackConsole: () => <div data-testid="sandpack-console" />,
+}));
+
+vi.mock("../../lib/project-assets/core", () => ({
+  projectFilesForSandpack: projectFilesForSandpackMock,
+  getProjectAssetBlob: getProjectAssetBlobMock,
 }));
 
 vi.mock("./SandpackListener", () => ({ SandpackListener: () => null }));
@@ -98,9 +110,10 @@ vi.mock("../../lib/design/desktop", () => ({
 
 const conversationState = {
   conversations: {
-    "conversation-a": { workspaceMode: "auto", title: "A" },
-    "conversation-b": { workspaceMode: "auto", title: "B" },
+    "conversation-a": { workspaceMode: "auto", title: "A", assets: {} },
+    "conversation-b": { workspaceMode: "auto", title: "B", assets: {} },
   },
+  setAssetsForConversation: vi.fn(),
 };
 
 vi.mock("../../store/conversation", () => {
@@ -156,6 +169,15 @@ const baseProps = {
 
 describe("CodeViewer preview scale", () => {
   beforeEach(() => {
+    projectFilesForSandpackMock.mockReset();
+    projectFilesForSandpackMock.mockImplementation(
+      async (files: Record<string, string>) => files,
+    );
+    getProjectAssetBlobMock.mockReset();
+    getProjectAssetBlobMock.mockResolvedValue(null);
+    conversationState.setAssetsForConversation.mockReset();
+    conversationState.conversations["conversation-a"].assets = {};
+    conversationState.conversations["conversation-b"].assets = {};
     vi.stubGlobal(
       "ResizeObserver",
       class ResizeObserverMock {
@@ -187,6 +209,7 @@ describe("CodeViewer preview scale", () => {
   });
 
   afterEach(() => {
+    sandpackProviderError = null;
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
@@ -278,6 +301,123 @@ describe("CodeViewer preview scale", () => {
     expect(viewportActions?.parentElement).toBe(preview.parentElement);
     expect(viewportActions?.parentElement).toHaveClass("relative");
     expect(viewportActions).toHaveClass("absolute", "bottom-2", "right-2");
+  });
+
+  it("keeps a Sandpack render error recoverable in the code workspace", () => {
+    sandpackProviderError = new SyntaxError(
+      "Unexpected token / in package.json",
+    );
+    const onFileChange = vi.fn();
+    const onDeleteFile = vi.fn();
+
+    render(
+      <CodeViewer
+        conversationId="conversation-a"
+        {...baseProps}
+        files={{
+          "package.json": "// invalid package",
+          "src/App.tsx": "export default function App() {}",
+        }}
+        currentFile="src/App.tsx"
+        onFileChange={onFileChange}
+        onDeleteFile={onDeleteFile}
+      />,
+    );
+
+    expect(screen.getByRole("alert")).toHaveTextContent("Preview unavailable");
+    expect(screen.getByLabelText("Edit package.json")).toHaveValue(
+      "// invalid package",
+    );
+
+    screen.getByRole("button", { name: "Remove package.json" }).click();
+    expect(onDeleteFile).toHaveBeenCalledWith("package.json");
+  });
+
+  it("never writes a redacted preview draft back to the canonical project", () => {
+    sandpackProviderError = new Error("Transient preview failure");
+    const onFileChange = vi.fn();
+    const secretSource = 'export const apiKey = "supersecret123";';
+
+    render(
+      <CodeViewer
+        conversationId="conversation-a"
+        {...baseProps}
+        files={{ "src/config.ts": secretSource }}
+        currentFile="src/config.ts"
+        onFileChange={onFileChange}
+      />,
+    );
+
+    expect(screen.getByLabelText("Edit src/config.ts")).toHaveValue(
+      'export const apiKey = "[REDACTED]";',
+    );
+    expect(
+      screen.getByRole("button", { name: "Repair preview" }),
+    ).toBeDisabled();
+    expect(screen.getByRole("note")).toHaveTextContent(
+      /hides protected values/i,
+    );
+    expect(onFileChange).not.toHaveBeenCalled();
+  });
+
+  it("keeps code and asset removal available when Blob projection fails", async () => {
+    const user = userEvent.setup();
+    const asset = {
+      path: "public/logo.png",
+      blobRef: `sha256:${"a".repeat(64)}`,
+      digest: "a".repeat(64),
+      mimeType: "image/png" as const,
+      size: 8,
+      modulePath: `src/generated-assets/logo-${"b".repeat(64)}.js`,
+      publicPath: "/logo.png",
+    };
+    conversationState.conversations["conversation-a"].assets = {
+      [asset.path]: asset,
+    };
+    projectFilesForSandpackMock.mockRejectedValueOnce(
+      new Error("Project asset is unavailable locally."),
+    );
+
+    render(<CodeViewer conversationId="conversation-a" {...baseProps} />);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Project asset is unavailable locally.",
+    );
+    expect(screen.getByTestId("sandpack-editor")).toBeInTheDocument();
+    expect(screen.getByTestId("view-mode")).toHaveTextContent("code");
+    await user.click(
+      screen.getByRole("button", {
+        name: "Remove project image public/logo.png",
+      }),
+    );
+    expect(conversationState.setAssetsForConversation).toHaveBeenCalledWith(
+      "conversation-a",
+      expect.any(Function),
+    );
+    const updater = conversationState.setAssetsForConversation.mock.calls[0][1];
+    expect(updater({ [asset.path]: asset })).toEqual({});
+  });
+
+  it("resets the desktop render boundary through explicit retry", async () => {
+    const onReloadPreview = vi.fn();
+    sandpackProviderError = new Error("Transient preview failure");
+
+    render(
+      <CodeViewer
+        conversationId="conversation-a"
+        {...baseProps}
+        onReloadPreview={onReloadPreview}
+      />,
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Transient preview failure",
+    );
+
+    sandpackProviderError = null;
+    screen.getByRole("button", { name: "Retry preview" }).click();
+
+    await waitFor(() => expect(onReloadPreview).toHaveBeenCalledOnce());
+    expect(await screen.findByTestId("sandpack-preview")).toBeInTheDocument();
   });
 
   it("passes inverse iframe heights for the supported zoom levels", async () => {

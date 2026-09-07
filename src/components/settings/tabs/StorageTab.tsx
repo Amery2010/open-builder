@@ -15,6 +15,7 @@ import { useSkillsStore } from "../../../store/skills";
 import { useSnapshotStore } from "../../../store/snapshot";
 
 const STORAGE_SNAPSHOT_LIMIT = 20;
+type ExtraStorageEstimate = { bytes: number; items: number; error?: string };
 
 export function StorageTab() {
   const t = useT();
@@ -27,9 +28,16 @@ export function StorageTab() {
   const skills = useSkillsStore((s) => s.skills);
   const templates = useProjectTemplateStore((s) => s.templates);
   const [notice, setNotice] = useState<string | null>(null);
-  const [extraDomains, setExtraDomains] = useState({
+  const [extraDomains, setExtraDomains] = useState<{
+    mcp: ExtraStorageEstimate;
+    designSystems: ExtraStorageEstimate;
+    attachments: ExtraStorageEstimate;
+    projectAssets: ExtraStorageEstimate;
+  }>({
     mcp: { bytes: 0, items: 0 },
+    designSystems: { bytes: 0, items: 0 },
     attachments: { bytes: 0, items: 0 },
+    projectAssets: { bytes: 0, items: 0 },
   });
 
   useEffect(() => {
@@ -40,7 +48,9 @@ export function StorageTab() {
         if (active) {
           setExtraDomains({
             mcp: estimates.mcp,
+            designSystems: estimates.designSystems,
             attachments: estimates.attachments,
+            projectAssets: estimates.projectAssets,
           });
         }
       });
@@ -163,6 +173,20 @@ export function StorageTab() {
       value: extraDomains.attachments.items,
       detail: formatBytes(extraDomains.attachments.bytes),
     },
+    {
+      label: t.settings.storage.designSystems,
+      value: extraDomains.designSystems.items,
+      detail: extraDomains.designSystems.error
+        ? t.settings.storage.estimateUnavailable
+        : formatBytes(extraDomains.designSystems.bytes),
+    },
+    {
+      label: t.settings.storage.projectAssets,
+      value: extraDomains.projectAssets.items,
+      detail: extraDomains.projectAssets.error
+        ? t.settings.storage.estimateUnavailable
+        : formatBytes(extraDomains.projectAssets.bytes),
+    },
   ];
 
   return (
@@ -180,7 +204,9 @@ export function StorageTab() {
             {formatBytes(
               report.totalBytes +
                 extraDomains.mcp.bytes +
-                extraDomains.attachments.bytes,
+                extraDomains.designSystems.bytes +
+                extraDomains.attachments.bytes +
+                extraDomains.projectAssets.bytes,
             )}
           </span>
         </div>

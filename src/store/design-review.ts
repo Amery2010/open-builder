@@ -11,8 +11,10 @@ import {
 import { isSafePrototypePreviewRoute } from "../lib/design/preview-runtime";
 import type {
   AutomaticDesignReviewEvidence,
+  AutomaticDesignReviewOutcome,
   AutomaticDesignReviewStage,
 } from "../lib/design/automatic-review";
+import { automaticDesignReviewStageForOutcome } from "../lib/design/automatic-review";
 import {
   isDesignReviewRunActive,
   isDesignReviewTerminalStatus,
@@ -94,7 +96,7 @@ interface DesignReviewState {
   setSelectedFindingIds: (ids: readonly string[]) => void;
   requestAutomaticCapture: (evidence: AutomaticDesignReviewEvidence) => void;
   setAutomaticStage: (stage: AutomaticDesignReviewStage) => void;
-  finishAutomatic: (openDialog: boolean) => void;
+  finishAutomatic: (outcome: AutomaticDesignReviewOutcome) => void;
   failAutomatic: (message: string) => void;
   clearAutomatic: () => void;
   reset: () => void;
@@ -416,20 +418,26 @@ export const useDesignReviewStore = create<DesignReviewState>()(
             ? { automatic: { ...state.automatic, stage } }
             : state,
         ),
-      finishAutomatic: (openDialog) =>
-        set((state) => ({
-          automatic: state.automatic
-            ? { ...state.automatic, stage: openDialog ? "warning" : "complete" }
-            : undefined,
-          ...(openDialog ? { dialogRequestId: ++nextDialogRequestId } : {}),
-        })),
+      finishAutomatic: (outcome) =>
+        set((state) => {
+          const openDialog = outcome === "findings";
+          return {
+            automatic: state.automatic
+              ? {
+                  ...state.automatic,
+                  stage: automaticDesignReviewStageForOutcome(outcome),
+                }
+              : undefined,
+            ...(openDialog ? { dialogRequestId: ++nextDialogRequestId } : {}),
+          };
+        }),
       failAutomatic: (error) =>
         set((state) => ({
           status: "error",
           error,
           captureProgress: undefined,
           automatic: state.automatic
-            ? { ...state.automatic, stage: "warning" }
+            ? { ...state.automatic, stage: "unavailable" }
             : undefined,
           dialogRequestId: ++nextDialogRequestId,
         })),

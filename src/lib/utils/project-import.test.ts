@@ -103,7 +103,7 @@ describe("project import staging", () => {
     const staged = await stageProjectFromFileList([
       sourceFile(
         "demo/src/App.tsx",
-        'export const api_key = "secret-sentinel-123";',
+        'export const logo = "/logo.png";\nexport const api_key = "secret-sentinel-123";',
       ),
       sourceFile(
         "demo/package.json",
@@ -134,6 +134,9 @@ describe("project import staging", () => {
     ]);
     expect(staged.files["src/App.tsx"]).not.toContain("secret-sentinel-123");
     expect(staged.files["src/App.tsx"]).toContain("[REDACTED]");
+    expect(staged.files["src/App.tsx"]).toContain(
+      'export const logo = "/logo.png"',
+    );
     expect(staged.report).toMatchObject({
       redactedFiles: 1,
       importedFiles: 5,

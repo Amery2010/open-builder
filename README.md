@@ -11,7 +11,7 @@
 [![Tailwind CSS](https://img.shields.io/badge/Tailwind_CSS-4.x-06B6D4?logo=tailwindcss&logoColor=white)](https://tailwindcss.com)
 [![Tauri](https://img.shields.io/badge/Tauri-2.x-FFC131?logo=tauri&logoColor=white)](https://tauri.app)
 
-[Deployment](#deployment) · [Quick Start](#quick-start) · [Features](#features) · [Architecture](#architecture) · [Changelog](CHANGELOG.md) · [Project Audit (Chinese)](docs/PROJECT_AUDIT.zh-CN.md) · [Contributing](CONTRIBUTING.md)
+[Deployment](#deployment) · [Quick Start](#quick-start) · [Features](#features) · [Architecture](#architecture) · [Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md)
 
 English | [简体中文](README.zh-CN.md)
 
@@ -58,25 +58,26 @@ The Tauri desktop build (macOS / Windows / Linux) provides local runtime capabil
 - **Subagent Collaboration** — Built-in read-only subagents for code exploration, review, dependency advice, bug investigation, and UI critique
 - **Built-in Search** — Supports enabling the model's built-in search service
 - **Desktop API Proxy** — Tauri can forward approved HTTP/HTTPS provider requests that would otherwise be blocked by browser CORS; static Web deployments still depend on provider CORS support
-- **Desktop Local CLI Runtime** — Explicitly run the complete generation workflow through an isolated, signed-in Codex, Claude, Pi, or Antigravity CLI while keeping API mode as the default; structured adapters never silently fall back between providers or runtimes
+- **Desktop Local CLI Runtime** — Explicitly run the complete generation workflow through an isolated, signed-in Codex, Claude, Pi, or Antigravity CLI while keeping API mode as the default; Codex can generate or edit images, Antigravity can generate images without reference-image editing, and unsupported providers do not receive the media tool
+- **Managed Project Images** — Keep images imported with a project and generated images explicitly added to it in content-addressed local storage while preserving each project path for source imports, CSS URLs, public URLs, preview, ZIP export, snapshots, and Starter copies; removed owners retain deduplicated Blob bytes conservatively until **Clear All Data** so another tab cannot lose an in-flight image
 
 ### User Experience
 
 - **Multi-Session Management** — Sidebar with create, switch, delete sessions; history persisted locally
 - **Session Organization** — Search, pin, archive, fork, and smart-rename conversations
-- **Project Starter Library** — Search, edit, update, and reuse safely prepared local project copies with deterministic stack metadata; sensitive paths are excluded and high-confidence plaintext credentials are redacted before an explicit save confirmation
+- **Project Starter Library** — Search, edit, update, and reuse safely prepared local project copies with deterministic stack metadata and managed project images; sensitive paths are excluded and high-confidence plaintext credentials are redacted before an explicit save confirmation
 - **Smart Session Naming** — Auto-generates session titles based on conversation content
 - **Slash Commands** — Input box supports `/new`, `/fork`, `/clear`, `/reset`, `/compact`, `/health`, `/review`, `/continue`, and `/retry`
 - **Command Palette & Shortcuts** — Open commands with `Cmd/Ctrl+K`, create sessions, open settings, focus input, or stop generation from the keyboard
-- **Image & File Input** — Upload screenshots, text files, or PDFs; PDF-capable models receive PDFs as native file input without local text extraction
+- **Image & File Input** — Upload screenshots, text files, or PDFs; new local images are compressed once at the configurable default quality of `0.85`, and PDF-capable models receive PDFs as native file input without local text extraction
 - **Skills System** — Enabled Skills expose metadata for automatic discovery; full instructions load only after `read_skill` or when a Skill is selected for the next message, which also applies to subagents and clears after sending. Skill loads in one Agent turn appear as one expandable list. The eight built-ins are `debug-web-app`, `build-tailwind-ui`, `build-accessible-ui`, `write-safe-typescript`, `art-direct-web`, `design-product-ui`, `review-code`, and `simplify-code`; legacy built-in IDs migrate automatically, while imported Skills start with discovery disabled
 - **Custom Instructions** — Advanced settings can safely append up to 32,000 characters to Chat, Plan, retry, and subagent requests without granting tools or changing mode restrictions; utility calls such as Automatic QA, titles, and compression exclude them
 - **Local Settings** — Provider configuration, API keys, and custom instructions persist in browser local storage
-- **Storage Governance** — Inspect local data usage and safely clean archived sessions, empty sessions, and old snapshots
+- **Storage Governance** — Inspect local data usage, including imported Design systems and retained project-image Blobs, and safely clean archived sessions, empty sessions, old snapshots, or every local storage domain
 - **Streaming Output** — Real-time display of AI thinking process and code generation progress
 - **Extended Thinking** — Supports Extended Thinking / Reasoning mode (DeepSeek-R1, Claude 4.6, etc.)
 - **One-Click Download** — Export generated project as a ZIP file
-- **Workspace Tools** — Switch between code and preview, search and manage files, inspect the Sandpack console, and preview desktop/tablet/phone widths with fit and zoom controls
+- **Workspace Tools** — Switch between code and preview, browse files with Material Icon Theme artwork, search and manage files, inspect the Sandpack console, and preview desktop/tablet/phone widths with fit and zoom controls
 - **Interactive Design Editing** — Point-select stable `data-ob-id` elements in supported Sandpack previews, pass a sanitized selection to the next request, and tune canonical semantic tokens with snapshot-backed saves
 - **Design Review & Desktop Export** — Upload up to three screenshots for an opt-in read-only review on Web or desktop, or export canonical project files from desktop to a new non-overwriting directory
 - **Adaptive Layout** — Desktop uses a horizontal resizable split, tablets use a vertical resizable workspace-over-chat split, and phones use a chat-first layout with inline preview
@@ -128,7 +129,7 @@ Design mode keeps its output in the current conversation's normal project file t
 | Visual review                           | User-uploaded screenshots                        | User-uploaded screenshots                                            |
 | Local processes / stdio / Skill scripts | Unavailable in a static Web deployment           | Subject to the existing desktop capability and approval restrictions |
 
-Design Review is deliberately separate from Automatic QA. Its restricted run can only list, read, and search project files and submit up to eight structured findings; it cannot write files, use MCP or network tools, load Skills, or run scripts. Complete-prototype reviews bind evidence to the project generation, blueprint revision, page, scenario, and viewport. They capture declared targets serially in a temporary preview iframe, mark uncaptured targets as unreviewed, and mark prior evidence stale after the project changes. No fix runs until the user selects findings and clicks **Apply selected fixes**.
+Design Review is deliberately separate from Automatic QA. Its restricted run can only list, read, and search project files and submit up to eight structured findings; it cannot write files, use MCP or network tools, load Skills, or run scripts. Complete-prototype reviews bind evidence to the project generation, blueprint revision, page, scenario, and viewport. They capture declared targets serially in a temporary preview iframe, mark uncaptured targets as unreviewed, and mark prior evidence stale after the project changes. A manual review never starts a fix until the user selects findings and clicks **Apply selected fixes**. After an eligible Design generation, the automatic review may run one bounded repair for deterministic issues, P0/P1 visual findings, and non-P3 system-consistency findings, followed by one verification pass. It repairs only while the evidence and conversation remain current; deferred, failed, unavailable, or superseded work is reported explicitly and is never presented as a clean review.
 
 ### MCP and Platform Capabilities (Optional)
 
@@ -213,6 +214,8 @@ Install and configure one supported CLI:
 
 Start the desktop app, open **Settings → Model → Runtime → Local CLI**, select the CLI provider, and confirm that its status is either **Installed and ready** or **Ready to send; verification required on first run**. The latter means the first real message—not the settings scan—will verify the configured credentials or gateway and may consume quota. Open Builder scans `PATH` and common installation locations; **Choose program** stores only a validated executable override in native app data. Model and reasoning choices are provider-specific and come from the selected CLI. Ordinary checks use a short-lived cached catalog; **Rescan** forces a fresh read. If a catalog is partial or stale, the currently saved model and effort remain selectable as **Unverified**, unknown effort choices are hidden, and the UI warns rather than clearing the preference. Switching among Codex, Claude, Pi, and Antigravity never reuses another provider's session; an installation, launch configuration, model, effort, or protocol change starts a fresh provider-scoped session.
 
+In Local CLI Chat runs, Codex receives `generate_image` with optional opaque reference-image IDs, while Antigravity receives text-to-image generation only. Claude and Pi do not receive that tool. A generated result stays in the conversation until the agent calls `import_generated_image` for an initialized project; the Host then creates a managed project-image module at the requested safe path. These media tools remain unavailable in Plan and other restricted profiles.
+
 The local CLI is not an offline model. Prompts, attachments, search activity, and tool results are normally sent to the model provider configured in that CLI and may consume subscription or API quota. For Codex, Claude, and Antigravity, Open Builder reads only the documented provider fields required by the selected configuration and passes referenced credentials directly to that CLI child process; it never persists, displays, logs, or places those credential values in command arguments or temporary configuration. Antigravity account login remains in the operating system's secure credential store; Open Builder does not guess or copy Gemini credential files. It persists only Agy's native conversation/cache state in a hashed app-private home per Open Builder conversation, while utility runs use disposable homes. Pi owns OAuth and API-key data in `~/.pi/agent/auth.json`, created with owner-only permissions; Open Builder strips provider API-key environment variables from the Pi child and relies on that OAuth/auth file. Inline, environment-resolved, and command-resolved credentials from `models.json` are rejected before user content is sent; the credential-source probe does not resolve or execute those values. Save the provider credential through Pi's `/login` flow instead. Ordinary Pi sessions default to cwd-organized JSONL under `~/.pi/agent/sessions/`, but Open Builder supplies an app-private session directory instead and retains only the provider-scoped opaque session ID with its local conversation. See the official [provider](https://pi.dev/docs/latest/providers) and [session](https://pi.dev/docs/latest/sessions) references.
 
 Projects remain in Open Builder's in-memory virtual file system. Each provider uses a stable app-private blank scratch directory and can interact with the project only through the per-run authenticated loopback tool bridge. Attachment IDs are opaque; host file paths are not exposed. User-level Skills, Agents, MCP servers, rules, project instruction files, hooks, extensions, native shell/filesystem tools, browser execution, and native writes are rejected or disabled before user content is sent. Antigravity additionally receives a private per-run agent, MCP configuration, and permission policy; only Open Builder MCP tools are allowed (plus read-only URL access when model-built-in search is explicitly selected).
@@ -238,6 +241,7 @@ Click the settings button in the top-right corner and fill in:
 | Web Search          | Keyless Firecrawl, or provider credentials    | `fc-...`, `tvly-...`, or an Exa key   |
 | Image Search        | Optional Pixabay or Unsplash credential       | Provider API key                      |
 | Custom Instructions | Reusable instructions under Advanced settings | Up to 32,000 characters               |
+| Image Compression   | Compress new local images once before storage | Enabled; quality `0.85`               |
 
 > Settings and API keys are stored in browser local storage. Custom instructions are sent to the selected model provider for Chat, Plan, retry, and subagent work. They cannot expand tool permissions; do not place credentials or other secrets in them. Treat the browser profile and device as part of your credential security boundary.
 
@@ -303,6 +307,8 @@ Built-in tools:
 Enabled MCP tools are injected dynamically after server discovery and approval, then filtered by the current platform and Chat, Plan, Design, Automatic QA, Design Review, or subagent run policy. `apply_design_style` remains the Auto-mode compatibility path; Design mode uses `apply_design_system`.
 
 The managed Agnes MCP adapter adds `generate_image`, `create_video`, and `get_video_status` without creating a remote MCP transport session. Its image and video results render directly in the conversation as media placeholders and replace those placeholders in place when a remote URL becomes available.
+
+Supported Local CLI Chat runs add provider-native `generate_image`. Initialized projects also expose `import_generated_image`, which admits a generated result through the managed project-image boundary instead of treating native CLI scratch files as project files.
 
 ### Tech Stack
 

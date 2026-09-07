@@ -66,6 +66,7 @@ describe("useGenerator optimistic request lifecycle", () => {
     await act(async () => {
       generation = hook.result.current.generate("Build it", undefined, {
         forcedSkillIds: ["review-code"],
+        designExpectedChangeModes: ["migrate"],
         prepareRun: () => preparation.promise,
       });
       await Promise.resolve();
@@ -79,6 +80,7 @@ describe("useGenerator optimistic request lifecycle", () => {
         role: "user",
         content: "Build it",
         forcedSkillIds: ["review-code"],
+        metadata: { designExpectedChangeModes: ["migrate"] },
       }),
     ]);
 
@@ -119,6 +121,36 @@ describe("useGenerator optimistic request lifecycle", () => {
     expect(
       useConversationStore.getState().conversations[conversationId].messages,
     ).toEqual([expect.objectContaining({ role: "user", content: "Build it" })]);
+  });
+
+  it("persists a Design change-mode policy resolved during preparation", async () => {
+    const conversationId = useConversationStore.getState().createConversation();
+    const hook = renderGenerator();
+    const runOptions: NonNullable<
+      Parameters<typeof hook.result.current.generate>[2]
+    > = {
+      prepareRun: async () => {
+        runOptions.designExpectedChangeModes = ["migrate"];
+      },
+    };
+
+    await act(async () => {
+      await hook.result.current.generate(
+        "Apply the selected system",
+        undefined,
+        runOptions,
+      );
+    });
+
+    expect(
+      useConversationStore.getState().conversations[conversationId].messages,
+    ).toEqual([
+      expect.objectContaining({
+        role: "user",
+        content: "Apply the selected system",
+        metadata: { designExpectedChangeModes: ["migrate"] },
+      }),
+    ]);
   });
 
   it("withdraws the final visible user message through a hidden assistant tail", async () => {

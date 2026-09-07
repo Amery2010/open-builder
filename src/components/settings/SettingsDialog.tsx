@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import type {
   AISettings,
   WebSearchSettings,
@@ -80,6 +80,33 @@ export function validateAISettingsDraft(
   return errors;
 }
 
+function areAISettingsEqual(left: AISettings, right: AISettings): boolean {
+  if (
+    left.runtime !== right.runtime ||
+    left.apiType !== right.apiType ||
+    left.apiKey !== right.apiKey ||
+    left.apiBaseUrl !== right.apiBaseUrl ||
+    left.model !== right.model ||
+    left.localAgent.provider !== right.localAgent.provider
+  ) {
+    return false;
+  }
+
+  type Provider = keyof AISettings["localAgent"]["preferences"];
+  const providers = new Set<Provider>([
+    ...(Object.keys(left.localAgent.preferences) as Provider[]),
+    ...(Object.keys(right.localAgent.preferences) as Provider[]),
+  ]);
+  return [...providers].every((provider) => {
+    const leftPreference = left.localAgent.preferences[provider];
+    const rightPreference = right.localAgent.preferences[provider];
+    return (
+      leftPreference?.model === rightPreference?.model &&
+      leftPreference?.effort === rightPreference?.effort
+    );
+  });
+}
+
 export function SettingsDialog({
   isOpen,
   onClose,
@@ -95,6 +122,60 @@ export function SettingsDialog({
 }: SettingsDialogProps) {
   const t = useT();
 
+  const openerRef = useRef<HTMLElement | null>(null);
+  if (isOpen && openerRef.current === null && typeof document !== "undefined") {
+    const activeElement = document.activeElement;
+    if (
+      activeElement instanceof HTMLElement &&
+      activeElement !== document.body
+    ) {
+      openerRef.current = activeElement;
+    }
+  }
+
+  const restoreOpenerFocus = useCallback(() => {
+    if (typeof document === "undefined") return;
+    const opener = openerRef.current;
+    if (opener?.isConnected) {
+      opener.focus({ preventScroll: true });
+      return;
+    }
+
+    const fallback = document.querySelector<HTMLElement>(
+      '[data-settings-focus-fallback="true"]',
+    );
+    if (fallback?.isConnected) {
+      fallback.focus({ preventScroll: true });
+      return;
+    }
+
+    // The opener can disappear when a conversation or layout is replaced.
+    // Focusing body is a safe final fallback and never throws in that case.
+    document.body.focus({ preventScroll: true });
+  }, []);
+
+  const handleCloseAutoFocus = useCallback(
+    (event: Event) => {
+      event.preventDefault();
+      restoreOpenerFocus();
+    },
+    [restoreOpenerFocus],
+  );
+
+  const settingsMountedRef = useRef(false);
+  useEffect(() => {
+    if (!isOpen) return;
+    settingsMountedRef.current = true;
+    return () => {
+      settingsMountedRef.current = false;
+      queueMicrotask(() => {
+        if (settingsMountedRef.current) return;
+        restoreOpenerFocus();
+        openerRef.current = null;
+      });
+    };
+  }, [isOpen, restoreOpenerFocus]);
+
   const [formData, setFormData] = useState<AISettings>(settings);
   const [webSearchForm, setWebSearchForm] =
     useState<WebSearchSettings>(webSearchSettings);
@@ -104,6 +185,8 @@ export function SettingsDialog({
   const [imageCompressionQualityDraft, setImageCompressionQualityDraft] =
     useState(() => String(systemSettings.imageCompressionQuality));
   const [showValidation, setShowValidation] = useState(false);
+  const [activeTab, setActiveTab] = useState("model");
+  const focusModelFieldRef = useRef<keyof ModelFieldErrors | null>(null);
   const localCliObservation = useSettingsStore(
     (state) =>
       state.localCliObservationCache.providers[formData.localAgent.provider],
@@ -117,6 +200,11 @@ export function SettingsDialog({
     () => validateAISettingsDraft(formData, t.settings.validation),
     [formData, t.settings.validation],
   );
+  const modelDraftChanged = useMemo(
+    () => !areAISettingsEqual(formData, settings),
+    [formData, settings],
+  );
+  const modelErrorsForSave = modelDraftChanged ? modelErrors : {};
   const customSystemPromptError =
     systemForm.customSystemPrompt.length > CUSTOM_SYSTEM_PROMPT_MAX_CHARS
       ? t.settings.customSystemPrompt.tooLong
@@ -140,6 +228,8 @@ export function SettingsDialog({
       String(systemSettings.imageCompressionQuality),
     );
     setShowValidation(false);
+    setActiveTab("model");
+    focusModelFieldRef.current = null;
   }, [
     isOpen,
     settings,
@@ -148,15 +238,38 @@ export function SettingsDialog({
     systemSettings,
   ]);
 
+  useEffect(() => {
+    if (!showValidation || activeTab !== "model") return;
+    const field = focusModelFieldRef.current;
+    if (!field || !modelErrorsForSave[field]) return;
+    const timer = window.setTimeout(() => {
+      const element = document.getElementById(field);
+      if (!(element instanceof HTMLElement)) return;
+      element.focus({ preventScroll: true });
+      element.scrollIntoView?.({ block: "center" });
+      focusModelFieldRef.current = null;
+    });
+    return () => window.clearTimeout(timer);
+  }, [activeTab, modelErrorsForSave, showValidation]);
+
   const handleSave = () => {
     setShowValidation(true);
-    if (
-      Object.keys(modelErrors).length > 0 ||
-      customSystemPromptError ||
-      imageCompressionQualityError
-    )
+    const modelErrorKeys = Object.keys(modelErrorsForSave) as Array<
+      keyof ModelFieldErrors
+    >;
+    if (modelErrorKeys.length > 0) {
+      focusModelFieldRef.current =
+        (["apiKey", "apiBaseUrl", "model"] as const).find(
+          (field) => modelErrorsForSave[field],
+        ) ?? null;
+      setActiveTab("model");
       return;
-    onSave(formData);
+    }
+    if (customSystemPromptError || imageCompressionQualityError) {
+      setActiveTab("advanced");
+      return;
+    }
+    if (modelDraftChanged) onSave(formData);
     onSaveWebSearch(webSearchForm);
     onSaveAssetSearch(assetSearchForm);
     onSaveSystem(
@@ -173,13 +286,17 @@ export function SettingsDialog({
 
   return (
     <Dialog open={isOpen} onOpenChange={onClose}>
-      <DialogContent className="flex h-[100dvh] max-h-[100dvh] max-w-full flex-col gap-0 rounded-none border-x-0 p-0 sm:h-auto sm:max-h-[90dvh] sm:max-w-md sm:gap-4 sm:rounded-lg sm:border sm:p-6">
+      <DialogContent
+        className="flex h-[100dvh] max-h-[100dvh] max-w-full flex-col gap-0 rounded-none border-x-0 p-0 sm:h-auto sm:max-h-[90dvh] sm:max-w-md sm:gap-4 sm:rounded-lg sm:border sm:p-6"
+        onCloseAutoFocus={handleCloseAutoFocus}
+      >
         <DialogHeader className="sticky top-0 z-10 shrink-0 border-b bg-background px-4 py-4 pr-12 sm:static sm:border-b-0 sm:px-2 sm:py-0 sm:pr-2">
           <DialogTitle>{t.settings.title}</DialogTitle>
         </DialogHeader>
 
         <Tabs
-          defaultValue="model"
+          value={activeTab}
+          onValueChange={setActiveTab}
           className="min-h-0 flex-1 overflow-hidden px-4 py-3 sm:px-2 sm:py-0"
         >
           <TabsList className="w-full shrink-0 justify-start overflow-x-auto sm:justify-center sm:overflow-visible">
@@ -222,7 +339,7 @@ export function SettingsDialog({
             <ModelTab
               formData={formData}
               setFormData={setFormData}
-              errors={showValidation ? modelErrors : {}}
+              errors={showValidation ? modelErrorsForSave : {}}
               runtimeChangeLocked={runtimeChangeLocked}
             />
           </TabsContent>
@@ -276,7 +393,7 @@ export function SettingsDialog({
 
         <DialogFooter className="sticky bottom-0 z-10 shrink-0 flex-row justify-end border-t bg-background px-4 py-3 sm:static sm:border-t-0 sm:px-0 sm:py-0">
           {showValidation &&
-            (Object.keys(modelErrors).length > 0 ||
+            (Object.keys(modelErrorsForSave).length > 0 ||
               customSystemPromptError ||
               imageCompressionQualityError) && (
               <p className="mr-auto text-xs text-destructive" role="alert">

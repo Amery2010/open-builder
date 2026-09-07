@@ -25,6 +25,9 @@ Tagged versions use their Git tag date. Versions 1.4.0 through 1.7.0 were not ta
 - Added isolated custom design-system compilation from a name and three rule groups. Successful JSON, CSS, semantic-token, and package validation registers and selects a local custom system with a generic preview without applying it to project files.
 - Added preview-only point selection for supported Sandpack templates with stable `data-ob-id` context, a semantic Token panel with live drafts and snapshot-backed canonical saves, and explicit legacy `DESIGN.md` upgrade behavior.
 - Added upload-based visual review on Web and desktop, plus desktop unique-directory export, followed by a structured Design Review card and user-selected fix application.
+- Added provider-native image generation to supported Local CLI runs. Codex supports text-to-image and reference-image editing; Antigravity supports text-to-image only; generated results enter an initialized project only through the explicit managed-image import tool.
+- Added managed project images with content-addressed Blob storage, preview-only source/CSS/public-path projection, canonical ZIP restoration, snapshot and Starter ownership, storage accounting, and full-data reset coverage.
+- Added single-pass local image compression, enabled by default at a configurable quality of `0.85`, and Material Icon Theme artwork for the project file tree.
 - Added focused Vitest, component, Rust, and authorized Playwright coverage for mode migration, prompts, tool profiles, design-system validation, Bridge isolation, tokens, review gating, responsive previews, and non-overwriting export.
 
 ### Changed
@@ -42,7 +45,8 @@ Tagged versions use their Git tag date. Versions 1.4.0 through 1.7.0 were not ta
 - The design-system dialog now keeps its header and custom-creation action footer visible around a bounded vertical scroll region, applies catalog choices without a redundant footer confirmation, uses responsive preview grids, and switches to custom creation in the same dialog while preserving the catalog selection and scroll position.
 - Design-system project contracts share the same `manifest.json + DESIGN.md + tokens.css` format on Web and desktop; Web stores imports in OPFS and desktop stores them in AppData.
 - Removed entry, JavaScript chunk, and CSS size budgets. The production artifact check still verifies lazy-loading boundaries and chunk initialization.
-- Updated the English and Chinese documentation, tool tables, and platform capability matrix for Design mode.
+- Updated the English and Chinese documentation, tool tables, and platform capability matrix for Design mode, Local CLI media, managed project images, compression, and file icons; removed links to the deleted project-audit document.
+- Manual Design Review continues to require an explicit finding selection before repair. Automatic Design Review may perform one bounded repair of deterministic, P0/P1, and non-P3 system-consistency issues, then one verification pass while its evidence remains current.
 
 ### Fixed
 
@@ -54,8 +58,18 @@ Tagged versions use their Git tag date. Versions 1.4.0 through 1.7.0 were not ta
 - Local Codex runs now preserve a validated selected custom model provider and its referenced environment credentials despite `--ignore-user-config`; Antigravity runs likewise preserve the official Gemini API-key provider and optional compatible endpoint inside the private runtime. Pi retains its documented stored-`auth.json`-only credential boundary.
 - Local CLI readiness now distinguishes a verified installation from credentials or gateway selections that require the first real inference request; only a missing, unsupported, or setup-required provider blocks sending, and an unavailable resumed session is rebuilt at most once before any observable activity.
 - Codex startup diagnostics emitted before `turn.started` and Claude `api_retry` status events are now handled as narrowly allow-listed, redacted metadata instead of aborting an otherwise valid structured run; capability-bearing unknown events still fail closed.
+- New files receive type-appropriate valid starter content, including `{}` for JSON. A preview error boundary keeps the project repairable when persisted project input still causes Sandpack initialization to fail.
+- Settings save validation now follows the fields that actually changed, so independent System preferences can be saved before model setup; closing Settings restores focus to its opener.
+- Project-image module identity now includes the canonical project path, imported source/CSS/public references resolve in preview without changing canonical exports, and Starter schema v3 preserves verified Blob ownership across save, reload, reuse, replacement, and deletion.
+- Reset & Clear All Data now includes imported Design systems and managed project-image Blobs, continues independent storage domains after a failure, and preserves dependent Blob domains when an owner store cannot be cleared. Storage Governance includes Design-system and project-image bytes in its total. Opportunistic image cleanup retains unowned deduplicated Blobs until this explicit clear, avoiding cross-tab owner races.
+- Automatic Design Review now distinguishes clean, findings, deferred, unavailable, and superseded outcomes; an active manual review defers the automatic run and stale or failed evidence can no longer appear clean.
+- Design retry now rebuilds its current files, system, change-mode, and blueprint policy before exposing write tools. Missing Design policy fails closed, while accepted contracts remain scoped to their originating run.
+- Generation snapshots the request-start Code, Plan, or Design profile across asynchronous setup. Automatic Design repair also binds its reviewed source and conversation, remains in Design mode, and seals the reused contract against resubmission or blueprint expansion.
+- The initial tool-metadata path no longer eagerly loads provider and AI SDK code. Rust lint failures and collision-prone Design test temporary directories were corrected.
 
 ### Security
+
+- Active Skill `allowed-tools` restrictions now use one live Host guard for Web and Local CLI execution. Local image generation, attachment reads, and generated-image imports are filtered before provider exposure and rechecked after mid-run Skill activation.
 
 - Gateway model discovery accepts only HTTPS or loopback HTTP, disables redirects, uses the existing explicit credential and safe custom headers, bounds its timeout/pages/model count/response size, and excludes URLs, credentials, headers, bodies, and fingerprints from diagnostics.
 - Saving or updating a project starter now prepares a non-mutating local copy, excludes sensitive paths, redacts high-confidence plaintext credentials while retaining environment examples, validates project/runtime/template limits, and previews all excluded or redacted paths before confirmation. Starter conversations never copy messages, snapshots, compressed context, local-agent sessions, recommendations, or failed Design state.

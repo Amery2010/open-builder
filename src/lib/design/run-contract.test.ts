@@ -124,6 +124,21 @@ describe("Design contract schema", () => {
 });
 
 describe("Design contract controller", () => {
+  it("fails closed for writes when a Design caller omitted run policy setup", () => {
+    const controller = createDesignContractController();
+
+    expect(controller.authorizeProjectWrite("read_files")).toBeUndefined();
+    expect(controller.authorizeProjectWrite("init_project")).toBeUndefined();
+    expect(controller.authorizeProjectWrite("write_file")).toContain(
+      "Design run policy required",
+    );
+    expect(
+      controller.authorizeProjectWrite("import_generated_image", {
+        image_id: "generated-image",
+      }),
+    ).toContain("Design run policy required");
+  });
+
   it("keeps project writes locked after an invalid contract submission", () => {
     const controller = createDesignContractController();
     const skills = createSkillActiveContext();
@@ -179,6 +194,11 @@ describe("Design contract controller", () => {
       }),
     ).toMatchObject({ surface_mode: "operate", system_id: "graphite" });
     expect(controller.authorizeProjectWrite("write_file")).toBeUndefined();
+    expect(
+      controller.authorizeProjectWrite("import_generated_image", {
+        image_id: "generated-image",
+      }),
+    ).toBeUndefined();
   });
 
   it("allows only the validated blueprint Host update while repairing invalid authority", () => {
@@ -309,6 +329,94 @@ describe("Design contract controller", () => {
         contract(),
       ),
     ).toThrow("no longer matches");
+  });
+
+  it("fails closed after a reusable policy reset cannot be rebuilt", () => {
+    const controller = createDesignContractController();
+    controller.reset(
+      { enabled: true, expectedSystemId: "graphite" },
+      contract(),
+    );
+    expect(controller.getContract()).not.toBeNull();
+
+    expect(() =>
+      controller.reset(
+        { enabled: true, expectedSystemId: "other" },
+        contract(),
+      ),
+    ).toThrow("no longer matches");
+    expect(controller.getContract()).toBeNull();
+    expect(controller.authorizeProjectWrite("write_file")).toContain(
+      "Design run policy required",
+    );
+
+    controller.reset(
+      { enabled: true, expectedSystemId: "graphite" },
+      contract(),
+    );
+    expect(() =>
+      controller.reset({ enabled: true, sealReusableContract: true }),
+    ).toThrow("requires a reusable contract");
+    expect(controller.getContract()).toBeNull();
+    expect(controller.authorizeProjectWrite("write_file")).toContain(
+      "Design run policy required",
+    );
+  });
+
+  it("seals an automatic repair contract against resubmission and blueprint widening", () => {
+    const controller = createDesignContractController();
+    const skills = createSkillActiveContext();
+    skills.activate(skill("design-product-ui"));
+    const reviewed = contract({
+      blueprint: blueprint({
+        target_page_ids: ["settings"],
+        shared_scope: { file_paths: [], ui_ids: [] },
+      }),
+    });
+    controller.reset(
+      {
+        enabled: true,
+        sealReusableContract: true,
+        expectedBlueprintRevision: "blueprint-r3",
+        knownBlueprintPageIds: ["settings", "dashboard"],
+        knownBlueprintPageFilePaths: {
+          settings: ["src/pages/Settings.tsx"],
+          dashboard: ["src/pages/Dashboard.tsx"],
+        },
+      },
+      reviewed,
+    );
+
+    expect(controller.isReusableContractSealed()).toBe(true);
+    expect(() =>
+      controller.submit(
+        contract({
+          blueprint: blueprint({
+            target_page_ids: ["settings", "dashboard"],
+            shared_scope: { file_paths: [], ui_ids: [] },
+          }),
+        }),
+        { expectedSystemId: "graphite", skillContext: skills },
+      ),
+    ).toThrow(/sealed.*cannot be replaced/i);
+    expect(
+      controller.authorizeProjectWrite("update_project_design", {
+        design: {},
+      }),
+    ).toContain("reviewed blueprint is sealed");
+    expect(
+      controller.authorizeProjectWrite("write_file", {
+        path: "src/pages/Dashboard.tsx",
+        content: "out of reviewed scope",
+      }),
+    ).toContain("outside the selected page files");
+    expect(
+      controller.authorizeProjectWrite("write_file", {
+        path: "src/pages/Settings.tsx",
+        content: "reviewed scope",
+      }),
+    ).toBeUndefined();
+    expect(controller.getContract()).toEqual(reviewed);
   });
 
   it("binds an optional blueprint to its revision and known page/shared scope", () => {

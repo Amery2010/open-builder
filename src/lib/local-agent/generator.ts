@@ -16,6 +16,7 @@ import type {
   ToolExecutionOutput,
 } from "../ai/generator-types";
 import type { ExecutionMode } from "../ai/tools-schema";
+import { activeSkillToolRestrictionError } from "../skills/active-context";
 import type { Conversation, LocalAgentSessionRef } from "../../types";
 import {
   deleteAttachment,
@@ -392,7 +393,7 @@ const GENERATE_IMAGE_TOOL_SPEC: LocalToolSpec = {
 const IMPORT_GENERATED_IMAGE_TOOL_SPEC: LocalToolSpec = {
   name: "import_generated_image",
   description:
-    "Copy a generated image into the initialized project and create a managed JavaScript module that project source can import.",
+    "Copy a generated image below public/ in the initialized project and create a managed JavaScript module that project source can import.",
   inputSchema: {
     type: "object",
     properties: {
@@ -425,6 +426,7 @@ export class LocalAgentGenerator implements GenerationBackend {
   private activeSignal: AbortSignal | null = null;
   private readonly utilityScopeId: string;
   private localToolAnnotations: ReadonlyMap<string, LocalToolAnnotations>;
+  private readonly authorizeToolCall?: GeneratorOptions["authorizeToolCall"];
 
   private conversationSnapshot(): Conversation {
     return (
@@ -447,10 +449,12 @@ export class LocalAgentGenerator implements GenerationBackend {
     host: WebAppGenerator,
     config: LocalAgentClientConfig,
     events: GeneratorEvents,
+    authorizeToolCall?: GeneratorOptions["authorizeToolCall"],
   ) {
     this.host = host;
     this.config = config;
     this.events = events;
+    this.authorizeToolCall = authorizeToolCall;
     this.localToolAnnotations = new Map(config.toolAnnotations ?? []);
     this.utilityScopeId =
       globalThis.crypto?.randomUUID?.() ??
@@ -789,6 +793,8 @@ export class LocalAgentGenerator implements GenerationBackend {
     const hostRun = this.host.getHostToolRun();
     const tools = hostRun.modelTools;
     const runContext = this.host.getRunContext();
+    const runSignal = this.activeSignal;
+    let authorizedHostRunId = runContext.runId;
     const nativeSearch =
       this.config.nativeSearch &&
       this.nativeSearchAllowed &&
@@ -799,6 +805,10 @@ export class LocalAgentGenerator implements GenerationBackend {
       ...this.host.getMessages(),
     ]);
     const imageCapabilities = localAgentImageCapabilities(this.config.provider);
+    const mediaToolsAllowed =
+      runContext.mode === "chat" &&
+      this.conversationContextAllowed &&
+      !hostRun.authority.has("submit_design_review");
     const extraSpecs: LocalToolSpec[] = [];
     if (attachmentIndex.size > 0) {
       extraSpecs.push({
@@ -820,23 +830,27 @@ export class LocalAgentGenerator implements GenerationBackend {
         hostApproval: "none",
       });
     }
-    if (runContext.mode === "chat" && imageCapabilities.imageGeneration) {
+    if (mediaToolsAllowed && imageCapabilities.imageGeneration) {
       extraSpecs.push(GENERATE_IMAGE_TOOL_SPEC);
     }
     if (
-      runContext.mode === "chat" &&
+      mediaToolsAllowed &&
       conversation.isProjectInitialized &&
       (imageCapabilities.imageGeneration || generatedIds.size > 0)
     ) {
       extraSpecs.push(IMPORT_GENERATED_IMAGE_TOOL_SPEC);
     }
+    const activeSkillContext = this.host.getSkillContext().get();
     const authority = await createLocalToolAuthoritySnapshot({
       tools,
       mode: runContext.mode,
       platform: runContext.platform,
       allowedMcpAliases: runContext.allowedMcpAliases,
       annotations: this.localToolAnnotations,
-      extraSpecs,
+      extraSpecs: extraSpecs.filter(
+        (spec) =>
+          !activeSkillToolRestrictionError(spec.name, activeSkillContext),
+      ),
       hostRun,
     });
     const toolSpecs = [...authority.specs];
@@ -906,9 +920,39 @@ export class LocalAgentGenerator implements GenerationBackend {
     const executeTool = async (
       event: Extract<LocalAgentEvent, { type: "toolRequest" }>,
     ): Promise<LocalCliHostToolOutcome> => {
+      const currentRunContext = this.host.getRunContext();
+      if (
+        !runSignal ||
+        runSignal.aborted ||
+        currentRunContext.runId !== authorizedHostRunId
+      ) {
+        const output = normalizeToolExecutionOutput({
+          text: `Error: tool "${event.name}" belongs to a local CLI run that is no longer current.`,
+          isError: true,
+        });
+        return { resolution: toLocalResolution(output), hadSideEffect: false };
+      }
       if (!authority.has(event.name)) {
         const output = normalizeToolExecutionOutput({
           text: `Error: tool "${event.name}" is not authorized for this local CLI run.`,
+          isError: true,
+        });
+        this.events.onToolResult?.(
+          event.name,
+          event.arguments,
+          output.text,
+          event.callId,
+          output,
+        );
+        return { resolution: toLocalResolution(output), hadSideEffect: false };
+      }
+      const skillRestriction = activeSkillToolRestrictionError(
+        event.name,
+        this.host.getSkillContext().get(),
+      );
+      if (skillRestriction) {
+        const output = normalizeToolExecutionOutput({
+          text: `Error: ${skillRestriction}`,
           isError: true,
         });
         this.events.onToolResult?.(
@@ -1153,6 +1197,20 @@ export class LocalAgentGenerator implements GenerationBackend {
           });
         } else {
           try {
+            const authorizationError = await this.authorizeToolCall?.(
+              event.name,
+              event.arguments,
+              {
+                signal: runSignal,
+                toolCallId: event.callId,
+                run: currentRunContext,
+                skillContext: this.host.getSkillContext(),
+              },
+            );
+            if (authorizationError) throw new Error(authorizationError);
+            const importSignal = this.activeSignal;
+            const expectedConversation = this.config.getConversation?.();
+            const expectedRunId = currentRunContext.runId;
             const { importGeneratedImageAsset } =
               await import("../project-assets/import");
             const imported = await importGeneratedImageAsset({
@@ -1161,6 +1219,13 @@ export class LocalAgentGenerator implements GenerationBackend {
               mimeType: reference.mimeType,
               name: reference.name,
               ...(path ? { path } : {}),
+              signal: importSignal ?? undefined,
+              isCurrent: () =>
+                !this.abortRequested &&
+                this.activeSignal === importSignal &&
+                importSignal?.aborted !== true &&
+                this.host.getRunContext().runId === expectedRunId &&
+                this.config.getConversation?.() === expectedConversation,
             });
             const current = this.config.getConversation?.();
             if (current) this.host.setFiles(current.files);
@@ -1221,6 +1286,9 @@ export class LocalAgentGenerator implements GenerationBackend {
           });
           output = executed.result;
           changes = executed.changes;
+          if (!runSignal.aborted) {
+            authorizedHostRunId = this.host.getRunContext().runId;
+          }
           hadSideEffect =
             executed.hadSideEffect && !authority.isReadOnly(event.name);
           if (
@@ -1489,6 +1557,7 @@ export function createLocalAgentGenerator(
       maxToolCalls: extras?.maxIterations ?? config.maxToolCalls,
     },
     events,
+    extras?.authorizeToolCall,
   );
 }
 

@@ -122,7 +122,14 @@ import {
   SandpackRefreshAction,
   SandpackRefreshRegistration,
 } from "./code-viewer/SandpackPreviewActions";
+import {
+  PreviewErrorBoundary,
+  type PreviewErrorBoundaryFallbackProps,
+} from "./code-viewer/PreviewErrorBoundary";
 import { projectFilesForSandpack } from "../lib/project-assets/core";
+import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
+import { getNewFileInitialContent } from "./code-viewer/new-file-content";
 
 interface PendingDesignCapture {
   expectation: DesignBridgeCaptureExpectation;
@@ -213,6 +220,168 @@ export function resolvePreviewIframeHeight(scale: number): string {
   return `${percentage}%`;
 }
 
+function normalizeProjectPath(path: string): string {
+  return path.replace(/^\/+/, "");
+}
+
+function getProjectFileContent(files: ProjectFiles, path: string): string {
+  const normalized = normalizeProjectPath(path);
+  return files[normalized] ?? files[`/${normalized}`] ?? "";
+}
+
+function findInvalidJsonFile(files: ProjectFiles): string | undefined {
+  for (const [rawPath, content] of Object.entries(files)) {
+    const path = normalizeProjectPath(rawPath);
+    if (!path.toLowerCase().endsWith(".json")) continue;
+    try {
+      const parsed: unknown = JSON.parse(content);
+      const lowerPath = path.toLowerCase();
+      const isPackageJson =
+        lowerPath === "package.json" || lowerPath.endsWith("/package.json");
+      if (
+        isPackageJson &&
+        (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+      ) {
+        return path;
+      }
+    } catch {
+      return path;
+    }
+  }
+  return undefined;
+}
+
+interface PreviewErrorFallbackProps extends PreviewErrorBoundaryFallbackProps {
+  conversationId: string;
+  files: ProjectFiles;
+  canonicalFiles: ProjectFiles;
+  currentFile: string;
+  onFileSelect: (path: string) => void;
+  onFileChange: (conversationId: string, path: string, content: string) => void;
+  onDeleteFile: (path: string) => void;
+  onRetry: () => void;
+}
+
+function PreviewErrorFallback({
+  error,
+  conversationId,
+  files,
+  canonicalFiles,
+  currentFile,
+  onFileSelect,
+  onFileChange,
+  onDeleteFile,
+  onRetry,
+}: PreviewErrorFallbackProps) {
+  const t = useT();
+  const invalidFile = findInvalidJsonFile(files);
+  const initialPath = invalidFile ?? normalizeProjectPath(currentFile);
+  const [editingPath, setEditingPath] = useState(initialPath);
+  const [draft, setDraft] = useState(() =>
+    getProjectFileContent(files, initialPath),
+  );
+
+  useEffect(() => {
+    setEditingPath(initialPath);
+    setDraft(getProjectFileContent(files, initialPath));
+  }, [files, initialPath]);
+
+  const repairProtected =
+    Boolean(editingPath) &&
+    getProjectFileContent(canonicalFiles, editingPath) !==
+      getProjectFileContent(files, editingPath);
+
+  const handleRepair = () => {
+    if (!editingPath || repairProtected) return;
+    onFileChange(conversationId, editingPath, draft);
+    onFileSelect(editingPath);
+  };
+
+  const handleOpenCode = () => {
+    if (!editingPath) return;
+    onFileSelect(editingPath);
+    document.getElementById("preview-error-editor")?.focus();
+  };
+
+  const errorDetail = error.message.trim().slice(0, 300);
+  const fileName = editingPath.split("/").pop() ?? editingPath;
+
+  return (
+    <div className="flex h-full min-h-0 flex-col gap-4 overflow-auto bg-background p-4 sm:p-6">
+      <div
+        className="rounded-lg border border-destructive/40 bg-destructive/5 p-4"
+        role="alert"
+        aria-live="assertive"
+      >
+        <h2 className="text-sm font-semibold text-foreground">
+          {t.previewRecovery.unavailableTitle}
+        </h2>
+        <p className="mt-1 text-sm text-muted-foreground">
+          {t.previewRecovery.renderDescription}
+        </p>
+        {errorDetail && (
+          <p className="mt-2 break-words font-mono text-xs text-destructive">
+            {errorDetail}
+          </p>
+        )}
+      </div>
+
+      {editingPath ? (
+        <div className="flex min-h-0 flex-1 flex-col gap-2">
+          <label htmlFor="preview-error-editor" className="text-sm font-medium">
+            {t.previewRecovery.editFile.replace("{name}", fileName)}
+          </label>
+          <Textarea
+            id="preview-error-editor"
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            className="min-h-48 flex-1 resize-none font-mono text-xs leading-relaxed"
+            spellCheck={false}
+            aria-label={t.previewRecovery.editPath.replace(
+              "{path}",
+              editingPath,
+            )}
+          />
+          <div className="flex flex-wrap gap-2">
+            <Button
+              type="button"
+              onClick={handleRepair}
+              disabled={repairProtected}
+            >
+              {t.previewRecovery.repair}
+            </Button>
+            <Button type="button" variant="outline" onClick={handleOpenCode}>
+              {t.previewRecovery.focusEditor}
+            </Button>
+            {invalidFile && (
+              <Button
+                type="button"
+                variant="destructive"
+                onClick={() => onDeleteFile(invalidFile)}
+              >
+                {t.previewRecovery.removeFile.replace("{name}", fileName)}
+              </Button>
+            )}
+            <Button type="button" variant="outline" onClick={onRetry}>
+              {t.previewRecovery.retry}
+            </Button>
+          </div>
+          {repairProtected && (
+            <p className="text-xs text-destructive" role="note">
+              {t.previewRecovery.protectedContent}
+            </p>
+          )}
+          <p className="text-xs text-muted-foreground">{editingPath}</p>
+        </div>
+      ) : (
+        <p className="text-sm text-muted-foreground">
+          {t.previewRecovery.openCodeHint}
+        </p>
+      )}
+    </div>
+  );
+}
+
 interface CodeViewerProps {
   conversationId: string;
   files: ProjectFiles;
@@ -261,6 +430,7 @@ export function CodeViewer({
   previewMode = "sandpack",
   defaultPreviewView = "desktop",
   sandpackKey,
+  onReloadPreview,
   onApplyDesignSystem,
   isGenerating = false,
   onDesignReview,
@@ -577,21 +747,50 @@ export function CodeViewer({
   );
   const [assetPreviewFiles, setAssetPreviewFiles] =
     useState<ProjectFiles>(previewFiles);
+  const [assetProjectionStatus, setAssetProjectionStatus] = useState<
+    "loading" | "ready" | "error"
+  >(() => (Object.keys(projectAssets).length > 0 ? "loading" : "ready"));
+  const [assetProjectionError, setAssetProjectionError] = useState<
+    string | null
+  >(null);
+  const [assetProjectionRetry, setAssetProjectionRetry] = useState(0);
+  const [previewRenderRetry, setPreviewRenderRetry] = useState(0);
+  const previewBoundaryResetKey = useMemo(
+    () => ({ files, previewRenderRetry, sandpackKey }),
+    [files, previewRenderRetry, sandpackKey],
+  );
   useEffect(() => {
     let cancelled = false;
     setAssetPreviewFiles(previewFiles);
+    setAssetProjectionError(null);
+    if (Object.keys(projectAssets).length === 0) {
+      setAssetProjectionStatus("ready");
+      return () => {
+        cancelled = true;
+      };
+    }
+    setAssetProjectionStatus("loading");
     void projectFilesForSandpack(previewFiles, projectAssets).then(
       (derived) => {
-        if (!cancelled) setAssetPreviewFiles(derived);
+        if (cancelled) return;
+        setAssetPreviewFiles(derived);
+        setAssetProjectionStatus("ready");
       },
-      () => {
-        if (!cancelled) setAssetPreviewFiles(previewFiles);
+      (error) => {
+        if (cancelled) return;
+        setAssetProjectionError(
+          error instanceof Error ? error.message : String(error),
+        );
+        setAssetProjectionStatus("error");
       },
     );
     return () => {
       cancelled = true;
     };
-  }, [previewFiles, projectAssets]);
+  }, [assetProjectionRetry, previewFiles, projectAssets]);
+  useEffect(() => {
+    if (assetProjectionStatus === "error") setViewMode("code");
+  }, [assetProjectionStatus]);
   useEffect(() => {
     let cancelled = false;
     previewGenerationRef.current = undefined;
@@ -1851,10 +2050,19 @@ export function CodeViewer({
     [captureDesignReviewScreenshots, conversationId],
   );
 
+  const retryPreviewRender = useCallback(() => {
+    setPreviewRenderRetry((attempt) => attempt + 1);
+    onReloadPreview();
+  }, [onReloadPreview]);
+
   const handleReloadPreview = useCallback(() => {
     flushPendingSandpackFileChanges(conversationId);
-    softRefreshRef.current?.();
-  }, [conversationId]);
+    if (softRefreshRef.current) {
+      softRefreshRef.current();
+      return;
+    }
+    retryPreviewRender();
+  }, [conversationId, retryPreviewRender]);
 
   const navigatePrototype = useCallback(
     async (pageId: string, scenarioId?: string) => {
@@ -2025,7 +2233,7 @@ export function CodeViewer({
     const p = path.startsWith("/") ? path.slice(1) : path;
     if (!(p in files)) {
       invalidateAutomaticReview();
-      onFileChange(conversationId, p, "// New file\n");
+      onFileChange(conversationId, p, getNewFileInitialContent(p));
       onFileSelect(p);
     }
   };
@@ -2042,7 +2250,9 @@ export function CodeViewer({
   return (
     <div className="editor w-full h-full flex flex-col bg-background">
       <ViewToolbar
-        viewMode={effectiveViewMode}
+        viewMode={
+          assetProjectionStatus === "error" ? "code" : effectiveViewMode
+        }
         onViewModeChange={setViewMode}
         deviceSize={deviceSize}
         onDeviceSizeChange={handleDeviceSizeChange}
@@ -2197,143 +2407,224 @@ export function CodeViewer({
               {desktopActionMessage}
             </div>
           )}
-          <SandpackProvider
-            key={sandpackKey}
-            template={
-              (previewEnabled
-                ? template
-                : "static") as SandpackPredefinedTemplate
-            }
-            theme={isDark ? "dark" : "light"}
-            files={sandpackFiles}
-            options={{ activeFile: sandpackCurrentFile }}
-            style={{ height: "100%" }}
-          >
-            <SandpackRefreshRegistration onChange={registerSoftRefresh} />
-            <SandpackListener
-              conversationId={conversationId}
-              requestedActiveFile={sandpackCurrentFile}
-              onFileChange={handleSandpackFileChange}
-            />
-            <SandpackLayout>
-              {/* Preview */}
-              {previewEnabled && (
-                <div
-                  ref={previewHostRef}
-                  className={cn(
-                    "h-full w-full",
-                    effectiveViewMode === "preview" ? "block" : "hidden",
-                    previewHostOverflowClass,
-                  )}
-                >
-                  <div
-                    className={cn("mx-auto", fixedPreview && "relative")}
-                    style={previewFrameStyle}
-                  >
+          {assetProjectionStatus === "loading" ? (
+            <div
+              className="flex h-full items-center justify-center bg-background p-6 text-sm text-muted-foreground"
+              role="status"
+            >
+              {t.previewRecovery.preparingAssets}
+            </div>
+          ) : (
+            <PreviewErrorBoundary
+              resetKey={previewBoundaryResetKey}
+              fallback={(props) => (
+                <PreviewErrorFallback
+                  {...props}
+                  conversationId={conversationId}
+                  files={previewFiles}
+                  canonicalFiles={files}
+                  currentFile={effectiveCurrentFile}
+                  onFileSelect={onFileSelect}
+                  onFileChange={onFileChange}
+                  onRetry={retryPreviewRender}
+                  onDeleteFile={(path) => {
+                    invalidateAutomaticReview();
+                    onDeleteFile(path);
+                  }}
+                />
+              )}
+            >
+              <SandpackProvider
+                key={sandpackKey}
+                template={
+                  (previewEnabled
+                    ? template
+                    : "static") as SandpackPredefinedTemplate
+                }
+                theme={isDark ? "dark" : "light"}
+                files={sandpackFiles}
+                options={{ activeFile: sandpackCurrentFile }}
+                style={{ height: "100%" }}
+              >
+                <SandpackRefreshRegistration onChange={registerSoftRefresh} />
+                <SandpackListener
+                  conversationId={conversationId}
+                  requestedActiveFile={sandpackCurrentFile}
+                  onFileChange={handleSandpackFileChange}
+                />
+                <SandpackLayout>
+                  {/* Preview */}
+                  {previewEnabled && assetProjectionStatus === "ready" && (
                     <div
+                      ref={previewHostRef}
                       className={cn(
-                        "grid grid-rows-3 h-full",
-                        fixedPreview &&
-                          "overflow-hidden rounded-lg border bg-background shadow-lg",
-                        captureViewport &&
-                          "absolute left-0 top-0 rounded-none border-0 shadow-none transition-none",
+                        "h-full w-full",
+                        effectiveViewMode === "preview" ? "block" : "hidden",
+                        previewHostOverflowClass,
                       )}
-                      style={previewSurfaceStyle}
                     >
                       <div
-                        className={cn(
-                          "relative transition-[width,height,transform,opacity] duration-300 ease-in-out",
-                          showConsole ? "row-span-2" : "row-span-3",
-                        )}
+                        className={cn("mx-auto", fixedPreview && "relative")}
+                        style={previewFrameStyle}
                       >
-                        <SandpackPreview
+                        <div
                           className={cn(
-                            "preview-content-zoom",
-                            previewScale !== 1 && "preview-content-scaled",
+                            "grid grid-rows-3 h-full",
+                            fixedPreview &&
+                              "overflow-hidden rounded-lg border bg-background shadow-lg",
+                            captureViewport &&
+                              "absolute left-0 top-0 rounded-none border-0 shadow-none transition-none",
                           )}
-                          style={previewContentStyle}
-                          showNavigator={!captureViewport}
-                          showOpenInCodeSandbox={false}
-                          showRefreshButton={false}
-                          showRestartButton={false}
-                        />
-                        <div className="preview-viewport-actions absolute bottom-2 right-2 z-20 flex gap-2">
-                          <SandpackActionButton
-                            label={
-                              showConsole ? t.console.hide : t.console.show
-                            }
-                            pressed={showConsole}
-                            onClick={() =>
-                              setShowConsole((visible) => !visible)
-                            }
+                          style={previewSurfaceStyle}
+                        >
+                          <div
+                            className={cn(
+                              "relative transition-[width,height,transform,opacity] duration-300 ease-in-out",
+                              showConsole ? "row-span-2" : "row-span-3",
+                            )}
                           >
-                            <Terminal size={16} />
-                          </SandpackActionButton>
-                          <SandpackRefreshAction
-                            label={t.toolbar.reloadPreview}
-                            onBeforeRefresh={() =>
-                              flushPendingSandpackFileChanges(conversationId)
-                            }
-                          />
+                            <SandpackPreview
+                              className={cn(
+                                "preview-content-zoom",
+                                previewScale !== 1 && "preview-content-scaled",
+                              )}
+                              style={previewContentStyle}
+                              showNavigator={!captureViewport}
+                              showOpenInCodeSandbox={false}
+                              showRefreshButton={false}
+                              showRestartButton={false}
+                            />
+                            <div className="preview-viewport-actions absolute bottom-2 right-2 z-20 flex gap-2">
+                              <SandpackActionButton
+                                label={
+                                  showConsole ? t.console.hide : t.console.show
+                                }
+                                pressed={showConsole}
+                                onClick={() =>
+                                  setShowConsole((visible) => !visible)
+                                }
+                              >
+                                <Terminal size={16} />
+                              </SandpackActionButton>
+                              <SandpackRefreshAction
+                                label={t.toolbar.reloadPreview}
+                                onBeforeRefresh={() =>
+                                  flushPendingSandpackFileChanges(
+                                    conversationId,
+                                  )
+                                }
+                              />
+                            </div>
+                          </div>
+                          <div
+                            className={cn(
+                              "overflow-hidden border-t",
+                              showConsole ? "row-span-1" : "max-h-0 border-t-0",
+                            )}
+                          >
+                            <SandpackConsole
+                              showSyntaxError={true}
+                              showRestartButton={false}
+                            />
+                          </div>
                         </div>
                       </div>
-                      <div
-                        className={cn(
-                          "overflow-hidden border-t",
-                          showConsole ? "row-span-1" : "max-h-0 border-t-0",
-                        )}
-                      >
-                        <SandpackConsole
-                          showSyntaxError={true}
-                          showRestartButton={false}
-                        />
-                      </div>
+                    </div>
+                  )}
+
+                  {/* Code editor */}
+                  <div
+                    className={cn(
+                      "h-full w-full overflow-hidden",
+                      assetProjectionStatus === "error" ||
+                        effectiveViewMode === "code"
+                        ? "flex"
+                        : "hidden",
+                    )}
+                  >
+                    <div className="w-56 border-r h-full shrink-0 overflow-hidden flex flex-col">
+                      <ProjectAssetList
+                        assets={projectAssets}
+                        onRemove={(path) => {
+                          invalidateAutomaticReview();
+                          useConversationStore
+                            .getState()
+                            .setAssetsForConversation(
+                              conversationId,
+                              (assets) =>
+                                Object.fromEntries(
+                                  Object.entries(assets).filter(
+                                    ([assetPath]) => assetPath !== path,
+                                  ),
+                                ),
+                            );
+                        }}
+                      />
+                      <FileExplorer
+                        files={previewFiles}
+                        currentFile={currentFile}
+                        onFileSelect={onFileSelect}
+                        onCreateFile={handleCreateFile}
+                        onCreateFolder={handleCreateFolder}
+                        onRenameFile={(oldPath, newPath) => {
+                          invalidateAutomaticReview();
+                          onRenameFile(oldPath, newPath);
+                        }}
+                        onDeleteFile={(path) => {
+                          invalidateAutomaticReview();
+                          onDeleteFile(path);
+                        }}
+                        onMoveFile={(sourcePath, targetFolder) => {
+                          invalidateAutomaticReview();
+                          onMoveFile(sourcePath, targetFolder);
+                        }}
+                      />
+                    </div>
+                    <div className="flex flex-col flex-1 h-full overflow-x-auto min-w-0">
+                      {assetProjectionStatus === "error" && (
+                        <div
+                          className="flex shrink-0 flex-wrap items-start justify-between gap-3 border-b border-destructive/30 bg-destructive/5 px-4 py-3"
+                          role="alert"
+                          aria-live="assertive"
+                        >
+                          <div className="min-w-0">
+                            <p className="text-sm font-semibold text-foreground">
+                              {t.previewRecovery.unavailableTitle}
+                            </p>
+                            <p className="mt-1 text-xs text-muted-foreground">
+                              {t.previewRecovery.assetDescription}
+                            </p>
+                            {assetProjectionError && (
+                              <p className="mt-1 break-words font-mono text-xs text-destructive">
+                                {assetProjectionError.slice(0, 300)}
+                              </p>
+                            )}
+                          </div>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            onClick={() =>
+                              setAssetProjectionRetry((attempt) => attempt + 1)
+                            }
+                          >
+                            {t.previewRecovery.retry}
+                          </Button>
+                        </div>
+                      )}
+                      <SandpackCodeEditor
+                        showTabs={false}
+                        showLineNumbers
+                        showInlineErrors
+                        wrapContent={false}
+                        closableTabs={false}
+                      />
                     </div>
                   </div>
-                </div>
-              )}
-
-              {/* Code editor */}
-              <div
-                className={cn(
-                  "h-full w-full overflow-hidden",
-                  effectiveViewMode === "code" ? "flex" : "hidden",
-                )}
-              >
-                <div className="w-56 border-r h-full shrink-0 overflow-hidden flex flex-col">
-                  <ProjectAssetList assets={projectAssets} />
-                  <FileExplorer
-                    files={previewFiles}
-                    currentFile={currentFile}
-                    onFileSelect={onFileSelect}
-                    onCreateFile={handleCreateFile}
-                    onCreateFolder={handleCreateFolder}
-                    onRenameFile={(oldPath, newPath) => {
-                      invalidateAutomaticReview();
-                      onRenameFile(oldPath, newPath);
-                    }}
-                    onDeleteFile={(path) => {
-                      invalidateAutomaticReview();
-                      onDeleteFile(path);
-                    }}
-                    onMoveFile={(sourcePath, targetFolder) => {
-                      invalidateAutomaticReview();
-                      onMoveFile(sourcePath, targetFolder);
-                    }}
-                  />
-                </div>
-                <div className="flex flex-col flex-1 h-full overflow-x-auto min-w-0">
-                  <SandpackCodeEditor
-                    showTabs={false}
-                    showLineNumbers
-                    showInlineErrors
-                    wrapContent={false}
-                    closableTabs={false}
-                  />
-                </div>
-              </div>
-            </SandpackLayout>
-          </SandpackProvider>
+                </SandpackLayout>
+              </SandpackProvider>
+            </PreviewErrorBoundary>
+          )}
         </div>
       </div>
     </div>

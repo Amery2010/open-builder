@@ -239,25 +239,33 @@ pub fn design_export_project(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    struct TemporaryDirectory {
+        path: PathBuf,
+    }
 
-    fn temporary_directory() -> PathBuf {
-        let suffix = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "open-builder-design-test-{}-{suffix}",
-            std::process::id()
-        ));
+    impl TemporaryDirectory {
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TemporaryDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn temporary_directory() -> TemporaryDirectory {
+        let path =
+            std::env::temp_dir().join(format!("open-builder-design-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&path).unwrap();
-        path
+        TemporaryDirectory { path }
     }
 
     #[test]
     fn export_uses_unique_directories_without_overwriting() {
         let parent = temporary_directory();
-        let existing = parent.join("Demo");
+        let existing = parent.path().join("Demo");
         fs::create_dir(&existing).unwrap();
         fs::write(existing.join("keep.txt"), "untouched").unwrap();
         let files = BTreeMap::from([
@@ -265,8 +273,8 @@ mod tests {
             ("src/app.ts".to_string(), "export {}".to_string()),
         ]);
 
-        let first = export_project_files(&parent, "Demo", &files, &[]).unwrap();
-        let second = export_project_files(&parent, "Demo", &files, &[]).unwrap();
+        let first = export_project_files(parent.path(), "Demo", &files, &[]).unwrap();
+        let second = export_project_files(parent.path(), "Demo", &files, &[]).unwrap();
 
         assert_eq!(first.directory_name, "Demo-2");
         assert_eq!(second.directory_name, "Demo-3");
@@ -278,16 +286,14 @@ mod tests {
             fs::read_to_string(Path::new(&first.path).join("src/app.ts")).unwrap(),
             "export {}"
         );
-        fs::remove_dir_all(parent).unwrap();
     }
 
     #[test]
     fn export_rejects_unsafe_paths_without_creating_a_project() {
         let parent = temporary_directory();
         let files = BTreeMap::from([("../escape.txt".to_string(), "no".to_string())]);
-        assert!(export_project_files(&parent, "Unsafe", &files, &[]).is_err());
-        assert!(!parent.join("Unsafe").exists());
-        fs::remove_dir_all(parent).unwrap();
+        assert!(export_project_files(parent.path(), "Unsafe", &files, &[]).is_err());
+        assert!(!parent.path().join("Unsafe").exists());
     }
 
     #[test]
@@ -300,7 +306,7 @@ mod tests {
             bytes: vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0],
         };
 
-        let result = export_project_files(&parent, "Images", &files, &[png]).unwrap();
+        let result = export_project_files(parent.path(), "Images", &files, &[png]).unwrap();
         assert_eq!(result.file_count, 2);
         assert_eq!(
             fs::read(Path::new(&result.path).join("public/generated/hero.png")).unwrap(),
@@ -312,8 +318,7 @@ mod tests {
             mime_type: "image/png".to_string(),
             bytes: b"not a png".to_vec(),
         };
-        assert!(export_project_files(&parent, "Invalid", &files, &[invalid]).is_err());
-        assert!(!parent.join("Invalid").exists());
-        fs::remove_dir_all(parent).unwrap();
+        assert!(export_project_files(parent.path(), "Invalid", &files, &[invalid]).is_err());
+        assert!(!parent.path().join("Invalid").exists());
     }
 }

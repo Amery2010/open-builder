@@ -1,13 +1,15 @@
 import { useEffect, useState } from "react";
+import { Trash2 } from "lucide-react";
 import type { ProjectAssets } from "../../types";
 import { getProjectAssetBlob } from "../../lib/project-assets/core";
 import { useT } from "../../i18n";
 
 interface ProjectAssetListProps {
   assets: ProjectAssets;
+  onRemove?: (path: string) => void;
 }
 
-export function ProjectAssetList({ assets }: ProjectAssetListProps) {
+export function ProjectAssetList({ assets, onRemove }: ProjectAssetListProps) {
   const t = useT();
   const [urls, setUrls] = useState<Record<string, string>>({});
 
@@ -54,7 +56,7 @@ export function ProjectAssetList({ assets }: ProjectAssetListProps) {
       <div className="grid grid-cols-2 gap-1.5">
         {entries.map((asset) => (
           <figure key={asset.path} className="min-w-0">
-            <div className="flex h-14 items-center justify-center overflow-hidden rounded border bg-muted/40">
+            <div className="relative flex h-14 items-center justify-center overflow-hidden rounded border bg-muted/40">
               {urls[asset.path] ? (
                 <img
                   src={urls[asset.path]}
@@ -65,6 +67,19 @@ export function ProjectAssetList({ assets }: ProjectAssetListProps) {
                 <span className="text-[10px] text-muted-foreground">
                   {t.explorer.image}
                 </span>
+              )}
+              {onRemove && (
+                <button
+                  type="button"
+                  className="absolute right-1 top-1 rounded bg-background/90 p-1 text-muted-foreground shadow-sm hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  aria-label={t.explorer.removeAsset.replace(
+                    "{name}",
+                    asset.path,
+                  )}
+                  onClick={() => onRemove(asset.path)}
+                >
+                  <Trash2 className="size-3" aria-hidden="true" />
+                </button>
               )}
             </div>
             <figcaption className="mt-1 truncate text-[10px] text-muted-foreground">

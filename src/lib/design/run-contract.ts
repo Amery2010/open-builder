@@ -233,6 +233,9 @@ const DESIGN_GATED_WRITE_TOOLS = new Set([
   "manage_env",
   "install_component",
   "screenshot_to_code",
+  // Local CLI media is admitted through a bounded Host-owned asset importer.
+  // It still mutates ProjectFiles and therefore requires the current contract.
+  "import_generated_image",
   "apply_design_style",
   "update_design_tokens",
   "update_project_design",
@@ -247,6 +250,9 @@ export interface DesignContractRunPolicy {
   allowProjectDesignRepair?: boolean;
   expectedChangeModes?: readonly DesignChangeMode[];
   expectedSystemId?: string | null;
+  /** Automatic repair may reuse one exact reviewed contract, but the model
+   * cannot replace it or widen its blueprint while that repair runs. */
+  sealReusableContract?: boolean;
   blueprint?: DesignBlueprintScopeBindings;
   /** Flat fields keep this policy compatible with the existing system/change bindings. */
   expectedBlueprintRevision?: DesignBlueprintRevision;
@@ -275,6 +281,7 @@ export interface DesignContractController {
   submit(input: unknown, context: SubmitDesignContractContext): DesignContract;
   authorizeProjectWrite(toolName: string, args?: unknown): string | undefined;
   getContract(): DesignContract | null;
+  isReusableContractSealed(): boolean;
   isReady(): boolean;
 }
 
@@ -543,10 +550,13 @@ function writePathsForTool(
 ): BlueprintWritePathResult {
   if (
     toolName === "apply_design_style" ||
+    toolName === "import_generated_image" ||
     toolName === "update_design_tokens" ||
     toolName === "update_project_design"
   ) {
-    // These host operations have fixed, root-level authority targets.
+    // These Host operations have bounded authority targets. Imported media can
+    // add only a new collision-checked asset plus its derived module; changing
+    // rendered project code still goes through a separately scoped write.
     return { kind: "trusted-authority" };
   }
   if (toolName === "manage_dependencies") {
@@ -630,11 +640,17 @@ export function createDesignContractController(): DesignContractController {
   let policy: DesignContractRunPolicy = { enabled: false };
   let blueprintPolicy: NormalizedBlueprintScopeBindings = { enabled: false };
   let contract: DesignContract | null = null;
+  let reusableContractSealed = false;
 
   return {
     reset(nextPolicy, reusableContract) {
+      // A failed policy rebuild must never leave authority from the prior run.
+      policy = { enabled: false };
+      blueprintPolicy = { enabled: false };
+      contract = null;
+      reusableContractSealed = false;
       const nextBlueprintPolicy = normalizeBlueprintBindings(nextPolicy);
-      policy = {
+      const preparedPolicy: DesignContractRunPolicy = {
         enabled: nextPolicy.enabled,
         ...(nextPolicy.allowProjectDesignRepair
           ? { allowProjectDesignRepair: true }
@@ -645,29 +661,37 @@ export function createDesignContractController(): DesignContractController {
         ...(nextPolicy.expectedChangeModes
           ? { expectedChangeModes: [...nextPolicy.expectedChangeModes] }
           : {}),
+        ...(nextPolicy.sealReusableContract
+          ? { sealReusableContract: true }
+          : {}),
       };
-      blueprintPolicy = nextBlueprintPolicy;
       if (!reusableContract) {
-        contract = null;
+        if (nextPolicy.sealReusableContract) {
+          throw new Error(
+            "A sealed reusable Design policy requires a reusable contract.",
+          );
+        }
+        policy = preparedPolicy;
+        blueprintPolicy = nextBlueprintPolicy;
         return;
       }
-      if (policy.allowProjectDesignRepair) {
+      if (preparedPolicy.allowProjectDesignRepair) {
         throw new Error(
           "Repair the invalid project design before reusing a Design contract.",
         );
       }
       const parsed = designContractSchema.parse(reusableContract);
       if (
-        policy.expectedSystemId !== undefined &&
-        parsed.system_id !== policy.expectedSystemId
+        preparedPolicy.expectedSystemId !== undefined &&
+        parsed.system_id !== preparedPolicy.expectedSystemId
       ) {
         throw new Error(
           "The reusable Design contract no longer matches the applied Design system.",
         );
       }
       if (
-        policy.expectedChangeModes &&
-        !policy.expectedChangeModes.includes(parsed.change_mode)
+        preparedPolicy.expectedChangeModes &&
+        !preparedPolicy.expectedChangeModes.includes(parsed.change_mode)
       ) {
         throw new Error(
           "The reusable Design contract no longer matches the required change mode.",
@@ -675,9 +699,12 @@ export function createDesignContractController(): DesignContractController {
       }
       validateBlueprintScope(
         blueprintScopeForContract(parsed),
-        blueprintPolicy,
+        nextBlueprintPolicy,
       );
+      policy = preparedPolicy;
+      blueprintPolicy = nextBlueprintPolicy;
       contract = cloneContract(parsed);
+      reusableContractSealed = nextPolicy.sealReusableContract === true;
     },
 
     submit(input, context) {
@@ -689,6 +716,11 @@ export function createDesignContractController(): DesignContractController {
       if (policy.allowProjectDesignRepair) {
         throw new Error(
           "Repair the invalid project design with update_project_design before submitting a Design contract.",
+        );
+      }
+      if (reusableContractSealed) {
+        throw new Error(
+          "The reusable Design contract is sealed for this automatic repair and cannot be replaced.",
         );
       }
       const parsed = designContractSchema.parse(input);
@@ -752,12 +784,17 @@ export function createDesignContractController(): DesignContractController {
         requestedSubagent !== null &&
         (requestedSubagent.writePolicy ?? "readonly") === "readonly";
       if (
-        !policy.enabled ||
         !DESIGN_GATED_WRITE_TOOLS.has(toolName) ||
         toolName === "init_project" ||
         isKnownReadonlySubagent
       ) {
         return undefined;
+      }
+      if (!policy.enabled) {
+        return (
+          `Design run policy required before project write tool "${toolName}". ` +
+          "Start a current Design run and submit a new Design contract."
+        );
       }
       if (
         !contract &&
@@ -770,6 +807,13 @@ export function createDesignContractController(): DesignContractController {
         return (
           `Design contract required before project write tool "${toolName}". ` +
           "Inspect the project, load the correct Design Skill, and call submit_design_contract first."
+        );
+      }
+
+      if (reusableContractSealed && toolName === "update_project_design") {
+        return blueprintWriteScopeError(
+          toolName,
+          "the reviewed blueprint is sealed for this automatic repair",
         );
       }
 
@@ -819,6 +863,10 @@ export function createDesignContractController(): DesignContractController {
 
     getContract() {
       return contract ? cloneContract(contract) : null;
+    },
+
+    isReusableContractSealed() {
+      return reusableContractSealed;
     },
 
     isReady() {

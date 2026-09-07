@@ -83,6 +83,7 @@ import { useProjectDesignWorkspaceStore } from "../store/project-design-workspac
 import { computeDesignReviewSourceDigest } from "../lib/design/review-jobs/digest";
 import { createDesignReviewLogEntry } from "../lib/design/review-jobs/logs";
 import {
+  isDesignReviewRunActive,
   isDesignReviewTerminalStatus,
   type DesignReviewJobInput,
   type DesignReviewRun,
@@ -94,6 +95,7 @@ import {
 } from "../lib/mcp/agnes/attachments";
 import {
   createDesignContractController,
+  DESIGN_CHANGE_MODES,
   type DesignBlueprintScopeBindings,
   type DesignChangeMode,
   type DesignContract,
@@ -235,6 +237,25 @@ function getLastForcedSkillIds(messages: readonly Message[]): string[] {
   return [];
 }
 
+function getLastDesignExpectedChangeModes(
+  messages: readonly Message[],
+): DesignChangeMode[] | undefined {
+  const allowed = new Set<string>(DESIGN_CHANGE_MODES);
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (message.role !== "user" || message.metadata?.origin) continue;
+    const rawModes = message.metadata?.designExpectedChangeModes;
+    const modes = Array.isArray(rawModes)
+      ? rawModes.filter(
+          (mode): mode is DesignChangeMode =>
+            typeof mode === "string" && allowed.has(mode),
+        )
+      : undefined;
+    return modes?.length ? [...new Set(modes)] : undefined;
+  }
+  return undefined;
+}
+
 function isAgnesImageToolAvailable(): boolean {
   const state = useMcpStore.getState();
   return Boolean(
@@ -294,9 +315,48 @@ interface GenerateRunOptions {
   automaticDesignReviewActivityId?: string;
   skipAutomaticDesignReview?: boolean;
   messageOrigin?: NonNullable<Message["metadata"]>["origin"];
+  /** Internal currentness binding for a background repair promoted into the
+   * foreground. Message/activity updates preserve this source-only token. */
+  expectedConversationId?: string;
+  expectedProjectSource?: DesignRepairProjectSource;
   /** Request-scoped preparation that must run after the optimistic message and
    * loading state are visible, but before generator setup and provider I/O. */
   prepareRun?: () => Promise<void>;
+}
+
+interface DesignRepairProjectSource {
+  files: ProjectFiles;
+  appliedSystemKey: string;
+  workspaceMode: WorkspaceMode;
+}
+
+function appliedDesignSystemKey(conversation: Conversation | undefined) {
+  const applied = conversation?.designState?.appliedSystem;
+  return applied
+    ? [applied.id, applied.version, applied.digest ?? ""].join("\u0000")
+    : "";
+}
+
+function captureDesignRepairProjectSource(
+  conversation: Conversation,
+): DesignRepairProjectSource {
+  return {
+    files: conversation.files,
+    appliedSystemKey: appliedDesignSystemKey(conversation),
+    workspaceMode: conversation.workspaceMode ?? "auto",
+  };
+}
+
+function isDesignRepairProjectSourceCurrent(
+  expected: DesignRepairProjectSource,
+  conversation: Conversation | undefined,
+): boolean {
+  return Boolean(
+    conversation &&
+    conversation.files === expected.files &&
+    appliedDesignSystemKey(conversation) === expected.appliedSystemKey &&
+    (conversation.workspaceMode ?? "auto") === expected.workspaceMode,
+  );
 }
 
 function designBlueprintBindings(
@@ -760,8 +820,49 @@ export function useGenerator({
   const designContractControllerRef = useRef(createDesignContractController());
   const lastAcceptedDesignContractRef = useRef<DesignContract | null>(null);
   const designRunInitialFilesRef = useRef<ProjectFiles>({});
+  const designRunExpectedChangeModesRef = useRef<
+    readonly DesignChangeMode[] | undefined
+  >(undefined);
   const reviewContractByRunIdRef = useRef(
     new Map<string, DesignContract | null>(),
+  );
+
+  const configureDesignRun = useCallback(
+    (
+      conversation: Conversation | undefined,
+      options: {
+        expectedChangeModes?: readonly DesignChangeMode[];
+        reusableContract?: DesignContract;
+        profile?: ToolProfile;
+        sealReusableContract?: boolean;
+      } = {},
+    ) => {
+      const files = conversation?.files ?? {};
+      const workspace = getConversationWorkspaceContext(conversation?.id);
+      const expectedChangeModes =
+        options.expectedChangeModes ??
+        (Object.keys(files).length === 0 ? (["create"] as const) : undefined);
+      designRunInitialFilesRef.current = { ...files };
+      designRunExpectedChangeModesRef.current = expectedChangeModes
+        ? [...expectedChangeModes]
+        : undefined;
+      designContractControllerRef.current.reset(
+        {
+          enabled: (options.profile ?? workspace.profile) === "design",
+          expectedSystemId:
+            conversation?.designState?.appliedSystem?.id ?? null,
+          expectedChangeModes,
+          ...(options.sealReusableContract
+            ? { sealReusableContract: true }
+            : {}),
+          ...(conversation ? designBlueprintRunPolicy(files) : {}),
+        },
+        options.reusableContract,
+      );
+      lastAcceptedDesignContractRef.current =
+        designContractControllerRef.current.getContract();
+    },
+    [],
   );
 
   const clearOutputBuffers = useCallback(() => {
@@ -799,6 +900,7 @@ export function useGenerator({
       activeToolProfileRef.current = "default";
       designContractControllerRef.current.reset({ enabled: false });
       designRunInitialFilesRef.current = {};
+      designRunExpectedChangeModesRef.current = undefined;
       generatorRef.current?.abort();
     },
     [clearOutputBuffers],
@@ -820,6 +922,7 @@ export function useGenerator({
     activeToolProfileRef.current = "default";
     designContractControllerRef.current.reset({ enabled: false });
     designRunInitialFilesRef.current = {};
+    designRunExpectedChangeModesRef.current = undefined;
     clearOutputBuffers();
     setIsThinkingStreaming(false);
     useInteractiveStore.getState().rejectAllPending("project reset");
@@ -859,6 +962,7 @@ export function useGenerator({
     activeToolProfileRef.current = "default";
     designContractControllerRef.current.reset({ enabled: false });
     designRunInitialFilesRef.current = {};
+    designRunExpectedChangeModesRef.current = undefined;
     clearOutputBuffers();
     prevActiveIdRef.current = activeId;
     useInteractiveStore.getState().rejectAllPending("conversation switched");
@@ -958,9 +1062,14 @@ export function useGenerator({
       if (
         !reviewJobId ||
         !status ||
-        !["capturing", "queued", "running", "fixing", "verifying"].includes(
-          status,
-        ) ||
+        ![
+          "capturing",
+          "queued",
+          "running",
+          "fixing",
+          "verifying",
+          "deferred",
+        ].includes(status) ||
         persistedIds.has(reviewJobId) ||
         activeCaptureId === reviewJobId ||
         pendingAutomaticCaptureIds.has(reviewJobId)
@@ -1102,7 +1211,7 @@ export function useGenerator({
   const appendGenerationError = useCallback(
     (
       err: unknown,
-      options: { replaceExisting?: boolean } = {},
+      options: { replaceExisting?: boolean; retryable?: boolean } = {},
     ): StructuredGenerationError => {
       flushOutputBuffers();
       setIsThinkingStreaming(false);
@@ -1121,7 +1230,7 @@ export function useGenerator({
           content: formatGenerationErrorMessage(classified, getT()),
           isError: true,
           errorKind: classified.kind,
-          errorRetryable: classified.retryable,
+          errorRetryable: options.retryable ?? classified.retryable,
           ...(classified.status !== undefined
             ? { errorStatus: classified.status }
             : {}),
@@ -1544,12 +1653,21 @@ export function useGenerator({
             useConversationStore.getState().conversations[
               generatorConversationId
             ];
-          designContractControllerRef.current.reset({
-            enabled: true,
-            expectedSystemId:
-              currentConversation?.designState?.appliedSystem?.id ?? null,
-            blueprint: designBlueprintBindings(nextFiles),
-          });
+          const reusableContract =
+            designContractControllerRef.current.isReusableContractSealed()
+              ? (designContractControllerRef.current.getContract() ?? undefined)
+              : undefined;
+          designContractControllerRef.current.reset(
+            {
+              enabled: true,
+              expectedSystemId:
+                currentConversation?.designState?.appliedSystem?.id ?? null,
+              expectedChangeModes: designRunExpectedChangeModesRef.current,
+              ...(reusableContract ? { sealReusableContract: true } : {}),
+              blueprint: designBlueprintBindings(nextFiles),
+            },
+            reusableContract,
+          );
         },
       });
 
@@ -1944,6 +2062,10 @@ export function useGenerator({
             .returnFromPlan(generatorConversationId);
           const profile: ToolProfile =
             returnMode === "design" ? "design" : "default";
+          // Bind the approved continuation to the same profile used to build
+          // its replacement tool set, even if the workspace selector changes
+          // while MCP preparation is in flight.
+          activeToolProfileRef.current = profile;
           generatorRef.current?.setReadOnlyMode(false);
           generatorRef.current?.setExecutionMode("chat");
           const mcpRuntime = await runtime.mcpManager.prepareRuntime();
@@ -2056,7 +2178,20 @@ export function useGenerator({
             },
           };
         },
-        authorizeToolCall: (name, args) => {
+        authorizeToolCall: (name, args, context) => {
+          const currentRun = candidate?.getRunContext();
+          if (
+            context.signal.aborted ||
+            generatorRef.current !== candidate ||
+            !isCurrentGeneratorRun(generatorConversationId) ||
+            !currentRun ||
+            currentRun.runId !== context.run.runId
+          ) {
+            return `Tool "${name}" belongs to a generation run that is no longer current.`;
+          }
+          // Authorization follows the profile used to compile this run's
+          // immutable tool authority. A workspace selector change cannot
+          // loosen an already-running Design request.
           if (activeToolProfileRef.current !== "design") return;
           return designContractControllerRef.current.authorizeProjectWrite(
             name,
@@ -2195,20 +2330,34 @@ export function useGenerator({
       dynamicOptions: {
         includeMcp?: boolean;
         mode?: ExecutionMode;
-        workspaceMode?: WorkspaceMode;
+        promptWorkspaceMode?: WorkspaceMode;
         profile?: ToolProfile;
         customSystemPromptSnapshot?: string;
+        isCurrent?: () => boolean;
       } = {},
     ) => {
-      const runtime = await loadGeneratorRuntime();
+      const assertCurrent = () => {
+        if (dynamicOptions.isCurrent && !dynamicOptions.isCurrent()) {
+          throw new DOMException(
+            "generation setup was superseded",
+            "AbortError",
+          );
+        }
+      };
+      assertCurrent();
       const conversationId = generator.getRunContext().conversationId;
       const workspace = getConversationWorkspaceContext(conversationId);
       const promptWorkspaceMode =
-        dynamicOptions.workspaceMode ?? workspace.promptWorkspaceMode;
+        dynamicOptions.promptWorkspaceMode ?? workspace.promptWorkspaceMode;
       const mode = dynamicOptions.mode ?? workspace.mode;
       const profile = dynamicOptions.profile ?? workspace.profile;
       const isDesignReview = profile === "design_review";
+      // Publish the run profile before the first async boundary. If a stopped
+      // run later resumes setup, it cannot overwrite the profile selected by a
+      // newer foreground run using the same generator instance.
       activeToolProfileRef.current = profile;
+      const runtime = await loadGeneratorRuntime();
+      assertCurrent();
       generator.setNativeSearchAllowed?.(mode !== "auto_qa" && !isDesignReview);
       generator.setConversationContextAllowed?.(!isDesignReview);
       const mcpRuntime = await runtime.mcpManager.prepareRuntime({
@@ -2217,6 +2366,7 @@ export function useGenerator({
             ? false
             : dynamicOptions.includeMcp,
       });
+      assertCurrent();
       mcpRuntimeRef.current =
         dynamicOptions.includeMcp === false || isDesignReview
           ? null
@@ -2275,10 +2425,12 @@ export function useGenerator({
         runtime.isSkillsAvailable()
       ) {
         const registry = await runtime.getSkillRegistry();
+        assertCurrent();
         skillsSuffix = runtime.buildSkillsPromptSection(
           registry.getAutoEnabled(),
         );
         const prepared = await registry.prepareForcedSkills(forcedSkillIds);
+        assertCurrent();
         skillContext.activateMany(prepared.map((skill) => skill.entry));
         forcedSkillsSuffix = runtime.buildForcedSkillsPromptSection(prepared);
       } else if (forcedSkillIds.length > 0) {
@@ -2294,6 +2446,7 @@ export function useGenerator({
         promptWorkspaceMode === "design"
           ? await loadDesignSystemContext(designState)
           : "";
+      assertCurrent();
       const projectDesignContext =
         promptWorkspaceMode === "design" && conversationId
           ? projectDesignWorkspaceContext(
@@ -2334,6 +2487,7 @@ export function useGenerator({
         mode === "auto_qa" || isDesignReview ? "" : mcpRuntime.instructions,
       );
       generator.setSystemPromptSuffix(promptSuffix);
+      assertCurrent();
     },
     [],
   );
@@ -2365,6 +2519,7 @@ export function useGenerator({
       await applyDynamicGeneratorState(generator, [], {
         includeMcp: false,
         mode: "auto_qa",
+        isCurrent: isCurrentRun,
       });
       if (!isCurrentRun()) return;
       setRunState("autoQa");
@@ -2391,6 +2546,7 @@ export function useGenerator({
         console.error("Automatic QA failed:", err);
         appendGenerationError(
           new Error(`Automatic QA failed: ${err?.message || "Unknown error"}`),
+          { retryable: false },
         );
       }
     },
@@ -2539,8 +2695,44 @@ export function useGenerator({
       attachments?: Attachment[],
       options: GenerateRunOptions = {},
     ) => {
-      const runConversationId = useConversationStore.getState().activeId;
+      if (runConversationIdRef.current !== null) return;
+      const runStartState = useConversationStore.getState();
+      const runConversationId = runStartState.activeId;
       if (!runConversationId) return;
+      const runStartConversation =
+        runStartState.conversations[runConversationId];
+      const runWorkspace = getConversationWorkspaceContext(runConversationId);
+      if (
+        (options.expectedConversationId !== undefined &&
+          options.expectedConversationId !== runConversationId) ||
+        (options.expectedProjectSource !== undefined &&
+          !isDesignRepairProjectSourceCurrent(
+            options.expectedProjectSource,
+            runStartConversation,
+          )) ||
+        (options.messageOrigin === "design_auto_fix" &&
+          runWorkspace.profile !== "design")
+      ) {
+        const activityId = options.automaticDesignReviewActivityId;
+        if (activityId) {
+          updateAutomaticReviewActivity(
+            options.expectedConversationId ?? runConversationId,
+            activityId,
+            {
+              status: "superseded",
+              stale: true,
+            },
+          );
+        }
+        const automatic = useDesignReviewStore.getState().automatic;
+        if (
+          automatic?.evidence.conversationId ===
+          (options.expectedConversationId ?? runConversationId)
+        ) {
+          useDesignReviewStore.getState().finishAutomatic("superseded");
+        }
+        return;
+      }
       if (options.messageOrigin !== "design_auto_fix") {
         const reviewStore = useDesignReviewStore.getState();
         const pendingAutomatic = reviewStore.automatic?.evidence;
@@ -2571,6 +2763,7 @@ export function useGenerator({
       const messageMetadata =
         attachmentRefs.length > 0 ||
         options.designSelection ||
+        options.designExpectedChangeModes?.length ||
         options.messageOrigin
           ? {
               ...(attachmentRefs.length > 0
@@ -2579,14 +2772,20 @@ export function useGenerator({
               ...(options.designSelection
                 ? { designSelection: options.designSelection }
                 : {}),
+              ...(options.designExpectedChangeModes?.length
+                ? {
+                    designExpectedChangeModes: [
+                      ...new Set(options.designExpectedChangeModes),
+                    ],
+                  }
+                : {}),
               ...(options.messageOrigin
                 ? { origin: options.messageOrigin }
                 : {}),
             }
           : undefined;
 
-      const previousConversation =
-        useConversationStore.getState().conversations[runConversationId];
+      const previousConversation = runStartConversation;
       const currentMessageIndex = removeErrorMessages(
         previousConversation?.messages ?? [],
       ).length;
@@ -2625,31 +2824,38 @@ export function useGenerator({
         designContractControllerRef.current.reset({ enabled: false });
         await options.prepareRun?.();
         if (!isCurrentRun()) return;
+        if (options.designExpectedChangeModes?.length) {
+          const expectedChangeModes = [
+            ...new Set(options.designExpectedChangeModes),
+          ];
+          useConversationStore
+            .getState()
+            .setMessagesForConversation(runConversationId, (messages) =>
+              messages.map((message, index) =>
+                index === currentMessageIndex &&
+                message.role === "user" &&
+                !message.metadata?.origin
+                  ? {
+                      ...message,
+                      metadata: {
+                        ...message.metadata,
+                        designExpectedChangeModes: expectedChangeModes,
+                      },
+                    }
+                  : message,
+              ),
+            );
+        }
         const preparedConversation =
           useConversationStore.getState().conversations[runConversationId];
-        const preparedWorkspace =
-          getConversationWorkspaceContext(runConversationId);
-        designRunInitialFilesRef.current = {
-          ...(preparedConversation?.files ?? {}),
-        };
-        designContractControllerRef.current.reset(
-          {
-            enabled: preparedWorkspace.profile === "design",
-            expectedSystemId:
-              preparedConversation?.designState?.appliedSystem?.id ?? null,
-            expectedChangeModes:
-              options.designExpectedChangeModes ??
-              (Object.keys(preparedConversation?.files ?? {}).length === 0
-                ? (["create"] as const)
-                : undefined),
-            ...(preparedConversation
-              ? designBlueprintRunPolicy(preparedConversation.files)
-              : {}),
-          },
-          options.reusableDesignContract,
-        );
-        lastAcceptedDesignContractRef.current =
-          designContractControllerRef.current.getContract();
+        configureDesignRun(preparedConversation, {
+          expectedChangeModes: options.designExpectedChangeModes,
+          reusableContract: options.reusableDesignContract,
+          profile: runWorkspace.profile,
+          sealReusableContract:
+            options.messageOrigin === "design_auto_fix" &&
+            options.reusableDesignContract !== undefined,
+        });
         const resolvedAttachments = attachments?.length
           ? await resolveAttachmentsForModel(attachments)
           : [];
@@ -2678,6 +2884,10 @@ export function useGenerator({
             options.forcedSkillIds ?? [],
             {
               customSystemPromptSnapshot,
+              promptWorkspaceMode: runWorkspace.promptWorkspaceMode,
+              mode: runWorkspace.mode,
+              profile: runWorkspace.profile,
+              isCurrent: isCurrentRun,
             },
           );
         }
@@ -2705,6 +2915,7 @@ export function useGenerator({
               expectedChangeModes: ["create", "extend"],
               ...designBlueprintRunPolicy(result.files),
             });
+            designRunExpectedChangeModesRef.current = ["create", "extend"];
             result = await generator.generate(AUTOMATIC_PROTOTYPE_BATCH_PROMPT);
           }
           const prototypeBuildIncomplete = hasIncompletePrototypeBuild(
@@ -2731,7 +2942,10 @@ export function useGenerator({
         if (!isCurrentRun()) return;
         console.error("Error generating:", err);
         if (err?.name !== "AbortError") {
-          appendGenerationError(err, { replaceExisting: true });
+          appendGenerationError(err, {
+            replaceExisting: true,
+            ...(options.messageOrigin ? { retryable: false } : {}),
+          });
         }
       } finally {
         clearAgnesAttachments();
@@ -2777,6 +2991,10 @@ export function useGenerator({
     customSystemPromptRef.current = "";
     requestPromptContextRef.current = "";
     runConversationIdRef.current = null;
+    activeToolProfileRef.current = "default";
+    designContractControllerRef.current.reset({ enabled: false });
+    designRunInitialFilesRef.current = {};
+    designRunExpectedChangeModesRef.current = undefined;
     useInteractiveStore.getState().rejectAllPending("user stopped");
     setRunState("aborted");
     setIsGenerating(false);
@@ -2821,6 +3039,7 @@ export function useGenerator({
     activeToolProfileRef.current = "default";
     designContractControllerRef.current.reset({ enabled: false });
     designRunInitialFilesRef.current = {};
+    designRunExpectedChangeModesRef.current = undefined;
     clearOutputBuffers();
     useInteractiveStore.getState().rejectAllPending("user message withdrawn");
     useSubagentStore.setState({ progress: {} });
@@ -2874,11 +3093,33 @@ export function useGenerator({
   ]);
 
   const retry = useCallback(async () => {
-    const runConversationId = useConversationStore.getState().activeId;
+    if (runConversationIdRef.current !== null) return;
+    const retryStartState = useConversationStore.getState();
+    const runConversationId = retryStartState.activeId;
     if (!runConversationId) return;
+    const retryConversation = retryStartState.conversations[runConversationId];
+    const retryWorkspace = getConversationWorkspaceContext(runConversationId);
+    const lastRunRequest = [...(retryConversation?.messages ?? [])]
+      .reverse()
+      .find(
+        (message) =>
+          message.role === "user" &&
+          message.metadata?.origin !== "design_review",
+      );
+    if (lastRunRequest?.metadata?.origin) {
+      appendGenerationError(new Error(getT().chat.automaticRetryUnavailable), {
+        replaceExisting: true,
+        retryable: false,
+      });
+      return;
+    }
     const customSystemPromptSnapshot =
       useSettingsStore.getState().system.customSystemPrompt;
     runConversationIdRef.current = runConversationId;
+    const runEpoch = ++generationRunEpochRef.current;
+    const isCurrentRun = () =>
+      generationRunEpochRef.current === runEpoch &&
+      isCurrentGeneratorRun(runConversationId);
     setRunState("preparing");
     setLastError(null);
     setIsThinkingStreaming(false);
@@ -2898,52 +3139,65 @@ export function useGenerator({
     let clearAgnesAttachments = () => {};
     try {
       const generator = await getGenerator();
-      if (!isCurrentGeneratorRun(runConversationId)) return;
+      if (!isCurrentRun()) return;
       if (generator) {
         const storeState = useConversationStore.getState();
         const activeConv = runConversationId
           ? storeState.conversations[runConversationId]
           : null;
-        if (activeConv) {
-          const lastRequest = [...activeConv.messages]
-            .reverse()
-            .find(
-              (message) => message.role === "user" && !message.metadata?.origin,
-            );
-          const resolvedAttachments = lastRequest?.metadata?.attachments?.length
-            ? await resolveAttachmentsForModel(lastRequest.metadata.attachments)
-            : [];
-          clearAgnesAttachments = registerAgnesRunAttachments(
-            runConversationId,
-            resolvedAttachments,
+        if (!activeConv) return;
+        generator.setFiles(activeConv.files);
+        configureDesignRun(activeConv, {
+          expectedChangeModes: getLastDesignExpectedChangeModes(
+            activeConv.messages,
+          ),
+          profile: retryWorkspace.profile,
+        });
+        const lastRequest = [...activeConv.messages]
+          .reverse()
+          .find(
+            (message) => message.role === "user" && !message.metadata?.origin,
           );
-          const manifest = isAgnesImageToolAvailable()
-            ? formatAgnesAttachmentManifest(resolvedAttachments)
-            : "";
-          generator.syncMessages(
-            appendAgnesManifestToLastUserMessage(
-              await getMessagesForAPI(activeConv),
-              manifest,
-            ),
-          );
-        }
+        const resolvedAttachments = lastRequest?.metadata?.attachments?.length
+          ? await resolveAttachmentsForModel(lastRequest.metadata.attachments)
+          : [];
+        if (!isCurrentRun()) return;
+        clearAgnesAttachments = registerAgnesRunAttachments(
+          runConversationId,
+          resolvedAttachments,
+        );
+        const manifest = isAgnesImageToolAvailable()
+          ? formatAgnesAttachmentManifest(resolvedAttachments)
+          : "";
+        generator.syncMessages(
+          appendAgnesManifestToLastUserMessage(
+            await getMessagesForAPI(activeConv),
+            manifest,
+          ),
+        );
         await applyDynamicGeneratorState(
           generator,
-          getLastForcedSkillIds(activeConv?.messages ?? []),
-          { customSystemPromptSnapshot },
+          getLastForcedSkillIds(activeConv.messages),
+          {
+            customSystemPromptSnapshot,
+            promptWorkspaceMode: retryWorkspace.promptWorkspaceMode,
+            mode: retryWorkspace.mode,
+            profile: retryWorkspace.profile,
+            isCurrent: isCurrentRun,
+          },
         );
-        if (!isCurrentGeneratorRun(runConversationId)) return;
+        if (!isCurrentRun()) return;
         await generator.retry();
       }
     } catch (err: any) {
-      if (!isCurrentGeneratorRun(runConversationId)) return;
+      if (!isCurrentRun()) return;
       console.error("Error retrying:", err);
       if (err?.name !== "AbortError") {
         appendGenerationError(err);
       }
     } finally {
       clearAgnesAttachments();
-      if (isCurrentGeneratorRun(runConversationId)) {
+      if (isCurrentRun()) {
         setMessages((prev) => filterMemoryMessages(prev));
         setIsGenerating(false);
         setIsThinkingStreaming(false);
@@ -2962,6 +3216,7 @@ export function useGenerator({
     setMessages,
     applyDynamicGeneratorState,
     appendGenerationError,
+    configureDesignRun,
     isCurrentGeneratorRun,
   ]);
 
@@ -3130,7 +3385,20 @@ export function useGenerator({
     ) => {
       const conversation =
         useConversationStore.getState().conversations[evidence.conversationId];
-      if (!conversation) return;
+      if (!conversation) {
+        updateAutomaticReviewActivity(
+          evidence.conversationId,
+          evidence.requestId,
+          { status: "superseded", stale: true },
+        );
+        if (
+          useDesignReviewStore.getState().automatic?.evidence.requestId ===
+          evidence.requestId
+        ) {
+          useDesignReviewStore.getState().finishAutomatic("superseded");
+        }
+        return;
+      }
 
       const runtimeSnapshots = screenshots.flatMap((screenshot) =>
         screenshot.semanticSnapshot ? [screenshot.semanticSnapshot] : [],
@@ -3183,20 +3451,116 @@ export function useGenerator({
         },
       };
 
+      const activeRun = (
+        useDesignReviewStore.getState().runsByConversation[
+          evidence.conversationId
+        ] ?? []
+      ).find(isDesignReviewRunActive);
+      if (activeRun) {
+        if (
+          useDesignReviewStore.getState().automatic?.evidence.requestId ===
+          evidence.requestId
+        ) {
+          useDesignReviewStore.getState().setAutomaticStage("deferred");
+        }
+        updateAutomaticReviewActivity(
+          evidence.conversationId,
+          evidence.requestId,
+          { status: "deferred" },
+        );
+        await waitForDesignReviewRun(activeRun.id);
+        const resumedConversation =
+          useConversationStore.getState().conversations[
+            evidence.conversationId
+          ];
+        const resumedProjectSource = resumedConversation
+          ? captureDesignRepairProjectSource(resumedConversation)
+          : null;
+        const resumedDigest = resumedConversation
+          ? await computeDesignReviewSourceDigest({
+              files: resumedConversation.files,
+              designSystem:
+                resumedConversation.designState?.appliedSystem ?? null,
+              designContract: evidence.contract,
+            })
+          : null;
+        const resumedState = useConversationStore.getState();
+        const currentAutomatic =
+          useDesignReviewStore.getState().automatic?.evidence.requestId ===
+          evidence.requestId;
+        const resumedProjectIsCurrent =
+          resumedProjectSource !== null &&
+          isDesignRepairProjectSourceCurrent(
+            resumedProjectSource,
+            resumedState.conversations[evidence.conversationId],
+          );
+        if (
+          !currentAutomatic ||
+          !evidence.sourceDigest ||
+          resumedDigest !== evidence.sourceDigest ||
+          !resumedProjectIsCurrent ||
+          resumedConversation?.workspaceMode !== "design" ||
+          hasNewerGenuineUserMessage(
+            evidence.conversationId,
+            evidence.requestId,
+          )
+        ) {
+          updateAutomaticReviewActivity(
+            evidence.conversationId,
+            evidence.requestId,
+            {
+              status: "superseded",
+              stale: resumedDigest !== evidence.sourceDigest,
+            },
+          );
+          if (currentAutomatic) {
+            useDesignReviewStore.getState().finishAutomatic("superseded");
+          }
+          return;
+        }
+        updateAutomaticReviewActivity(
+          evidence.conversationId,
+          evidence.requestId,
+          { status: "queued" },
+        );
+      }
+
       useDesignReviewStore.getState().setAutomaticStage("reviewing");
       const startedRun = await designReview(screenshots, {
         automaticEvidence: enrichedEvidence,
         captureErrors,
       });
-      if (!startedRun) return;
+      if (!startedRun) {
+        if (
+          useDesignReviewStore.getState().automatic?.evidence.requestId ===
+          evidence.requestId
+        ) {
+          useDesignReviewStore
+            .getState()
+            .failAutomatic(
+              useDesignReviewStore.getState().error ??
+                "Automatic Design Review could not start.",
+            );
+        }
+        return;
+      }
       const completedRun = await waitForDesignReviewRun(startedRun.id);
-      if (!completedRun) return;
-      const report = completedRun.report ?? {
-        overview: "Visual review unavailable.",
-        findings: [],
-      };
+      if (!completedRun) {
+        if (
+          useDesignReviewStore.getState().automatic?.evidence.requestId ===
+          evidence.requestId
+        ) {
+          useDesignReviewStore
+            .getState()
+            .failAutomatic("Automatic Design Review result is unavailable.");
+        }
+        return;
+      }
       const currentConversation =
         useConversationStore.getState().conversations[evidence.conversationId];
+      const currentProjectSource = currentConversation
+        ? captureDesignRepairProjectSource(currentConversation)
+        : null;
       const currentDigest = currentConversation
         ? await computeDesignReviewSourceDigest({
             files: currentConversation.files,
@@ -3205,17 +3569,57 @@ export function useGenerator({
             designContract: evidence.contract,
           })
         : null;
-      const fresh = currentDigest === completedRun.sourceDigest;
-      if (currentDigest) {
+      const postDigestState = useConversationStore.getState();
+      const currentProject =
+        currentProjectSource !== null &&
+        isDesignRepairProjectSourceCurrent(
+          currentProjectSource,
+          postDigestState.conversations[evidence.conversationId],
+        );
+      const fresh =
+        currentProject && currentDigest === completedRun.sourceDigest;
+      if (currentDigest || !currentProject) {
         useDesignReviewStore
           .getState()
-          .markRunFreshness(completedRun.id, currentDigest);
+          .markRunFreshness(
+            completedRun.id,
+            currentProject ? (currentDigest ?? "") : "",
+          );
       }
       updateAutomaticReviewActivity(evidence.conversationId, completedRun.id, {
         status: completedRun.status,
         findingCount: completedRun.report?.findings.length ?? 0,
         stale: !fresh,
       });
+      if (completedRun.status !== "succeeded" || !completedRun.report) {
+        if (
+          useDesignReviewStore.getState().automatic?.evidence.requestId ===
+          evidence.requestId
+        ) {
+          useDesignReviewStore
+            .getState()
+            .failAutomatic(
+              completedRun.error ??
+                "Automatic Design Review did not produce a report.",
+            );
+        }
+        return;
+      }
+      const report = completedRun.report;
+      if (!fresh) {
+        updateAutomaticReviewActivity(
+          evidence.conversationId,
+          completedRun.id,
+          { status: "superseded", stale: true },
+        );
+        if (
+          useDesignReviewStore.getState().automatic?.evidence.requestId ===
+          evidence.requestId
+        ) {
+          useDesignReviewStore.getState().finishAutomatic("superseded");
+        }
+        return;
+      }
 
       if (evidence.phase === "verify") {
         if (
@@ -3225,8 +3629,9 @@ export function useGenerator({
           useDesignReviewStore
             .getState()
             .finishAutomatic(
-              completedRun.status === "succeeded" &&
-                hasRemainingAutomaticDesignIssues(enrichedEvidence, report),
+              hasRemainingAutomaticDesignIssues(enrichedEvidence, report)
+                ? "findings"
+                : "clean",
             );
         }
         return;
@@ -3238,30 +3643,43 @@ export function useGenerator({
           useDesignReviewStore.getState().automatic?.evidence.requestId ===
           evidence.requestId
         ) {
-          useDesignReviewStore.getState().finishAutomatic(false);
+          useDesignReviewStore
+            .getState()
+            .finishAutomatic(
+              hasRemainingAutomaticDesignIssues(enrichedEvidence, report)
+                ? "findings"
+                : "clean",
+            );
         }
         return;
       }
       const safeToRepair = canEnterAutomaticDesignRepair({
         fresh,
         activeConversation:
-          useConversationStore.getState().activeId === evidence.conversationId,
+          postDigestState.activeId === evidence.conversationId,
         currentReview:
           useDesignReviewStore.getState().automatic?.evidence.requestId ===
           evidence.requestId,
+        currentProject,
+        designMode: currentConversation?.workspaceMode === "design",
         chatIdle: runConversationIdRef.current === null,
         hasNewerUserRequest: hasNewerGenuineUserMessage(
           evidence.conversationId,
           completedRun.id,
         ),
       });
-      if (!safeToRepair) {
+      if (!safeToRepair || !currentConversation) {
         if (
           useDesignReviewStore.getState().automatic?.evidence.requestId ===
           evidence.requestId
         ) {
-          useDesignReviewStore.getState().finishAutomatic(false);
+          useDesignReviewStore.getState().finishAutomatic("superseded");
         }
+        updateAutomaticReviewActivity(
+          evidence.conversationId,
+          completedRun.id,
+          { status: "superseded", stale: !fresh },
+        );
         return;
       }
 
@@ -3288,6 +3706,12 @@ export function useGenerator({
           ),
         );
       useDesignReviewStore.getState().setAutomaticStage("fixing");
+      const repairConversationRevision =
+        useConversationStore.getState().conversations[evidence.conversationId];
+      if (!repairConversationRevision) {
+        useDesignReviewStore.getState().finishAutomatic("superseded");
+        return;
+      }
       await generate(
         buildAutomaticDesignRepairPrompt(enrichedEvidence, scope),
         undefined,
@@ -3299,6 +3723,10 @@ export function useGenerator({
           automaticDesignOriginalRequest: evidence.originalRequest,
           automaticDesignReviewActivityId: completedRun.id,
           messageOrigin: "design_auto_fix",
+          expectedConversationId: evidence.conversationId,
+          expectedProjectSource: captureDesignRepairProjectSource(
+            repairConversationRevision,
+          ),
         },
       );
       if (trackFixingOnRun && completedRun.report) {
@@ -3324,8 +3752,8 @@ export function useGenerator({
 
   const automaticDesignReviewUnavailable = useCallback(
     async (evidence: AutomaticDesignReviewEvidence, message: string) => {
-      const state = useConversationStore.getState();
-      const conversation = state.conversations[evidence.conversationId];
+      const initialState = useConversationStore.getState();
+      const conversation = initialState.conversations[evidence.conversationId];
       if (!conversation) return;
       const scope = selectAutomaticDesignRepairScope(evidence, {
         overview: "Visual review unavailable.",
@@ -3339,28 +3767,46 @@ export function useGenerator({
       const fresh = Boolean(
         evidence.sourceDigest && currentDigest === evidence.sourceDigest,
       );
+      const currentState = useConversationStore.getState();
+      const currentConversation =
+        currentState.conversations[evidence.conversationId];
+      const currentProject = isDesignRepairProjectSourceCurrent(
+        captureDesignRepairProjectSource(conversation),
+        currentConversation,
+      );
       const safeToRepair = canEnterAutomaticDesignRepair({
-        fresh,
-        activeConversation: state.activeId === evidence.conversationId,
+        fresh: fresh && currentProject,
+        activeConversation: currentState.activeId === evidence.conversationId,
         currentReview:
           useDesignReviewStore.getState().automatic?.evidence.requestId ===
           evidence.requestId,
+        currentProject,
+        designMode: currentConversation?.workspaceMode === "design",
         chatIdle: runConversationIdRef.current === null,
         hasNewerUserRequest: hasNewerGenuineUserMessage(
           evidence.conversationId,
           evidence.requestId,
         ),
       });
-      if (
-        shouldRunAutomaticDesignRepair(evidence.phase, scope) &&
-        safeToRepair
-      ) {
+      const repairNeeded = shouldRunAutomaticDesignRepair(
+        evidence.phase,
+        scope,
+      );
+      if (repairNeeded && safeToRepair) {
         updateAutomaticReviewActivity(
           evidence.conversationId,
           evidence.requestId,
           { status: "fixing" },
         );
         useDesignReviewStore.getState().setAutomaticStage("fixing");
+        const repairConversationRevision =
+          useConversationStore.getState().conversations[
+            evidence.conversationId
+          ];
+        if (!repairConversationRevision) {
+          useDesignReviewStore.getState().finishAutomatic("superseded");
+          return;
+        }
         await generate(
           buildAutomaticDesignRepairPrompt(evidence, scope),
           undefined,
@@ -3372,14 +3818,32 @@ export function useGenerator({
             automaticDesignOriginalRequest: evidence.originalRequest,
             automaticDesignReviewActivityId: evidence.requestId,
             messageOrigin: "design_auto_fix",
+            expectedConversationId: evidence.conversationId,
+            expectedProjectSource: captureDesignRepairProjectSource(
+              repairConversationRevision,
+            ),
           },
         );
+        return;
+      }
+      if (repairNeeded) {
+        updateAutomaticReviewActivity(
+          evidence.conversationId,
+          evidence.requestId,
+          { status: "superseded", stale: !fresh || !currentProject },
+        );
+        if (
+          useDesignReviewStore.getState().automatic?.evidence.requestId ===
+          evidence.requestId
+        ) {
+          useDesignReviewStore.getState().finishAutomatic("superseded");
+        }
         return;
       }
       updateAutomaticReviewActivity(
         evidence.conversationId,
         evidence.requestId,
-        { status: "failed", stale: !fresh },
+        { status: "failed", stale: !fresh || !currentProject },
       );
       if (
         useDesignReviewStore.getState().automatic?.evidence.requestId ===
@@ -3392,8 +3856,12 @@ export function useGenerator({
   );
 
   const continueTask = useCallback(async () => {
-    const runConversationId = useConversationStore.getState().activeId;
+    if (runConversationIdRef.current !== null) return;
+    const continueStartState = useConversationStore.getState();
+    const runConversationId = continueStartState.activeId;
     if (!runConversationId) return;
+    const continueWorkspace =
+      getConversationWorkspaceContext(runConversationId);
     const runEpoch = ++generationRunEpochRef.current;
     const isCurrentRun = () =>
       generationRunEpochRef.current === runEpoch &&
@@ -3416,17 +3884,16 @@ export function useGenerator({
         if (activeConv) {
           generator.syncMessages(await getMessagesForAPI(activeConv));
           generator.setFiles(activeConv.files);
-          designRunInitialFilesRef.current = { ...activeConv.files };
-          const workspace = getConversationWorkspaceContext(runConversationId);
-          designContractControllerRef.current.reset({
-            enabled: workspace.profile === "design",
-            expectedSystemId: activeConv.designState?.appliedSystem?.id ?? null,
-            ...designBlueprintRunPolicy(activeConv.files),
+          configureDesignRun(activeConv, {
+            profile: continueWorkspace.profile,
           });
-          lastAcceptedDesignContractRef.current = null;
         }
         await applyDynamicGeneratorState(generator, [], {
           customSystemPromptSnapshot,
+          promptWorkspaceMode: continueWorkspace.promptWorkspaceMode,
+          mode: continueWorkspace.mode,
+          profile: continueWorkspace.profile,
+          isCurrent: isCurrentRun,
         });
         if (!isCurrentRun()) return;
         const continuePrompt =
@@ -3450,6 +3917,7 @@ export function useGenerator({
             expectedChangeModes: ["create", "extend"],
             ...designBlueprintRunPolicy(result.files),
           });
+          designRunExpectedChangeModesRef.current = ["create", "extend"];
           result = await generator.generate(AUTOMATIC_PROTOTYPE_BATCH_PROMPT);
         }
         const incomplete = hasIncompletePrototypeBuild(result.files);
@@ -3485,6 +3953,7 @@ export function useGenerator({
     }
   }, [
     getGenerator,
+    configureDesignRun,
     setIsGenerating,
     setMessages,
     applyDynamicGeneratorState,

@@ -11,7 +11,7 @@
 [![Tailwind CSS](https://img.shields.io/badge/Tailwind_CSS-4.x-06B6D4?logo=tailwindcss&logoColor=white)](https://tailwindcss.com)
 [![Tauri](https://img.shields.io/badge/Tauri-2.x-FFC131?logo=tauri&logoColor=white)](https://tauri.app)
 
-[部署指南](#部署) · [快速开始](#快速开始) · [功能特性](#功能特性) · [技术架构](#技术架构) · [更新日志](CHANGELOG.md) · [项目审计](docs/PROJECT_AUDIT.zh-CN.md) · [贡献指南](CONTRIBUTING.md)
+[部署指南](#部署) · [快速开始](#快速开始) · [功能特性](#功能特性) · [技术架构](#技术架构) · [更新日志](CHANGELOG.md) · [贡献指南](CONTRIBUTING.md)
 
 [English](README.md) | 简体中文
 
@@ -58,25 +58,26 @@ Tauri 桌面版（macOS / Windows / Linux）提供 stdio MCP 等本机运行能�
 - **子代理协作** — 内置代码浏览、代码审查、依赖建议、Bug 调查、UI 审查等只读子代理
 - **内置搜索** — 支持启用模型内置的搜索服务
 - **桌面 API 代理** — Tauri 可转发经允许的 HTTP/HTTPS 模型请求，处理浏览器 CORS 限制；静态 Web 部署仍依赖服务商允许跨域访问
-- **桌面本地 CLI 运行时** — 可主动选择通过隔离运行的 Codex、Claude、Pi 或 Antigravity CLI 执行完整生成流程，同时保持 API 为默认模式；结构化适配器绝不会在服务商或运行方式之间静默回退
+- **桌面本地 CLI 运行时** — 可主动选择通过隔离运行的 Codex、Claude、Pi 或 Antigravity CLI 执行完整生成流程，同时保持 API 为默认模式；Codex 可生成图片或以参考图编辑图片，Antigravity 可生成图片但不支持参考图编辑，不支持媒体的服务商不会收到该工具
+- **托管项目图片** — 将随项目导入的图片，以及显式加入项目的生成图片保存在内容寻址的本地存储中，同时为源码 import、CSS URL、public URL、预览、ZIP 导出、快照和 Starter 副本保留各自的项目路径；删除所有者后会保守保留去重 Blob，直到执行“清除全部数据”，避免其他标签页正在导入的图片丢失
 
 ### 交互体验
 
 - **多会话管理** — 会话列表侧边栏支持创建、切换、删除，历史记录持久化保存
 - **会话整理** — 支持会话搜索、置顶、归档、复制与智能重命名
-- **项目起始库** — 可搜索、编辑、更新并复用经过安全处理的本地项目副本；保存前会确定性分析技术栈、排除敏感路径、脱敏高置信明文凭据，并要求显式确认
+- **项目起始库** — 可搜索、编辑、更新并复用经过安全处理的本地项目副本及托管项目图片；保存前会确定性分析技术栈、排除敏感路径、脱敏高置信明文凭据，并要求显式确认
 - **智能会话命名** — 根据对话内容自动生成会话标题，无需手动命名
 - **Slash 指令** — 输入框支持 `/new`、`/fork`、`/clear`、`/reset`、`/compact`、`/health`、`/review`、`/continue`、`/retry`
 - **命令面板与快捷键** — 可通过 `Cmd/Ctrl+K` 打开命令面板，并使用键盘新建会话、打开设置、聚焦输入框或停止生成
-- **图片与文件输入** — 支持上传截图、文本文件或 PDF；支持 PDF 的模型会收到原生 PDF 文件输入，本地不抽取 PDF 文本
+- **图片与文件输入** — 支持上传截图、文本文件或 PDF；新的本地图片默认以可配置的 `0.85` 质量压缩一次，支持 PDF 的模型会收到原生 PDF 文件输入，本地不抽取 PDF 文本
 - **技能系统** — 开启的 Skill 只提供 metadata 供 AI 自动发现；仅在调用 `read_skill` 或为下一条消息选择 Skill 时加载全文，选择结果会传给子代理并在发送后清空。同一轮 Agent 加载的 Skill 会合并为一张可展开列表。8 个内置 Skill 为 `debug-web-app`、`build-tailwind-ui`、`build-accessible-ui`、`write-safe-typescript`、`art-direct-web`、`design-product-ui`、`review-code` 与 `simplify-code`；旧内置 ID 会自动迁移，导入 Skill 默认关闭自动发现
 - **自定义指令** — 高级设置可安全追加最多 32,000 个字符，覆盖 Chat、Plan、重试与子代理，但不能授予工具或改变模式限制；自动 QA、智能标题与上下文压缩不会携带它
 - **本地设置** — 服务商配置、API Key 与自定义指令会持久化到浏览器本地存储
-- **存储治理** — 可查看本地数据占用，并安全清理归档会话、空会话和旧快照
+- **存储治理** — 可查看包含导入设计系统与保留项目图片 Blob 在内的本地数据占用，并安全清理归档会话、空会话、旧快照或全部本地存储域
 - **流式输出** — 实时展示 AI 思考过程和代码生成进度
 - **扩展思考** — 支持 Extended Thinking / Reasoning 模式（DeepSeek-R1、Claude 4.6 等）
 - **一键下载** — 将生成的项目打包为 ZIP 文件下载到本地
-- **工作区工具** — 支持代码/预览切换、文件搜索与管理、Sandpack 控制台，以及桌面/平板/手机预览宽度、自适应和缩放
+- **工作区工具** — 支持代码/预览切换、使用 Material Icon Theme 图标浏览并搜索和管理文件、Sandpack 控制台，以及桌面/平板/手机预览宽度、自适应和缩放
 - **交互式设计修改** — 在受支持的 Sandpack 预览中点选带稳定 `data-ob-id` 的元素，将清洗后的选择上下文交给下一条请求，并通过带快照的保存修改规范语义 Token
 - **设计审查与桌面导出** — 在 Web 或桌面端上传最多三张截图进行按需只读审查，或在桌面端将规范项目文件导出到全新的不覆盖目录
 - **自适应布局** — 桌面端使用横向可调分栏，平板端使用工作区在上、对话在下的纵向可调分栏，手机端使用对话优先并内嵌预览的布局
@@ -128,7 +129,7 @@ Design 模式的产物仍位于当前会话的普通项目文件树和 Sandpack 
 | 视觉审查                      | 用户手动上传截图                 | 用户手动上传截图                         |
 | 本地进程 / stdio / Skill 脚本 | 静态 Web 部署不支持              | 遵循现有桌面能力检测与批准限制           |
 
-Design Review 与自动 QA 明确分离。受限审查运行只能列出、读取和搜索项目文件，并提交最多 8 条结构化问题；它不能写文件、调用 MCP 或联网工具、加载 Skill 或执行脚本。完整原型的证据绑定项目 generation、蓝图修订、页面、场景和视口；声明的目标会在临时预览 iframe 中串行采集，未采集目标显示为未审查，项目发生变化后旧证据显示为已过期。只有用户勾选问题并点击**应用所选修复**后，才会进入正常 Design 修改流程。
+Design Review 与自动 QA 明确分离。受限审查运行只能列出、读取和搜索项目文件，并提交最多 8 条结构化问题；它不能写文件、调用 MCP 或联网工具、加载 Skill 或执行脚本。完整原型的证据绑定项目 generation、蓝图修订、页面、场景和视口；声明的目标会在临时预览 iframe 中串行采集，未采集目标显示为未审查，项目发生变化后旧证据显示为已过期。手动审查只有在用户勾选问题并点击**应用所选修复**后，才会进入正常 Design 修改流程。符合条件的 Design 生成完成后，自动审查可以针对确定性问题、P0/P1 视觉问题及非 P3 的系统一致性问题执行一次有界修复，并再做一次复核。只有证据与会话仍为当前状态时才会修复；等待、失败、不可用或被新状态取代的任务会明确显示，也不会被描述为审查无问题。
 
 ### MCP 与平台能力（可选）
 
@@ -213,6 +214,8 @@ pnpm tauri:android:build
 
 启动桌面版，打开 **设置 → 模型 → 运行方式 → 本地 CLI**，选择 CLI 服务商，并确认状态为**已安装并可用**或**可发送，待首次验证**。后者表示设置页检测不会发起模型调用；第一条真实消息才会验证凭据或网关，并可能消耗额度。Open Builder 会扫描 `PATH` 与常见安装位置；**选择程序**只会把验证过的可执行文件覆盖路径保存到原生 app data。模型和推理强度偏好按服务商分别保存，并由所选 CLI 提供；普通检测使用短时缓存，**重新检测**会强制读取最新目录。如果目录不完整或已过期（partial/stale），当前保存的模型和推理强度仍可作为**未验证**选项使用，未知的推理强度会隐藏，界面会提示而不会清空偏好。Codex、Claude、Pi 与 Antigravity 之间切换时绝不会复用对方的 session；安装、启动配置、模型、推理强度或协议发生变化时会新建对应服务商的 session。
 
+本地 CLI 的 Chat 运行中，Codex 会收到支持可选 opaque 参考图 ID 的 `generate_image`，Antigravity 只会收到文生图能力，Claude 与 Pi 不会收到该工具。生成结果会先保留在对话中；只有代理为已初始化项目调用 `import_generated_image` 后，Host 才会在请求的安全路径创建托管项目图片模块。这些媒体工具不向 Plan 及其他受限 profile 开放。
+
 本地 CLI 不等于离线模型。提示词、附件、联网搜索活动和工具结果通常仍会发送给该 CLI 配置的模型服务商，并可能消耗订阅或 API 额度。对于 Codex、Claude 与 Antigravity，Open Builder 只读取当前所选配置所需的官方服务商字段，并把其引用的凭据直接交给对应 CLI 子进程；凭据值不会被持久化、显示、记录到日志，也不会进入命令参数或临时配置。Antigravity 的账号登录仍由操作系统安全凭据存储管理；Open Builder 不会猜测或复制 Gemini 凭据文件，只会按 Open Builder 对话把 Agy 的原生会话／缓存状态保存在哈希命名的 app-private HOME 中，utility 运行仍使用一次性 HOME。Pi 将 OAuth 与 API Key 保存在 `~/.pi/agent/auth.json`，创建时仅当前用户可读；Open Builder 会从 Pi 子进程环境中剥离模型服务商 API Key，只依赖 OAuth／auth 文件。在发送用户内容前，应用还会拒绝 `models.json` 中的内联凭据、环境变量凭据和命令解析凭据；凭据来源探测不会解析或执行这些值。请改用 Pi 的 `/login` 流程保存该服务商凭据。普通 Pi 默认将按 cwd 组织的 JSONL session 保存到 `~/.pi/agent/sessions/`，但 Open Builder 会改用 app-private session 目录，并只在本地对话中保留按服务商隔离的 opaque session ID。详见官方[服务商](https://pi.dev/docs/latest/providers)与 [session](https://pi.dev/docs/latest/sessions)说明。
 
 项目仍保存在 Open Builder 的内存虚拟文件系统中。每个服务商使用稳定的 app-private 空白 scratch 目录，只能通过当次运行的带认证 loopback 工具桥访问项目。附件使用不可猜测 ID，不暴露宿主文件路径；在发送用户内容前，应用会禁用或拒绝用户级 Skills、Agents、MCP 服务、规则、项目指令文件、hooks、扩展、原生 shell／文件系统工具、浏览器执行和原生写入。Antigravity 还会收到每轮私有 Agent、MCP 配置和权限策略；只允许 Open Builder MCP 工具（明确选择模型内置搜索时，额外只允许只读 URL 访问）。
@@ -238,6 +241,7 @@ DeepSeek Harness 支持目前明确延后，且未来只走 ACP。截至本文�
 | 联网搜索     | 免 Key Firecrawl，或其他服务商凭据        | `fc-...`、`tvly-...` 或 Exa Key     |
 | 图片搜索     | 可选的 Pixabay 或 Unsplash 凭据           | 对应服务商 API Key                  |
 | 自定义指令   | 高级设置中的可复用指令                    | 最多 32,000 个字符                  |
+| 图片压缩     | 新的本地图片存储前只压缩一次              | 默认启用；质量 `0.85`               |
 
 > 设置和 API Key 都保存在浏览器本地存储中。自定义指令会在 Chat、Plan、重试与子代理工作时发送给当前模型服务商，且不能扩大工具权限；请勿在其中填写凭据或其他秘密。请将当前浏览器配置文件和设备视为凭据安全边界的一部分。
 
@@ -303,6 +307,8 @@ Agnes API Key 在 MCP 面板中默认以掩码显示，只保存在本地应用�
 启用的 MCP 工具会在服务发现并获批后动态注入，并根据当前平台以及 Chat、Plan、Design、自动 QA、Design Review 或子代理运行策略进行过滤。`apply_design_style` 继续作为 Auto 模式的兼容路径；Design 模式使用 `apply_design_system`。
 
 内置 Agnes MCP 适配器直接提供 `generate_image`、`create_video` 和 `get_video_status`，不会创建远程 MCP 传输会话。图片与视频结果会在对话中直接显示为媒体占位符，并在远程 URL 可用后原位替换。
+
+受支持的本地 CLI Chat 运行会加入服务商原生 `generate_image`；已初始化项目还会加入 `import_generated_image`，通过托管项目图片边界接纳生成结果，不会把 CLI 原生 scratch 文件当作项目文件。
 
 ### 技术栈
 

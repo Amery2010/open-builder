@@ -3,6 +3,7 @@ import type { DesignReviewReport } from "./review";
 import {
   buildAutomaticDesignRepairPrompt,
   buildAutomaticDesignReviewContext,
+  automaticDesignReviewStageForOutcome,
   canEnterAutomaticDesignRepair,
   hasRemainingAutomaticDesignIssues,
   requiredSkillsForContract,
@@ -130,6 +131,15 @@ const report: DesignReviewReport = {
 };
 
 describe("automatic Design review policy", () => {
+  it("maps explicit outcomes without conflating unavailable work with clean", () => {
+    expect(automaticDesignReviewStageForOutcome("clean")).toBe("complete");
+    expect(automaticDesignReviewStageForOutcome("findings")).toBe("warning");
+    expect(automaticDesignReviewStageForOutcome("deferred")).toBe("deferred");
+    expect(automaticDesignReviewStageForOutcome("superseded")).toBe(
+      "superseded",
+    );
+  });
+
   it("selects every static issue, P0/P1, and non-P3 system consistency", () => {
     const scope = selectAutomaticDesignRepairScope(evidence(), report);
 
@@ -214,6 +224,8 @@ describe("automatic Design review policy", () => {
       fresh: true,
       activeConversation: true,
       currentReview: true,
+      currentProject: true,
+      designMode: true,
       chatIdle: true,
       hasNewerUserRequest: false,
     };
@@ -228,6 +240,12 @@ describe("automatic Design review policy", () => {
       }),
     ).toBe(false);
     expect(canEnterAutomaticDesignRepair({ ...safe, fresh: false })).toBe(
+      false,
+    );
+    expect(
+      canEnterAutomaticDesignRepair({ ...safe, currentProject: false }),
+    ).toBe(false);
+    expect(canEnterAutomaticDesignRepair({ ...safe, designMode: false })).toBe(
       false,
     );
   });

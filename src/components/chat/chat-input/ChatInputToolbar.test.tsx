@@ -109,6 +109,16 @@ describe("ChatInputToolbar project upload", () => {
     ).toHaveAttribute("data-disabled");
   });
 
+  it("locks the request mode while generation is active", () => {
+    render(
+      <TooltipProvider>
+        <ChatInputToolbar {...baseProps} isGenerating />
+      </TooltipProvider>,
+    );
+
+    expect(screen.getByRole("button", { name: "Mode" })).toBeDisabled();
+  });
+
   it("shows tooltips for every toolbar button and keeps icon buttons square", async () => {
     const user = userEvent.setup();
     render(

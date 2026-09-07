@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { migrateConversationState, useConversationStore } from "./conversation";
 import { useSnapshotStore } from "./snapshot";
+import { useProjectTemplateStore } from "./project-templates";
 import { PROJECT_FILE_LIMITS } from "../lib/utils/project-files";
 
 const localforageMock = vi.hoisted(() => {
@@ -35,6 +36,7 @@ describe("conversation store", () => {
       legacyPlanModeMigrated: false,
     });
     useSnapshotStore.setState({ snapshots: {}, _hasHydrated: true });
+    useProjectTemplateStore.setState({ templates: {}, _hasHydrated: true });
   });
 
   it("rejects oversized project trees from setFiles", () => {
@@ -599,6 +601,83 @@ describe("conversation store", () => {
     });
   });
 
+  it("drops malformed persisted file values before preview hydration", () => {
+    const persisted = {
+      activeId: "corrupt",
+      conversations: {
+        corrupt: {
+          id: "corrupt",
+          title: "Corrupt",
+          messages: [],
+          files: {
+            "src/App.tsx": null,
+            "src/valid.ts": "export const valid = true;",
+          },
+          template: "vite-react-ts",
+          isProjectInitialized: true,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      },
+    };
+
+    const migrated = migrateConversationState(persisted, 5);
+
+    expect(migrated.conversations.corrupt.files).toEqual({
+      "src/valid.ts": "export const valid = true;",
+    });
+    expect(
+      (migrated.conversations.corrupt as { activeFile?: string }).activeFile,
+    ).toBe("src/valid.ts");
+  });
+
+  it("migrates legacy source image URLs while preserving their module identity", () => {
+    const digest = "a".repeat(64);
+    const modulePath = "src/generated-assets/logo-legacy.js";
+    const asset = {
+      path: "src/assets/logo.png",
+      blobRef: `sha256:${digest}`,
+      mimeType: "image/png" as const,
+      size: 8,
+      digest,
+      modulePath,
+      publicPath: "/src/assets/logo.png",
+    };
+    const persisted = {
+      activeId: "legacy-source-asset",
+      conversations: {
+        "legacy-source-asset": {
+          id: "legacy-source-asset",
+          title: "Legacy source asset",
+          messages: [],
+          files: {
+            "src/App.tsx": 'import logo from "./assets/logo.png";',
+            [modulePath]:
+              `// Managed by Open Builder for ${asset.path}.\n` +
+              `export default ${JSON.stringify(asset.publicPath)};\n`,
+          },
+          assets: { [asset.path]: asset },
+          template: "vite-react-ts",
+          isProjectInitialized: true,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      },
+    };
+
+    const migrated = migrateConversationState(persisted, 5);
+
+    expect(migrated.conversations["legacy-source-asset"].assets).toEqual({
+      [asset.path]: { ...asset, publicPath: "" },
+    });
+    expect(
+      migrated.conversations["legacy-source-asset"].files[modulePath],
+    ).toBe(
+      `// Managed by Open Builder for ${asset.path}.\n` +
+        'export { default } from "../assets/logo.png";\n',
+    );
+  });
+
   it("repairs stale v1 project flags without changing other persisted fields", () => {
     const persisted = {
       activeId: "with-files",
@@ -699,7 +778,7 @@ describe("conversation store", () => {
     expect(localforageMock.removeItem).toHaveBeenCalledWith("shared-pdf");
   });
 
-  it("forks project asset references and releases the Blob after the final owner", async () => {
+  it("forks project asset references and conservatively retains the Blob after owners are removed", async () => {
     const original = useConversationStore.getState().createConversation();
     const asset = {
       path: "public/generated/hero.png",
@@ -729,7 +808,66 @@ describe("conversation store", () => {
     });
     useConversationStore.getState().deleteConversation(original);
     await vi.waitFor(() => {
-      expect(localforageMock.removeItem).toHaveBeenCalledWith(asset.blobRef);
+      expect(localforageMock.removeItem).not.toHaveBeenCalledWith(
+        asset.blobRef,
+      );
+    });
+  });
+
+  it("retains a project asset after its final Starter owner is deleted", async () => {
+    const original = useConversationStore.getState().createConversation();
+    const asset = {
+      path: "public/generated/hero.png",
+      blobRef: `sha256:${"c".repeat(64)}`,
+      mimeType: "image/png" as const,
+      size: 9,
+      digest: "c".repeat(64),
+      modulePath: "src/generated-assets/hero-cccccccc.js",
+      publicPath: "/generated/hero.png",
+    };
+    useConversationStore.setState((state) => ({
+      conversations: {
+        ...state.conversations,
+        [original]: {
+          ...state.conversations[original],
+          assets: { [asset.path]: asset },
+        },
+      },
+    }));
+    useProjectTemplateStore.setState({
+      templates: {
+        starter: {
+          id: "starter",
+          name: "Starter",
+          files: {},
+          assets: { [asset.path]: asset },
+          template: "vite-react-ts",
+          tags: [],
+          schemaVersion: 3,
+          contentDigest: "d".repeat(64),
+          safety: {
+            status: "safe",
+            excludedPaths: [],
+            redactedPaths: [],
+          },
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      },
+    });
+
+    useConversationStore.getState().deleteConversation(original);
+    await vi.waitFor(() => {
+      expect(localforageMock.removeItem).not.toHaveBeenCalledWith(
+        asset.blobRef,
+      );
+    });
+
+    await useProjectTemplateStore.getState().deleteTemplate("starter");
+    await vi.waitFor(() => {
+      expect(localforageMock.removeItem).not.toHaveBeenCalledWith(
+        asset.blobRef,
+      );
     });
   });
 

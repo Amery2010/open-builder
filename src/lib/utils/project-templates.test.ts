@@ -1,6 +1,18 @@
-import { describe, expect, it } from "vitest";
+// @vitest-environment jsdom
+
+import JSZip from "jszip";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Conversation, ProjectTemplate } from "../../types";
 import { inspectDesignTokenContract } from "../design/tokens";
+import { buildProjectZip } from "../project-assets/archive";
+import {
+  addProjectAssetModules,
+  createProjectAssetRecord,
+  deleteProjectAssetBlob,
+  projectFilesForSandpack,
+  stageProjectAsset,
+  storeStagedProjectAsset,
+} from "../project-assets/core";
 import {
   PROJECT_TEMPLATE_LIMITS,
   createConversationFromProjectTemplate,
@@ -14,6 +26,35 @@ import {
   sanitizeTemplateName,
   validateProjectTemplateFiles,
 } from "./project-templates";
+
+const stores = vi.hoisted(() => new Map<string, Map<string, unknown>>());
+
+vi.mock("localforage", () => ({
+  default: {
+    createInstance: ({ storeName = "default" }: { storeName?: string }) => {
+      const store = stores.get(storeName) ?? new Map<string, unknown>();
+      stores.set(storeName, store);
+      return {
+        getItem: async <T>(key: string) => (store.get(key) as T) ?? null,
+        setItem: async (key: string, value: unknown) => {
+          store.set(key, value);
+          return value;
+        },
+        removeItem: async (key: string) => {
+          store.delete(key);
+        },
+        clear: async () => store.clear(),
+        iterate: async <T, U>(iterator: (value: T, key: string) => U) => {
+          for (const [key, value] of store) iterator(value as T, key);
+        },
+      };
+    },
+  },
+}));
+
+const pngBytes = new Uint8Array([
+  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3,
+]);
 
 const conversation: Conversation = {
   id: "conv-1",
@@ -29,7 +70,38 @@ const conversation: Conversation = {
   updatedAt: 2,
 };
 
+async function legacyV2Digest(template: ProjectTemplate): Promise<string> {
+  const stable = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(stable);
+    if (!value || typeof value !== "object") return value;
+    const record = value as Record<string, unknown>;
+    return Object.fromEntries(
+      Object.keys(record)
+        .sort()
+        .map((key) => [key, stable(record[key])]),
+    );
+  };
+  const payload = {
+    files: template.files,
+    template: template.template,
+    previewMode: template.previewMode ?? "sandpack",
+    activeFile: template.activeFile,
+    designState: template.designState,
+  };
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(JSON.stringify(stable(payload))),
+  );
+  return Array.from(new Uint8Array(digest), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+}
+
 describe("project template utilities", () => {
+  beforeEach(() => {
+    for (const store of stores.values()) store.clear();
+  });
+
   it("prepares a safe deterministic copy before the template is persisted", async () => {
     const prepared = await prepareProjectTemplateFromConversation(
       {
@@ -72,7 +144,7 @@ describe("project template utilities", () => {
       "abcdefgh-token",
     );
     expect(prepared.template).toMatchObject({
-      schemaVersion: 2,
+      schemaVersion: 3,
       activeFile: "src/App.tsx",
       contentDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
       safety: {
@@ -157,6 +229,127 @@ describe("project template utilities", () => {
     expect(next.files).not.toBe(template.files);
   });
 
+  it("continues to verify and materialize existing asset-free v2 Starters", async () => {
+    const { template: prepared } = await prepareProjectTemplateFromConversation(
+      conversation,
+      {
+        id: "v2-compatible",
+        name: "V2 Compatible",
+        now: 1,
+      },
+    );
+    const legacyV2: ProjectTemplate = {
+      ...prepared,
+      assets: undefined,
+      schemaVersion: 2,
+    };
+    legacyV2.contentDigest = await legacyV2Digest(legacyV2);
+
+    expect(isProjectTemplateUsable(legacyV2)).toBe(true);
+    await expect(
+      createConversationFromProjectTemplate(legacyV2, {
+        id: "from-v2",
+        now: 2,
+      }),
+    ).resolves.toMatchObject({ id: "from-v2", assets: {} });
+  });
+
+  it("round-trips validated asset ownership through a persisted v3 Starter", async () => {
+    const staged = await stageProjectAsset(
+      "src/assets/hero.png",
+      new Blob([Uint8Array.from(pngBytes).buffer], { type: "image/png" }),
+      "image/png",
+    );
+    const asset = createProjectAssetRecord(
+      staged,
+      await storeStagedProjectAsset(staged),
+    );
+    const files = addProjectAssetModules(
+      {
+        "src/App.tsx": 'import hero from "./assets/hero.png"; export { hero };',
+      },
+      { [asset.path]: asset },
+    );
+
+    const prepared = await prepareProjectTemplateFromConversation(
+      {
+        ...conversation,
+        files,
+        assets: { [asset.path]: asset },
+      },
+      { id: "asset-starter", name: "Asset Starter", now: 10 },
+    );
+    const reloaded = JSON.parse(
+      JSON.stringify(prepared.template),
+    ) as ProjectTemplate;
+    const next = await createConversationFromProjectTemplate(reloaded, {
+      id: "asset-conversation",
+      now: 20,
+    });
+
+    expect(reloaded.schemaVersion).toBe(3);
+    expect(reloaded.assets).toEqual({ [asset.path]: asset });
+    expect(getProjectTemplateStats(reloaded)).toEqual({
+      fileCount: 3,
+      totalBytes:
+        Object.values(reloaded.files).reduce(
+          (total, content) =>
+            total + new TextEncoder().encode(content).byteLength,
+          0,
+        ) + pngBytes.byteLength,
+    });
+    expect(next.assets).toEqual(reloaded.assets);
+    expect(next.assets).not.toBe(reloaded.assets);
+    const preview = await projectFilesForSandpack(
+      next.files,
+      next.assets ?? {},
+    );
+    expect(preview["src/App.tsx"]).toContain("generated-assets/hero-");
+    expect(next.files["src/App.tsx"]).toContain("./assets/hero.png");
+    const archive = await buildProjectZip(next.files, next.assets);
+    const zip = await JSZip.loadAsync(await archive.arrayBuffer());
+    expect(await zip.file(asset.path)?.async("uint8array")).toEqual(pngBytes);
+  });
+
+  it("rejects missing asset Blobs before preparing or materializing a Starter", async () => {
+    const staged = await stageProjectAsset(
+      "public/hero.png",
+      new Blob([Uint8Array.from(pngBytes).buffer], { type: "image/png" }),
+      "image/png",
+    );
+    const asset = createProjectAssetRecord(
+      staged,
+      await storeStagedProjectAsset(staged),
+    );
+    const withAsset: Conversation = {
+      ...conversation,
+      files: addProjectAssetModules(conversation.files, {
+        [asset.path]: asset,
+      }),
+      assets: { [asset.path]: asset },
+    };
+
+    await deleteProjectAssetBlob(asset.blobRef);
+    await expect(
+      prepareProjectTemplateFromConversation(withAsset, {
+        id: "missing",
+        name: "Missing",
+        now: 1,
+      }),
+    ).rejects.toThrow(/unavailable locally/i);
+
+    const restoredRef = await storeStagedProjectAsset(staged);
+    expect(restoredRef).toBe(asset.blobRef);
+    const { template } = await prepareProjectTemplateFromConversation(
+      withAsset,
+      { id: "later-missing", name: "Later missing", now: 2 },
+    );
+    await deleteProjectAssetBlob(asset.blobRef);
+    await expect(
+      createConversationFromProjectTemplate(template, { id: "new", now: 3 }),
+    ).rejects.toThrow(/unavailable locally/i);
+  });
+
   it("stores a normalized default preview view without changing the content digest", async () => {
     const mobile = await prepareProjectTemplateFromConversation(
       { ...conversation, defaultPreviewView: "mobile" },
@@ -168,7 +361,7 @@ describe("project template utilities", () => {
     );
 
     expect(mobile.template).toMatchObject({
-      schemaVersion: 2,
+      schemaVersion: 3,
       defaultPreviewView: "mobile",
     });
     expect(mobile.template.contentDigest).toBe(desktop.template.contentDigest);
@@ -344,7 +537,7 @@ describe("project template utilities", () => {
       name: legacy.name,
       description: legacy.description,
       files: { "src/App.tsx": "legacy app" },
-      schemaVersion: 2,
+      schemaVersion: 3,
       defaultPreviewView: "desktop",
       safety: { status: "safe", excludedPaths: [".env.local"] },
     });

@@ -46,7 +46,7 @@ import {
 } from "../utils/project-file-policy";
 import { normalizeSubagentTask } from "./subagents/limits";
 import {
-  ALWAYS_ALLOWED_TOOL_NAMES,
+  activeSkillToolRestrictionError,
   createSkillActiveContext,
 } from "../skills/active-context";
 import type { SkillActiveContextController } from "../skills/active-context";
@@ -1238,21 +1238,11 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
             "Submit or revise the plan first; write tools are enabled only after approval."
           );
         }
-        const active = this.skillContext.get();
-        if (
-          active?.restrictTools &&
-          !ALWAYS_ALLOWED_TOOL_NAMES.has(call.name) &&
-          !active.allowedTools.includes(call.name)
-        ) {
-          const activeNames = active.skills
-            .map((skill) => `"${skill.skillName}"`)
-            .join(", ");
-          return (
-            `Tool "${call.name}" is not in the active skills ${activeNames} ` +
-            `allowed-tools. Available now: ${active.allowedTools.join(", ")}. ` +
-            "Work within these tools, call read_skill on a different skill, or wait for the next user message."
-          );
-        }
+        const skillRestriction = activeSkillToolRestrictionError(
+          call.name,
+          this.skillContext.get(),
+        );
+        if (skillRestriction) return skillRestriction;
         return this.authorizeToolCall?.(call.name, call.input, {
           signal: this.ctrl?.signal ?? new AbortController().signal,
           toolCallId: call.callId ?? "host-tool",

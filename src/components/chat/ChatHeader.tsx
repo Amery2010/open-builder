@@ -92,6 +92,7 @@ export function ChatHeader({
             <Button
               variant="ghost"
               size="icon"
+              data-settings-focus-fallback="true"
               onClick={onOpenSettings}
               aria-label={t.header.settings}
               className="h-8 w-8 shrink-0"

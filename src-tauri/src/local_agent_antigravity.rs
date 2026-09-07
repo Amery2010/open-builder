@@ -1288,8 +1288,8 @@ fn attest_init(
             .as_str()
             .filter(|name| !name.is_empty() && name.len() <= 256)
             .ok_or_else(|| "Antigravity init returned a malformed tool inventory".to_string())?;
-        if !expected_inventory.contains(name)
-            && !(request.native_search
+        if !(expected_inventory.contains(name)
+            || request.native_search
                 && matches!(
                     name,
                     NATIVE_SEARCH_TOOL | NATIVE_URL_TOOL | LEGACY_NATIVE_URL_TOOL

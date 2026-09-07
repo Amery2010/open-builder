@@ -51,10 +51,16 @@ export function DesignReviewActivityBlock({
     "running",
     "fixing",
     "verifying",
+    "deferred",
   ].includes(status)
     ? true
     : Boolean(run && isDesignReviewRunActive(run));
-  const failed = status === "failed" || status === "interrupted";
+  const failed = [
+    "failed",
+    "interrupted",
+    "superseded",
+    "unavailable",
+  ].includes(status);
   const cancelled = status === "cancelled";
   const canOpen = Boolean(run && activeConversationId === run.conversationId);
 

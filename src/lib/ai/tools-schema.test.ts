@@ -12,6 +12,7 @@ import {
   isToolAllowedInMode,
   isWriteToolName,
 } from "./tools-schema";
+import { HOST_TOOL_DESCRIPTORS } from "./host-tool-catalog-data";
 import { filterToolSet } from "../tools/tool-set-utils";
 
 describe("tool policies", () => {
@@ -64,6 +65,9 @@ describe("tool policies", () => {
   });
 
   it("keeps the flat static inventory unique and presentation-complete", () => {
+    expect(HOST_TOOL_DESCRIPTORS.map((record) => record.name)).toEqual(
+      HOST_TOOL_RECORDS.map((record) => record.name),
+    );
     expect(new Set(HOST_TOOL_RECORDS.map((record) => record.name)).size).toBe(
       HOST_TOOL_RECORDS.length,
     );

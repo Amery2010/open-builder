@@ -22,7 +22,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
-import { HOST_TOOL_RECORDS } from "./tools-schema";
+import { HOST_TOOL_DESCRIPTORS } from "./host-tool-catalog-data";
 
 export interface ToolMeta {
   iconComponent: LucideIcon;
@@ -78,7 +78,7 @@ const FALLBACK_ICON: IconPresentation = {
 };
 
 const catalogMetadata: Record<string, ToolMeta> = Object.fromEntries(
-  HOST_TOOL_RECORDS.map((record) => {
+  HOST_TOOL_DESCRIPTORS.map((record) => {
     const icon =
       ICON_PRESENTATION[record.presentation.iconKey] ?? FALLBACK_ICON;
     return [
