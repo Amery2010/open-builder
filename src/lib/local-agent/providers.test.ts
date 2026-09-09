@@ -64,4 +64,35 @@ describe("local-agent provider catalog", () => {
       mediaCapabilitiesVerified: true,
     });
   });
+
+  it("prefers observed capabilities over the declared baseline", () => {
+    expect(localAgentSupportsNativeSearch("pi", { nativeSearch: true })).toBe(
+      true,
+    );
+    expect(
+      localAgentSupportsNativeSearch("codex", { nativeSearch: false }),
+    ).toBe(false);
+    expect(
+      localAgentImageCapabilities("codex", {
+        nativeSearch: true,
+        imageGeneration: false,
+      }),
+    ).toEqual({
+      imageGeneration: false,
+      imageEditing: false,
+      mediaCapabilitiesVerified: false,
+    });
+    expect(
+      localAgentImageCapabilities("antigravity", {
+        nativeSearch: true,
+        imageGeneration: true,
+        imageEditing: false,
+        mediaCapabilitiesVerified: true,
+      }),
+    ).toEqual({
+      imageGeneration: true,
+      imageEditing: false,
+      mediaCapabilitiesVerified: true,
+    });
+  });
 });

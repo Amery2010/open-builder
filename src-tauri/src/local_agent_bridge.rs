@@ -309,6 +309,23 @@ impl Default for ToolBridge {
     }
 }
 
+/// Only requests addressed to the bridge's own loopback authority are served,
+/// so a bearer token that leaks into a browser or DNS-rebinding context cannot
+/// be replayed against it.
+fn require_loopback_host(headers: &HeaderMap, uri: &axum::http::Uri, port: u16) -> bool {
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+        .or_else(|| {
+            uri.authority()
+                .map(|authority| authority.as_str().to_owned())
+        });
+    host.is_some_and(|host| {
+        host == format!("127.0.0.1:{port}") || host == format!("localhost:{port}")
+    })
+}
+
 impl ToolBridge {
     async fn ensure_started(&self) -> Result<String, String> {
         let mut runtime = self.runtime.lock().await;
@@ -336,12 +353,22 @@ impl ToolBridge {
                     .with_sse_keep_alive(None)
                     .with_cancellation_token(cancellation.child_token()),
             );
+        let port = address.port();
         let router = axum::Router::new()
             .route("/pi/tools", get(pi_tools))
             .route("/pi/call", post(pi_call))
             .nest_service("/mcp", service)
             .layer(DefaultBodyLimit::max(MAX_ARGUMENT_BYTES + 64 * 1024))
-            .with_state(self.broker.clone());
+            .with_state(self.broker.clone())
+            .layer(axum::middleware::from_fn(
+                move |request: axum::extract::Request, next: axum::middleware::Next| async move {
+                    if require_loopback_host(request.headers(), request.uri(), port) {
+                        next.run(request).await
+                    } else {
+                        StatusCode::FORBIDDEN.into_response()
+                    }
+                },
+            ));
         let server_cancellation = cancellation.clone();
         let task = tauri::async_runtime::spawn(async move {
             let _ = axum::serve(listener, router)
@@ -490,6 +517,42 @@ mod tests {
         assert_eq!(result.is_error, Some(false));
         assert_eq!(result.structured_content, Some(json!({"value": 1})));
         assert_eq!(result.content.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn bridge_rejects_requests_for_foreign_hosts() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let bridge = ToolBridge::default();
+        let (channel, _events) = channel();
+        let (mcp_url, token) = bridge
+            .register(
+                "host-run".to_string(),
+                vec![tool("allowed")],
+                2,
+                CancellationToken::new(),
+                channel.into(),
+            )
+            .await
+            .unwrap();
+        let authority = mcp_url
+            .strip_prefix("http://")
+            .and_then(|rest| rest.strip_suffix("/mcp"))
+            .unwrap();
+
+        let mut stream = tokio::net::TcpStream::connect(authority).await.unwrap();
+        stream
+            .write_all(
+                format!(
+                    "GET /pi/tools HTTP/1.1\r\nHost: evil.example\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).await.unwrap();
+        assert!(response.starts_with("HTTP/1.1 403"), "{response}");
     }
 
     #[tokio::test]

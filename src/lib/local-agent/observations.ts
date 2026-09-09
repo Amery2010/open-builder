@@ -45,6 +45,8 @@ export interface PersistedLocalCliObservation {
   efforts: string[];
   capabilities: LocalAgentProbe["capabilities"];
   setupCommand: string;
+  /** Required credential variables the desktop process did not receive. */
+  missingEnvironment?: string[];
   /** The preference used by the most recent inspect/prepared observation. */
   inspectedPreference: LocalAgentPreference;
   /** Explicitly persisted for consumers that do not interpret status. */
@@ -92,6 +94,8 @@ const LOCAL_CLI_PATH_SOURCES: readonly LocalCliPathSource[] = [
 const MAX_PERSISTED_MODELS = 128;
 const MAX_PERSISTED_MODEL_EFFORTS = 16;
 const MAX_PERSISTED_PROVIDER_EFFORTS = 64;
+const MAX_PERSISTED_MISSING_ENVIRONMENT = 8;
+const ENVIRONMENT_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 const MAX_INSPECTED_MODELS = 4_096;
 const MAX_INSPECTED_MODEL_EFFORTS = 64;
 
@@ -119,6 +123,18 @@ function isString(value: unknown): value is string {
 
 function isBoundedString(value: unknown, maxLength: number): value is string {
   return isString(value) && value.length <= maxLength;
+}
+
+function isEnvironmentName(value: unknown): value is string {
+  return isString(value) && ENVIRONMENT_NAME.test(value);
+}
+
+function isEnvironmentNames(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) &&
+    value.length <= MAX_PERSISTED_MISSING_ENVIRONMENT &&
+    value.every(isEnvironmentName)
+  );
 }
 
 function isOneOf<T extends string>(
@@ -235,6 +251,8 @@ export function isPersistedLocalCliObservation(
     value.efforts.every((effort) => isBoundedString(effort, 100)) &&
     isCapabilities(value.capabilities) &&
     isBoundedString(value.setupCommand, 600) &&
+    (value.missingEnvironment === undefined ||
+      isEnvironmentNames(value.missingEnvironment)) &&
     isPreference(value.inspectedPreference) &&
     typeof value.verificationRequired === "boolean" &&
     isFiniteTimestamp(value.checkedAt)
@@ -384,6 +402,12 @@ export function sanitizeLocalCliProbe(
     modelCatalog.truncated ||
     rawProviderEfforts.length > MAX_PERSISTED_PROVIDER_EFFORTS ||
     providerEfforts.length !== rawProviderEfforts.length;
+  const missingEnvironment = Array.isArray(probe.missingEnvironment)
+    ? [...new Set(probe.missingEnvironment.filter(isEnvironmentName))].slice(
+        0,
+        MAX_PERSISTED_MISSING_ENVIRONMENT,
+      )
+    : [];
   return {
     provider: probe.provider,
     status,
@@ -421,6 +445,7 @@ export function sanitizeLocalCliProbe(
     setupCommand: redactLocalCliMessage(
       boundedString(probe.setupCommand, 600) ?? "",
     ),
+    ...(missingEnvironment.length > 0 ? { missingEnvironment } : {}),
     inspectedPreference: preference,
     verificationRequired: status === "verificationRequired" || unverified,
     checkedAt: isFiniteTimestamp(probe.checkedAt) ? probe.checkedAt : now,

@@ -15,6 +15,9 @@ export type LocalCliUnavailableReason =
 
 export type LocalCliCatalogAuthority = "authoritative" | "partial";
 
+/** Lifecycle states the desktop runtime reports while a run is active. */
+export type LocalCliRunState = "preparing" | "handshaking" | "streaming";
+
 export type LocalAgentRunScopeKind = "conversation" | "utility";
 
 export interface LocalAgentRunScope {
@@ -67,6 +70,12 @@ export interface LocalAgentProbe {
     /** True only when the backend completed a provider capability probe. */
     mediaCapabilitiesVerified?: boolean;
   };
+  /**
+   * Credential variables the CLI configuration requires that the desktop
+   * process did not receive. Reported only with `needsSetup`; optional for
+   * older desktop builds.
+   */
+  missingEnvironment?: string[];
   message?: string;
 }
 
@@ -162,7 +171,7 @@ export interface LocalAgentStartRequest {
 }
 
 export type LocalAgentEvent =
-  | { type: "status"; state: string; message?: string }
+  | { type: "status"; state: LocalCliRunState; message?: string }
   | { type: "session"; sessionId: string; cliVersion: string }
   | {
       type: "prepared";
@@ -269,7 +278,7 @@ export interface LocalCliUsage {
 }
 
 export interface LocalCliRunStatus {
-  state: string;
+  state: LocalCliRunState;
   message?: string;
 }
 

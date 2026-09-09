@@ -295,6 +295,9 @@ interface ConversationState {
     provider: LocalAgentProvider,
     session: LocalAgentSessionRef | undefined,
   ) => void;
+  /** Drop every provider's session after the transcript is edited, so no
+   * stale fingerprint can ever match again. */
+  clearLocalAgentSessions: (id: string) => void;
   renameConversation: (id: string, title: string) => void;
   pinConversation: (id: string) => void;
   unpinConversation: (id: string) => void;
@@ -1022,6 +1025,23 @@ export const useConversationStore = create<ConversationState>()(
                   Object.keys(localAgentSessions).length > 0
                     ? localAgentSessions
                     : undefined,
+                updatedAt: Date.now(),
+              },
+            },
+          };
+        });
+      },
+
+      clearLocalAgentSessions: (id) => {
+        set((state) => {
+          const conversation = state.conversations[id];
+          if (!conversation?.localAgentSessions) return state;
+          return {
+            conversations: {
+              ...state.conversations,
+              [id]: {
+                ...conversation,
+                localAgentSessions: undefined,
                 updatedAt: Date.now(),
               },
             },

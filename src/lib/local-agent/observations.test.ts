@@ -67,6 +67,28 @@ function failure(
 }
 
 describe("Local CLI observation cache", () => {
+  it("keeps model names that merely mention credential words", () => {
+    const observation = sanitizeLocalCliProbe(
+      probe({
+        models: [
+          {
+            id: "gpt-5.6-sol",
+            displayName: "GPT 5.6 Sol token efficient",
+            isDefault: true,
+            defaultEffort: "high",
+            efforts: ["low", "high"],
+          },
+        ],
+      }),
+      { model: "gpt-5.6-sol", effort: "high" },
+      123,
+    );
+
+    expect(observation?.models[0]?.displayName).toBe(
+      "GPT 5.6 Sol token efficient",
+    );
+  });
+
   it("persists only sanitized display metadata", () => {
     const observation = sanitizeLocalCliProbe(
       probe({
@@ -86,6 +108,38 @@ describe("Local CLI observation cache", () => {
     });
     expect(observation).not.toHaveProperty("message");
     expect(JSON.stringify(observation)).not.toContain("super-secret");
+    expect(observation?.setupCommand).toBe("codex login --token [redacted]");
+  });
+
+  it("keeps only well-formed missing credential variable names", () => {
+    const observation = sanitizeLocalCliProbe(
+      probe({
+        availability: "needsSetup",
+        status: "setupRequired",
+        missingEnvironment: [
+          "PROXY_TOKEN",
+          "PROXY_TOKEN",
+          "not a name",
+          "x".repeat(80),
+          "",
+        ],
+      }),
+      { model: "", effort: "" },
+    );
+    expect(observation?.missingEnvironment).toEqual(["PROXY_TOKEN"]);
+    expect(
+      sanitizeLocalCliProbe(probe(), { model: "", effort: "" }),
+    ).not.toHaveProperty("missingEnvironment");
+
+    const empty = createEmptyLocalCliObservationCache();
+    expect(
+      sanitizeLocalCliObservationCache({
+        ...empty,
+        providers: {
+          codex: { ...observation, missingEnvironment: ["not a name"] },
+        },
+      }),
+    ).toEqual(empty);
   });
 
   it("keeps legacy capability caches explicitly unverified", () => {

@@ -35,9 +35,26 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
-import { useT } from "../../../i18n";
+import { useResolvedLocale, useT, type ResolvedLocale } from "../../../i18n";
 
 const DEFAULT_OPTION = "default:";
+
+function formatCheckedAt(timestamp: number, locale: ResolvedLocale): string {
+  return new Intl.DateTimeFormat(locale === "zh" ? "zh-CN" : "en-US", {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(timestamp);
+}
+
+function describePreference(
+  preference: LocalAgentPreference,
+  cliDefault: string,
+): string {
+  return (
+    [preference.model, preference.effort].filter(Boolean).join(" · ") ||
+    cliDefault
+  );
+}
 const MODEL_OPTION_PREFIX = "model:";
 const EFFORT_OPTION_PREFIX = "effort:";
 
@@ -68,6 +85,7 @@ export function LocalAgentSettings({
   runtimeChangeLocked = false,
 }: LocalAgentSettingsProps) {
   const t = useT();
+  const locale = useResolvedLocale();
   const provider = value.provider;
   const providerDefinition = LOCAL_AGENT_PROVIDER_CATALOG[provider];
   const preferences = value.preferences[provider];
@@ -91,6 +109,10 @@ export function LocalAgentSettings({
   const [copyFeedback, setCopyFeedback] = useState<"success" | "error" | null>(
     null,
   );
+  const [replacedPreference, setReplacedPreference] = useState<{
+    previous: LocalAgentPreference;
+    next: LocalAgentPreference;
+  } | null>(null);
   const requestSequenceRef = useRef(0);
   const providerRef = useRef(provider);
   const valueRef = useRef(value);
@@ -131,6 +153,7 @@ export function LocalAgentSettings({
       };
       valueRef.current = next;
       onChangeRef.current(next);
+      setReplacedPreference({ previous: currentPreference, next: replacement });
     },
     [],
   );
@@ -242,6 +265,7 @@ export function LocalAgentSettings({
     };
     valueRef.current = next;
     onChangeRef.current(next);
+    setReplacedPreference(null);
     markPreferenceVerificationRequired(provider);
   };
 
@@ -251,6 +275,7 @@ export function LocalAgentSettings({
     providerRef.current = nextProvider;
     setActionError("");
     setCopyFeedback(null);
+    setReplacedPreference(null);
     const current = valueRef.current;
     const next: LocalAgentSettingsValue = {
       ...current,
@@ -394,6 +419,12 @@ export function LocalAgentSettings({
         : notFound
           ? t.settings.localCli.notFound
           : t.settings.localCli.unavailable;
+  const missingEnvironment =
+    needsSetup && observation?.missingEnvironment
+      ? observation.missingEnvironment
+      : [];
+  const [missingEnvironmentLead, missingEnvironmentTail] =
+    t.settings.localCli.missingEnvironmentHint.split("{variables}");
   const probeDetail = ready
     ? t.settings.localCli.probeDetails.ready
     : verificationRequired
@@ -521,12 +552,44 @@ export function LocalAgentSettings({
                   <span className="font-medium text-foreground/80">
                     {t.settings.localCli.lastChecked}:
                   </span>{" "}
-                  {new Date(observation.checkedAt).toLocaleString()}
+                  {formatCheckedAt(observation.checkedAt, locale)}
                 </p>
               ) : null}
               {!showLoading && needsSetup && provider === "pi" ? (
                 <p className="mt-1.5 text-xs text-muted-foreground">
                   {t.settings.localCli.piSetupHint}
+                </p>
+              ) : null}
+              {!showLoading && missingEnvironment.length > 0 ? (
+                <p className="mt-1.5 text-xs text-muted-foreground">
+                  {missingEnvironmentLead}
+                  <code className="font-mono text-foreground">
+                    {missingEnvironment.join(", ")}
+                  </code>
+                  {missingEnvironmentTail}
+                </p>
+              ) : null}
+              {replacedPreference ? (
+                <p
+                  role="status"
+                  className="mt-2 text-xs text-amber-700 dark:text-amber-300"
+                >
+                  {t.settings.localCli.preferenceReplaced
+                    .replace(
+                      "{previous}",
+                      describePreference(
+                        replacedPreference.previous,
+                        t.settings.localCli.cliDefault,
+                      ),
+                    )
+                    .replace("{provider}", providerDefinition.displayName)
+                    .replace(
+                      "{next}",
+                      describePreference(
+                        replacedPreference.next,
+                        t.settings.localCli.cliDefault,
+                      ),
+                    )}
                 </p>
               ) : null}
               {actionError ? (

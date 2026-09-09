@@ -7,6 +7,7 @@ import {
   isSensitiveProjectPath,
   redactProjectFileSecrets,
 } from "./project-file-policy";
+import { redactSecrets } from "../security/redact";
 
 export const REDACTED_VALUE = "[REDACTED]";
 const OMITTED_PROTECTED_RESULT =
@@ -21,24 +22,9 @@ function boundSummaryOnlyText(text: string): string {
 }
 
 export function redactSensitiveText(text: string): string {
-  return redactProjectFileSecrets(text)
-    .replace(
-      /-----BEGIN [^-\r\n]*PRIVATE KEY-----[\s\S]*?-----END [^-\r\n]*PRIVATE KEY-----/gi,
-      REDACTED_VALUE,
-    )
-    .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9+/._~=-]+/gi, `$1 ${REDACTED_VALUE}`)
-    .replace(
-      /([?&](?:api[_-]?key|access[_-]?token|auth|key|password|secret|token)=)[^&#\s]*/gi,
-      `$1${REDACTED_VALUE}`,
-    )
-    .replace(
-      /((?:api[_-]?key|access[_-]?token|authorization|client[_-]?secret|password|private[_-]?key|secret|token)\s*[=:]\s*["']?)([^\s,"'\]}]+)/gi,
-      `$1${REDACTED_VALUE}`,
-    )
-    .replace(
-      /^([A-Z_][A-Z0-9_]*(?:API_KEY|CREDENTIAL|PASSWORD|PRIVATE_KEY|SECRET|TOKEN)[A-Z0-9_]*)\s*=.*$/gim,
-      `$1=${REDACTED_VALUE}`,
-    );
+  return redactSecrets(redactProjectFileSecrets(text), {
+    placeholder: REDACTED_VALUE,
+  });
 }
 
 function parseArguments(raw: string | unknown): unknown {

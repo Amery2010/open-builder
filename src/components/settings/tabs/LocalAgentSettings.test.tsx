@@ -184,7 +184,7 @@ describe("LocalAgentSettings", () => {
 
     expect(
       await screen.findByText(
-        "Ready to send; verification required on first run",
+        "Ready. The first message verifies login and may use quota.",
       ),
     ).toBeInTheDocument();
     expect(screen.queryByText("Installed and ready")).not.toBeInTheDocument();
@@ -476,6 +476,37 @@ describe("LocalAgentSettings", () => {
     ).toBeInTheDocument();
   });
 
+  it("names the credential variable the desktop process is missing", async () => {
+    localAgentMocks.probe.mockResolvedValue({
+      ...probe("needsSetup"),
+      missingEnvironment: ["PROXY_TOKEN"],
+    });
+
+    render(<Harness />);
+
+    expect(await screen.findByText(/did not receive/)).toHaveTextContent(
+      "This app did not receive PROXY_TOKEN, which the CLI configuration requires.",
+    );
+  });
+
+  it("formats the last-checked time in the app language", async () => {
+    useSettingsStore.setState({
+      system: { ...systemDefaults, language: "zh" },
+    });
+    const checkedAt = Date.UTC(2026, 8, 9, 4, 5);
+    localAgentMocks.probe.mockResolvedValue({ ...probe("ready"), checkedAt });
+
+    render(<Harness />);
+
+    const label = await screen.findByText("最近检测:");
+    expect(label.parentElement).toHaveTextContent(
+      new Intl.DateTimeFormat("zh-CN", {
+        dateStyle: "medium",
+        timeStyle: "short",
+      }).format(checkedAt),
+    );
+  });
+
   it("maps probe failures to a sanitized unavailable observation", async () => {
     localAgentMocks.probe.mockRejectedValue(new Error("Probe failed"));
 
@@ -559,6 +590,13 @@ describe("LocalAgentSettings", () => {
         JSON.parse(screen.getByTestId("local-agent-state").textContent ?? "{}")
           .preferences.codex,
       ).toEqual({ model: "gpt-5.6-sol", effort: "max" }),
+    );
+    expect(
+      screen.getByRole("status", {
+        name: "",
+      }),
+    ).toHaveTextContent(
+      "removed-model · ultra is no longer offered by Codex. Switched to gpt-5.6-sol · max.",
     );
   });
 

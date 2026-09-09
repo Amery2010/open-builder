@@ -65,7 +65,11 @@ lines.on("line", (line) => {
       respond(message.id, {
         resultType: "complete",
         content: [{ type: "text", text }],
-        structuredContent: { echoed: text },
+        structuredContent: {
+          echoed: text,
+          canary: process.env.OPEN_BUILDER_ENV_CANARY ?? null,
+          configured: process.env.OPEN_BUILDER_ENV_CONFIGURED ?? null,
+        },
         isError: false,
       });
     };

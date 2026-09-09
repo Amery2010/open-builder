@@ -29,9 +29,14 @@ export function getT(): Translations {
   return lang === "zh" ? zh : en;
 }
 
+/** Reactive hook — the resolved UI locale, for locale-aware formatting. */
+export function useResolvedLocale(): ResolvedLocale {
+  const language = useSettingsStore((s) => s.system.language);
+  return resolveLocale(language);
+}
+
 /** Reactive hook — re-renders when language setting changes. */
 export function useT(): Translations {
-  const language = useSettingsStore((s) => s.system.language);
-  const lang = resolveLocale(language);
+  const lang = useResolvedLocale();
   return lang === "zh" ? zh : en;
 }

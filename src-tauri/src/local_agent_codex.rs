@@ -20,10 +20,12 @@ use crate::local_agent_models::{
 };
 use crate::local_agent_protocol::{
     apply_minimal_environment, command_output_capped, contains_capability_semantics,
-    read_capped_line, turn_prompt, FrozenProcessSpec, PreparedPrivateFile, ProtocolContext,
-    ProtocolOutcome, ProtocolOutputBudget, RunSupervisor,
+    read_capped_line, turn_prompt, FrozenProcessSpec, LocalCliRunState, PreparedPrivateFile,
+    ProtocolContext, ProtocolOutcome, ProtocolOutputBudget, RunSupervisor,
 };
-use crate::local_agent_runtime::{AdapterError, LocalCliFailureCode};
+use crate::local_agent_runtime::{
+    is_operating_system_permission_error, AdapterError, LocalCliFailureCode,
+};
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_PROBE_OUTPUT_BYTES: usize = 256 * 1024;
@@ -33,6 +35,10 @@ const MAX_CODEX_PROVIDER_VALUE_BYTES: usize = 64 * 1024;
 const MAX_CODEX_PROVIDER_ENV_BYTES: usize = 256 * 1024;
 const MAX_CODEX_EFFORT_BYTES: usize = 64;
 const OPENAI_API_KEY_ENV: &str = "OPENAI_API_KEY";
+/// Reported when a required credential variable is absent. The probe turns
+/// this exact message into a setup hint instead of a generic error.
+const MISSING_CREDENTIAL_ENVIRONMENT: &str =
+    "Codex provider credential environment is not configured";
 const SYNTHETIC_OPENAI_PROVIDER: &str = "open_builder_proxy";
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(120);
 const HANDSHAKE_TIMEOUT_ERROR: &str = "Codex exec handshake timed out";
@@ -338,7 +344,7 @@ fn insert_environment(
     validate_environment_name(name)?;
     let value = inherited
         .get(name)
-        .ok_or_else(|| "Codex provider credential environment is not configured".to_string())?;
+        .ok_or_else(|| MISSING_CREDENTIAL_ENVIRONMENT.to_string())?;
     validate_provider_value(name, value)?;
     environment.insert(name.to_string(), value.clone());
     Ok(())
@@ -647,61 +653,87 @@ fn provider_config_from_sources(
     Ok(provider_config)
 }
 
-fn load_provider_config() -> Result<CodexProviderConfig, String> {
-    let config = match user_config_path()? {
-        Some(path) => {
-            let bytes = std::fs::read(path)
-                .map_err(|_| "failed to read Codex user configuration".to_string())?;
-            if bytes.len() as u64 > MAX_CODEX_CONFIG_BYTES {
-                return Err(
-                    "Codex user configuration must be a regular file no larger than 2 MiB"
-                        .to_string(),
-                );
-            }
-            Some(
-                String::from_utf8(bytes)
-                    .map_err(|_| "Codex user configuration must contain UTF-8 text".to_string())?,
-            )
-        }
-        None => None,
+struct ReferencedEnvironment {
+    /// The credential variable the selected provider cannot start without.
+    required: Option<String>,
+    /// Header variables Codex tolerates being absent.
+    optional: Vec<String>,
+}
+
+fn parse_user_config(config: &str) -> Result<toml::Table, String> {
+    toml::from_str::<toml::Table>(config)
+        .map_err(|_| "Codex user configuration contains malformed TOML".to_string())
+}
+
+fn referenced_environment(document: &toml::Table) -> Result<ReferencedEnvironment, String> {
+    let provider = string_field(document, "model_provider", "configuration")?.unwrap_or("openai");
+    let mut referenced = ReferencedEnvironment {
+        required: None,
+        optional: Vec::new(),
     };
-    let mut inherited = BTreeMap::new();
-    if let Some(config) = config.as_deref() {
-        let document = toml::from_str::<toml::Table>(config)
-            .map_err(|_| "Codex user configuration contains malformed TOML".to_string())?;
-        let provider =
-            string_field(&document, "model_provider", "configuration")?.unwrap_or("openai");
-        let mut referenced = BTreeSet::new();
-        if provider == "openai"
-            && document
-                .get("openai_base_url")
-                .and_then(toml::Value::as_str)
-                .is_some_and(|url| validate_provider_url(url).ok() == Some(false))
-        {
-            referenced.insert(OPENAI_API_KEY_ENV.to_string());
-        } else if let Some(selected) = document
-            .get("model_providers")
+    if provider == "openai"
+        && document
+            .get("openai_base_url")
+            .and_then(toml::Value::as_str)
+            .is_some_and(|url| validate_provider_url(url).ok() == Some(false))
+    {
+        referenced.required = Some(OPENAI_API_KEY_ENV.to_string());
+    } else if let Some(selected) = document
+        .get("model_providers")
+        .and_then(toml::Value::as_table)
+        .and_then(|providers| providers.get(provider))
+        .and_then(toml::Value::as_table)
+    {
+        referenced.required = selected
+            .get("env_key")
+            .and_then(toml::Value::as_str)
+            .map(str::to_string);
+        if let Some(headers) = selected
+            .get("env_http_headers")
             .and_then(toml::Value::as_table)
-            .and_then(|providers| providers.get(provider))
-            .and_then(toml::Value::as_table)
         {
-            if let Some(name) = selected.get("env_key").and_then(toml::Value::as_str) {
-                referenced.insert(name.to_string());
-            }
-            if let Some(headers) = selected
-                .get("env_http_headers")
-                .and_then(toml::Value::as_table)
-            {
-                referenced.extend(
-                    headers
-                        .values()
-                        .filter_map(toml::Value::as_str)
-                        .map(str::to_string),
-                );
-            }
+            referenced.optional.extend(
+                headers
+                    .values()
+                    .filter_map(toml::Value::as_str)
+                    .map(str::to_string),
+            );
         }
-        for name in referenced {
-            if let Some(value) = std::env::var_os(&name) {
+    }
+    Ok(referenced)
+}
+
+fn read_user_config() -> Result<Option<String>, String> {
+    let Some(path) = user_config_path()? else {
+        return Ok(None);
+    };
+    let bytes =
+        std::fs::read(path).map_err(|_| "failed to read Codex user configuration".to_string())?;
+    if bytes.len() as u64 > MAX_CODEX_CONFIG_BYTES {
+        return Err(
+            "Codex user configuration must be a regular file no larger than 2 MiB".to_string(),
+        );
+    }
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|_| "Codex user configuration must contain UTF-8 text".to_string())
+}
+
+fn load_provider_config_from(config: Option<&str>) -> Result<CodexProviderConfig, String> {
+    load_provider_config_with(config, |name| std::env::var_os(name))
+}
+
+/// Builds the provider configuration, inheriting only the credential variables
+/// the configuration references and `lookup` can supply.
+fn load_provider_config_with(
+    config: Option<&str>,
+    lookup: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Result<CodexProviderConfig, String> {
+    let mut inherited = BTreeMap::new();
+    if let Some(config) = config {
+        let referenced = referenced_environment(&parse_user_config(config)?)?;
+        for name in referenced.required.iter().chain(&referenced.optional) {
+            if let Some(value) = lookup(name) {
                 inherited.insert(
                     name.clone(),
                     value.into_string().map_err(|_| {
@@ -711,7 +743,26 @@ fn load_provider_config() -> Result<CodexProviderConfig, String> {
             }
         }
     }
-    provider_config_from_sources(config.as_deref(), &inherited)
+    provider_config_from_sources(config, &inherited)
+}
+
+fn load_provider_config() -> Result<CodexProviderConfig, String> {
+    load_provider_config_from(read_user_config()?.as_deref())
+}
+
+/// Required credential variables that `is_set` reports as absent. Unreadable
+/// configuration yields an empty list; the loader reports those errors itself.
+fn missing_required_environment(
+    config: Option<&str>,
+    is_set: impl Fn(&str) -> bool,
+) -> Vec<String> {
+    config
+        .and_then(|config| parse_user_config(config).ok())
+        .and_then(|document| referenced_environment(&document).ok())
+        .and_then(|referenced| referenced.required)
+        .filter(|name| !is_set(name))
+        .into_iter()
+        .collect()
 }
 
 fn configuration_fingerprint_for(config: &CodexProviderConfig) -> String {
@@ -930,6 +981,23 @@ fn unsupported_probe(version: Option<String>) -> AdapterProbe {
         catalog_authority: CatalogAuthority::Partial,
         verification_required: false,
         message: Some(STRUCTURED_CAPABILITY_ERROR.to_string()),
+        missing_environment: Vec::new(),
+    }
+}
+
+fn missing_environment_probe(
+    version: Option<String>,
+    missing_environment: Vec<String>,
+) -> AdapterProbe {
+    AdapterProbe {
+        availability: LocalAgentAvailability::NeedsSetup,
+        version,
+        models: Vec::new(),
+        efforts: Vec::new(),
+        catalog_authority: CatalogAuthority::Partial,
+        verification_required: false,
+        message: Some(MISSING_CREDENTIAL_ENVIRONMENT.to_string()),
+        missing_environment,
     }
 }
 
@@ -942,6 +1010,7 @@ fn error_probe(version: Option<String>, message: &str) -> AdapterProbe {
         catalog_authority: CatalogAuthority::Partial,
         verification_required: false,
         message: Some(message.to_string()),
+        missing_environment: Vec::new(),
     }
 }
 
@@ -1021,8 +1090,21 @@ pub(crate) async fn probe(executable: &Path) -> AdapterProbe {
         Err(_) => return error_probe(None, "Codex version probe failed."),
     };
     let version = first_output_line(&version_output);
-    let provider_config = match load_provider_config() {
+    let user_config = match read_user_config() {
         Ok(config) => config,
+        Err(message) => return error_probe(version, &message),
+    };
+    let provider_config = match load_provider_config_from(user_config.as_deref()) {
+        Ok(config) => config,
+        Err(message) if message == MISSING_CREDENTIAL_ENVIRONMENT => {
+            let missing = missing_required_environment(user_config.as_deref(), |name| {
+                std::env::var_os(name).is_some()
+            });
+            if missing.is_empty() {
+                return error_probe(version, &message);
+            }
+            return missing_environment_probe(version, missing);
+        }
         Err(message) => return error_probe(version, &message),
     };
 
@@ -1110,6 +1192,7 @@ pub(crate) async fn probe(executable: &Path) -> AdapterProbe {
             catalog_authority,
             verification_required: false,
             message: Some("Codex is not signed in; run codex login.".to_string()),
+            missing_environment: Vec::new(),
         },
         LoginStatus::Unknown => error_probe(version, LOGIN_PROBE_ERROR),
         LoginStatus::Authenticated => AdapterProbe {
@@ -1120,6 +1203,7 @@ pub(crate) async fn probe(executable: &Path) -> AdapterProbe {
             catalog_authority,
             verification_required: provider_config.uses_custom_provider(),
             message: model_warning,
+            missing_environment: Vec::new(),
         },
     }
 }
@@ -1890,6 +1974,9 @@ fn mcp_item_error_message(item: &Value) -> Option<&str> {
 
 fn is_provider_approval_rejection(message: &str) -> bool {
     let message = message.to_ascii_lowercase();
+    if is_operating_system_permission_error(&message) {
+        return false;
+    }
     message.contains("approval")
         || message.contains("permission")
         || message.contains("user cancelled mcp tool call")
@@ -2183,10 +2270,9 @@ fn classify_stream_failure(value: &Value, attempted_resume: bool) -> AdapterErro
         .take(2_048)
         .collect::<String>()
         .to_ascii_lowercase();
-    let mentions_session = ["session", "thread", "conversation", "resume"]
-        .iter()
-        .any(|needle| message.contains(needle));
-    let unavailable = [
+    let contains_any = |needles: &[&str]| needles.iter().any(|needle| message.contains(needle));
+    let mentions_session = contains_any(&["session", "thread", "conversation", "resume"]);
+    let unavailable = contains_any(&[
         "invalid",
         "missing",
         "not found",
@@ -2196,9 +2282,8 @@ fn classify_stream_failure(value: &Value, attempted_resume: bool) -> AdapterErro
         "no conversation found",
         "no session found",
         "no thread found",
-    ]
-    .iter()
-    .any(|needle| message.contains(needle));
+    ]);
+    let mentions_capability = contains_any(&["native", "tool", "capability", "mcp"]);
     if is_provider_approval_rejection(&message) {
         AdapterError::coded(
             LocalCliFailureCode::ProviderApprovalRejected,
@@ -2209,29 +2294,30 @@ fn classify_stream_failure(value: &Value, attempted_resume: bool) -> AdapterErro
             LocalCliFailureCode::SessionUnavailable,
             "Codex session is unavailable",
         )
-    } else if ["native", "tool", "capability", "mcp"]
-        .iter()
-        .any(|needle| message.contains(needle))
-        && ["unauthorized", "unexpected", "disabled"]
-            .iter()
-            .any(|needle| message.contains(needle))
+    } else if contains_any(&["authentication", "credential", "api key"])
+        || (!mentions_capability && contains_any(&["unauthorized", "401"]))
+    {
+        // Credential wording wins unless the event names a tool or MCP
+        // capability; only then does "unauthorized" describe an isolation
+        // breach rather than a rejected provider login.
+        AdapterError::coded(
+            LocalCliFailureCode::CredentialRejected,
+            "Codex credentials were rejected",
+        )
+    } else if mentions_capability
+        && contains_any(&[
+            "unauthorized",
+            "disabled",
+            "not allowed",
+            "not permitted",
+            "external",
+        ])
     {
         AdapterError::coded(
             LocalCliFailureCode::IsolationViolation,
             "Codex attempted to use an unavailable capability",
         )
-    } else if ["unauthorized", "authentication", "credential", "api key"]
-        .iter()
-        .any(|needle| message.contains(needle))
-    {
-        AdapterError::coded(
-            LocalCliFailureCode::CredentialRejected,
-            "Codex credentials were rejected",
-        )
-    } else if ["unknown model", "model not found", "invalid model"]
-        .iter()
-        .any(|needle| message.contains(needle))
-    {
+    } else if contains_any(&["unknown model", "model not found", "invalid model"]) {
         AdapterError::coded(
             LocalCliFailureCode::ModelRejected,
             "Codex selected model was rejected",
@@ -2442,7 +2528,7 @@ async fn run_prepared(
                     context
                         .channel
                         .send(LocalAgentEvent::Status {
-                            state: "streaming".to_string(),
+                            state: LocalCliRunState::Streaming,
                             message: None,
                         })
                         .map_err(|_| "local agent event consumer is unavailable".to_string())?;
@@ -3120,6 +3206,55 @@ env_http_headers = { "X-Proxy-Feature" = "OPTIONAL_PROXY_FEATURE" }
     }
 
     #[test]
+    fn missing_required_environment_names_only_absent_required_variables() {
+        let config = r#"
+model = "proxy-model"
+model_provider = "proxy"
+
+[model_providers.proxy]
+base_url = "https://gateway.example/v1"
+env_key = "PROXY_TOKEN"
+env_http_headers = { "X-Proxy-Feature" = "OPTIONAL_PROXY_FEATURE" }
+"#;
+        assert_eq!(
+            missing_required_environment(Some(config), |_| false),
+            ["PROXY_TOKEN".to_string()]
+        );
+        assert!(
+            missing_required_environment(Some(config), |name| name == "PROXY_TOKEN").is_empty()
+        );
+        assert!(missing_required_environment(None, |_| false).is_empty());
+        assert!(missing_required_environment(Some("model_provider = ["), |_| false).is_empty());
+    }
+
+    #[test]
+    fn openai_compatible_base_url_requires_the_openai_api_key_variable() {
+        let config = r#"
+openai_base_url = "https://gateway.example/v1"
+"#;
+        assert_eq!(
+            missing_required_environment(Some(config), |_| false),
+            [OPENAI_API_KEY_ENV.to_string()]
+        );
+        let error = load_provider_config_with(Some(config), |_| None).err();
+        assert_eq!(error.as_deref(), Some(MISSING_CREDENTIAL_ENVIRONMENT));
+    }
+
+    #[test]
+    fn missing_environment_probe_reports_setup_with_variable_names() {
+        let probe = missing_environment_probe(
+            Some("codex-cli 1.0.0".to_string()),
+            vec!["PROXY_TOKEN".to_string()],
+        );
+        assert!(matches!(
+            probe.availability,
+            LocalAgentAvailability::NeedsSetup
+        ));
+        assert_eq!(probe.missing_environment, ["PROXY_TOKEN"]);
+        assert!(!probe.verification_required);
+    }
+
+    #[test]
     fn custom_provider_requires_a_top_level_model() {
         let config = r#"
 model_provider = "proxy"
@@ -3448,6 +3583,38 @@ enabled = true
             assert_eq!(generic.code, None);
             assert_eq!(generic.message, RUN_ERROR);
         }
+    }
+
+    #[test]
+    fn stream_failures_prefer_credential_over_approval_and_isolation_wording() {
+        let credential = classify_stream_failure(
+            &json!({"type":"error","message":"unauthorized: invalid api key for provider"}),
+            false,
+        );
+        assert_eq!(
+            credential.code,
+            Some(LocalCliFailureCode::CredentialRejected)
+        );
+
+        let os_error = classify_stream_failure(
+            &json!({"type":"error","message":"EACCES: permission denied, open '/Users/x/.codex/log'"}),
+            false,
+        );
+        assert_eq!(os_error.code, None);
+        assert_eq!(os_error.message, RUN_ERROR);
+
+        let unexpected_tool = classify_stream_failure(
+            &json!({"type":"error","message":"unexpected tool call error"}),
+            false,
+        );
+        assert_eq!(unexpected_tool.code, None);
+        assert_eq!(unexpected_tool.message, RUN_ERROR);
+
+        let external = classify_stream_failure(
+            &json!({"type":"error","message":"external mcp server is not allowed"}),
+            false,
+        );
+        assert_eq!(external.code, Some(LocalCliFailureCode::IsolationViolation));
     }
 
     #[test]

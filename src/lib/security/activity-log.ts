@@ -8,6 +8,7 @@ import type {
   ProjectPermissionScope,
 } from "./project-permission-broker";
 import { PROJECT_FILE_LIMITS } from "../utils/project-files";
+import { redactSecrets } from "./redact";
 
 const STORAGE_KEY = "open-builder-permission-activity";
 const MAX_ENTRIES = 200;
@@ -74,10 +75,7 @@ const subscribers = new Set<() => void>();
 
 function safeText(value: string | undefined): string | undefined {
   if (!value) return undefined;
-  return value
-    .replace(/\b(Bearer|Basic)\s+\S+/gi, "$1 [REDACTED]")
-    .replace(/([?&](?:token|key|secret|password)=)[^&#\s]*/gi, "$1[REDACTED]")
-    .slice(0, MAX_TEXT_CHARS);
+  return redactSecrets(value, { maxLength: MAX_TEXT_CHARS });
 }
 
 function safeTarget(value: string | undefined): string | undefined {

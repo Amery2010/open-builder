@@ -93,6 +93,7 @@ export function PermissionRequestDialog({
 }: PermissionRequestDialogProps) {
   const denyButtonRef = useRef<HTMLButtonElement>(null);
   const scopeGroupId = useId();
+  const pathsLabelId = useId();
   const [selectedScope, setSelectedScope] = useState<ScopeChoice>("exact");
   const requestKey = `${operation}\u0000${commonParent ?? ""}\u0000${paths.join("\u0000")}`;
   const sessionEnabled = eligibleForSession && operation !== "replace_project";
@@ -166,11 +167,14 @@ export function PermissionRequestDialog({
               <strong className="tabular-nums">{count}</strong>
             </div>
             <div className="space-y-2">
-              <h2 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+              <p
+                id={pathsLabelId}
+                className="text-xs font-medium uppercase tracking-wide text-muted-foreground"
+              >
                 {labels.paths}
-              </h2>
+              </p>
               <ul
-                aria-label={labels.paths}
+                aria-labelledby={pathsLabelId}
                 className="max-h-40 space-y-1 overflow-y-auto rounded-md bg-background/70 p-2 font-mono text-xs"
               >
                 {paths.map((path) => (

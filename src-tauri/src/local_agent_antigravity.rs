@@ -23,7 +23,8 @@ use crate::local_agent_models::CatalogAuthority;
 use crate::local_agent_protocol::{
     apply_minimal_environment, command_output_capped, command_output_capped_with_env,
     contains_capability_semantics, read_capped_line, turn_prompt, write_json, FrozenProcessSpec,
-    PreparedPrivateFile, ProtocolContext, ProtocolOutcome, ProtocolOutputBudget, RunSupervisor,
+    LocalCliRunState, PreparedPrivateFile, ProtocolContext, ProtocolOutcome, ProtocolOutputBudget,
+    RunSupervisor,
 };
 use crate::local_agent_runtime::{AdapterError, LocalCliFailureCode};
 
@@ -416,6 +417,7 @@ async fn inspect_installation(executable: &Path) -> Result<InstallationInspectio
                     "The selected Antigravity executable did not report a supported version."
                         .to_string(),
                 ),
+                missing_environment: Vec::new(),
             })
         }
         Err(message) => {
@@ -427,6 +429,7 @@ async fn inspect_installation(executable: &Path) -> Result<InstallationInspectio
                 catalog_authority: CatalogAuthority::Partial,
                 verification_required: false,
                 message: Some(message),
+                missing_environment: Vec::new(),
             })
         }
     };
@@ -439,6 +442,7 @@ async fn inspect_installation(executable: &Path) -> Result<InstallationInspectio
             catalog_authority: CatalogAuthority::Partial,
             verification_required: false,
             message: Some("Antigravity returned an empty version response.".to_string()),
+            missing_environment: Vec::new(),
         });
     };
     let help_output = match command_output_capped(
@@ -459,6 +463,7 @@ async fn inspect_installation(executable: &Path) -> Result<InstallationInspectio
                 catalog_authority: CatalogAuthority::Partial,
                 verification_required: false,
                 message: Some(message),
+                missing_environment: Vec::new(),
             })
         }
     };
@@ -472,6 +477,7 @@ async fn inspect_installation(executable: &Path) -> Result<InstallationInspectio
             catalog_authority: CatalogAuthority::Partial,
             verification_required: false,
             message: Some("Antigravity did not expose its structured CLI interface.".to_string()),
+            missing_environment: Vec::new(),
         });
     }
     if let Err(message) = has_required_help(&help) {
@@ -483,6 +489,7 @@ async fn inspect_installation(executable: &Path) -> Result<InstallationInspectio
             catalog_authority: CatalogAuthority::Partial,
             verification_required: false,
             message: Some(message),
+            missing_environment: Vec::new(),
         });
     }
     Ok(InstallationInspection { version })
@@ -679,6 +686,7 @@ pub(crate) async fn probe(executable: &Path) -> AdapterProbe {
                 catalog_authority: CatalogAuthority::Partial,
                 verification_required: false,
                 message: Some(message),
+                missing_environment: Vec::new(),
             }
         }
     };
@@ -724,6 +732,7 @@ pub(crate) async fn probe(executable: &Path) -> AdapterProbe {
                 verification_required: provider_environment.uses_gemini_api_key()
                     || provider_environment.uses_custom_endpoint(),
                 message,
+                missing_environment: Vec::new(),
             }
         }
         Ok(output) if looks_like_auth_failure(&combined_output(&output)) => AdapterProbe {
@@ -742,6 +751,7 @@ pub(crate) async fn probe(executable: &Path) -> AdapterProbe {
             } else {
                 "Antigravity is not signed in; run agy and complete login.".to_string()
             }),
+            missing_environment: Vec::new(),
         },
         Ok(_) | Err(_) => AdapterProbe {
             availability: LocalAgentAvailability::Ready,
@@ -757,6 +767,7 @@ pub(crate) async fn probe(executable: &Path) -> AdapterProbe {
                 "Antigravity model discovery failed; the CLI default model remains usable."
                     .to_string(),
             ),
+            missing_environment: Vec::new(),
         },
     }
 }
@@ -1742,7 +1753,7 @@ async fn run_protocol(
     context
         .channel
         .send(LocalAgentEvent::Status {
-            state: "streaming".to_string(),
+            state: LocalCliRunState::Streaming,
             message: None,
         })
         .map_err(|_| "local agent event consumer is unavailable".to_string())?;
@@ -4236,6 +4247,27 @@ mod tests {
         assert_ne!(utility_files.home, resume_files.home);
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn mcp_config_lives_inside_the_run_directory_and_leaves_with_it() {
+        let root = std::env::temp_dir().join(format!(
+            "open-builder-agy-lifetime-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let (channel, _events) = event_channel();
+        let context = protocol_context(&root, root.join("agy"), request(), channel);
+
+        let files =
+            prepare_run_files(&context, &AntigravityProviderEnvironment::default()).unwrap();
+        let mcp_config = files.workspace.join(".agents").join("mcp_config.json");
+
+        assert!(files.workspace.starts_with(&context.run_dir));
+        assert!(mcp_config.is_file());
+        std::fs::remove_dir_all(&context.run_dir).unwrap();
+        assert!(!mcp_config.exists());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[tokio::test]

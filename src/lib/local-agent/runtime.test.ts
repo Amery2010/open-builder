@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   LocalAgentEvent,
+  LocalAgentProvider,
   LocalAgentStartRequest,
   LocalCliFailure,
   LocalToolResolution,
@@ -124,6 +125,18 @@ describe("LocalCliRuntime", () => {
       { model: "", effort: "" },
       true,
     );
+  });
+
+  it("names the requested provider when inspect rejects it", async () => {
+    await expect(
+      new LocalCliRuntime().inspect({
+        provider: "unknown-cli" as LocalAgentProvider,
+        preference: { model: "", effort: "" },
+      }),
+    ).rejects.toMatchObject({
+      failure: { code: "selectionRejected", provider: "unknown-cli" },
+    });
+    expect(tauriMocks.probe).not.toHaveBeenCalled();
   });
 
   it("reports an unsupported host without probing a provider", async () => {

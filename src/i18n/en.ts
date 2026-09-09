@@ -75,7 +75,8 @@ export const en: typeof zh = {
       provider: "CLI provider",
       scanning: "Detecting local CLI…",
       ready: "Installed and ready",
-      verificationRequired: "Ready to send; verification required on first run",
+      verificationRequired:
+        "Ready. The first message verifies login and may use quota.",
       needsSetup: "Installed, setup required",
       notFound: "CLI not found",
       unavailable: "CLI unavailable",
@@ -87,6 +88,10 @@ export const en: typeof zh = {
       copyFailed:
         "Could not copy the setup command. Copy it manually and retry.",
       piSetupHint: "Start pi, then run /login to configure a provider.",
+      missingEnvironmentHint:
+        "This app did not receive {variables}, which the CLI configuration requires. Launch Open Builder from a terminal that exports the missing variable, or add it to your login environment, then rescan.",
+      preferenceReplaced:
+        "{previous} is no longer offered by {provider}. Switched to {next}.",
       builtinSearchBlocked:
         "The selected local CLI does not provide native web search. Choose Tavily, Firecrawl, Exa, or Disabled before starting this turn.",
       probeMismatch:

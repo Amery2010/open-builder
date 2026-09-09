@@ -58,6 +58,9 @@ pub(crate) struct AdapterProbe {
     pub catalog_authority: CatalogAuthority,
     pub verification_required: bool,
     pub message: Option<String>,
+    /// Credential variables the provider configuration requires that this
+    /// process did not receive. Non-empty only with `NeedsSetup`.
+    pub missing_environment: Vec<String>,
 }
 
 pub(crate) struct PreparedCliRun {

@@ -125,7 +125,12 @@ import {
   type AutomaticDesignReviewPhase,
 } from "../lib/design/automatic-review";
 import { runProjectHealthCheck } from "../lib/tools/project-health";
-import { localAgentSupportsNativeSearch } from "../lib/local-agent/providers";
+import {
+  localAgentSupportsNativeSearch,
+  type LocalAgentProvider,
+} from "../lib/local-agent/providers";
+import { runStateForLocalCliStatus } from "../lib/local-agent/orchestration";
+import type { LocalAgentClientConfig } from "../lib/local-agent/generator";
 import { createHostProjectPermissionSession } from "../lib/security/project-permission-host";
 import {
   publishProjectPermissionAuthority,
@@ -757,6 +762,41 @@ interface UseGeneratorOptions {
   restartSandpack: () => void;
 }
 
+function observedLocalCapabilities(provider: LocalAgentProvider) {
+  return useSettingsStore.getState().localCliObservationCache.providers[
+    provider
+  ]?.capabilities;
+}
+
+/**
+ * Build the local CLI client config from the saved provider preference. The
+ * observation cache and image-compression settings are read lazily, so a run
+ * sees current values without the lib layer reaching into the store.
+ */
+function localAgentClientConfig(
+  localAgent: AISettings["localAgent"],
+  overrides: Pick<LocalAgentClientConfig, "nativeSearch"> &
+    Partial<LocalAgentClientConfig>,
+): LocalAgentClientConfig {
+  const { provider } = localAgent;
+  const preferences = localAgent.preferences[provider];
+  return {
+    provider,
+    model: preferences.model,
+    effort: preferences.effort,
+    getObservedCapabilities: () => observedLocalCapabilities(provider),
+    getImageCompression: () => {
+      const { imageCompressionEnabled, imageCompressionQuality } =
+        useSettingsStore.getState().system;
+      return {
+        enabled: imageCompressionEnabled,
+        quality: imageCompressionQuality,
+      };
+    },
+    ...overrides,
+  };
+}
+
 export function useGenerator({
   settings,
   webSearchSettings,
@@ -1107,17 +1147,11 @@ export function useGenerator({
       prompt: string,
       options?: { timeoutMs?: number; signal?: AbortSignal },
     ) => {
-      const provider = settings.localAgent.provider;
-      const preferences = settings.localAgent.preferences[provider];
       const { runLocalUtilityText } =
         await import("../lib/local-agent/generator");
       try {
         return await runLocalUtilityText(
-          {
-            provider,
-            model: preferences.model,
-            effort: preferences.effort,
-          },
+          localAgentClientConfig(settings.localAgent, { nativeSearch: false }),
           instructions,
           prompt,
           {
@@ -1247,7 +1281,6 @@ export function useGenerator({
   const getGenerator = useCallback(async () => {
     const isLocalRuntime = settings.runtime === "localCli";
     const localProvider = settings.localAgent.provider;
-    const localPreferences = settings.localAgent.preferences[localProvider];
     const currentApiType = settings.apiType;
     const currentApiKey = settings.apiKey;
     const currentApiBaseUrl = settings.apiBaseUrl;
@@ -1261,7 +1294,10 @@ export function useGenerator({
     if (isLocalRuntime) {
       if (
         webSearchSettings.engine === "builtin" &&
-        !localAgentSupportsNativeSearch(localProvider)
+        !localAgentSupportsNativeSearch(
+          localProvider,
+          observedLocalCapabilities(localProvider),
+        )
       ) {
         throw new Error(getT().settings.localCli.builtinSearchBlocked);
       }
@@ -1706,13 +1742,10 @@ export function useGenerator({
               const { createLocalAgentGenerator } =
                 await import("../lib/local-agent/generator");
               return createLocalAgentGenerator(
-                {
-                  provider: localProvider,
-                  model: localPreferences.model,
-                  effort: localPreferences.effort,
+                localAgentClientConfig(settings.localAgent, {
                   nativeSearch: false,
                   conversationId: options.conversationId,
-                },
+                }),
                 events,
                 options.initialFiles,
                 options.customTools,
@@ -1963,26 +1996,7 @@ export function useGenerator({
         },
         onLocalCliStatus: (status) => {
           if (!isCurrentGeneratorRun(generatorConversationId)) return;
-          const normalized = status.state.toLowerCase();
-          if (normalized.includes("tool")) {
-            setRunState("executingTool");
-          } else if (
-            normalized.includes("wait") ||
-            normalized.includes("input")
-          ) {
-            setRunState("waitingUser");
-          } else if (
-            normalized.includes("stream") ||
-            normalized.includes("think")
-          ) {
-            setRunState("streaming");
-          } else if (
-            normalized.includes("prepare") ||
-            normalized.includes("start") ||
-            normalized.includes("handshake")
-          ) {
-            setRunState("preparing");
-          }
+          setRunState(runStateForLocalCliStatus(status.state));
         },
         onRetry: (attempt, maxAttempts, error) => {
           if (!isCurrentGeneratorRun(generatorConversationId)) return;
@@ -2230,10 +2244,7 @@ export function useGenerator({
         const { createLocalAgentGenerator } =
           await import("../lib/local-agent/generator");
         candidate = createLocalAgentGenerator(
-          {
-            provider: localProvider,
-            model: localPreferences.model,
-            effort: localPreferences.effort,
+          localAgentClientConfig(settings.localAgent, {
             nativeSearch: webSearchSettings.engine === "builtin",
             conversationId: generatorConversationId,
             getConversation: () =>
@@ -2255,7 +2266,7 @@ export function useGenerator({
                   session,
                 );
             },
-          },
+          }),
           generatorEvents,
           initialFiles,
           customToolSet,
@@ -3070,27 +3081,16 @@ export function useGenerator({
         .getState()
         .renameConversation(conversationId, DEFAULT_TITLE);
     }
-    if (settings.runtime === "localCli") {
-      useConversationStore
-        .getState()
-        .setLocalAgentSessionForConversation(
-          conversationId,
-          settings.localAgent.provider,
-          undefined,
-        );
-    }
+    // Every provider's session fingerprint is tied to the transcript that
+    // just changed, so none of them may resume.
+    useConversationStore.getState().clearLocalAgentSessions(conversationId);
 
     setLastError(null);
     setIsThinkingStreaming(false);
     setRunState("idle");
     setIsGenerating(false);
     return draft;
-  }, [
-    clearOutputBuffers,
-    setIsGenerating,
-    settings.localAgent.provider,
-    settings.runtime,
-  ]);
+  }, [clearOutputBuffers, setIsGenerating]);
 
   const retry = useCallback(async () => {
     if (runConversationIdRef.current !== null) return;

@@ -1,4 +1,5 @@
 import * as tauri from "./tauri";
+import { redactSecrets } from "../security/redact";
 import type {
   LocalAgentEvent,
   LocalAgentPreference,
@@ -14,6 +15,7 @@ import type {
   LocalCliRetryPolicy,
   LocalCliUnavailableReason,
   LocalCliUsage,
+  LocalCliRunState,
   LocalCliRunStatus,
   LocalCliHostToolOutcome,
   LocalToolResolution,
@@ -116,17 +118,11 @@ function valueWithAliases(
 }
 
 export function redactLocalCliMessage(message: string): string {
-  return message
-    .replace(
-      /(authorization\s*:\s*)(?:bearer|basic)\s+[^\s,;]+/gi,
-      "$1[redacted]",
-    )
-    .replace(/\bbearer\s+[^\s,;]+/gi, "Bearer [redacted]")
-    .replace(
-      /((?:api[_ -]?key|access[_ -]?token|password|secret|token)\s*)(?:[:=]|\s)\s*[^\s,;]+/gi,
-      "$1=[redacted]",
-    )
-    .slice(0, 600);
+  return redactSecrets(message, {
+    placeholder: "[redacted]",
+    maxLength: 600,
+    diagnosticForms: true,
+  });
 }
 
 function diagnosticId(): string {
@@ -135,6 +131,12 @@ function diagnosticId(): string {
     `local-cli-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
   );
 }
+
+const LOCAL_CLI_RUN_STATES = [
+  "preparing",
+  "handshaking",
+  "streaming",
+] as const satisfies readonly LocalCliRunState[];
 
 function isOneOf<T extends string>(
   value: unknown,
@@ -403,7 +405,7 @@ function normalizeEvent(
   switch (type) {
     case "status": {
       const state = stringValue(value.state);
-      if (!state) return { kind: "unknown" };
+      if (!isOneOf(state, LOCAL_CLI_RUN_STATES)) return { kind: "unknown" };
       return {
         kind: "event",
         event: {
@@ -612,7 +614,7 @@ export class LocalCliRuntime {
       throw new LocalCliRuntimeError({
         code: "selectionRejected",
         phase: "inspect",
-        provider: "codex",
+        provider: input.provider,
         safeMessage: "The selected local CLI provider is invalid.",
         diagnosticId: diagnosticId(),
         hadActivity: false,

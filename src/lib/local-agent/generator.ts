@@ -56,9 +56,10 @@ import type {
 import {
   localAgentImageCapabilities,
   localAgentSupportsNativeSearch,
+  type LocalAgentObservedCapabilities,
 } from "./providers";
 import { generateLocalImage } from "./media";
-import { useSettingsStore } from "../../store/settings";
+import { DEFAULT_IMAGE_COMPRESSION_QUALITY } from "../images/settings";
 
 const LOCAL_RUNTIME_INSTRUCTIONS = `
 
@@ -88,6 +89,11 @@ export interface LocalAgentClientConfig {
   model?: string;
   effort?: string;
   nativeSearch: boolean;
+  /** Capabilities the desktop runtime observed for the provider; the declared
+   * catalog is the fallback until something has been observed. */
+  getObservedCapabilities?: () => LocalAgentObservedCapabilities | undefined;
+  /** Compression policy for generated images; defaults to compression on. */
+  getImageCompression?: () => { enabled: boolean; quality: number };
   conversationId?: string;
   toolAnnotations?: ReadonlyMap<string, LocalToolAnnotations>;
   getConversation?: () => Conversation | null;
@@ -619,7 +625,10 @@ export class LocalAgentGenerator implements GenerationBackend {
   private assertSearchCompatibility(): void {
     const mode = this.host.getRunContext().mode;
     if (
-      !localAgentSupportsNativeSearch(this.config.provider) &&
+      !localAgentSupportsNativeSearch(
+        this.config.provider,
+        this.config.getObservedCapabilities?.(),
+      ) &&
       this.config.nativeSearch &&
       this.nativeSearchAllowed &&
       (mode === "chat" || mode === "plan")
@@ -804,7 +813,10 @@ export class LocalAgentGenerator implements GenerationBackend {
       ...conversation.messages,
       ...this.host.getMessages(),
     ]);
-    const imageCapabilities = localAgentImageCapabilities(this.config.provider);
+    const imageCapabilities = localAgentImageCapabilities(
+      this.config.provider,
+      this.config.getObservedCapabilities?.(),
+    );
     const mediaToolsAllowed =
       runContext.mode === "chat" &&
       this.conversationContextAllowed &&
@@ -1071,8 +1083,10 @@ export class LocalAgentGenerator implements GenerationBackend {
             output = referenceError;
           } else {
             try {
-              const { imageCompressionEnabled, imageCompressionQuality } =
-                useSettingsStore.getState().system;
+              const compression = this.config.getImageCompression?.() ?? {
+                enabled: true,
+                quality: DEFAULT_IMAGE_COMPRESSION_QUALITY,
+              };
               const image = await generateLocalImage(
                 {
                   taskId: `${event.runId}:${event.callId}`,
@@ -1096,10 +1110,7 @@ export class LocalAgentGenerator implements GenerationBackend {
                   type: image.mimeType,
                   lastModified: 0,
                 }),
-                {
-                  enabled: imageCompressionEnabled,
-                  quality: imageCompressionQuality,
-                },
+                compression,
                 this.activeSignal ?? undefined,
               );
               const sha256 = await blobSha256(compressed);

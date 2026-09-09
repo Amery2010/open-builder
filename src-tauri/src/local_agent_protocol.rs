@@ -10,6 +10,7 @@ use process_wrap::tokio::JobObject;
 #[cfg(unix)]
 use process_wrap::tokio::ProcessGroup;
 use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::io::{
@@ -19,13 +20,25 @@ use tokio::process::{ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio_util::sync::CancellationToken;
 
 use crate::local_agent::{LocalAgentStartRequest, TrackedChannel};
-use crate::local_agent_runtime::{AdapterError, LocalCliFailureCode};
+use crate::local_agent_runtime::{
+    is_provider_approval_rejected, is_rate_limited, AdapterError, LocalCliFailureCode,
+};
 
 const MAX_JSON_LINE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_PROTOCOL_OUTPUT_BYTES: usize = 32 * 1024 * 1024;
 const MAX_PROTOCOL_EVENTS: usize = 250_000;
 const MAX_STDERR_TAIL_BYTES: usize = 8 * 1024;
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(4);
+
+/// Lifecycle states a run reports to the UI. The wire form is the camelCase
+/// name, and the frontend enumerates exactly these values.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum LocalCliRunState {
+    Preparing,
+    Handshaking,
+    Streaming,
+}
 
 pub struct ProtocolContext {
     pub executable: PathBuf,
@@ -450,20 +463,7 @@ impl StderrCapture {
 
 fn classify_stderr_category(text: &str) -> u8 {
     let text = text.to_ascii_lowercase();
-    if [
-        "approval policy is never",
-        "requires approval",
-        "approval required",
-        "approval was rejected",
-        "permission denied",
-        "permission to use",
-        "not authorized",
-        "user cancelled mcp tool call",
-        "user canceled mcp tool call",
-    ]
-    .iter()
-    .any(|needle| text.contains(needle))
-    {
+    if is_provider_approval_rejected(&text) {
         5
     } else if [
         "unauthorized",
@@ -492,7 +492,7 @@ fn classify_stderr_category(text: &str) -> u8 {
     .any(|needle| text.contains(needle))
     {
         3
-    } else if text.contains("rate limit") || text.contains("too many requests") {
+    } else if is_rate_limited(&text) {
         4
     } else {
         6
@@ -966,6 +966,21 @@ pub(crate) fn turn_prompt(request: &LocalAgentStartRequest) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_states_round_trip_as_enumerated_wire_strings() {
+        for (state, wire) in [
+            (LocalCliRunState::Preparing, "\"preparing\""),
+            (LocalCliRunState::Handshaking, "\"handshaking\""),
+            (LocalCliRunState::Streaming, "\"streaming\""),
+        ] {
+            assert_eq!(serde_json::to_string(&state).unwrap(), wire);
+            assert_eq!(
+                serde_json::from_str::<LocalCliRunState>(wire).unwrap(),
+                state
+            );
+        }
+    }
     use tokio::io::BufReader;
 
     fn compile_fake_cli() -> (PathBuf, PathBuf) {

@@ -17,6 +17,7 @@ use crate::local_agent_adapter::{
 use crate::local_agent_bridge::ToolBridge;
 use crate::local_agent_media::ActiveImageTask;
 use crate::local_agent_models::{CatalogAuthority, LaunchValidation, ModelStrategy};
+use crate::local_agent_protocol::LocalCliRunState;
 use crate::local_agent_runtime::{
     infer_failure_phase, AdapterError, InstallationIdentity, LocalCliFailure, LocalCliFailureCode,
     LocalCliFailurePhase, LocalCliRetryPolicy,
@@ -166,6 +167,9 @@ pub struct LocalAgentProbe {
     efforts: Vec<String>,
     preference_decision: LocalAgentPreferenceDecision,
     capabilities: LocalAgentCapabilities,
+    /// Credential variables the provider configuration requires that this
+    /// process did not receive; the UI turns them into a setup hint.
+    missing_environment: Vec<String>,
     message: Option<String>,
 }
 
@@ -196,6 +200,7 @@ impl LocalAgentProbe {
             efforts: Vec::new(),
             preference_decision: LocalAgentPreferenceDecision::default(),
             capabilities: provider.capabilities(),
+            missing_environment: Vec::new(),
             message: Some(message),
         }
     }
@@ -362,7 +367,7 @@ pub struct LocalToolResolution {
 )]
 pub enum LocalAgentEvent {
     Status {
-        state: String,
+        state: LocalCliRunState,
         message: Option<String>,
     },
     Session {
@@ -479,12 +484,14 @@ impl RunPhaseTracker {
 
     fn observe(&self, event: &LocalAgentEvent) {
         match event {
-            LocalAgentEvent::Status { state, .. } if state == "preparing" => {
-                self.set(LocalCliFailurePhase::Prepare)
-            }
-            LocalAgentEvent::Status { state, .. } if state == "handshaking" => {
-                self.set(LocalCliFailurePhase::Handshake)
-            }
+            LocalAgentEvent::Status {
+                state: LocalCliRunState::Preparing,
+                ..
+            } => self.set(LocalCliFailurePhase::Prepare),
+            LocalAgentEvent::Status {
+                state: LocalCliRunState::Handshaking,
+                ..
+            } => self.set(LocalCliFailurePhase::Handshake),
             LocalAgentEvent::ToolRequest { .. } => {
                 self.pending_tools.fetch_add(1, Ordering::AcqRel);
                 self.set(LocalCliFailurePhase::Tool);
@@ -888,6 +895,7 @@ async fn probe_path(
                 catalog_authority,
                 verification_required: provider_verification_required,
                 message: provider_message,
+                missing_environment,
             },
         preference_decision,
         launch_validation,
@@ -969,6 +977,7 @@ async fn probe_path(
         efforts,
         preference_decision,
         capabilities,
+        missing_environment,
         message,
     }
 }
@@ -1033,6 +1042,7 @@ async fn probe_path_bounded(
             preference_decision: LocalAgentPreferenceDecision::default(),
             capabilities: provider.capabilities(),
             message: Some("local CLI capability probe timed out".to_string()),
+            missing_environment: Vec::new(),
         },
     }
 }
@@ -1493,7 +1503,7 @@ pub async fn local_agent_start(
     let task_run_id = run_id.clone();
     let task = tauri::async_runtime::spawn(async move {
         let _ = on_event.send(LocalAgentEvent::Status {
-            state: "preparing".to_string(),
+            state: LocalCliRunState::Preparing,
             message: None,
         });
         let mut work = Box::pin(async {
@@ -1568,7 +1578,7 @@ pub async fn local_agent_start(
             }
             on_event
                 .send(LocalAgentEvent::Status {
-                    state: "handshaking".to_string(),
+                    state: LocalCliRunState::Handshaking,
                     message: None,
                 })
                 .map_err(|_| {
@@ -1773,7 +1783,7 @@ mod tests {
     fn run_phase_tracks_handshake_stream_tool_and_shutdown() {
         let phase = RunPhaseTracker::default();
         phase.observe(&LocalAgentEvent::Status {
-            state: "handshaking".to_string(),
+            state: LocalCliRunState::Handshaking,
             message: None,
         });
         assert_eq!(phase.current(), LocalCliFailurePhase::Handshake);

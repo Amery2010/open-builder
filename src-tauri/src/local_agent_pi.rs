@@ -19,7 +19,8 @@ use crate::local_agent_models::CatalogAuthority;
 use crate::local_agent_protocol::{
     apply_minimal_environment, command_output_capped, finish_process, provider_error,
     spawn_stderr_drain, spawn_wrapped, turn_prompt, write_json, FrozenProcessSpec,
-    PreparedPrivateFile, ProtocolContext, ProtocolOutcome, ProtocolOutputBudget, RunSupervisor,
+    LocalCliRunState, PreparedPrivateFile, ProtocolContext, ProtocolOutcome, ProtocolOutputBudget,
+    RunSupervisor,
 };
 use crate::local_agent_runtime::{AdapterError, LocalCliFailureCode};
 
@@ -1148,6 +1149,7 @@ pub(crate) async fn probe(executable: &Path) -> AdapterProbe {
                 catalog_authority: CatalogAuthority::Partial,
                 verification_required: false,
                 message: Some(error.message),
+                missing_environment: Vec::new(),
             }
         }
     };
@@ -1164,6 +1166,7 @@ pub(crate) async fn probe(executable: &Path) -> AdapterProbe {
             catalog_authority: result.catalog_authority,
             verification_required: false,
             message: result.message,
+            missing_environment: Vec::new(),
         },
         Err(message) => AdapterProbe {
             availability: LocalAgentAvailability::Error,
@@ -1173,6 +1176,7 @@ pub(crate) async fn probe(executable: &Path) -> AdapterProbe {
             catalog_authority: CatalogAuthority::Partial,
             verification_required: false,
             message: Some(message),
+            missing_environment: Vec::new(),
         },
     }
 }
@@ -2257,7 +2261,7 @@ async fn run_pi_protocol(
     context
         .channel
         .send(LocalAgentEvent::Status {
-            state: "streaming".to_string(),
+            state: LocalCliRunState::Streaming,
             message: None,
         })
         .map_err(|_| "local agent event consumer is unavailable".to_string())?;

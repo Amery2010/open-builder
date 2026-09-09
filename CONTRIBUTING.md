@@ -105,15 +105,27 @@ Before contributing, familiarize yourself with the core modules:
 ```
 src/
 ├── lib/ai/generator.ts   # Core engine: WebAppGenerator (Tool Call loop)
+├── lib/local-agent/      # Local CLI client: probes, observation cache, run-state mapping, generator
 ├── lib/tools/            # Built-in project and network tools
 ├── lib/mcp/              # MCP validation, transports, and runtime policy
 ├── lib/skills/           # Skill storage, import, activation, and execution policy
 ├── lib/attachments/      # Blob-backed attachment persistence
-├── lib/security/         # Permission activity and native execution revocation
+├── lib/security/         # Permission broker, activity log, and shared secret redaction
 ├── store/settings/       # Settings persistence
 ├── store/conversation.ts # Zustand session state management
 ├── hooks/useGenerator.ts # Hook connecting engine to UI
 └── components/           # UI components
+
+src-tauri/src/
+├── local_agent.rs          # Local CLI supervisor: probes, run lifecycle, Tauri commands
+├── local_agent_<cli>.rs    # Codex, Claude, Pi, and Antigravity adapters
+├── local_agent_protocol.rs # Shared child-process helpers, minimal environment, run states
+├── local_agent_runtime.rs  # Failure classification and safe error copy
+├── local_agent_bridge*.rs  # Per-run loopback tool bridge and permission broker
+├── mcp_*.rs, sse.rs        # MCP stdio/remote transports and OAuth
+├── proxy.rs                # Provider request proxy for the desktop webview
+├── skills.rs               # Skill script execution with a minimal environment
+└── design.rs               # Design-mode project export with a native folder picker
 ```
 
 **Exercise caution** when modifying the core engine (`generator.ts`) — it directly affects AI tool call stability.

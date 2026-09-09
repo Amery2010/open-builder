@@ -56,17 +56,43 @@ export function isLocalAgentProvider(
   );
 }
 
-export function localAgentSupportsNativeSearch(
-  provider: LocalAgentProvider,
-): boolean {
-  return LOCAL_AGENT_PROVIDER_CATALOG[provider].nativeSearch;
+/** Capabilities the desktop runtime observed for a provider, when known. */
+export interface LocalAgentObservedCapabilities {
+  nativeSearch: boolean;
+  imageGeneration?: boolean;
+  imageEditing?: boolean;
+  mediaCapabilitiesVerified?: boolean;
 }
 
-export function localAgentImageCapabilities(provider: LocalAgentProvider): {
+/**
+ * The catalog above is the declared baseline; a capability set observed by the
+ * desktop runtime for the same provider always wins over it.
+ */
+export function localAgentSupportsNativeSearch(
+  provider: LocalAgentProvider,
+  observed?: LocalAgentObservedCapabilities,
+): boolean {
+  return (
+    observed?.nativeSearch ??
+    LOCAL_AGENT_PROVIDER_CATALOG[provider].nativeSearch
+  );
+}
+
+export function localAgentImageCapabilities(
+  provider: LocalAgentProvider,
+  observed?: LocalAgentObservedCapabilities,
+): {
   imageGeneration: boolean;
   imageEditing: boolean;
   mediaCapabilitiesVerified: boolean;
 } {
+  if (observed) {
+    return {
+      imageGeneration: observed.imageGeneration === true,
+      imageEditing: observed.imageEditing === true,
+      mediaCapabilitiesVerified: observed.mediaCapabilitiesVerified === true,
+    };
+  }
   const { imageGeneration, imageEditing, mediaCapabilitiesVerified } =
     LOCAL_AGENT_PROVIDER_CATALOG[provider];
   return { imageGeneration, imageEditing, mediaCapabilitiesVerified };

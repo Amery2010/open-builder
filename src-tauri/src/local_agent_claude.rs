@@ -19,9 +19,12 @@ use crate::local_agent_models::{
 use crate::local_agent_protocol::{
     apply_minimal_environment, command_output_capped, finish_process, read_capped_line,
     spawn_stderr_drain, spawn_wrapped, terminate, turn_prompt, write_json, FrozenProcessSpec,
-    PreparedPrivateFile, ProtocolContext, ProtocolOutcome, ProtocolOutputBudget, RunSupervisor,
+    LocalCliRunState, PreparedPrivateFile, ProtocolContext, ProtocolOutcome, ProtocolOutputBudget,
+    RunSupervisor,
 };
-use crate::local_agent_runtime::{AdapterError, LocalCliFailureCode};
+use crate::local_agent_runtime::{
+    is_operating_system_permission_error, is_rate_limited, AdapterError, LocalCliFailureCode,
+};
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -852,6 +855,7 @@ pub(crate) async fn probe(executable: &Path) -> AdapterProbe {
                     "The selected Claude executable did not report a supported version."
                         .to_string(),
                 ),
+                missing_environment: Vec::new(),
             }
         }
         Err(message) => {
@@ -863,6 +867,7 @@ pub(crate) async fn probe(executable: &Path) -> AdapterProbe {
                 catalog_authority: CatalogAuthority::Partial,
                 verification_required: false,
                 message: Some(message),
+                missing_environment: Vec::new(),
             }
         }
     };
@@ -878,6 +883,7 @@ pub(crate) async fn probe(executable: &Path) -> AdapterProbe {
                 catalog_authority: CatalogAuthority::Partial,
                 verification_required: false,
                 message: Some(message),
+                missing_environment: Vec::new(),
             }
         }
     };
@@ -897,6 +903,7 @@ pub(crate) async fn probe(executable: &Path) -> AdapterProbe {
             catalog_authority: CatalogAuthority::Partial,
             verification_required: false,
             message: Some(failure.message),
+            missing_environment: Vec::new(),
         };
     }
 
@@ -918,6 +925,7 @@ pub(crate) async fn probe(executable: &Path) -> AdapterProbe {
                 "Claude API credential detected; it will be verified by the first model request."
                     .to_string()
             }),
+            missing_environment: Vec::new(),
         };
     }
 
@@ -939,6 +947,7 @@ pub(crate) async fn probe(executable: &Path) -> AdapterProbe {
                 catalog_authority: CatalogAuthority::Partial,
                 verification_required: false,
                 message: Some(message),
+                missing_environment: Vec::new(),
             }
         }
     };
@@ -953,6 +962,7 @@ pub(crate) async fn probe(executable: &Path) -> AdapterProbe {
                 catalog_authority: CatalogAuthority::Partial,
                 verification_required: false,
                 message: Some(message),
+                missing_environment: Vec::new(),
             }
         }
     };
@@ -965,6 +975,7 @@ pub(crate) async fn probe(executable: &Path) -> AdapterProbe {
             catalog_authority: CatalogAuthority::Partial,
             verification_required: false,
             message: Some("Claude authentication status probe failed".to_string()),
+            missing_environment: Vec::new(),
         };
     }
     if !logged_in {
@@ -979,6 +990,7 @@ pub(crate) async fn probe(executable: &Path) -> AdapterProbe {
             catalog_authority: CatalogAuthority::Partial,
             verification_required: false,
             message: Some("Claude is not signed in; run claude auth login.".to_string()),
+            missing_environment: Vec::new(),
         };
     }
 
@@ -993,6 +1005,7 @@ pub(crate) async fn probe(executable: &Path) -> AdapterProbe {
         catalog_authority: CatalogAuthority::Partial,
         verification_required: false,
         message: None,
+        missing_environment: Vec::new(),
     }
 }
 
@@ -1875,7 +1888,7 @@ async fn run_claude_protocol(
     context
         .channel
         .send(LocalAgentEvent::Status {
-            state: "streaming".to_string(),
+            state: LocalCliRunState::Streaming,
             message: None,
         })
         .map_err(|_| "local agent event consumer is unavailable".to_string())?;
@@ -2107,10 +2120,9 @@ fn safe_error_text(
         .take(MAX_ERROR_BYTES)
         .collect::<String>()
         .to_ascii_lowercase();
-    let mentions_session = ["session", "conversation", "resume"]
-        .iter()
-        .any(|needle| lower.contains(needle));
-    let unavailable = [
+    let contains_any = |needles: &[&str]| needles.iter().any(|needle| lower.contains(needle));
+    let mentions_session = contains_any(&["session", "conversation", "resume"]);
+    let unavailable = contains_any(&[
         "invalid",
         "missing",
         "not found",
@@ -2119,37 +2131,33 @@ fn safe_error_text(
         "does not exist",
         "no conversation found",
         "no session found",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle));
+    ]);
+    let mentions_capability = contains_any(&["native", "tool", "capability", "mcp"]);
+    // Credential wording is checked before approval and isolation wording so
+    // that "permission denied: invalid API key" or a gateway 403 recovers with
+    // credential guidance instead of reporting a Host tool rejection.
+    let credential_rejected = contains_any(&[
+        "api key",
+        "api_key",
+        "x-api-key",
+        "authenticat",
+        "authorization failed",
+        "not logged in",
+        "login",
+        "log in",
+        "credential",
+        "invalid token",
+        "expired token",
+        "oauth",
+        "permission_error",
+    ]) || (!mentions_capability
+        && contains_any(&["unauthor", "401", "403", "forbidden"]));
     if attempted_resume && mentions_session && unavailable {
         AdapterError::coded(
             LocalCliFailureCode::SessionUnavailable,
             "Claude session is unavailable",
         )
-    } else if ["permission", "forbidden", "approval"]
-        .iter()
-        .any(|needle| lower.contains(needle))
-    {
-        AdapterError::coded(
-            LocalCliFailureCode::ProviderApprovalRejected,
-            "Claude provider approval rejected the requested capability.",
-        )
-    } else if ["native", "tool", "capability", "mcp"]
-        .iter()
-        .any(|needle| lower.contains(needle))
-        && ["unauthor", "disabled", "unexpected"]
-            .iter()
-            .any(|needle| lower.contains(needle))
-    {
-        AdapterError::coded(
-            LocalCliFailureCode::IsolationViolation,
-            "Claude requested an unavailable capability.",
-        )
-    } else if ["auth", "login", "unauthor", "credential", "token"]
-        .iter()
-        .any(|needle| lower.contains(needle))
-    {
+    } else if credential_rejected {
         AdapterError::coded(
             LocalCliFailureCode::CredentialRejected,
             if gateway_configured {
@@ -2158,40 +2166,46 @@ fn safe_error_text(
                 "Claude authentication failed; run claude auth login."
             },
         )
-    } else if [
+    } else if contains_any(&[
         "unknown model",
         "model not found",
         "invalid model",
         "selected model",
         "reasoning effort",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle))
-    {
+    ]) {
         AdapterError::coded(
             LocalCliFailureCode::ModelRejected,
             "Claude selected model or reasoning effort was rejected.",
         )
-    } else if ["tool", "capability"]
-        .iter()
-        .any(|needle| lower.contains(needle))
+    } else if !is_operating_system_permission_error(&lower)
+        && contains_any(&["permission", "approval", "not authorized"])
+    {
+        AdapterError::coded(
+            LocalCliFailureCode::ProviderApprovalRejected,
+            "Claude provider approval rejected the requested capability.",
+        )
+    } else if mentions_capability
+        && contains_any(&[
+            "unauthor",
+            "disabled",
+            "unexpected",
+            "not allowed",
+            "not available",
+            "unavailable",
+            "unknown tool",
+        ])
     {
         AdapterError::coded(
             LocalCliFailureCode::IsolationViolation,
             "Claude requested an unavailable capability.",
         )
-    } else if ["rate", "overload", "timeout", "temporarily"]
-        .iter()
-        .any(|needle| lower.contains(needle))
-    {
-        if lower.contains("rate") {
-            AdapterError::coded(
-                LocalCliFailureCode::ProcessExit,
-                "Claude request was rate limited",
-            )
-        } else {
-            "Claude request could not be completed; retry later.".into()
-        }
+    } else if is_rate_limited(&lower) {
+        AdapterError::coded(
+            LocalCliFailureCode::ProcessExit,
+            "Claude request was rate limited",
+        )
+    } else if contains_any(&["overload", "timeout", "temporarily"]) {
+        "Claude request could not be completed; retry later.".into()
     } else {
         fallback.into()
     }
@@ -2865,6 +2879,81 @@ mod tests {
         );
         assert_eq!(generic.code, None);
         assert_eq!(generic.message, "Claude model request failed");
+    }
+
+    #[test]
+    fn credential_and_operating_system_errors_are_not_approval_rejections() {
+        let credential = safe_error_text(
+            Some("Permission denied: invalid API key · Please run /login"),
+            "Claude model request failed",
+            false,
+            false,
+        );
+        assert_eq!(
+            credential.code,
+            Some(LocalCliFailureCode::CredentialRejected)
+        );
+
+        let gateway = safe_error_text(
+            Some("HTTP 403 Forbidden"),
+            "Claude model request failed",
+            true,
+            false,
+        );
+        assert_eq!(gateway.code, Some(LocalCliFailureCode::CredentialRejected));
+        assert_eq!(
+            gateway.message,
+            "Claude gateway authentication failed; check its configured credential."
+        );
+
+        let os_error = safe_error_text(
+            Some("EACCES: permission denied, open '/Users/x/.claude/cache'"),
+            "Claude model request failed",
+            false,
+            false,
+        );
+        assert_eq!(os_error.code, None);
+        assert_eq!(os_error.message, "Claude model request failed");
+
+        let generated = safe_error_text(
+            Some("Failed to generate a response"),
+            "Claude model request failed",
+            false,
+            false,
+        );
+        assert_eq!(generated.code, None);
+        assert_eq!(generated.message, "Claude model request failed");
+
+        let rate_limit = safe_error_text(
+            Some("Rate limit reached (429)"),
+            "Claude model request failed",
+            false,
+            false,
+        );
+        assert_eq!(rate_limit.code, Some(LocalCliFailureCode::ProcessExit));
+
+        let overloaded = safe_error_text(
+            Some("overloaded_error: temporarily unable to serve"),
+            "Claude model request failed",
+            false,
+            false,
+        );
+        assert_eq!(overloaded.code, None);
+        assert_eq!(
+            overloaded.message,
+            "Claude request could not be completed; retry later."
+        );
+
+        let tool_unavailable = safe_error_text(
+            Some("Tool WebSearch is not available in this session"),
+            "Claude model request failed",
+            false,
+            false,
+        );
+        assert_eq!(
+            tool_unavailable.code,
+            Some(LocalCliFailureCode::IsolationViolation)
+        );
     }
 
     #[test]

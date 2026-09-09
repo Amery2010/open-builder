@@ -140,7 +140,9 @@ impl LocalCliFailure {
     ) -> Self {
         if !cancelled {
             if let Some(code) = error.code {
-                if let Some((safe_message, retry_policy)) = coded_failure(code, attempted_resume) {
+                if let Some((safe_message, retry_policy)) =
+                    coded_failure(code, attempted_resume, &error.message)
+                {
                     return Self::new(provider, code, phase, safe_message, retry_policy);
                 }
             }
@@ -223,7 +225,7 @@ impl LocalCliFailure {
                 "The local CLI rejected its configured credentials.",
                 LocalCliRetryPolicy::AfterSetup,
             )
-        } else if message.contains("rate limit") || message.contains("rate-limited") {
+        } else if is_rate_limited(&message) {
             (
                 LocalCliFailureCode::ProcessExit,
                 "The local CLI provider rate limit prevented this request from completing.",
@@ -364,10 +366,12 @@ impl LocalCliFailure {
 }
 
 /// Safe text for the codes adapters attach today. A code without an entry
-/// falls back to substring classification of the message.
+/// falls back to substring classification of the message. The internal
+/// message only refines wording; it never changes the attached code.
 fn coded_failure(
     code: LocalCliFailureCode,
     attempted_resume: bool,
+    message: &str,
 ) -> Option<(&'static str, LocalCliRetryPolicy)> {
     match code {
         LocalCliFailureCode::CredentialRejected => Some((
@@ -395,28 +399,75 @@ fn coded_failure(
             LocalCliRetryPolicy::None,
         )),
         LocalCliFailureCode::ProcessExit => Some((
-            "The local CLI provider rate limit prevented this request from completing.",
+            if is_rate_limited(&message.to_ascii_lowercase()) {
+                "The local CLI provider rate limit prevented this request from completing."
+            } else {
+                "The local CLI process exited before completing the request."
+            },
             LocalCliRetryPolicy::Manual,
         )),
         _ => None,
     }
 }
 
-fn is_provider_approval_rejected(message: &str) -> bool {
+/// Rate-limit and quota wording shared by every provider classifier.
+pub(crate) fn is_rate_limited(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
     [
+        "rate limit",
+        "rate-limit",
+        "rate_limit",
+        "ratelimit",
+        "too many requests",
+        "429",
+        "quota",
+        "usage limit",
+        "usagelimitexceeded",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+}
+
+/// Operating-system permission failures (EACCES, EPERM, `os error 13`) come
+/// from the CLI's own files, not from its provider approval layer.
+pub(crate) fn is_operating_system_permission_error(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    ["os error", "eacces", "eperm", "errno"]
+        .iter()
+        .any(|needle| message.contains(needle))
+}
+
+/// Provider approval wording. Explicit approval phrases always count; bare
+/// "permission denied" / "not authorized" count only when the text also names
+/// a tool or MCP context and is not an operating-system error, so a Node or
+/// Rust EACCES from the CLI's own cache never becomes a non-retryable
+/// provider approval rejection.
+pub(crate) fn is_provider_approval_rejected(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    if [
         "approval policy is never",
         "requires approval",
         "approval required",
         "approval was rejected",
-        "permission denied",
         "permission to use",
-        "not authorized",
         "user cancelled mcp tool call",
         "user canceled mcp tool call",
         "provider approval rejected",
     ]
     .iter()
     .any(|needle| message.contains(needle))
+    {
+        return true;
+    }
+    if is_operating_system_permission_error(&message) {
+        return false;
+    }
+    ["permission denied", "not authorized"]
+        .iter()
+        .any(|needle| message.contains(needle))
+        && ["tool", "mcp"]
+            .iter()
+            .any(|needle| message.contains(needle))
 }
 
 pub fn infer_failure_phase(message: &str, fallback: LocalCliFailurePhase) -> LocalCliFailurePhase {
@@ -647,6 +698,95 @@ mod tests {
     }
 
     #[test]
+    fn process_exit_codes_only_mention_rate_limits_when_the_message_does() {
+        let exit = LocalCliFailure::from_adapter(
+            LocalAgentProvider::Codex,
+            LocalCliFailurePhase::Shutdown,
+            &AdapterError::coded(
+                LocalCliFailureCode::ProcessExit,
+                "CLI exited unsuccessfully; exit status 1",
+            ),
+            false,
+            false,
+        );
+        assert_eq!(exit.code, LocalCliFailureCode::ProcessExit);
+        assert_eq!(exit.retry_policy, LocalCliRetryPolicy::Manual);
+        assert!(!exit.safe_message.contains("rate limit"));
+
+        let rate_limit = LocalCliFailure::from_adapter(
+            LocalAgentProvider::Claude,
+            LocalCliFailurePhase::Stream,
+            &AdapterError::coded(
+                LocalCliFailureCode::ProcessExit,
+                "Claude request was rate limited",
+            ),
+            false,
+            false,
+        );
+        assert_eq!(rate_limit.code, LocalCliFailureCode::ProcessExit);
+        assert!(rate_limit.safe_message.contains("rate limit"));
+
+        let quota = LocalCliFailure::classified(
+            LocalAgentProvider::Antigravity,
+            LocalCliFailurePhase::Stream,
+            "Antigravity image generation quota was exhausted.",
+            false,
+            false,
+        );
+        assert_eq!(quota.code, LocalCliFailureCode::ProcessExit);
+        assert!(quota.safe_message.contains("rate limit"));
+
+        let generated = LocalCliFailure::classified(
+            LocalAgentProvider::Claude,
+            LocalCliFailurePhase::Stream,
+            "Failed to generate a response",
+            false,
+            false,
+        );
+        assert!(!generated.safe_message.contains("rate limit"));
+    }
+
+    #[test]
+    fn operating_system_permission_errors_are_not_provider_approval_rejections() {
+        let node = LocalCliFailure::classified(
+            LocalAgentProvider::Claude,
+            LocalCliFailurePhase::Stream,
+            "EACCES: permission denied, open '/Users/x/.npm/_cacache/index-v5'",
+            false,
+            false,
+        );
+        assert_ne!(node.code, LocalCliFailureCode::ProviderApprovalRejected);
+        assert_eq!(node.retry_policy, LocalCliRetryPolicy::Manual);
+
+        let rust = LocalCliFailure::classified(
+            LocalAgentProvider::Codex,
+            LocalCliFailurePhase::Stream,
+            "Permission denied (os error 13)",
+            false,
+            false,
+        );
+        assert_ne!(rust.code, LocalCliFailureCode::ProviderApprovalRejected);
+
+        assert!(is_provider_approval_rejected(
+            "MCP tool call requires approval, but approval policy is never"
+        ));
+        assert!(is_provider_approval_rejected(
+            "permission denied for MCP tool open_builder__write_file"
+        ));
+        assert!(!is_provider_approval_rejected("permission denied"));
+        assert!(!is_provider_approval_rejected(
+            "EACCES: permission denied while writing the tool cache"
+        ));
+        assert_eq!(
+            infer_failure_phase(
+                "EACCES: permission denied, mkdir '/tmp/x'",
+                LocalCliFailurePhase::Stream
+            ),
+            LocalCliFailurePhase::Stream
+        );
+    }
+
+    #[test]
     fn compatibility_key_changes_for_launch_authority_inputs() {
         let material =
             |installation_fingerprint, tool_digest, model, effort| CompatibilityKeyMaterial {
@@ -860,7 +1000,8 @@ mod tests {
             false,
         );
         assert_eq!(rate_limit.code, LocalCliFailureCode::ProcessExit);
-        assert!(rate_limit.safe_message.contains("rate limit"));
+        assert!(!rate_limit.safe_message.contains("thread"));
+        assert!(!rate_limit.safe_message.contains("rate limit"));
 
         let isolation = LocalCliFailure::from_adapter(
             LocalAgentProvider::Pi,

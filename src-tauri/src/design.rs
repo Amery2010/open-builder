@@ -6,6 +6,8 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use tauri::AppHandle;
+use tauri_plugin_dialog::DialogExt;
 
 const MAX_PROJECT_FILES: usize = 1_000;
 const MAX_PROJECT_BYTES: usize = 12 * 1024 * 1024;
@@ -226,14 +228,35 @@ fn export_project_files(
     })
 }
 
+/// Exports the project into a new directory under a parent chosen in a native
+/// folder dialog. The dialog runs here, on the host side, so the webview never
+/// supplies a filesystem destination; a cancelled dialog yields `None`.
 #[tauri::command]
-pub fn design_export_project(
-    parent_path: String,
+pub async fn design_export_project(
+    app: AppHandle,
     project_name: String,
     files: BTreeMap<String, String>,
     assets: Vec<DesignProjectAssetInput>,
-) -> Result<DesignExportResult, String> {
-    export_project_files(Path::new(&parent_path), &project_name, &files, &assets)
+) -> Result<Option<DesignExportResult>, String> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    app.dialog().file().pick_folder(move |selected| {
+        let _ = sender.send(selected);
+    });
+    let Some(selected) = receiver
+        .await
+        .map_err(|_| "export folder picker was cancelled".to_string())?
+    else {
+        return Ok(None);
+    };
+    let parent = selected
+        .into_path()
+        .map_err(|_| "selected export folder is invalid".to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        export_project_files(&parent, &project_name, &files, &assets)
+    })
+    .await
+    .map_err(|_| "project export task failed".to_string())?
+    .map(Some)
 }
 
 #[cfg(test)]

@@ -55,6 +55,18 @@ const localAgentAntigravity = readFileSync(
   new URL("../src-tauri/src/local_agent_antigravity.rs", import.meta.url),
   "utf8",
 );
+const design = readFileSync(
+  new URL("../src-tauri/src/design.rs", import.meta.url),
+  "utf8",
+);
+const mcpStdio = readFileSync(
+  new URL("../src-tauri/src/mcp_stdio.rs", import.meta.url),
+  "utf8",
+);
+const localAgentBridge = readFileSync(
+  new URL("../src-tauri/src/local_agent_bridge.rs", import.meta.url),
+  "utf8",
+);
 const failures = [];
 
 async function listen(server) {
@@ -771,6 +783,19 @@ if (
   );
 }
 
+const designExportSignature = design.match(
+  /pub async fn design_export_project\(([\s\S]*?)\)\s*->/,
+)?.[1];
+if (
+  !designExportSignature ||
+  designExportSignature.includes("parent_path") ||
+  !design.includes(".pick_folder(")
+) {
+  failures.push(
+    "design_export_project must choose the export parent in a native Rust folder dialog instead of accepting a renderer-supplied path.",
+  );
+}
+
 if (!/developerSkillScriptsEnabled:\s*false/.test(settingsSystem)) {
   failures.push("Desktop Skill scripts must default to disabled.");
 }
@@ -800,6 +825,23 @@ if (
 ) {
   failures.push(
     "Skill ZIP metadata must be preflighted before JSZip, and chunks budgeted before buffering.",
+  );
+}
+
+if (!mcpStdio.includes("apply_minimal_environment(&mut command)")) {
+  failures.push(
+    "Stdio MCP servers must start from the minimal local-agent environment, not the desktop app environment.",
+  );
+}
+if (!localAgentBridge.includes("Ipv4Addr::LOCALHOST, 0")) {
+  failures.push("The local tool bridge must bind an ephemeral loopback port.");
+}
+if (
+  !localAgentBridge.includes("fn require_loopback_host(") ||
+  !localAgentBridge.includes("require_loopback_host(request.headers()")
+) {
+  failures.push(
+    "The local tool bridge must reject requests whose Host is not its loopback authority.",
   );
 }
 

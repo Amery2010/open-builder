@@ -19,9 +19,6 @@ export async function exportProjectToUniqueDirectory(
   assets: ProjectAssets = {},
 ): Promise<DesignExportResult | null> {
   if (!isTauriMcpHost()) return null;
-  const { open } = await import("@tauri-apps/plugin-dialog");
-  const parentPath = await open({ directory: true, multiple: false });
-  if (typeof parentPath !== "string") return null;
   const projectAssets = await Promise.all(
     Object.values(assets).map(async (asset) => ({
       path: asset.path,
@@ -29,8 +26,9 @@ export async function exportProjectToUniqueDirectory(
       bytes: Array.from(await readProjectAssetBytes(asset)),
     })),
   );
-  return invoke<DesignExportResult>("design_export_project", {
-    parentPath,
+  // The native folder picker runs inside the Rust command, so the webview
+  // never chooses the destination path. A cancelled dialog resolves to null.
+  return invoke<DesignExportResult | null>("design_export_project", {
     projectName,
     files,
     assets: projectAssets,

@@ -202,7 +202,7 @@ pnpm tauri:android:build
 
 ### 本地 CLI 运行时（桌面端）
 
-桌面版可以把已安装的 Codex、Claude、Pi 与 Antigravity CLI 作为完整代理运行时。API 仍是默认运行方式。每个服务商都必须先通过可执行文件、版本、结构化协议、模型选择与隔离能力检测，之后才会接收用户内容。认证状态单独表达：CLI 能提供的登录状态会在检测时验证；只有真实推理才能确认的自定义网关凭据或模型路由会显示为**可发送，待首次验证**。模型选择由能力目录驱动：完整目录可以明确拒绝不支持的选择；不完整或过期（partial/stale）目录会保留当前选择并标记为“未验证”及发出提示，不会静默替换。Open Builder 不会在运行方式或服务商之间静默降级。
+桌面版可以把已安装的 Codex、Claude、Pi 与 Antigravity CLI 作为完整代理运行时。API 仍是默认运行方式。每个服务商都必须先通过可执行文件、版本、结构化协议、模型选择与隔离能力检测，之后才会接收用户内容。认证状态单独表达：CLI 能提供的登录状态会在检测时验证；只有真实推理才能确认的自定义网关凭据或模型路由会显示为**已就绪，首条消息将验证登录并可能消耗额度**。模型选择由能力目录驱动：完整目录可以明确拒绝不支持的选择；不完整或过期（partial/stale）目录会保留当前选择并标记为“未验证”及发出提示，不会静默替换。Open Builder 不会在运行方式或服务商之间静默降级。
 
 请安装并配置一个受支持的 CLI：
 
@@ -212,13 +212,23 @@ pnpm tauri:android:build
 - **Windows 上的 Pi 独立程序：**从 [Pi release](https://github.com/earendil-works/pi/releases/tag/v0.84.4) 下载官方 `pi-windows-x64.zip` 或 `pi-windows-arm64.zip` 及 `SHA256SUMS`，解压；若程序不在 `PATH`，可通过**选择程序**指定 `pi.exe`。
 - **Antigravity：**安装现代 Google Antigravity CLI 并完成账号登录流程。只有当 `agy` 宣布支持官方[流式 headless 协议](https://antigravity.google/docs/cli/headless/)的 `--input-format stream-json`、`--output-format stream-json` 与 `--agent` 参数时，Open Builder 才会接入；可用 `agy models` 查看模型。应用支持官方的 [`modelProvider: "gemini"`](https://antigravity.google/docs/cli/install/#using-a-gemini-api-key) 模式、`GEMINI_API_KEY`，以及可选且经过校验的 `GOOGLE_GEMINI_BASE_URL`。结构化 headless 输入界面从 Antigravity CLI 1.1.15 起提供，请升级旧版本。应用不会回退到纯文本协议。
 
-启动桌面版，打开 **设置 → 模型 → 运行方式 → 本地 CLI**，选择 CLI 服务商，并确认状态为**已安装并可用**或**可发送，待首次验证**。后者表示设置页检测不会发起模型调用；第一条真实消息才会验证凭据或网关，并可能消耗额度。Open Builder 会扫描 `PATH` 与常见安装位置；**选择程序**只会把验证过的可执行文件覆盖路径保存到原生 app data。模型和推理强度偏好按服务商分别保存，并由所选 CLI 提供；普通检测使用短时缓存，**重新检测**会强制读取最新目录。如果目录不完整或已过期（partial/stale），当前保存的模型和推理强度仍可作为**未验证**选项使用，未知的推理强度会隐藏，界面会提示而不会清空偏好。Codex、Claude、Pi 与 Antigravity 之间切换时绝不会复用对方的 session；安装、启动配置、模型、推理强度或协议发生变化时会新建对应服务商的 session。
+启动桌面版，打开 **设置 → 模型 → 运行方式 → 本地 CLI**，选择 CLI 服务商，并确认状态为**已安装并可用**或**已就绪，首条消息将验证登录并可能消耗额度**。后者表示设置页检测不会发起模型调用；第一条真实消息才会验证凭据或网关，并可能消耗额度。Open Builder 会扫描 `PATH` 与常见安装位置；**选择程序**只会把验证过的可执行文件覆盖路径保存到原生 app data。模型和推理强度偏好按服务商分别保存，并由所选 CLI 提供；普通检测使用短时缓存，**重新检测**会强制读取最新目录。如果目录不完整或已过期（partial/stale），当前保存的模型和推理强度仍可作为**未验证**选项使用，未知的推理强度会隐藏，界面会提示而不会清空偏好。Codex、Claude、Pi 与 Antigravity 之间切换时绝不会复用对方的 session；安装、启动配置、模型、推理强度或协议发生变化时会新建对应服务商的 session。
 
 本地 CLI 的 Chat 运行中，Codex 会收到支持可选 opaque 参考图 ID 的 `generate_image`，Antigravity 只会收到文生图能力，Claude 与 Pi 不会收到该工具。生成结果会先保留在对话中；只有代理为已初始化项目调用 `import_generated_image` 后，Host 才会在请求的安全路径创建托管项目图片模块。这些媒体工具不向 Plan 及其他受限 profile 开放。
 
 本地 CLI 不等于离线模型。提示词、附件、联网搜索活动和工具结果通常仍会发送给该 CLI 配置的模型服务商，并可能消耗订阅或 API 额度。对于 Codex、Claude 与 Antigravity，Open Builder 只读取当前所选配置所需的官方服务商字段，并把其引用的凭据直接交给对应 CLI 子进程；凭据值不会被持久化、显示、记录到日志，也不会进入命令参数或临时配置。Antigravity 的账号登录仍由操作系统安全凭据存储管理；Open Builder 不会猜测或复制 Gemini 凭据文件，只会按 Open Builder 对话把 Agy 的原生会话／缓存状态保存在哈希命名的 app-private HOME 中，utility 运行仍使用一次性 HOME。Pi 将 OAuth 与 API Key 保存在 `~/.pi/agent/auth.json`，创建时仅当前用户可读；Open Builder 会从 Pi 子进程环境中剥离模型服务商 API Key，只依赖 OAuth／auth 文件。在发送用户内容前，应用还会拒绝 `models.json` 中的内联凭据、环境变量凭据和命令解析凭据；凭据来源探测不会解析或执行这些值。请改用 Pi 的 `/login` 流程保存该服务商凭据。普通 Pi 默认将按 cwd 组织的 JSONL session 保存到 `~/.pi/agent/sessions/`，但 Open Builder 会改用 app-private session 目录，并只在本地对话中保留按服务商隔离的 opaque session ID。详见官方[服务商](https://pi.dev/docs/latest/providers)与 [session](https://pi.dev/docs/latest/sessions)说明。
 
 项目仍保存在 Open Builder 的内存虚拟文件系统中。每个服务商使用稳定的 app-private 空白 scratch 目录，只能通过当次运行的带认证 loopback 工具桥访问项目。附件使用不可猜测 ID，不暴露宿主文件路径；在发送用户内容前，应用会禁用或拒绝用户级 Skills、Agents、MCP 服务、规则、项目指令文件、hooks、扩展、原生 shell／文件系统工具、浏览器执行和原生写入。Antigravity 还会收到每轮私有 Agent、MCP 配置和权限策略；只允许 Open Builder MCP 工具（明确选择模型内置搜索时，额外只允许只读 URL 访问）。
+
+按进程划分的信任边界：
+
+- **所有 CLI 子进程**从空环境启动，只继承固定白名单（`PATH`、`HOME`、临时目录、语言、代理、证书、XDG 与 Windows 用户目录变量，以及 `CODEX_HOME`、`CLAUDE_CONFIG_DIR`），并把 loopback 加入 `NO_PROXY`。只有经过校验的服务商配置引用的凭据变量才会补充进去。
+- **Codex** 通过环境获得被引用的 `env_key`／`env_http_headers` 变量与当次运行的工具桥令牌；令牌被排除在 Codex 的 shell 环境策略之外。若应用进程缺少某个必需变量，检测会显示**已安装，需要配置**并指出变量名。
+- **Claude** 通过私有 MCP 配置中的 `${OPEN_BUILDER_MCP_TOKEN}` 引用从环境读取工具桥令牌；令牌不会写入磁盘。
+- **Pi** 通过仅所有者可读的当次运行配置文件把工具桥令牌交给私有扩展；服务商 API Key 变量会被剥离，登录状态保留在 `~/.pi/agent/auth.json`。
+- **Antigravity** 从运行目录内仅所有者可读的当次 `mcp_config.json` 读取工具桥 Bearer 令牌，该文件随运行目录一起删除。其私有 HOME 会映射 macOS 钥匙串目录并传递 Linux 会话总线变量，以便 `agy` 读取自己的登录状态；这与同一用户运行的任何进程暴露程度相同。
+- **stdio MCP 服务**只获得相同的白名单加上自身配置中的 `env` 值，绝不会继承应用的完整环境。
+- **工具桥**只监听 loopback 随机端口，使用当次运行的 Bearer 令牌，并拒绝 `Host` 头不是 `127.0.0.1` 或 `localhost` 的请求。
 
 Headless 本地 CLI 不会打开自己的权限弹窗。Open Builder 只把当次运行的精确工具清单投影给服务商，使工具调用能够抵达现有 Host 授权流程；该投影本身不会授予项目访问权。服务商侧的 approval 或 permission 拒绝会立即终止运行，并在聊天中显示服务商、失败阶段、安全的修复建议和可复制诊断 ID；聊天错误绝不会展示服务商 stderr 或凭据。
 

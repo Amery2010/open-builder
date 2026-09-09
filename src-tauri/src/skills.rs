@@ -140,7 +140,7 @@ fn resolve_program(program: &str) -> Result<PathBuf, String> {
         }
     }
     Err(format!(
-        "interpreter {program} was not found in the host PATH"
+        "interpreter {program} was not found in the host PATH; install it or launch Open Builder from a terminal whose PATH includes it"
     ))
 }
 

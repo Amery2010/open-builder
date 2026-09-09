@@ -920,6 +920,17 @@ describe("conversation store", () => {
     expect(
       useConversationStore.getState().conversations[fork].localAgentSessions,
     ).toBeUndefined();
+
+    useConversationStore.getState().clearLocalAgentSessions(original);
+    expect(
+      useConversationStore.getState().conversations[original]
+        .localAgentSessions,
+    ).toBeUndefined();
+    const cleared = useConversationStore.getState().conversations[original];
+    useConversationStore.getState().clearLocalAgentSessions(original);
+    expect(useConversationStore.getState().conversations[original]).toBe(
+      cleared,
+    );
   });
 
   it("invalidates external sessions when context or project authority changes", () => {

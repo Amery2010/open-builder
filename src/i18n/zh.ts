@@ -71,7 +71,7 @@ export const zh = {
       provider: "CLI 服务商",
       scanning: "正在检测本地 CLI…",
       ready: "已安装并可用",
-      verificationRequired: "可以发送，等待首次验证",
+      verificationRequired: "已就绪，首条消息将验证登录并可能消耗额度",
       needsSetup: "已安装，需要配置",
       notFound: "未找到 CLI",
       unavailable: "当前 CLI 不可用",
@@ -82,6 +82,9 @@ export const zh = {
       copied: "配置命令已复制",
       copyFailed: "无法复制配置命令，请手动复制后重试。",
       piSetupHint: "请先启动 pi，再运行 /login 配置模型服务商。",
+      missingEnvironmentHint:
+        "本应用未收到 CLI 配置所需的环境变量 {variables}。请从已导出该变量的终端启动 Open Builder，或将其加入登录环境，然后重新检测。",
+      preferenceReplaced: "{provider} 不再提供 {previous}，已切换为 {next}。",
       builtinSearchBlocked:
         "所选本地 CLI 不提供原生联网搜索。开始本次 turn 前，请改选 Tavily、Firecrawl、Exa 或停用联网搜索。",
       probeMismatch: "CLI 能力检测返回了其他代理的数据，请重新检测后再试。",

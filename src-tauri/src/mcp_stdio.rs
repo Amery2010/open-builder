@@ -272,6 +272,10 @@ async fn create_connection(
 ) -> Result<(StdioConnection, McpStdioConnectionInfo), String> {
     let cwd = validate_config(config)?;
     let mut command = Command::new(&config.command);
+    // Same least-privilege environment as local CLI runs and skill scripts: the
+    // server sees the allowlist plus its own configured variables, never the
+    // desktop app's full environment.
+    crate::local_agent_protocol::apply_minimal_environment(&mut command);
     command
         .args(&config.args)
         .envs(&config.env)
@@ -725,11 +729,16 @@ mod tests {
 
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let fixture = manifest_dir.join("tests/fixtures/echo-mcp.mjs");
+        // Only configured variables and the allowlist may reach the server.
+        std::env::set_var("OPEN_BUILDER_ENV_CANARY", "leaked-from-parent");
         let config = McpStdioConfig {
             id: "echo-fixture".to_string(),
             command: "node".to_string(),
             args: vec![fixture.to_string_lossy().into_owned()],
-            env: HashMap::new(),
+            env: HashMap::from([(
+                "OPEN_BUILDER_ENV_CONFIGURED".to_string(),
+                "configured".to_string(),
+            )]),
             cwd: Some(manifest_dir.to_string_lossy().into_owned()),
         };
 
@@ -751,6 +760,11 @@ mod tests {
             .expect("echo tool should return a result");
         let result = serde_json::to_value(result).expect("tool result serializes");
         assert_eq!(result["structuredContent"]["echoed"], "hello");
+        assert_eq!(result["structuredContent"]["configured"], "configured");
+        assert!(
+            result["structuredContent"]["canary"].is_null(),
+            "parent environment leaked into the MCP server"
+        );
 
         let mut delayed_arguments = serde_json::Map::new();
         delayed_arguments.insert("message".to_string(), serde_json::json!("cancel me"));
