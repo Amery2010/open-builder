@@ -852,8 +852,7 @@ pub(crate) async fn probe(executable: &Path) -> AdapterProbe {
                 catalog_authority: CatalogAuthority::Partial,
                 verification_required: false,
                 message: Some(
-                    "The selected Claude executable did not report a supported version."
-                        .to_string(),
+                    "The selected Claude executable failed to report its version.".to_string(),
                 ),
                 missing_environment: Vec::new(),
             }

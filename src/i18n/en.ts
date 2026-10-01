@@ -950,7 +950,7 @@ export const en: typeof zh = {
           executableNotFound:
             "The selected local CLI executable was not found.",
           cliUnsupported:
-            "The installed CLI version does not support this verified run contract.",
+            "The installed CLI does not provide the capabilities required for this verified run contract.",
           setupRequired: "The local CLI requires setup before it can run.",
           selectionRejected:
             "The CLI rejected the selected model or reasoning effort.",

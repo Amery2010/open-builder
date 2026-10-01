@@ -897,7 +897,7 @@ export const zh = {
         },
         failureCodes: {
           executableNotFound: "未找到所选的本地 CLI 程序。",
-          cliUnsupported: "当前 CLI 版本不支持此 Verified Run 契约。",
+          cliUnsupported: "当前 CLI 未提供此 Verified Run 契约所需的能力。",
           setupRequired: "本地 CLI 尚未完成运行所需的配置。",
           selectionRejected: "CLI 拒绝了所选模型或推理强度。",
           installationChanged: "检测后 CLI 安装发生了变化，请重新检测后再试。",

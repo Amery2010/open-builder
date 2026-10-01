@@ -195,7 +195,7 @@ impl LocalCliFailure {
         {
             (
                 LocalCliFailureCode::CliUnsupported,
-                "The installed local CLI version is not supported.",
+                "The installed local CLI does not provide the required capabilities.",
                 LocalCliRetryPolicy::AfterSetup,
             )
         } else if message.contains("needs setup")

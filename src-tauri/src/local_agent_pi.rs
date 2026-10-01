@@ -24,8 +24,6 @@ use crate::local_agent_protocol::{
 };
 use crate::local_agent_runtime::{AdapterError, LocalCliFailureCode};
 
-const PI_MINIMUM_VERSION: (u64, u64, u64) = (0, 84, 4);
-const PI_MAXIMUM_VERSION: (u64, u64, u64) = (0, 85, 0);
 const PI_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 const PI_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 const PI_CANCEL_RESPONSE_TIMEOUT: Duration = Duration::from_millis(750);
@@ -216,19 +214,10 @@ fn models_configuration_identity() -> Result<String, String> {
 }
 
 pub(crate) fn configuration_fingerprint() -> Result<String, String> {
-    let minimum = format!(
-        "{}.{}.{}",
-        PI_MINIMUM_VERSION.0, PI_MINIMUM_VERSION.1, PI_MINIMUM_VERSION.2
-    );
-    let maximum = format!(
-        "{}.{}.{}",
-        PI_MAXIMUM_VERSION.0, PI_MAXIMUM_VERSION.1, PI_MAXIMUM_VERSION.2
-    );
     let model_routing = models_configuration_identity()?;
     Ok(crate::local_agent_runtime::hash_compatibility_material(&[
         "pi-provider-config-v2",
         &format!("protocol={PI_PROTOCOL_CONFIG_VERSION}"),
-        &format!("supported={minimum}..<{maximum}"),
         &model_routing,
         "credential-source=stored-auth-json",
         "native-tools=disabled",
@@ -503,62 +492,6 @@ fn pi_probe_args(extension_path: &Path) -> Vec<String> {
         extension_path.to_string_lossy().to_string(),
     ]);
     args
-}
-
-fn parse_pi_version(text: &str) -> Option<(u64, u64, u64, bool)> {
-    for (start, character) in text.char_indices() {
-        if !character.is_ascii_digit() {
-            continue;
-        }
-        let rest = &text[start..];
-        let mut parts = rest.splitn(3, '.');
-        let major_text = parts.next()?;
-        let minor_and_rest = parts.next()?;
-        let patch_and_rest = parts.next()?;
-        if !major_text.chars().all(|value| value.is_ascii_digit()) {
-            continue;
-        }
-        let minor_len = minor_and_rest
-            .chars()
-            .take_while(|value| value.is_ascii_digit())
-            .count();
-        if minor_len == 0 || minor_len != minor_and_rest.len() {
-            continue;
-        }
-        let patch_len = patch_and_rest
-            .chars()
-            .take_while(|value| value.is_ascii_digit())
-            .count();
-        if patch_len == 0 {
-            continue;
-        }
-        let suffix = &patch_and_rest[patch_len..];
-        if suffix
-            .chars()
-            .next()
-            .is_some_and(|value| value.is_ascii_alphanumeric() || value == '.')
-        {
-            continue;
-        }
-        let major = major_text.parse().ok()?;
-        let minor = minor_and_rest.parse().ok()?;
-        let patch = patch_and_rest[..patch_len].parse().ok()?;
-        return Some((major, minor, patch, suffix.starts_with('-')));
-    }
-    None
-}
-
-pub(crate) fn validate_pi_version(version: Option<&str>) -> Result<(), String> {
-    let text = version.ok_or_else(|| "Pi did not report its version".to_string())?;
-    let (major, minor, patch, pre_release) =
-        parse_pi_version(text).ok_or_else(|| "Pi returned an invalid version".to_string())?;
-    let parsed = (major, minor, patch);
-    if pre_release || parsed < PI_MINIMUM_VERSION || parsed >= PI_MAXIMUM_VERSION {
-        return Err(
-            "Pi 0.84.4 or newer is required, and Pi 0.85.x is not yet supported".to_string(),
-        );
-    }
-    Ok(())
 }
 
 fn parse_model(value: &Value) -> Result<PiModelDescriptor, String> {
@@ -1067,7 +1000,7 @@ async fn inspect_installation(executable: &Path) -> Result<String, PiInstallatio
         Ok(_) => {
             return Err(PiInstallationError::unsupported(
                 None,
-                "The selected Pi executable did not report a supported version.".to_string(),
+                "The selected Pi executable failed to report its version.".to_string(),
             ))
         }
         Err(message) => {
@@ -1075,8 +1008,11 @@ async fn inspect_installation(executable: &Path) -> Result<String, PiInstallatio
         }
     };
     let version = first_output_line(&version_output.stdout);
-    if let Err(message) = validate_pi_version(version.as_deref()) {
-        return Err(PiInstallationError::unsupported(version, message));
+    if version.is_none() {
+        return Err(PiInstallationError::unsupported(
+            None,
+            "Pi returned an empty version response.",
+        ));
     }
     let help = match command_output_capped(
         executable,
@@ -1134,7 +1070,7 @@ async fn inspect_installation(executable: &Path) -> Result<String, PiInstallatio
         }
     }
 
-    Ok(version.expect("validated Pi versions always contain a version string"))
+    Ok(version.expect("Pi version response was checked above"))
 }
 
 pub(crate) async fn probe(executable: &Path) -> AdapterProbe {
@@ -2615,22 +2551,47 @@ mod tests {
         }
     }
 
-    #[test]
-    fn accepts_only_the_supported_pi_minor_line() {
-        for version in ["0.84.4", "pi 0.84.4", "0.84.9+build.1"] {
-            assert!(validate_pi_version(Some(version)).is_ok(), "{version}");
-        }
+    #[tokio::test]
+    async fn installation_discovers_versions_and_checks_capabilities() {
+        let (root, executable) = compile_contract_cli("installation");
+        let _directory = ProbeDirectory(root.clone());
+        let version_file = root.join("version.txt");
         for version in [
-            "0.84.3",
-            "0.84.4-beta.1",
             "0.83.99",
+            "0.84.3",
+            "pi 0.84.4",
+            "0.84.9+build.1",
+            "0.84.4-beta.1",
             "0.85.0",
             "0.85.0-beta.1",
             "1.0.0",
-            "invalid",
+            "pi nightly-custom",
         ] {
-            assert!(validate_pi_version(Some(version)).is_err(), "{version}");
+            std::fs::write(&version_file, format!("{version}\n")).unwrap();
+            let detected = inspect_installation(&executable)
+                .await
+                .unwrap_or_else(|error| panic!("{version}: {}", error.message));
+            assert_eq!(detected, version);
         }
+
+        std::fs::write(&version_file, " \n").unwrap();
+        let error = inspect_installation(&executable).await.err().unwrap();
+        assert!(error.version.is_none());
+        assert!(error.message.contains("empty version response"));
+
+        std::fs::write(&version_file, "1.0.0\n").unwrap();
+        std::fs::write(root.join("missing-isolation"), "").unwrap();
+        let error = inspect_installation(&executable).await.err().unwrap();
+        assert_eq!(error.version.as_deref(), Some("1.0.0"));
+        assert!(error.message.contains("missing required isolation flag"));
+        std::fs::remove_file(root.join("missing-isolation")).unwrap();
+
+        std::fs::write(root.join("missing-auth-option"), "").unwrap();
+        let error = inspect_installation(&executable).await.err().unwrap();
+        assert_eq!(error.version.as_deref(), Some("1.0.0"));
+        assert!(error
+            .message
+            .contains("missing required option --no-refresh"));
     }
 
     #[test]

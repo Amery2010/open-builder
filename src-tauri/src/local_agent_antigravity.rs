@@ -414,8 +414,7 @@ async fn inspect_installation(executable: &Path) -> Result<InstallationInspectio
                 catalog_authority: CatalogAuthority::Partial,
                 verification_required: false,
                 message: Some(
-                    "The selected Antigravity executable did not report a supported version."
-                        .to_string(),
+                    "The selected Antigravity executable failed to report its version.".to_string(),
                 ),
                 missing_environment: Vec::new(),
             })

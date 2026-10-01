@@ -517,6 +517,26 @@ fn response(id: &str, command: &str, data: &str) -> String {
 }
 
 fn run_pi(mode: &str, args: &[String]) {
+    if mode.ends_with("-installation") {
+        let executable = env::current_exe().unwrap();
+        let root = executable.parent().unwrap();
+        if args == ["--version"] {
+            print!("{}", fs::read_to_string(root.join("version.txt")).unwrap());
+        } else if args == ["--help"] {
+            println!("--mode --session-dir --session --no-tools --no-extensions --no-skills --no-prompt-templates --no-themes --no-context-files --no-approve");
+            if !root.join("missing-isolation").exists() {
+                println!("--no-builtin-tools");
+            }
+        } else if args == ["auth", "check", "--help"] {
+            println!("--json");
+            if !root.join("missing-auth-option").exists() {
+                println!("--no-refresh");
+            }
+        } else {
+            panic!("unexpected installation probe arguments: {args:?}");
+        }
+        return;
+    }
     let config_path = env::var("OPEN_BUILDER_PI_CONFIG").unwrap();
     let config = fs::read_to_string(config_path).unwrap();
     let attestation_nonce = json_string_field(&config, "attestationNonce").unwrap();
