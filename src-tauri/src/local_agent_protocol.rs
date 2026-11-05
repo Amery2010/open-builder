@@ -25,8 +25,8 @@ use crate::local_agent_runtime::{
 };
 
 const MAX_JSON_LINE_BYTES: usize = 4 * 1024 * 1024;
-const MAX_PROTOCOL_OUTPUT_BYTES: usize = 32 * 1024 * 1024;
-const MAX_PROTOCOL_EVENTS: usize = 250_000;
+const MAX_PREFLIGHT_OUTPUT_BYTES: usize = 32 * 1024 * 1024;
+const MAX_PREFLIGHT_EVENTS: usize = 250_000;
 const MAX_STDERR_TAIL_BYTES: usize = 8 * 1024;
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(4);
 
@@ -335,13 +335,14 @@ impl Drop for ProcessTreeGuard {
     }
 }
 
+/// Bounded diagnostic output during preflight; active runs have no cumulative quota.
 #[derive(Default)]
-pub(crate) struct ProtocolOutputBudget {
+pub(crate) struct ProbeOutputBudget {
     bytes: usize,
     events: usize,
 }
 
-impl ProtocolOutputBudget {
+impl ProbeOutputBudget {
     pub(crate) fn record(&mut self, line: &str) -> Result<(), String> {
         self.bytes = self
             .bytes
@@ -351,21 +352,13 @@ impl ProtocolOutputBudget {
             .events
             .checked_add(1)
             .ok_or_else(|| "local CLI output event counter overflowed".to_string())?;
-        if self.bytes > MAX_PROTOCOL_OUTPUT_BYTES {
+        if self.bytes > MAX_PREFLIGHT_OUTPUT_BYTES {
             return Err("local CLI output exceeded the cumulative byte limit".to_string());
         }
-        if self.events > MAX_PROTOCOL_EVENTS {
+        if self.events > MAX_PREFLIGHT_EVENTS {
             return Err("local CLI output exceeded the event limit".to_string());
         }
         Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn exhausted_for_test() -> Self {
-        Self {
-            bytes: MAX_PROTOCOL_OUTPUT_BYTES,
-            events: 0,
-        }
     }
 }
 
@@ -760,7 +753,7 @@ pub(crate) async fn command_output_capped_with_env(
         })
     };
 
-    match tokio::time::timeout(timeout, capture).await {
+    match crate::timeouts::wait_with_timeout_retries(capture, timeout).await {
         Ok(Ok(output)) => {
             tree_guard.cleanup();
             Ok(output)
@@ -1045,6 +1038,21 @@ mod tests {
         assert_eq!(stderr, b"warning\n");
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn slow_probe_keeps_one_process_and_its_partial_output_across_timeouts() {
+        let output = command_output_capped(
+            Path::new("/bin/sh"),
+            &["-c", "printf before; sleep 0.4; printf after"],
+            Duration::from_millis(300),
+            128,
+        )
+        .await
+        .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"beforeafter");
+    }
+
     #[tokio::test]
     async fn portable_fake_cli_proves_spawn_stdin_fragmented_stdout_and_redaction() {
         let (root, executable) = compile_fake_cli();
@@ -1247,16 +1255,16 @@ mod tests {
     }
 
     #[test]
-    fn protocol_output_budget_is_cumulative() {
-        let mut budget = ProtocolOutputBudget {
-            bytes: MAX_PROTOCOL_OUTPUT_BYTES - 2,
+    fn probe_output_budget_is_cumulative() {
+        let mut budget = ProbeOutputBudget {
+            bytes: MAX_PREFLIGHT_OUTPUT_BYTES - 2,
             ..Default::default()
         };
         assert!(budget.record("x").is_ok());
         assert!(budget.record("x").is_err());
 
-        let mut budget = ProtocolOutputBudget {
-            events: MAX_PROTOCOL_EVENTS,
+        let mut budget = ProbeOutputBudget {
+            events: MAX_PREFLIGHT_EVENTS,
             ..Default::default()
         };
         assert!(budget.record("{}").is_err());
@@ -1388,7 +1396,8 @@ mod tests {
             .current_dir(&cwd)
             .env("OPEN_BUILDER_FROZEN", "captured");
         let spec = FrozenProcessSpec::capture(&command).unwrap();
-        let authority_lifetime = CancellationToken::new();
+        let cancellation = crate::local_agent_runtime::RunCancellation::new();
+        let authority_lifetime = cancellation.authority_token();
         let process = RunSupervisor::spawn(spec, authority_lifetime.clone()).unwrap();
         let SupervisedProcess {
             supervisor,
@@ -1414,7 +1423,15 @@ mod tests {
             .unwrap_err();
         assert!(outcome.message.contains("provider approval rejected"));
         assert!(authority_lifetime.is_cancelled());
+        let failure = crate::local_agent_runtime::LocalCliFailure::from_adapter(
+            crate::local_agent::LocalAgentProvider::Codex,
+            crate::local_agent_runtime::LocalCliFailurePhase::Stream,
+            &outcome,
+            false,
+            cancellation.stop_requested(),
+        );
         let _ = std::fs::remove_dir_all(cwd);
+        assert_eq!(failure.code, LocalCliFailureCode::ProviderApprovalRejected);
     }
 
     #[tokio::test]
@@ -1426,7 +1443,8 @@ mod tests {
             .current_dir(&root)
             .env("OPEN_BUILDER_FAKE_MODE", "delayed-exit");
         let spec = FrozenProcessSpec::capture(&command).unwrap();
-        let authority_lifetime = CancellationToken::new();
+        let cancellation = crate::local_agent_runtime::RunCancellation::new();
+        let authority_lifetime = cancellation.authority_token();
         let process = RunSupervisor::spawn(spec, authority_lifetime.clone()).unwrap();
         drop(process.stdin);
         drop(process.stdout);
@@ -1444,6 +1462,7 @@ mod tests {
             result = &mut finish => panic!("shutdown completed before authority closed: {result:?}"),
         }
         assert!(!finish.await.unwrap().aborted);
+        assert!(!cancellation.stop_requested());
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -28,7 +28,7 @@ mod broker;
 
 use broker::{BrokerError, BrokerErrorKind, BrokerTool, ToolBroker, MAX_ARGUMENT_BYTES};
 
-pub(crate) use broker::canonical_tool_digest;
+pub(crate) use broker::{canonical_tool_digest, TOOL_CALL_TIMEOUT};
 
 #[derive(Clone)]
 struct OpenBuilderToolServer {
@@ -422,6 +422,10 @@ impl ToolBridge {
 
     pub fn unregister(&self, run_id: &str, reason: &str) {
         self.broker.unregister(run_id, reason);
+    }
+
+    pub(crate) fn failure(&self, run_id: &str) -> Option<crate::local_agent_runtime::AdapterError> {
+        self.broker.failure(run_id)
     }
 
     pub fn shutdown_now(&self) {

@@ -10,6 +10,50 @@ import {
 } from "./ToolCallCard";
 
 describe("ToolCallCard result guards", () => {
+  it("extracts only valid npm packages and ignores invalid optional fields", () => {
+    const parsed = parseNpmSearchResult(
+      JSON.stringify({
+        success: true,
+        data: [
+          null,
+          "not a package object",
+          { name: { invalid: true } },
+          { name: "" },
+          {
+            name: "@scope/package",
+            version: "1.0.0",
+            description: "A package",
+          },
+          { name: "zod", version: {}, description: [] },
+        ],
+      }),
+    );
+
+    expect(parsed).toMatchObject({
+      success: true,
+      count: 2,
+      packages: [
+        { name: "@scope/package", version: "1.0.0", description: "A package" },
+        { name: "zod" },
+      ],
+    });
+  });
+
+  it.each([
+    "not JSON",
+    "null",
+    "42",
+    '{"success":true,"data":{}}',
+    '{"success":false,"error":{"message":"invalid field"}}',
+  ])("handles malformed npm search payloads without throwing: %s", (result) => {
+    expect(parseNpmSearchResult(result)).toMatchObject({
+      success: false,
+      count: 0,
+      packages: [],
+      error: expect.any(String),
+    });
+  });
+
   it("does not parse oversized JSON payloads", () => {
     const huge = JSON.stringify({
       success: true,

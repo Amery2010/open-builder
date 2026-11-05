@@ -624,8 +624,8 @@ if (
 
 if (
   !localAgentProtocol.includes("command.env_clear()") ||
-  !localAgentProtocol.includes("MAX_PROTOCOL_OUTPUT_BYTES") ||
-  !localAgentProtocol.includes("MAX_PROTOCOL_EVENTS") ||
+  !localAgentProtocol.includes("MAX_JSON_LINE_BYTES") ||
+  !localAgentProtocol.includes("read_capped_line") ||
   !localAgentProtocol.includes("127.0.0.1,localhost,::1") ||
   !localAgentProtocol.includes("ProcessGroup::leader()") ||
   !localAgentProtocol.includes("JobObject")

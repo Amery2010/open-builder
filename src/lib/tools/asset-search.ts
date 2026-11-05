@@ -5,7 +5,7 @@ import {
   ASSET_DESCRIPTION_MAX_CHARS,
   ASSET_SEARCH_MAX_RESULTS,
   clampInt,
-  fetchWithTimeout,
+  fetchTextWithTimeout,
   formatHttpError,
   limitArray,
   normalizeToolQuery,
@@ -51,6 +51,7 @@ async function pixabaySearch(
   orientation: string = "all",
   color?: string,
   perPage: number = 10,
+  signal?: AbortSignal,
 ): Promise<string> {
   const checkedQuery = normalizeToolQuery(query);
   if (!checkedQuery.ok) {
@@ -67,24 +68,24 @@ async function pixabaySearch(
   if (color) params.append("colors", color);
 
   try {
-    const res = await fetchWithTimeout(`${PIXABAY_API_URL}/?${params}`);
+    const { response: res, text: body } = await fetchTextWithTimeout(
+      `${PIXABAY_API_URL}/?${params}`,
+      { signal },
+    );
     if (!res.ok) {
-      const text = await res.text();
+      const text = body;
       return JSON.stringify({
         ok: false,
         error: formatHttpError("Pixabay search failed", res.status, text),
       });
     }
 
-    const data = await res.json();
+    const data = JSON.parse(body);
     const limited = limitArray(data.hits ?? [], size);
     return JSON.stringify({
       ok: true,
       images: limited.items.map((img: any) => {
-        const description = truncateText(
-          img.tags,
-          ASSET_DESCRIPTION_MAX_CHARS,
-        );
+        const description = truncateText(img.tags, ASSET_DESCRIPTION_MAX_CHARS);
         return {
           url: `https://i0.wp.com/${img.webformatURL.replace(/^https?:\/\//, "")}`,
           thumbnail: `https://i0.wp.com/${img.previewURL.replace(/^https?:\/\//, "")}`,
@@ -101,6 +102,7 @@ async function pixabaySearch(
       },
     });
   } catch (err) {
+    signal?.throwIfAborted();
     return JSON.stringify({ ok: false, error: safeErrorMessage(err) });
   }
 }
@@ -111,6 +113,7 @@ async function unsplashSearch(
   orientation: string = "all",
   color?: string,
   perPage: number = 10,
+  signal?: AbortSignal,
 ): Promise<string> {
   const checkedQuery = normalizeToolQuery(query);
   if (!checkedQuery.ok) {
@@ -128,18 +131,19 @@ async function unsplashSearch(
   if (color) params.append("color", color);
 
   try {
-    const res = await fetchWithTimeout(
+    const { response: res, text: body } = await fetchTextWithTimeout(
       `${UNSPLASH_API_URL}/search/photos?${params}`,
+      { signal },
     );
     if (!res.ok) {
-      const text = await res.text();
+      const text = body;
       return JSON.stringify({
         ok: false,
         error: formatHttpError("Unsplash search failed", res.status, text),
       });
     }
 
-    const data = await res.json();
+    const data = JSON.parse(body);
     const limited = limitArray(data.results ?? [], size);
     return JSON.stringify({
       ok: true,
@@ -164,14 +168,20 @@ async function unsplashSearch(
       },
     });
   } catch (err) {
+    signal?.throwIfAborted();
     return JSON.stringify({ ok: false, error: safeErrorMessage(err) });
   }
 }
 
 export function createAssetSearchToolHandler(
   settings: AssetSearchSettings,
-): (name: string, args: unknown) => Promise<string> {
-  return async (name: string, args: unknown): Promise<string> => {
+): (name: string, args: unknown, signal?: AbortSignal) => Promise<string> {
+  return async (
+    name: string,
+    args: unknown,
+    signal?: AbortSignal,
+  ): Promise<string> => {
+    signal?.throwIfAborted();
     const a = args as Record<string, any>;
     const engine = settings.engine;
     if (name === "image_search") {
@@ -190,6 +200,7 @@ export function createAssetSearchToolHandler(
         a.orientation,
         a.color,
         a.per_page,
+        signal,
       );
     }
 
@@ -200,6 +211,7 @@ export function createAssetSearchToolHandler(
         a.orientation,
         a.color,
         a.per_page,
+        signal,
       );
     }
 

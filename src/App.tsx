@@ -14,7 +14,10 @@ import { useConversationStore } from "./store/conversation";
 import { useSettingsStore } from "./store/settings";
 import { useProjectTemplateLibraryUi } from "./store/project-template-library-ui";
 import { useT } from "./i18n";
-import { discardPendingSandpackFileChanges } from "./components/code-viewer/sandpack-file-changes";
+import {
+  discardPendingSandpackFileChanges,
+  type ProjectFileChangeGuard,
+} from "./components/code-viewer/sandpack-file-changes";
 import type { StagedProjectImport } from "./lib/utils/project-import";
 import {
   materializeStagedProjectAssets,
@@ -186,6 +189,7 @@ export default function App() {
 
   const {
     generate,
+    enqueueInstruction,
     stop,
     retry,
     continueTask,
@@ -215,8 +219,21 @@ export default function App() {
   });
 
   const handleCodeFileChange = useCallback(
-    (conversationId: string, path: string, content: string) => {
-      if (useConversationStore.getState().activeId === conversationId) {
+    (
+      conversationId: string,
+      path: string,
+      content: string,
+      guard?: ProjectFileChangeGuard,
+    ) => {
+      const state = useConversationStore.getState();
+      const conversation = state.conversations[conversationId];
+      if (
+        !conversation ||
+        (guard && conversation.files[path] !== guard.expectedContent)
+      ) {
+        return;
+      }
+      if (state.activeId === conversationId) {
         updateFiles(path, content);
         return;
       }
@@ -661,6 +678,7 @@ export default function App() {
       hasConfiguredModelRuntime={hasConfiguredModelRuntime}
       localCliStatusNotice={localCliStatusNotice}
       onGenerate={handleGenerate}
+      onEnqueueInstruction={enqueueInstruction}
       onStop={stop}
       onOpenSettings={() => setIsSettingsOpen(true)}
       onSetFiles={(nextFiles) => setFiles(nextFiles)}

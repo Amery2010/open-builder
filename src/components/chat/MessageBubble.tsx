@@ -64,6 +64,7 @@ interface MessageBubbleProps {
   canWithdraw?: boolean;
   onWithdraw?: () => void;
   withdrawLabel?: string;
+  statusLabel?: string;
 }
 
 function StoredAttachmentImage({ block }: { block: ImageBlock }) {
@@ -107,6 +108,7 @@ export const MessageBubble = memo(function MessageBubble({
   canWithdraw = false,
   onWithdraw,
   withdrawLabel = "Withdraw",
+  statusLabel,
 }: MessageBubbleProps) {
   const t = useT();
   const pendingInteractions = useInteractiveStore((state) => state.pending);
@@ -196,6 +198,11 @@ export const MessageBubble = memo(function MessageBubble({
             />
           )}
         </div>
+        {statusLabel && (
+          <p role="status" className="px-1 text-xs text-muted-foreground">
+            {statusLabel}
+          </p>
+        )}
         {canWithdraw && !message.origin && onWithdraw && (
           <button
             type="button"

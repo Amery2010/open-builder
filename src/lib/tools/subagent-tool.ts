@@ -19,7 +19,7 @@ const description =
   agentList +
   "\n\n" +
   "Use this to keep the main conversation context clean when you need to explore the codebase, review code, research dependencies, or diagnose runtime issues. " +
-  "Multiple dispatch_subagent calls in the same turn run in parallel (up to 3 per turn). " +
+  "Multiple dispatch_subagent calls in the same turn are queued and run with up to 3 active at a time. " +
   "Subagents are strictly READ-ONLY — they cannot create, modify, or delete project files. " +
   "Subagents cannot dispatch further subagents.";
 

@@ -7,6 +7,7 @@ import { useSettingsStore } from "../../store/settings";
 import { useSubagentStore } from "../../store/subagent";
 import { SUBAGENT_LIMITS } from "../../lib/ai/subagents/limits";
 import { SubagentCallCard } from "./SubagentCallCard";
+import { cancelPendingToolCalls } from "../../lib/ai/run-guard";
 
 vi.mock("./LazyMarkdownContent", () => ({
   LazyMarkdownContent: ({ content }: { content: string }) => (
@@ -31,6 +32,35 @@ describe("SubagentCallCard errors", () => {
       system: { ...state.system, language: "en" },
     }));
     useSubagentStore.setState({ progress: {} });
+  });
+
+  it("shows a stopped child as stopped after its canonical tool call is cancelled", () => {
+    const closed = cancelPendingToolCalls([
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: baseProps.toolCallId,
+            type: "function",
+            function: {
+              name: "dispatch_subagent",
+              arguments: JSON.stringify(baseProps.rawArgs),
+            },
+          },
+        ],
+      },
+    ]);
+    const result = closed.at(-1)!;
+    render(
+      <SubagentCallCard
+        {...baseProps}
+        result={String(result.content)}
+        toolOutput={result.toolOutput}
+      />,
+    );
+    expect(screen.getByText("Stopped")).toBeInTheDocument();
+    expect(screen.queryByText("Failed")).not.toBeInTheDocument();
   });
 
   it("keeps the task out of the compact title and shows it when expanded", async () => {

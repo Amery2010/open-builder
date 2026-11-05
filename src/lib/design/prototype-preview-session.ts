@@ -1,6 +1,7 @@
 import {
   createDesignBridgeNonce,
   DESIGN_BRIDGE_CAPTURE_TIMEOUT_MS,
+  DESIGN_BRIDGE_TIMEOUT_ATTEMPTS,
   DESIGN_BRIDGE_PROTOCOL_VERSION,
   getDesignBridgeTargetOrigin,
   isDesignBridgeOriginAllowed,
@@ -12,7 +13,10 @@ import {
   type DesignBridgeParentMessage,
 } from "./preview-bridge";
 import type { DesignReviewViewport } from "./preview-capture";
-import type { PrototypePreviewTarget } from "./preview-runtime";
+import {
+  PreviewRuntimeError,
+  type PrototypePreviewTarget,
+} from "./preview-runtime";
 
 export interface IsolatedPreviewSession {
   setViewport: (viewport: DesignReviewViewport) => Promise<void>;
@@ -71,6 +75,34 @@ export function createIsolatedPreviewSession(
     opacity: "0.01",
     pointerEvents: "none",
   });
+  const lifecycle = new AbortController();
+  const sessionSignal = lifecycle.signal;
+  const dispose = () => {
+    lifecycle.abort();
+    signal.removeEventListener("abort", dispose);
+    frame.remove();
+  };
+  signal.addEventListener("abort", dispose, { once: true });
+  if (signal.aborted) dispose();
+  const invalidateGeneration = () => {
+    lifecycle.abort(
+      new PreviewRuntimeError(
+        "stale_generation",
+        "Preview generation was replaced.",
+      ),
+    );
+    dispose();
+  };
+
+  const generationReplaced = (event: MessageEvent) => {
+    const message = event.data as DesignBridgeParentMessage | undefined;
+    return (
+      message?.type === "open-builder:design-bridge-ready" &&
+      message.version === DESIGN_BRIDGE_PROTOCOL_VERSION &&
+      typeof message.generation === "string" &&
+      message.generation !== generation
+    );
+  };
 
   const request = <T>(
     expectation:
@@ -84,13 +116,11 @@ export function createIsolatedPreviewSession(
       const cleanup = () => {
         window.clearTimeout(timeout);
         window.removeEventListener("message", onMessage);
-        signal.removeEventListener("abort", onAbort);
+        sessionSignal.removeEventListener("abort", onAbort);
       };
       const onAbort = () => {
         cleanup();
-        reject(
-          new DOMException("Prototype review was cancelled.", "AbortError"),
-        );
+        reject(sessionSignal.reason);
       };
       const onMessage = (event: MessageEvent) => {
         if (
@@ -103,6 +133,10 @@ export function createIsolatedPreviewSession(
         ) {
           return;
         }
+        if (generationReplaced(event)) {
+          invalidateGeneration();
+          return;
+        }
         const parsed = parse(event);
         if (!parsed) return;
         cleanup();
@@ -112,10 +146,10 @@ export function createIsolatedPreviewSession(
       const timeout = window.setTimeout(() => {
         cleanup();
         reject(new Error("Temporary prototype preview request timed out."));
-      }, DESIGN_BRIDGE_CAPTURE_TIMEOUT_MS);
+      }, DESIGN_BRIDGE_CAPTURE_TIMEOUT_MS * DESIGN_BRIDGE_TIMEOUT_ATTEMPTS);
       window.addEventListener("message", onMessage);
-      signal.addEventListener("abort", onAbort, { once: true });
-      if (signal.aborted) {
+      sessionSignal.addEventListener("abort", onAbort, { once: true });
+      if (sessionSignal.aborted) {
         onAbort();
         return;
       }
@@ -127,12 +161,12 @@ export function createIsolatedPreviewSession(
     const cleanup = () => {
       window.clearTimeout(timeout);
       window.removeEventListener("message", onMessage);
-      signal.removeEventListener("abort", onAbort);
+      sessionSignal.removeEventListener("abort", onAbort);
     };
     const onAbort = () => {
       cleanup();
       frame.remove();
-      reject(new DOMException("Prototype review was cancelled.", "AbortError"));
+      reject(sessionSignal.reason);
     };
     const onMessage = (event: MessageEvent) => {
       if (
@@ -143,6 +177,10 @@ export function createIsolatedPreviewSession(
           event.origin,
         )
       ) {
+        return;
+      }
+      if (generationReplaced(event)) {
+        invalidateGeneration();
         return;
       }
       const message = event.data as DesignBridgeParentMessage | undefined;
@@ -161,90 +199,95 @@ export function createIsolatedPreviewSession(
       cleanup();
       frame.remove();
       reject(new Error("Temporary prototype preview did not become ready."));
-    }, DESIGN_BRIDGE_CAPTURE_TIMEOUT_MS);
+    }, DESIGN_BRIDGE_CAPTURE_TIMEOUT_MS * DESIGN_BRIDGE_TIMEOUT_ATTEMPTS);
     window.addEventListener("message", onMessage);
-    signal.addEventListener("abort", onAbort, { once: true });
-    if (signal.aborted) {
+    sessionSignal.addEventListener("abort", onAbort, { once: true });
+    if (sessionSignal.aborted) {
       onAbort();
       return;
     }
     document.body.appendChild(frame);
   });
 
-  return ready.then(() => ({
-    setViewport: async (viewport) => {
-      signal.throwIfAborted();
-      frame.style.width = `${viewport.width}px`;
-      frame.style.height = `${viewport.height}px`;
-      await afterIsolatedPreviewPaint();
-      await new Promise<void>((resolve) => window.setTimeout(resolve, 50));
-    },
-    navigate: (target) => {
-      const expectation: DesignBridgeNavigationExpectation = {
-        generation,
-        nonce: createDesignBridgeNonce(),
-        requestId: createDesignBridgeNonce(),
-        target,
-      };
-      return request(
-        expectation,
-        {
-          type: "open-builder:design-bridge-navigate",
-          version: DESIGN_BRIDGE_PROTOCOL_VERSION,
+  return ready
+    .then<IsolatedPreviewSession>(() => ({
+      setViewport: async (viewport) => {
+        sessionSignal.throwIfAborted();
+        frame.style.width = `${viewport.width}px`;
+        frame.style.height = `${viewport.height}px`;
+        await afterIsolatedPreviewPaint();
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 50));
+      },
+      navigate: (target) => {
+        const expectation: DesignBridgeNavigationExpectation = {
           generation,
-          nonce: expectation.nonce,
-          requestId: expectation.requestId,
+          nonce: createDesignBridgeNonce(),
+          requestId: createDesignBridgeNonce(),
           target,
-        },
-        (event) => {
-          const response = parseDesignBridgeNavigationResponse(
-            event.data,
-            expectation,
-          );
-          if (!response) return null;
-          return response.ok
-            ? { ok: true, value: response.target }
-            : { ok: false, error: new Error(response.error) };
-        },
-      );
-    },
-    capture: (viewport, target) => {
-      const expectation: DesignBridgeCaptureExpectation = {
-        generation,
-        nonce: createDesignBridgeNonce(),
-        requestId: createDesignBridgeNonce(),
-        viewportName: viewport.name,
-        viewportWidth: viewport.width,
-        viewportHeight: viewport.height,
-        target,
-      };
-      return request(
-        expectation,
-        {
-          type: "open-builder:design-bridge-capture",
-          version: DESIGN_BRIDGE_PROTOCOL_VERSION,
-          generation,
-          nonce: expectation.nonce,
-          requestId: expectation.requestId,
-          viewport: {
-            name: viewport.name,
-            width: viewport.width,
-            height: viewport.height,
+        };
+        return request(
+          expectation,
+          {
+            type: "open-builder:design-bridge-navigate",
+            version: DESIGN_BRIDGE_PROTOCOL_VERSION,
+            generation,
+            nonce: expectation.nonce,
+            requestId: expectation.requestId,
+            target,
           },
+          (event) => {
+            const response = parseDesignBridgeNavigationResponse(
+              event.data,
+              expectation,
+            );
+            if (!response) return null;
+            return response.ok
+              ? { ok: true, value: response.target }
+              : { ok: false, error: new Error(response.error) };
+          },
+        );
+      },
+      capture: (viewport, target) => {
+        const expectation: DesignBridgeCaptureExpectation = {
+          generation,
+          nonce: createDesignBridgeNonce(),
+          requestId: createDesignBridgeNonce(),
+          viewportName: viewport.name,
+          viewportWidth: viewport.width,
+          viewportHeight: viewport.height,
           target,
-        },
-        (event) => {
-          const response = parseDesignBridgeCaptureResponse(
-            event.data,
-            expectation,
-          );
-          if (!response) return null;
-          return response.ok
-            ? { ok: true, value: response.result }
-            : { ok: false, error: new Error(response.error) };
-        },
-      );
-    },
-    dispose: () => frame.remove(),
-  }));
+        };
+        return request(
+          expectation,
+          {
+            type: "open-builder:design-bridge-capture",
+            version: DESIGN_BRIDGE_PROTOCOL_VERSION,
+            generation,
+            nonce: expectation.nonce,
+            requestId: expectation.requestId,
+            viewport: {
+              name: viewport.name,
+              width: viewport.width,
+              height: viewport.height,
+            },
+            target,
+          },
+          (event) => {
+            const response = parseDesignBridgeCaptureResponse(
+              event.data,
+              expectation,
+            );
+            if (!response) return null;
+            return response.ok
+              ? { ok: true, value: response.result }
+              : { ok: false, error: new Error(response.error) };
+          },
+        );
+      },
+      dispose,
+    }))
+    .catch((error) => {
+      dispose();
+      throw error;
+    });
 }

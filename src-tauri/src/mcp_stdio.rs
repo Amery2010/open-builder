@@ -14,7 +14,7 @@ use rmcp::model::{
     CallToolRequest, CallToolRequestParams, ClientCapabilities, ClientInfo, ClientRequest,
     Implementation, ProtocolVersion, ServerResult,
 };
-use rmcp::service::{PeerRequestOptions, RoleClient, RunningService};
+use rmcp::service::{PeerRequestOptions, RequestHandle, RoleClient, RunningService};
 use rmcp::transport::TokioChildProcess;
 use rmcp::{ClientLifecycleMode, ClientServiceExt, Peer};
 use serde::Serialize;
@@ -541,7 +541,7 @@ pub async fn mcp_stdio_call_tool(
         None => CallToolRequestParams::new(name),
     };
     let key = (server_id, call_id);
-    let (cancel_tx, mut cancel_rx) = oneshot::channel();
+    let (cancel_tx, cancel_rx) = oneshot::channel();
     {
         let mut calls = state
             .calls
@@ -570,25 +570,46 @@ pub async fn mcp_stdio_call_tool(
     let timeout_ms = timeout_ms
         .unwrap_or(DEFAULT_CALL_TIMEOUT_MS)
         .clamp(MIN_CALL_TIMEOUT_MS, MAX_CALL_TIMEOUT_MS);
+    let response = wait_for_tool_call(handle, cancel_rx, Duration::from_millis(timeout_ms)).await;
+
+    if let Ok(mut calls) = state.calls.lock() {
+        calls.remove(&key);
+    }
+    let value = response?;
+    ensure_json_budget(&value, "tool result")?;
+    Ok(value)
+}
+
+async fn wait_for_tool_call(
+    handle: RequestHandle<RoleClient>,
+    mut cancel_rx: oneshot::Receiver<String>,
+    timeout: Duration,
+) -> Result<serde_json::Value, String> {
     let mut handle = Some(handle);
-    let response = tokio::select! {
+    tokio::select! {
         response = async {
             let request = handle.as_mut().expect("request handle is present");
-            (&mut request.rx).await
+            crate::timeouts::wait_with_timeout_retries(&mut request.rx, timeout).await
         } => {
             match response {
-                Ok(Ok(ServerResult::CallToolResult(result))) => {
+                Ok(Ok(Ok(ServerResult::CallToolResult(result)))) => {
                     serde_json::to_value(result)
                         .map_err(|_| "failed to serialize MCP tool result".to_string())
                 }
-                Ok(Ok(ServerResult::InputRequiredResult(_))) => {
+                Ok(Ok(Ok(ServerResult::InputRequiredResult(_)))) => {
                     Err("MCP tool requested additional input, which is not supported".to_string())
                 }
-                Ok(Ok(ServerResult::CreateTaskResult(_))) => {
+                Ok(Ok(Ok(ServerResult::CreateTaskResult(_)))) => {
                     Err("MCP asynchronous tasks are not supported".to_string())
                 }
-                Ok(Ok(_)) => Err("MCP server returned an unexpected tool response".to_string()),
-                Ok(Err(_)) | Err(_) => Err("MCP tool call failed".to_string()),
+                Ok(Ok(Ok(_))) => Err("MCP server returned an unexpected tool response".to_string()),
+                Ok(Ok(Err(_))) | Ok(Err(_)) => Err("MCP tool call failed".to_string()),
+                Err(_) => {
+                    if let Some(handle) = handle.take() {
+                        let _ = handle.cancel(Some("MCP tool call timed out".to_string())).await;
+                    }
+                    Err("MCP tool call timed out".to_string())
+                }
             }
         }
         reason = &mut cancel_rx => {
@@ -598,20 +619,7 @@ pub async fn mcp_stdio_call_tool(
             }
             Err("MCP tool call cancelled".to_string())
         }
-        _ = tokio::time::sleep(Duration::from_millis(timeout_ms)) => {
-            if let Some(handle) = handle.take() {
-                let _ = handle.cancel(Some("MCP tool call timed out".to_string())).await;
-            }
-            Err("MCP tool call timed out".to_string())
-        }
-    };
-
-    if let Ok(mut calls) = state.calls.lock() {
-        calls.remove(&key);
     }
-    let value = response?;
-    ensure_json_budget(&value, "tool result")?;
-    Ok(value)
 }
 
 #[tauri::command]
@@ -714,6 +722,93 @@ mod tests {
             cwd: None,
         };
         assert!(validate_config(&config).is_err());
+    }
+
+    #[tokio::test]
+    async fn tool_wait_retries_keep_one_request_and_preserve_cancellation() {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let config = McpStdioConfig {
+            id: "wait-fixture".to_string(),
+            command: "node".to_string(),
+            args: vec![manifest_dir
+                .join("tests/fixtures/echo-mcp.mjs")
+                .to_string_lossy()
+                .into_owned()],
+            env: HashMap::new(),
+            cwd: Some(manifest_dir.to_string_lossy().into_owned()),
+        };
+        let (mut connection, _) = create_connection(&config).await.unwrap();
+        let start = |delay_ms: u64| {
+            let peer = connection.service.peer().clone();
+            async move {
+                peer.send_cancellable_request(
+                    ClientRequest::CallToolRequest(CallToolRequest::new(
+                        CallToolRequestParams::new("echo").with_arguments(
+                            serde_json::json!({"message":"saved once", "delayMs":delay_ms})
+                                .as_object()
+                                .unwrap()
+                                .clone(),
+                        ),
+                    )),
+                    PeerRequestOptions::no_options(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        let (_cancel, cancel_rx) = oneshot::channel();
+        let late_result =
+            wait_for_tool_call(start(150).await, cancel_rx, Duration::from_millis(100)).await;
+
+        let (_cancel, cancel_rx) = oneshot::channel();
+        let timeout_started = tokio::time::Instant::now();
+        let timed_out =
+            wait_for_tool_call(start(5_000).await, cancel_rx, Duration::from_millis(50)).await;
+        let waited = timeout_started.elapsed();
+
+        let (cancel, cancel_rx) = oneshot::channel();
+        let handle = start(5_000).await;
+        let canceller = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(75)).await;
+            let _ = cancel.send("stopped during second window".to_string());
+        });
+        let stopped = wait_for_tool_call(handle, cancel_rx, Duration::from_millis(50)).await;
+        canceller.await.unwrap();
+
+        let rejected_handle = connection
+            .service
+            .peer()
+            .send_cancellable_request(
+                ClientRequest::PingRequest(rmcp::model::PingRequest::default()),
+                PeerRequestOptions::no_options(),
+            )
+            .await
+            .unwrap();
+        let (_cancel, cancel_rx) = oneshot::channel();
+        let rejected = tokio::time::timeout(
+            Duration::from_secs(1),
+            wait_for_tool_call(rejected_handle, cancel_rx, Duration::from_secs(5)),
+        )
+        .await;
+
+        let usable_after_cancellation = connection.service.list_all_tools().await;
+        let closed = connection
+            .service
+            .close_with_timeout(SHUTDOWN_TIMEOUT)
+            .await;
+        connection.stderr_task.abort();
+
+        assert_eq!(
+            late_result.unwrap()["structuredContent"]["echoed"],
+            "saved once"
+        );
+        assert_eq!(timed_out.unwrap_err(), "MCP tool call timed out");
+        assert!(waited >= Duration::from_millis(50) * crate::timeouts::TIMEOUT_ATTEMPTS);
+        assert_eq!(stopped.unwrap_err(), "MCP tool call cancelled");
+        assert_eq!(rejected.unwrap().unwrap_err(), "MCP tool call failed");
+        assert_eq!(usable_after_cancellation.unwrap().len(), 1);
+        assert!(closed.unwrap().is_some());
     }
 
     #[tokio::test]

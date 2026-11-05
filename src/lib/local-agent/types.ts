@@ -166,6 +166,7 @@ export interface LocalAgentStartRequest {
   scope: LocalAgentRunScope;
   tools: LocalToolSpec[];
   nativeSearch: boolean;
+  /** Zero disables the per-run tool-call budget. */
   maxToolCalls: number;
   mode: "chat" | "plan" | "auto_qa" | "subagent";
 }
@@ -229,6 +230,7 @@ export type LocalCliFailureCode =
   | "handshakeFailed"
   | "sessionUnavailable"
   | "toolBridgeFailed"
+  | "toolBudgetExceeded"
   | "isolationViolation"
   | "protocolViolation"
   | "outputLimit"
@@ -251,7 +253,35 @@ export type LocalCliFailurePhase =
 export type LocalCliRetryPolicy =
   "none" | "reprobe" | "afterSetup" | "freshSessionSafe" | "manual";
 
+export const LOCAL_CLI_ISOLATION_REASONS = [
+  "externalMcpServer",
+  "unauthorizedHostTool",
+  "nativeCapability",
+  "invalidDiscovery",
+] as const;
+export const LOCAL_CLI_ISOLATION_ITEM_KINDS = [
+  "mcpToolCall",
+  "agentMessage",
+  "reasoning",
+  "plan",
+  "userMessage",
+  "contextCompaction",
+  "webSearch",
+  "commandExecution",
+  "fileChange",
+  "dynamicToolCall",
+  "collabAgentToolCall",
+  "hookPrompt",
+  "imageView",
+  "imageGeneration",
+  "computerUse",
+  "browserUse",
+  "subAgentActivity",
+] as const;
+
 export interface LocalCliFailure {
+  isolationReason?: (typeof LOCAL_CLI_ISOLATION_REASONS)[number];
+  itemKind?: (typeof LOCAL_CLI_ISOLATION_ITEM_KINDS)[number];
   code: LocalCliFailureCode;
   phase: LocalCliFailurePhase;
   provider: LocalAgentProvider;
@@ -283,6 +313,9 @@ export interface LocalCliRunStatus {
 }
 
 export interface LocalCliHostToolOutcome {
+  /** Run-local callbacks, never serialized onto the provider wire. */
+  onDelivered?: () => void;
+  onDeliveryFailed?: () => void;
   resolution: LocalToolResolution;
   /** True only after the Host execution seam was crossed for a side-effecting
    * tool. Validation, policy, budget and authorization denials are false. */

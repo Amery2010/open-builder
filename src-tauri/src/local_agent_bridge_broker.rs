@@ -13,6 +13,8 @@ use crate::local_agent::{
     LocalAgentEvent, LocalToolAnnotations, LocalToolHostApproval, LocalToolResolution,
     LocalToolSpec,
 };
+use crate::local_agent_runtime::{AdapterError, LocalCliFailureCode};
+use crate::timeouts::wait_with_timeout_retries;
 
 pub(crate) const MAX_ARGUMENT_BYTES: usize = 4 * 1024 * 1024;
 pub(crate) const MAX_RESULT_BYTES: usize = 20 * 1024 * 1024;
@@ -140,6 +142,7 @@ struct BrokerRun {
     cancellation: CancellationToken,
     channel: TrackedChannel,
     pending: Mutex<HashMap<String, PendingCall>>,
+    failure: Mutex<Option<AdapterError>>,
 }
 
 struct PendingCall {
@@ -150,20 +153,35 @@ struct PendingCall {
 }
 
 impl BrokerRun {
+    fn fail(&self, code: LocalCliFailureCode, reason: &'static str) {
+        if let Ok(mut failure) = self.failure.lock() {
+            if failure.is_none() {
+                *failure = Some(AdapterError::coded(code, reason));
+            }
+        }
+        self.abort(reason);
+    }
+
     fn abort(&self, reason: &str) {
         self.cancellation.cancel();
         self.cancel_pending(reason);
     }
 
     fn reserve_tool_call(&self) -> bool {
+        if self.max_tool_calls == 0 {
+            return true;
+        }
         let reserved = self
             .tool_calls_started
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |started| {
-                (started < self.max_tool_calls).then_some(started + 1)
+                (started < self.max_tool_calls).then(|| started + 1)
             })
             .is_ok();
         if !reserved {
-            self.abort(TOOL_CALL_BUDGET_EXHAUSTED);
+            self.fail(
+                LocalCliFailureCode::ToolBudgetExceeded,
+                TOOL_CALL_BUDGET_EXHAUSTED,
+            );
         }
         reserved
     }
@@ -254,6 +272,7 @@ impl ToolBroker {
             cancellation,
             channel,
             pending: Mutex::new(HashMap::new()),
+            failure: Mutex::new(None),
         });
 
         let replaced = {
@@ -305,14 +324,20 @@ impl ToolBroker {
             ));
         }
         if !run.tools.iter().any(|tool| tool.name == name) {
-            run.abort("local agent requested an unknown tool");
+            run.fail(
+                LocalCliFailureCode::IsolationViolation,
+                "local agent requested an unknown tool",
+            );
             return Err(BrokerError::new(
                 BrokerErrorKind::UnknownTool,
                 "tool is not authorized for this run",
             ));
         }
         if !arguments.is_object() {
-            run.abort("local agent supplied non-object tool arguments");
+            run.fail(
+                LocalCliFailureCode::ProtocolViolation,
+                "local agent supplied non-object tool arguments",
+            );
             return Err(BrokerError::new(
                 BrokerErrorKind::InvalidArguments,
                 "tool arguments must be a JSON object",
@@ -324,7 +349,10 @@ impl ToolBroker {
             })?
             .len();
         if argument_bytes > self.limits.max_argument_bytes {
-            run.abort("local agent tool arguments exceeded the request limit");
+            run.fail(
+                LocalCliFailureCode::OutputLimit,
+                "local agent tool arguments exceeded the request limit",
+            );
             return Err(BrokerError::new(
                 BrokerErrorKind::ArgumentsTooLarge,
                 "tool arguments exceed the request limit",
@@ -364,7 +392,10 @@ impl ToolBroker {
             })
             .is_err()
         {
-            run.abort("tool broker consumer is unavailable");
+            run.fail(
+                LocalCliFailureCode::ConsumerGone,
+                "tool broker consumer is unavailable",
+            );
             return Err(BrokerError::new(
                 BrokerErrorKind::ConsumerUnavailable,
                 "tool broker consumer is unavailable",
@@ -377,7 +408,7 @@ impl ToolBroker {
                 BrokerErrorKind::PendingCancelled,
                 "Open Builder cancelled this tool call.",
             )),
-            result = tokio::time::timeout(self.limits.tool_call_timeout, receiver) => {
+            result = wait_with_timeout_retries(receiver, self.limits.tool_call_timeout) => {
                 match result {
                     Ok(Ok(Ok(value))) => Ok(value),
                     Ok(Ok(Err(error))) => Err(error),
@@ -445,6 +476,12 @@ impl ToolBroker {
         }
         call.media_claimed = true;
         Ok(call.cancellation.child_token())
+    }
+
+    pub(crate) fn failure(&self, run_id: &str) -> Option<AdapterError> {
+        let run = self.run_for_id(run_id).ok()?;
+        let failure = run.failure.lock().ok()?.clone();
+        failure
     }
 
     pub(crate) fn unregister(&self, run_id: &str, reason: &str) {
@@ -775,6 +812,114 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn unlimited_run_completes_more_than_512_host_calls() {
+        let broker = ToolBroker::default();
+        let (token, cancellation, mut events) = register(&broker, 0);
+        let authorization = format!("Bearer {token}");
+        for index in 0..600 {
+            let caller = {
+                let broker = broker.clone();
+                let authorization = authorization.clone();
+                tokio::spawn(async move {
+                    broker
+                        .call(
+                            Some(&authorization),
+                            "allowed".to_string(),
+                            json!({"index": index}),
+                        )
+                        .await
+                })
+            };
+            let event = tokio::select! {
+                event = events.recv() => event.expect("missing Host tool event"),
+                _ = cancellation.cancelled() => panic!("unlimited run stopped at call {}", index + 1),
+            };
+            assert_eq!(event["arguments"]["index"], index);
+            broker
+                .resolve(
+                    "run",
+                    event["callId"].as_str().unwrap(),
+                    resolution("saved"),
+                )
+                .unwrap();
+            assert_eq!(caller.await.unwrap().unwrap().text, "saved");
+        }
+        assert!(!cancellation.is_cancelled());
+        assert!(broker.failure("run").is_none());
+        broker.unregister("run", "test complete");
+        assert!(cancellation.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn thirty_completed_calls_then_budget_stop_has_a_distinct_reason() {
+        let broker = ToolBroker::default();
+        let cancellation = crate::local_agent_runtime::RunCancellation::new();
+        let (channel, mut events) = channel();
+        let token = broker
+            .register(
+                "run".to_string(),
+                vec![tool("allowed")],
+                30,
+                cancellation.authority_token(),
+                channel.into(),
+            )
+            .unwrap();
+        let authorization = format!("Bearer {token}");
+        for _ in 0..30 {
+            let caller = {
+                let broker = broker.clone();
+                let authorization = authorization.clone();
+                tokio::spawn(async move {
+                    broker
+                        .call(Some(&authorization), "allowed".to_string(), json!({}))
+                        .await
+                })
+            };
+            let event = events.recv().await.unwrap();
+            broker
+                .resolve(
+                    "run",
+                    event["callId"].as_str().unwrap(),
+                    resolution("saved"),
+                )
+                .unwrap();
+            assert_eq!(caller.await.unwrap().unwrap().text, "saved");
+        }
+        assert!(!cancellation.authority_token().is_cancelled());
+        let denied = broker
+            .call(Some(&authorization), "allowed".to_string(), json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(denied.kind(), BrokerErrorKind::BudgetExhausted);
+        assert!(events.try_recv().is_err());
+        assert!(cancellation.authority_token().is_cancelled());
+        assert!(!cancellation.stop_requested());
+        let failure = crate::local_agent_runtime::LocalCliFailure::from_adapter(
+            crate::local_agent::LocalAgentProvider::Codex,
+            crate::local_agent_runtime::LocalCliFailurePhase::Tool,
+            &broker.failure("run").unwrap(),
+            false,
+            cancellation.stop_requested(),
+        );
+        assert_eq!(
+            serde_json::to_value(failure).unwrap()["code"],
+            "toolBudgetExceeded"
+        );
+    }
+
+    #[test]
+    fn largest_explicit_budget_stops_without_overflowing_the_counter() {
+        let broker = ToolBroker::default();
+        let (_, cancellation, _) = register(&broker, usize::MAX);
+        let run = broker.run_for_id("run").unwrap();
+        run.tool_calls_started
+            .store(usize::MAX - 1, Ordering::Release);
+        assert!(run.reserve_tool_call());
+        assert!(!run.reserve_tool_call());
+        assert!(cancellation.is_cancelled());
+    }
+
     #[test]
     fn total_budget_is_atomic_under_concurrent_reservations() {
         let (channel, _) = channel();
@@ -786,6 +931,7 @@ mod tests {
             cancellation: CancellationToken::new(),
             channel: channel.into(),
             pending: Mutex::new(HashMap::new()),
+            failure: Mutex::new(None),
         });
         let barrier = Arc::new(Barrier::new(33));
         let handles = (0..32)
@@ -806,6 +952,10 @@ mod tests {
             .count();
         assert_eq!(reserved, 8);
         assert!(run.cancellation.is_cancelled());
+        assert_eq!(
+            run.failure.lock().unwrap().as_ref().unwrap().code,
+            Some(LocalCliFailureCode::ToolBudgetExceeded)
+        );
     }
 
     #[tokio::test]
@@ -819,6 +969,10 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.kind(), BrokerErrorKind::UnknownTool);
         assert!(cancellation.is_cancelled());
+        assert_eq!(
+            broker.failure("run").unwrap().code,
+            Some(LocalCliFailureCode::IsolationViolation)
+        );
 
         let broker = ToolBroker::with_limits(32, 64);
         let (token, cancellation, _) = register(&broker, 2);
@@ -833,6 +987,10 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.kind(), BrokerErrorKind::ArgumentsTooLarge);
         assert!(cancellation.is_cancelled());
+        assert_eq!(
+            broker.failure("run").unwrap().code,
+            Some(LocalCliFailureCode::OutputLimit)
+        );
     }
 
     #[tokio::test]
@@ -858,6 +1016,71 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.kind(), BrokerErrorKind::ConsumerUnavailable);
         assert!(cancellation.is_cancelled());
+        assert_eq!(
+            broker.failure("run").unwrap().code,
+            Some(LocalCliFailureCode::ConsumerGone)
+        );
+    }
+
+    #[tokio::test]
+    async fn broker_failure_closes_authority_without_requesting_stop() {
+        let broker = ToolBroker::with_limits(128, 128);
+        let cancellation = crate::local_agent_runtime::RunCancellation::new();
+        let (channel, mut events) = channel();
+        let token = broker
+            .register(
+                "run".to_string(),
+                vec![tool("allowed")],
+                2,
+                cancellation.authority_token(),
+                channel.into(),
+            )
+            .unwrap();
+        let error = broker
+            .call(
+                Some(&format!("Bearer {token}")),
+                "allowed".to_string(),
+                json!([]),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), BrokerErrorKind::InvalidArguments);
+        assert!(cancellation.authority_token().is_cancelled());
+        assert!(!cancellation.stop_requested());
+        assert!(events.try_recv().is_err());
+        let recorded = broker.failure("run").unwrap();
+        assert_eq!(recorded.code, Some(LocalCliFailureCode::ProtocolViolation));
+        let run = broker.run_for_id("run").unwrap();
+        broker.unregister("run", "normal cleanup");
+        assert_eq!(run.failure.lock().unwrap().as_ref(), Some(&recorded));
+    }
+
+    #[tokio::test]
+    async fn explicit_stop_closes_host_authority_without_a_broker_failure() {
+        let broker = ToolBroker::with_limits(128, 128);
+        let cancellation = crate::local_agent_runtime::RunCancellation::new();
+        let (channel, mut events) = channel();
+        let token = broker
+            .register(
+                "run".to_string(),
+                vec![tool("allowed")],
+                2,
+                cancellation.authority_token(),
+                channel.into(),
+            )
+            .unwrap();
+        cancellation.request_stop();
+        let error = broker
+            .call(
+                Some(&format!("Bearer {token}")),
+                "allowed".to_string(),
+                json!({}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), BrokerErrorKind::RunCancelled);
+        assert!(events.try_recv().is_err());
+        assert!(broker.failure("run").is_none());
     }
 
     #[tokio::test]
@@ -970,6 +1193,68 @@ mod tests {
             ),
             Err(message) if message.contains("not pending")
         ));
+    }
+
+    #[tokio::test]
+    async fn a_slow_host_result_uses_one_call_across_timeout_windows() {
+        let broker = ToolBroker::with_limits(128, 128);
+        let (token, cancellation, mut events) = register(&broker, 1);
+        let authorization = format!("Bearer {token}");
+        let caller = {
+            let broker = broker.clone();
+            tokio::spawn(async move {
+                broker
+                    .call(Some(&authorization), "allowed".to_string(), json!({}))
+                    .await
+            })
+        };
+        let event = events.recv().await.unwrap();
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(6)).await;
+        tokio::task::yield_now().await;
+        assert!(!caller.is_finished());
+        assert!(events.try_recv().is_err());
+        broker
+            .resolve(
+                "run",
+                event["callId"].as_str().unwrap(),
+                resolution("saved once"),
+            )
+            .unwrap();
+        assert_eq!(caller.await.unwrap().unwrap().text, "saved once");
+        assert!(!cancellation.is_cancelled());
+        assert_eq!(
+            broker
+                .run_for_id("run")
+                .unwrap()
+                .tool_calls_started
+                .load(Ordering::Acquire),
+            1
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn host_timeout_fails_after_three_windows_and_rejects_late_result() {
+        let broker = ToolBroker::with_limits(128, 128);
+        let (token, _, mut events) = register(&broker, 1);
+        let authorization = format!("Bearer {token}");
+        let started = tokio::time::Instant::now();
+        let caller = {
+            let broker = broker.clone();
+            tokio::spawn(async move {
+                broker
+                    .call(Some(&authorization), "allowed".to_string(), json!({}))
+                    .await
+            })
+        };
+        let event = events.recv().await.unwrap();
+        let error = caller.await.unwrap().unwrap_err();
+        assert_eq!(error.kind(), BrokerErrorKind::TimedOut);
+        assert_eq!(started.elapsed(), Duration::from_secs(15));
+        assert!(events.try_recv().is_err());
+        assert!(broker
+            .resolve("run", event["callId"].as_str().unwrap(), resolution("late"))
+            .is_err());
     }
 
     #[tokio::test]

@@ -117,6 +117,49 @@ describe("generation error helpers", () => {
     });
   });
 
+  it.each([en, zh])(
+    "distinguishes trusted rate-limit and interrupted-run summaries without exposing provider text",
+    (translations) => {
+      const format = (safeMessage: string) =>
+        formatGenerationErrorMessage(
+          classifyGenerationError(
+            new LocalCliRuntimeError({
+              code: "processExit",
+              phase: "stream",
+              provider: "codex",
+              safeMessage,
+              diagnosticId: "diag-process-exit",
+              hadActivity: true,
+              hadHostSideEffect: true,
+              retryPolicy: "manual",
+            }),
+          ),
+          translations,
+        );
+      const quota = format(
+        "The local CLI provider rate limit prevented this request from completing.",
+      );
+      const interrupted = format(
+        "The local CLI stopped before completing the request. Your changes have been kept. Retry to continue.",
+      );
+
+      expect(quota).not.toEqual(interrupted);
+      expect(quota).toContain(
+        translations.message.generationError.localCli.failureDetails
+          .rateLimited,
+      );
+      expect(interrupted).toContain(
+        translations.message.generationError.localCli.failureDetails
+          .unexpectedStop,
+      );
+      const unknown = format("private provider diagnostic sentinel");
+      expect(unknown).toContain(
+        translations.message.generationError.localCli.failureCodes.processExit,
+      );
+      expect(unknown).not.toContain("private provider diagnostic sentinel");
+    },
+  );
+
   it("keeps local runtime diagnostics out of the network category", () => {
     const error = new LocalCliRuntimeError({
       code: "providerApprovalRejected",

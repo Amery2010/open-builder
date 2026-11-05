@@ -53,6 +53,7 @@ import type {
   Attachment,
   ProjectPreviewMode,
   DesignSelectionContext,
+  PendingUserInstruction,
 } from "../types";
 import { useDesignSelectionStore } from "../store/design-selection";
 import { useVirtualizer } from "@tanstack/react-virtual";
@@ -102,6 +103,14 @@ interface ChatInterfaceProps {
       designSelection?: DesignSelectionContext;
     },
   ) => Promise<void>;
+  onEnqueueInstruction?: (
+    prompt: string,
+    attachments?: Attachment[],
+    options?: {
+      forcedSkillIds?: string[];
+      designSelection?: DesignSelectionContext;
+    },
+  ) => Promise<boolean>;
   onStop: () => void;
   onOpenSettings: () => void;
   onSetFiles: (files: ProjectFiles) => void;
@@ -174,6 +183,7 @@ export function ChatInterface({
   hasConfiguredModelRuntime,
   localCliStatusNotice = null,
   onGenerate,
+  onEnqueueInstruction,
   onStop,
   onOpenSettings,
   onSetFiles,
@@ -200,23 +210,36 @@ export function ChatInterface({
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [forcedSkillIds, setForcedSkillIds] = useState<string[]>([]);
+  const [instructionSubmitError, setInstructionSubmitError] = useState<
+    string | null
+  >(null);
+  const [isSubmittingInstruction, setIsSubmittingInstruction] = useState(false);
+  const instructionSubmissionRef = useRef<symbol | null>(null);
   const [showSessionList, setShowSessionList] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesViewportRef = useRef<HTMLDivElement>(null);
   const virtualListRef = useRef<HTMLDivElement>(null);
   const shouldAutoScrollRef = useRef(true);
-  const mergedMessages = useMergedMessages(messages);
+  const activeId = useConversationStore((s) => s.activeId);
+  const pendingInstructions = useConversationStore((state) =>
+    state.activeId
+      ? state.conversations[state.activeId]?.pendingUserInstructions
+      : undefined,
+  );
+  const mergedMessages = useMergedMessages(messages, pendingInstructions);
   const shouldVirtualizeMessages = mergedMessages.length > 40;
   const virtualScrollMargin = virtualListRef.current?.offsetTop ?? 0;
   const messageVirtualizer = useVirtualizer({
     count: shouldVirtualizeMessages ? mergedMessages.length : 0,
     getScrollElement: () => messagesViewportRef.current,
     estimateSize: () => 160,
-    getItemKey: (index) => mergedMessages[index]?.id ?? index,
+    getItemKey: (index) =>
+      mergedMessages[index]?.instructionId ??
+      mergedMessages[index]?.id ??
+      index,
     overscan: 6,
     scrollMargin: virtualScrollMargin,
   });
-  const activeId = useConversationStore((s) => s.activeId);
   const pendingQuestionnaire = useInteractiveStore((state) =>
     state.pending.find(
       (item) =>
@@ -254,6 +277,9 @@ export function ChatInterface({
   useEffect(() => {
     setForcedSkillIds([]);
     setAttachmentRestoreWarning(null);
+    setInstructionSubmitError(null);
+    instructionSubmissionRef.current = null;
+    setIsSubmittingInstruction(false);
   }, [activeId]);
   const compressFromIndex = useConversationStore((s) =>
     s.activeId
@@ -457,7 +483,7 @@ export function ChatInterface({
       behavior: isGenerating ? "auto" : "smooth",
       block: "end",
     });
-  }, [messages, isGenerating]);
+  }, [messages, pendingInstructions, isGenerating]);
 
   useEffect(() => {
     if (!showSessionList) return;
@@ -531,17 +557,63 @@ export function ChatInterface({
     e.preventDefault();
     if (
       isQuestionnairePending ||
-      (!input.trim() && attachments.length === 0) ||
-      isGenerating
+      pendingProjectPermission !== null ||
+      (!input.trim() &&
+        attachments.length === 0 &&
+        forcedSkillIds.length === 0) ||
+      instructionSubmissionRef.current
     )
       return;
     if (!hasConfiguredModelRuntime) {
       onOpenSettings();
       return;
     }
-    const prompt = input.trim();
+    const prompt =
+      input.trim() ||
+      (forcedSkillIds.length > 0 && attachments.length === 0
+        ? t.chat.instructions.applySkills
+        : "");
     const atts = [...attachments];
     const forced = [...forcedSkillIds];
+    setInstructionSubmitError(null);
+    if (isGenerating) {
+      const submission = Symbol("instruction submission");
+      instructionSubmissionRef.current = submission;
+      setIsSubmittingInstruction(true);
+      try {
+        const accepted = await onEnqueueInstruction?.(
+          prompt,
+          atts.length ? atts : undefined,
+          {
+            forcedSkillIds: forced.length ? forced : undefined,
+          },
+        );
+        if (
+          useConversationStore.getState().activeId !== activeId ||
+          instructionSubmissionRef.current !== submission
+        )
+          return;
+        if (!accepted) {
+          setInstructionSubmitError(t.chat.instructions.submitFailed);
+          return;
+        }
+        setInput("");
+        setAttachments([]);
+        setForcedSkillIds([]);
+        setAttachmentRestoreWarning(null);
+        shouldAutoScrollRef.current = true;
+      } catch {
+        if (useConversationStore.getState().activeId === activeId) {
+          setInstructionSubmitError(t.chat.instructions.submitFailed);
+        }
+      } finally {
+        if (instructionSubmissionRef.current === submission) {
+          instructionSubmissionRef.current = null;
+          setIsSubmittingInstruction(false);
+        }
+      }
+      return;
+    }
     setInput("");
     setAttachments([]);
     setForcedSkillIds([]);
@@ -575,6 +647,33 @@ export function ChatInterface({
     });
   };
 
+  const dismissInstruction = (id: string) => {
+    if (!activeId) return;
+    useConversationStore
+      .getState()
+      .setPendingUserInstructions(activeId, (items) =>
+        items.filter((item) => item.id !== id),
+      );
+  };
+
+  const editInstruction = async (instruction: PendingUserInstruction) => {
+    if (input.trim() || attachments.length > 0 || forcedSkillIds.length > 0)
+      return;
+    const restored = await restoreAvailableAttachments(instruction.attachments);
+    if (useConversationStore.getState().activeId !== instruction.conversationId)
+      return;
+    setInput(instruction.content);
+    setAttachments(restored.attachments);
+    setForcedSkillIds([...instruction.forcedSkillIds]);
+    setAttachmentRestoreWarning(
+      restored.missingNames.length
+        ? `${t.chat.attachmentErrors.readFailed}: ${restored.missingNames.join(", ")}`
+        : null,
+    );
+    setInstructionSubmitError(null);
+    dismissInstruction(instruction.id);
+  };
+
   const withdrawLabel = t.message.withdraw;
   const questionnaireCloseLabel = t.chat.askQuestion.close;
 
@@ -593,8 +692,34 @@ export function ChatInterface({
       messageIndex >= compressFromIndex &&
       (previousIndex === null || previousIndex < compressFromIndex);
     const isLast = msg.id === lastAssistantId;
+    const pendingInstruction = pendingInstructions?.find(
+      (item) => item.id === msg.instructionId,
+    );
+    const pendingEnded =
+      pendingInstruction &&
+      pendingInstruction.status !== "queued" &&
+      pendingInstruction.status !== "delivering";
     const canWithdraw =
-      canWithdrawLastMessage && msg.id === lastVisibleMessage?.id;
+      msg.id === lastVisibleMessage?.id &&
+      (pendingInstruction
+        ? Boolean(
+            pendingEnded &&
+            !input.trim() &&
+            !attachments.length &&
+            !forcedSkillIds.length &&
+            !isSubmittingInstruction,
+          )
+        : canWithdrawLastMessage);
+    let onWithdraw: (() => void) | undefined;
+    if (canWithdraw) {
+      if (pendingInstruction) {
+        onWithdraw = () => {
+          void editInstruction(pendingInstruction);
+        };
+      } else {
+        onWithdraw = handleWithdrawLastMessage;
+      }
+    }
     return (
       <div>
         <MessageBubble
@@ -610,8 +735,13 @@ export function ChatInterface({
           onCompressContext={onCompressContext}
           onHealthCheck={onHealthCheck}
           canWithdraw={canWithdraw}
-          onWithdraw={canWithdraw ? handleWithdrawLastMessage : undefined}
+          onWithdraw={onWithdraw}
           withdrawLabel={withdrawLabel}
+          statusLabel={
+            pendingEnded
+              ? t.chat.instructions[pendingInstruction.status]
+              : undefined
+          }
         />
         {showDivider && (
           <div className="flex items-center gap-3 my-4 text-xs text-muted-foreground">
@@ -664,7 +794,7 @@ export function ChatInterface({
             />
           ) : null}
 
-          {messages.length === 0 && hasConfiguredModelRuntime && (
+          {mergedMessages.length === 0 && hasConfiguredModelRuntime && (
             <EmptyState onSelectSuggestion={setInput} />
           )}
 
@@ -693,7 +823,9 @@ export function ChatInterface({
             </div>
           ) : (
             mergedMessages.map((message, index) => (
-              <div key={message.id}>{renderMergedMessage(message, index)}</div>
+              <div key={message.instructionId ?? message.id}>
+                {renderMergedMessage(message, index)}
+              </div>
             ))
           )}
 
@@ -752,12 +884,18 @@ export function ChatInterface({
         </div>
 
         <div className="relative shrink-0">
+          {instructionSubmitError && (
+            <p role="alert" className="px-3 pt-2 text-xs text-destructive">
+              {instructionSubmitError}
+            </p>
+          )}
           <ChatInput
             input={input}
             onChange={setInput}
             onSubmit={handleSubmit}
             onStop={onStop}
             isGenerating={isGenerating}
+            isSubmitting={isSubmittingInstruction}
             isQuestionnairePending={isQuestionnairePending}
             attachmentRestoreWarning={attachmentRestoreWarning ?? undefined}
             messages={messages}

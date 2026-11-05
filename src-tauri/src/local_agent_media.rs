@@ -19,9 +19,10 @@ use crate::local_agent_runtime::{
     infer_failure_phase, AdapterError, InstallationIdentity, LocalCliFailure, LocalCliFailureCode,
     LocalCliFailurePhase, LocalCliRetryPolicy,
 };
+use crate::timeouts::wait_with_timeout_retries;
 
 const MAX_ACTIVE_IMAGE_TASKS: usize = 4;
-const MAX_IMAGE_TASK_DURATION: Duration = Duration::from_secs(10 * 60);
+const IMAGE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const MAX_TASK_ID_BYTES: usize = 256;
 const MAX_PROMPT_BYTES: usize = 128 * 1024;
 const MAX_REFERENCE_COUNT: usize = 5;
@@ -364,6 +365,31 @@ async fn generate_prepared(
     }
 }
 
+async fn wait_for_image<F>(
+    work: F,
+    cancellation: &CancellationToken,
+) -> Result<GeneratedImageBytes, AdapterError>
+where
+    F: std::future::Future<Output = Result<GeneratedImageBytes, AdapterError>>,
+{
+    tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => Err(AdapterError::from("local image task cancelled")),
+        result = wait_with_timeout_retries(work, IMAGE_REQUEST_TIMEOUT) => {
+            match result {
+                Ok(result) => result,
+                Err(_) => {
+                    cancellation.cancel();
+                    Err(AdapterError::coded(
+                        LocalCliFailureCode::Timeout,
+                        "local image task timed out",
+                    ))
+                }
+            }
+        }
+    }
+}
+
 fn failure(
     provider: LocalAgentProvider,
     phase: LocalCliFailurePhase,
@@ -560,16 +586,7 @@ pub async fn local_agent_generate_image(
         .await
     };
 
-    let mut result = match tokio::time::timeout(MAX_IMAGE_TASK_DURATION, work).await {
-        Ok(result) => result,
-        Err(_) => {
-            cancellation.cancel();
-            Err(AdapterError::coded(
-                LocalCliFailureCode::Timeout,
-                "local image task timed out",
-            ))
-        }
-    };
+    let mut result = wait_for_image(work, &cancellation).await;
     if cancellation.is_cancelled() && result.is_ok() {
         result = Err(AdapterError::from("local image task cancelled"));
     }
@@ -608,6 +625,114 @@ mod tests {
     use super::*;
 
     const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDRpayload\x00\x00\x00\x00IEND\xaeB`\x82";
+
+    #[tokio::test(start_paused = true)]
+    async fn slow_image_completes_in_second_window_without_restarting() {
+        let cancellation = CancellationToken::new();
+        let mut starts = 0;
+        let work = async {
+            starts += 1;
+            tokio::time::sleep(IMAGE_REQUEST_TIMEOUT + Duration::from_secs(1)).await;
+            Ok(GeneratedImageBytes {
+                id: "image-once".to_string(),
+                mime_type: "image/png".to_string(),
+                bytes: PNG.to_vec(),
+                revised_prompt: None,
+                file_name: None,
+            })
+        };
+        let image = wait_for_image(work, &cancellation).await.unwrap();
+        assert_eq!(image.id, "image-once");
+        assert_eq!(starts, 1);
+        assert!(!cancellation.is_cancelled());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn image_timeout_waits_three_windows_then_drops_the_running_work() {
+        struct DropProbe(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::Release);
+            }
+        }
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let guard = DropProbe(dropped.clone());
+        let cancellation = CancellationToken::new();
+        let started = tokio::time::Instant::now();
+        let error = wait_for_image(
+            async move {
+                let _guard = guard;
+                std::future::pending().await
+            },
+            &cancellation,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, Some(LocalCliFailureCode::Timeout));
+        assert_eq!(started.elapsed(), IMAGE_REQUEST_TIMEOUT * 3);
+        assert!(cancellation.is_cancelled());
+        assert!(dropped.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn third_image_timeout_kills_the_owned_process() {
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command.arg("-c").arg("sleep 30");
+        let process = crate::local_agent_protocol::spawn_wrapped(command).unwrap();
+        let child = process.child.clone();
+        let cancellation = CancellationToken::new();
+        let error = wait_for_image(
+            async move {
+                let _owned_process = process;
+                std::future::pending().await
+            },
+            &cancellation,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, Some(LocalCliFailureCode::Timeout));
+        tokio::time::resume();
+        let status = tokio::time::timeout(Duration::from_secs(2), async {
+            child.lock().await.wait().await
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(!status.success());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn image_error_and_stop_do_not_wait_for_remaining_timeout_windows() {
+        let cancellation = CancellationToken::new();
+        let started = tokio::time::Instant::now();
+        let error = wait_for_image(
+            async {
+                Err(AdapterError::coded(
+                    LocalCliFailureCode::CredentialRejected,
+                    "rejected",
+                ))
+            },
+            &cancellation,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, Some(LocalCliFailureCode::CredentialRejected));
+        assert_eq!(started.elapsed(), Duration::ZERO);
+        let cancel = cancellation.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(IMAGE_REQUEST_TIMEOUT + Duration::from_secs(1)).await;
+            cancel.cancel();
+        });
+        let error = wait_for_image(std::future::pending(), &cancellation)
+            .await
+            .unwrap_err();
+        assert_eq!(error.message, "local image task cancelled");
+        assert_eq!(
+            started.elapsed(),
+            IMAGE_REQUEST_TIMEOUT + Duration::from_secs(1)
+        );
+    }
 
     fn request(data: String, mime_type: &str) -> LocalImageGenerationRequest {
         LocalImageGenerationRequest {

@@ -346,6 +346,7 @@ fn execute_script_process(
     eval_flag: &str,
     work_dir: &Path,
     cancelled: &AtomicBool,
+    timeout: Duration,
 ) -> Result<SkillScriptResult, String> {
     if cancelled.load(Ordering::Acquire) {
         return Err("skill script execution was cancelled".to_string());
@@ -376,6 +377,9 @@ fn execute_script_process(
     let stdout_reader = thread::spawn(move || read_capped_stream(stdout));
     let stderr_reader = thread::spawn(move || read_capped_stream(stderr));
 
+    // Keep waiting for this approved process; restarting a script could repeat
+    // writes that completed after the first timeout window.
+    let total_timeout = timeout * crate::timeouts::TIMEOUT_ATTEMPTS;
     let started = Instant::now();
     loop {
         if cancelled.load(Ordering::Acquire) {
@@ -397,7 +401,7 @@ fn execute_script_process(
                 exit_code: status.code().unwrap_or(-1),
             });
         }
-        if started.elapsed() > SCRIPT_TIMEOUT {
+        if started.elapsed() > total_timeout {
             terminate_process_tree(&mut child);
             let _ = child.wait();
             let stdout = join_reader(stdout_reader, "stdout")?;
@@ -406,7 +410,7 @@ fn execute_script_process(
                 stdout,
                 stderr: [
                     stderr,
-                    format!("script timed out after {}s", SCRIPT_TIMEOUT.as_secs()),
+                    format!("script timed out after {}s", total_timeout.as_secs()),
                 ]
                 .into_iter()
                 .filter(|s| !s.is_empty())
@@ -462,6 +466,7 @@ pub async fn run_skill_script(
             eval_flag,
             &work_dir,
             &cancelled,
+            SCRIPT_TIMEOUT,
         );
         let _ = fs::remove_dir_all(&work_dir);
         execution
@@ -574,6 +579,76 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn script_can_finish_in_a_later_wait_window_without_reexecution() {
+        let (result, starts, _) = run_wait_fixture(
+            "printf 'started\\n' >> \"$1\"; /bin/sleep 0.15; printf completed",
+            Duration::from_millis(100),
+        );
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "completed");
+        assert_eq!(starts, "started\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn script_is_terminated_after_three_wait_windows_without_reexecution() {
+        let window = Duration::from_millis(100);
+        let (result, starts, elapsed) = run_wait_fixture(
+            "printf 'started\\n' >> \"$1\"; /bin/sleep 5; printf unexpected",
+            window,
+        );
+        assert_eq!(result.exit_code, 124);
+        assert!(result.stderr.contains("timed out"));
+        assert!(elapsed >= window * crate::timeouts::TIMEOUT_ATTEMPTS);
+        assert_eq!(starts, "started\n");
+        assert!(result.stdout.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_timeout_script_failure_is_not_reexecuted() {
+        let (result, starts, _) = run_wait_fixture(
+            "printf 'started\\n' >> \"$1\"; exit 7",
+            Duration::from_millis(100),
+        );
+        assert_eq!(result.exit_code, 7);
+        assert_eq!(starts, "started\n");
+        assert!(!result.stderr.contains("timed out"));
+    }
+
+    #[cfg(unix)]
+    fn run_wait_fixture(script: &str, timeout: Duration) -> (SkillScriptResult, String, Duration) {
+        let work_dir = std::env::temp_dir().join(format!(
+            "open-builder-skill-wait-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&work_dir).unwrap();
+        let marker = work_dir.join("starts");
+        let mut req = request();
+        req.script_path = "scripts/wait.sh".to_string();
+        req.script_content = script.to_string();
+        req.content_sha256 = format!("{:x}", Sha256::digest(req.script_content.as_bytes()));
+        req.args = vec!["fixture".to_string(), marker.to_string_lossy().to_string()];
+        let (program, eval_flag) = validate_request(&req).unwrap();
+        let started = Instant::now();
+        let result = execute_script_process(
+            &req,
+            program,
+            &resolve_program(program).unwrap(),
+            eval_flag,
+            &work_dir,
+            &AtomicBool::new(false),
+            timeout,
+        )
+        .unwrap();
+        let elapsed = started.elapsed();
+        let starts = fs::read_to_string(marker).unwrap();
+        fs::remove_dir_all(work_dir).unwrap();
+        (result, starts, elapsed)
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn cancellation_terminates_the_spawned_process_group() {
         let work_dir =
             std::env::temp_dir().join(format!("open-builder-skill-test-{}", uuid::Uuid::new_v4()));
@@ -607,6 +682,7 @@ wait"#
                 "-c",
                 &thread_work_dir,
                 &thread_cancelled,
+                SCRIPT_TIMEOUT,
             )
         });
 

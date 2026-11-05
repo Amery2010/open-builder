@@ -124,7 +124,6 @@ export const zh = {
           "上次检测未能确认该 CLI 可用。你仍可直接发送，或前往设置重新检测。",
         openSettings: "打开模型设置",
       },
-      outputLimit: "本地 CLI 输出超过了界面可处理的上限。",
       utilityTimeout: "本地 CLI 辅助任务在 {timeoutMs} 毫秒后超时。",
     },
     webSearch: {
@@ -337,6 +336,16 @@ export const zh = {
   },
   chat: {
     placeholder: "一句话描述你想要的应用...",
+    instructions: {
+      placeholder: "补充新的要求，当前任务会继续进行…",
+      queued: "等待送达",
+      delivering: "正在送达 AI",
+      cancelled: "已取消 · 未送达",
+      failed: "送达失败",
+      uncertain: "送达未确认 · 请核对后再发送",
+      submitFailed: "未能发送消息，已保留输入内容。",
+      applySkills: "在后续工作中应用所选技能。",
+    },
     autoQaActivity: "自动 QA 活动",
     autoDesignFixActivity: "自动设计修复",
     automaticRetryUnavailable:
@@ -845,6 +854,10 @@ export const zh = {
     copy: "复制",
     copied: "已复制",
     runHealthCheck: "健康检查",
+    toolBudgetReached:
+      "本轮工具调用已达到上限，生成已暂停。项目修改已保留，发送“继续”可接着完成。",
+    prototypeNoProgress:
+      "AI 在自动继续后未更新项目或完成检查点，已停止重复请求。当前修改已保留，请处理未完成事项后继续。",
     generationError: {
       detail: "错误详情：",
       status: "HTTP 状态码：{status}",
@@ -895,6 +908,11 @@ export const zh = {
           freshSessionSafe: "使用新会话重试",
           manual: "手动重试",
         },
+        failureDetails: {
+          rateLimited: "本地 CLI 模型服务商的限流或配额限制阻止了请求完成。",
+          unexpectedStop:
+            "本地 CLI 意外停止，当前记录没有保留具体原因。生成内容和项目修改已保留，可手动重试继续。",
+        },
         failureCodes: {
           executableNotFound: "未找到所选的本地 CLI 程序。",
           cliUnsupported: "当前 CLI 未提供此 Verified Run 契约所需的能力。",
@@ -911,12 +929,14 @@ export const zh = {
           handshakeFailed: "本地 CLI 未能完成启动握手。",
           sessionUnavailable: "保存的本地 CLI 会话已不可用。",
           toolBridgeFailed: "Host 工具桥接未能完成此次工具调用。",
+          toolBudgetExceeded:
+            "本轮本地 CLI 工具调用已达到上限，可发送“继续”接着完成。",
           isolationViolation:
             "本地 CLI 尝试使用 Verified Host 边界之外的能力。",
           protocolViolation: "本地 CLI 返回了不支持或格式错误的协议事件。",
           outputLimit: "本地 CLI 输出超过了安全上限。",
           timeout: "本地 CLI 未在允许时间内完成。",
-          processExit: "本地 CLI 进程在运行完成前退出。",
+          processExit: "本地 CLI 未能完成本次运行。",
           cancelled: "本地 CLI 运行已取消。",
           consumerGone: "页面已停止接收此次本地 CLI 运行。",
           internal: "Open Builder 遇到了本地 CLI 内部运行错误。",

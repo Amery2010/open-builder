@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   LocalAgentEvent,
   LocalAgentProvider,
@@ -66,6 +66,158 @@ describe("LocalCliRuntime", () => {
     tauriMocks.supports.mockResolvedValue(true);
     tauriMocks.resolve.mockResolvedValue(undefined);
     tauriMocks.cancel.mockResolvedValue(true);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it.each([false, true])(
+    "reports an unsolicited provider cancellation (typed cancellation: %s)",
+    async (typedCancellation) => {
+      tauriMocks.start.mockImplementation(async (_request, onEvent) => {
+        onEvent(preparedEvent());
+        if (typedCancellation) {
+          onEvent({
+            type: "error",
+            message: "cancelled",
+            retryable: false,
+            failure: {
+              code: "cancelled",
+              phase: "shutdown",
+              provider: "codex",
+              safeMessage: "The local CLI run was cancelled.",
+              diagnosticId: "provider-cancelled",
+              hadActivity: false,
+              hadHostSideEffect: false,
+              retryPolicy: "none",
+            },
+          });
+        }
+        onEvent({ type: "done", aborted: true });
+        return "run-provider-cancelled";
+      });
+
+      await expect(new LocalCliRuntime().run(request())).rejects.toMatchObject({
+        name: "LocalCliRuntimeError",
+        failure: {
+          code: "processExit",
+          phase: "stream",
+          retryPolicy: "manual",
+          hadActivity: false,
+          hadHostSideEffect: false,
+          diagnosticId: expect.any(String),
+        },
+      });
+    },
+  );
+
+  it("waits for committed host work before reporting provider cancellation", async () => {
+    const onEvent = vi.fn();
+    tauriMocks.start.mockImplementation(async (_request, emit) => {
+      emit({ type: "textDelta", delta: "Partial response" });
+      emit({
+        type: "toolRequest",
+        runId: "run-provider-cancelled",
+        callId: "write-1",
+        name: "write_file",
+        arguments: { path: "src/App.tsx", content: "updated" },
+      });
+      emit({ type: "done", aborted: true });
+      return "run-provider-cancelled";
+    });
+
+    await expect(
+      new LocalCliRuntime().run(request(), {
+        onEvent,
+        executeHostTool: async () => ({
+          resolution: { text: "Written" },
+          hadSideEffect: true,
+        }),
+      }),
+    ).rejects.toMatchObject({
+      failure: {
+        code: "processExit",
+        hadActivity: true,
+        hadHostSideEffect: true,
+        retryPolicy: "manual",
+      },
+    });
+    expect(onEvent).toHaveBeenCalledWith({
+      type: "textDelta",
+      delta: "Partial response",
+    });
+    expect(tauriMocks.resolve).toHaveBeenCalledOnce();
+    expect(tauriMocks.start).toHaveBeenCalledOnce();
+  });
+
+  it.each([false, true])(
+    "keeps backend activity flags when cancellation ends with aborted=%s",
+    async (aborted) => {
+      tauriMocks.start.mockImplementation(async (_request, emit) => {
+        emit({
+          type: "error",
+          message: "cancelled",
+          retryable: false,
+          failure: {
+            code: "cancelled",
+            phase: "shutdown",
+            provider: "codex",
+            safeMessage: "The local CLI run was cancelled.",
+            diagnosticId: "provider-cancelled-after-activity",
+            hadActivity: true,
+            hadHostSideEffect: true,
+            retryPolicy: "none",
+          },
+        });
+        emit({ type: "done", aborted });
+        return "run-provider-cancelled";
+      });
+
+      await expect(new LocalCliRuntime().run(request())).rejects.toMatchObject({
+        name: "LocalCliRuntimeError",
+        failure: {
+          code: "processExit",
+          hadActivity: true,
+          hadHostSideEffect: true,
+          retryPolicy: "manual",
+        },
+      });
+    },
+  );
+
+  it("logs monotonic lifecycle timings once without request or result content", async () => {
+    let now = 10;
+    vi.spyOn(performance, "now").mockImplementation(() => now);
+    const debug = vi.spyOn(console, "debug").mockImplementation(() => {});
+    tauriMocks.start.mockImplementation(async (_request, emit) => {
+      now = 30;
+      emit(preparedEvent({ resumed: true }));
+      now = 60;
+      emit({ type: "session", sessionId: "private-session", cliVersion: "1" });
+      now = 90;
+      emit({ type: "reasoningDelta", delta: "private reasoning" });
+      now = 120;
+      emit({ type: "textDelta", delta: "private response" });
+      now = 150;
+      emit({ type: "done", aborted: false });
+      emit({ type: "done", aborted: false });
+      return "run-timings";
+    });
+
+    await new LocalCliRuntime().run(request({ prompt: "private prompt" }));
+
+    expect(debug).toHaveBeenCalledExactlyOnceWith("[local-cli] run timing", {
+      runId: "run-timings",
+      provider: "codex",
+      preparationMs: 20,
+      handshakeMs: 30,
+      firstActivityMs: 80,
+      totalMs: 140,
+      outcome: "completed",
+      resumed: true,
+    });
+    expect(JSON.stringify(debug.mock.calls)).not.toContain("private");
   });
 
   it("normalizes readiness fields while preserving legacy availability", () => {
@@ -442,6 +594,50 @@ describe("LocalCliRuntime", () => {
     expect(tauriMocks.cancel).toHaveBeenCalledWith("run-error");
   });
 
+  it("correlates a failed run with its diagnostic ID without logging provider content", async () => {
+    const debug = vi.spyOn(console, "debug").mockImplementation(() => {});
+    tauriMocks.start.mockImplementation(async (_request, emit) => {
+      emit({
+        type: "error",
+        message: "private stderr sentinel",
+        retryable: false,
+        failure: {
+          code: "protocolViolation",
+          phase: "stream",
+          provider: "codex",
+          safeMessage: "private provider diagnostic sentinel",
+          diagnosticId: "diag-preserved-protocol",
+          hadActivity: true,
+          hadHostSideEffect: true,
+          retryPolicy: "none",
+        },
+      });
+      emit({ type: "done", aborted: false });
+      return "run-preserved-protocol";
+    });
+
+    await expect(new LocalCliRuntime().run(request())).rejects.toMatchObject({
+      failure: { code: "protocolViolation" },
+    });
+    expect(debug).toHaveBeenCalledOnce();
+    expect(debug).toHaveBeenCalledWith(
+      "[local-cli] run timing",
+      expect.objectContaining({
+        runId: "run-preserved-protocol",
+        outcome: "failed",
+        failure: {
+          diagnosticId: "diag-preserved-protocol",
+          code: "protocolViolation",
+          phase: "stream",
+          retryPolicy: "none",
+          hadActivity: true,
+          hadHostSideEffect: true,
+        },
+      }),
+    );
+    expect(JSON.stringify(debug.mock.calls)).not.toContain("private");
+  });
+
   it("settles when the event consumer throws on Done", async () => {
     tauriMocks.start.mockImplementation(
       async (
@@ -575,4 +771,90 @@ describe("LocalCliRuntime", () => {
       aborted: true,
     });
   });
+});
+
+it.each([true, false])(
+  "filters optional isolation diagnostics to fixed enums (valid=%s)",
+  async (valid) => {
+    const runtime = new LocalCliRuntime({
+      start: async (_request, emit) => {
+        emit({
+          type: "error",
+          message: "Isolation denied",
+          retryable: false,
+          failure: {
+            code: "isolationViolation",
+            phase: "stream",
+            provider: "codex",
+            safeMessage: "Isolation denied",
+            diagnosticId: "diag-isolation",
+            hadActivity: true,
+            hadHostSideEffect: false,
+            retryPolicy: "none",
+            isolationReason: valid ? "invalidDiscovery" : "private arguments",
+            itemKind: valid ? "mcpToolCall" : "private capability data",
+          },
+        } as unknown as LocalAgentEvent);
+        emit({ type: "done", aborted: false });
+        return "run-isolation";
+      },
+      cancel: async () => true,
+    });
+    const error = await runtime
+      .run(request())
+      .catch((cause: LocalCliRuntimeError) => cause);
+    expect(error).toBeInstanceOf(LocalCliRuntimeError);
+    if (!(error instanceof LocalCliRuntimeError))
+      throw new Error("Expected runtime error");
+    expect(error.failure.isolationReason).toBe(
+      valid ? "invalidDiscovery" : undefined,
+    );
+    expect(error.failure.itemKind).toBe(valid ? "mcpToolCall" : undefined);
+  },
+);
+
+it("stamps requests arriving before delivery ACK with the barrier's original authority", async () => {
+  let emit!: (event: LocalAgentEvent) => void;
+  let epoch = 0;
+  const received: Array<{ callId: string; epoch?: number }> = [];
+  const runtime = new LocalCliRuntime({
+    start: async (_request, onEvent) => {
+      emit = onEvent;
+      emit({
+        type: "toolRequest",
+        runId: "run",
+        callId: "first",
+        name: "list_files",
+        arguments: {},
+      });
+      return "run";
+    },
+    resolveTool: async (_run, callId) => {
+      if (callId === "first")
+        emit({
+          type: "toolRequest",
+          runId: "run",
+          callId: "old-write",
+          name: "write_file",
+          arguments: {},
+        });
+      else emit({ type: "done", aborted: false });
+    },
+  });
+  await runtime.run(request(), {
+    getToolAuthorityEpoch: () => epoch,
+    executeHostTool: async (call) => {
+      received.push({ callId: call.callId, epoch: call.authorityEpoch });
+      if (call.callId === "first") epoch += 1;
+      return {
+        resolution: { text: "result" },
+        hadSideEffect: false,
+        onDelivered: () => {},
+      };
+    },
+  });
+  expect(received).toEqual([
+    { callId: "first", epoch: 0 },
+    { callId: "old-write", epoch: 0 },
+  ]);
 });

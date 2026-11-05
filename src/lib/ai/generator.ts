@@ -74,6 +74,7 @@ import type {
   GenerationBackend,
   AgentToolExecutor,
   InitializedProjectPreparation,
+  PreparedUserInstructionBatch,
 } from "./generator-types";
 
 function diffProjectFiles(
@@ -179,6 +180,7 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
   private readonly onProjectPermissionAuthorityChange?: GeneratorOptions["onProjectPermissionAuthorityChange"];
   private readonly onProjectPermissionRequestFinished?: GeneratorOptions["onProjectPermissionRequestFinished"];
   private readonly conversationId?: string;
+  private readonly userInstructions?: GeneratorOptions["userInstructions"];
   private systemPromptSuffix: string = "";
   private untrustedReferenceContext: string = "";
   private readOnlyMode = false;
@@ -207,7 +209,7 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
     this.apiKey = options.apiKey;
     this.model = options.model;
     this.systemPrompt = options.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
-    this.maxIterations = options.maxIterations ?? 30;
+    this.maxIterations = options.maxIterations ?? Infinity;
     this.useStream = options.stream ?? true;
     this.customToolSet = options.customTools ?? {};
     this.tools = options.tools
@@ -217,7 +219,7 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
     this.authorizeToolCall = options.authorizeToolCall;
     this.useThinking = options.thinking ?? true;
     this.thinkingBudget = options.thinkingBudget ?? 10000;
-    this.maxRetries = options.maxRetries ?? 3;
+    this.maxRetries = options.maxRetries ?? 2;
     this.retryDelay = options.retryDelay ?? 1000;
     this.providerToolNames = new Set(options.providerToolNames ?? []);
     this.askUserQuestion = options.askUserQuestion;
@@ -231,6 +233,7 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
     this.onProjectPermissionRequestFinished =
       options.onProjectPermissionRequestFinished;
     this.conversationId = options.conversationId;
+    this.userInstructions = options.userInstructions;
     this.executionMode = options.executionMode ?? "chat";
     this.runtimePlatform = options.runtimePlatform ?? "web";
     this.toolRuntime = options.toolRuntime ?? "api";
@@ -401,6 +404,55 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
     this.messages.push({ role: "user", content: userMessage });
   }
 
+  hasUserInstructionSource(): boolean {
+    return this.userInstructions !== undefined;
+  }
+
+  async prepareUserInstructions(
+    backend: GenerationBackend,
+    signal: AbortSignal,
+  ): Promise<PreparedUserInstructionBatch | null> {
+    signal.throwIfAborted();
+    if (
+      (this.executionMode !== "chat" && this.executionMode !== "plan") ||
+      this.inferToolProfile() === "design_review"
+    )
+      return null;
+    const priorSkills = this.skillContext.get();
+    const batch = await this.userInstructions?.prepare(backend, signal);
+    signal.throwIfAborted();
+    if (
+      batch &&
+      JSON.stringify(priorSkills) !== JSON.stringify(this.skillContext.get())
+    ) {
+      this.rebuildToolRun();
+    }
+    return batch ?? null;
+  }
+
+  appendUserInstructions(batch: PreparedUserInstructionBatch): void {
+    for (const instruction of batch.instructions) {
+      const prompt =
+        instruction.modelPrompt ??
+        (typeof instruction.message.content === "string"
+          ? instruction.message.content
+          : "");
+      this.appendUserMessage(prompt, instruction.attachments);
+      const message = this.messages[this.messages.length - 1];
+      message.metadata = instruction.message.metadata;
+      message.forcedSkillIds = instruction.message.forcedSkillIds;
+    }
+  }
+
+  private async acceptUserInstructions(signal: AbortSignal): Promise<boolean> {
+    const batch = await this.prepareUserInstructions(this, signal);
+    if (!batch?.instructions.length) return false;
+    if (!batch.commit())
+      throw new DOMException("The instruction run ended.", "AbortError");
+    this.appendUserInstructions(batch);
+    return true;
+  }
+
   executeToolCall(toolCall: ToolCall): Promise<{
     result: ToolExecutionOutput;
     changes: FileChange[];
@@ -411,8 +463,6 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
 
   /** Retry the loop without adding a new user message (user message is already in history). */
   async retry(): Promise<GenerateResult> {
-    this.runId = this.createRunId();
-    this.rebuildToolRun();
     return this._runGenerateLoop();
   }
 
@@ -420,8 +470,6 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
     userMessage: string,
     attachments?: ResolvedAttachment[],
   ): Promise<GenerateResult> {
-    this.runId = this.createRunId();
-    this.rebuildToolRun();
     this.appendUserMessage(userMessage, attachments);
 
     return this._runGenerateLoop();
@@ -680,34 +728,38 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
   }
 
   private async _runGenerateLoop(): Promise<GenerateResult> {
+    const signal = this.beginExternalRun();
     let fullText = "";
     let aborted = false;
     let maxReached = false;
+    let iterationMessageStart = this.messages.length;
 
     try {
       for (let iter = 0; iter < this.maxIterations; iter++) {
+        signal.throwIfAborted();
+        await this.acceptUserInstructions(signal);
         // Authorization transitions (notably Plan approval) can change the
         // trusted suffix and untrusted reference context between iterations.
-        const systemContent = this.buildSystemContent();
-        const isLastIter = iter === this.maxIterations - 1;
-        const instructions = isLastIter
-          ? systemContent +
-            `\n\nFinal iteration — the tool call budget of ${this.maxIterations} is exhausted. ` +
-            `Call no further tools. Summarize what you accomplished and what remains, ` +
-            `then stop so the user can resume in a follow-up message.`
-          : systemContent;
+        const instructions = this.buildSystemContent();
 
         const assistantMsg = await this.requestWithRetry(
           this.messages,
           instructions,
         );
 
+        iterationMessageStart = this.messages.length;
         this.messages.push(assistantMsg);
         if (assistantMsg.content) {
           fullText += assistantMsg.content;
         }
+        signal.throwIfAborted();
 
         if (!assistantMsg.tool_calls?.length) {
+          if (
+            iter < this.maxIterations - 1 &&
+            (await this.acceptUserInstructions(signal))
+          )
+            continue;
           break;
         }
 
@@ -783,6 +835,7 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
             );
           }
 
+          signal.throwIfAborted();
           if (iter === this.maxIterations - 1) {
             maxReached = true;
           }
@@ -804,6 +857,7 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
 
         let permissionBarrier = false;
         for (let index = 0; index < regularCalls.length; index += 1) {
+          signal.throwIfAborted();
           const toolCall = regularCalls[index];
           if (this.toolRun.providerOwnedNames.has(toolCall.function.name)) {
             continue;
@@ -833,39 +887,43 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
         }
 
         if (permissionBarrier) {
+          signal.throwIfAborted();
           if (iter === this.maxIterations - 1) maxReached = true;
           continue;
         }
 
         if (dispatchCalls.length > 0) {
           const MAX_PARALLEL = 3;
-          const accepted = dispatchCalls.slice(0, MAX_PARALLEL);
-          const rejected = dispatchCalls.slice(MAX_PARALLEL);
-
-          const results = await Promise.all(
-            accepted.map((tc) => this.executeTool(tc)),
-          );
-
-          for (let i = 0; i < accepted.length; i++) {
-            this.messages.push({
-              role: "tool",
-              tool_call_id: accepted[i].id,
-              content: results[i].result.text,
-              toolOutput: results[i].result,
-            });
-          }
-
-          for (const tc of rejected) {
-            const msg = `Too many parallel subagent dispatches in one turn (limit: ${MAX_PARALLEL}). Reissue this call in the next turn.`;
-            this.messages.push({
-              role: "tool",
-              tool_call_id: tc.id,
-              content: msg,
-            });
-            this.events.onToolResult?.(tc.function.name, {}, msg, tc.id);
+          for (
+            let offset = 0;
+            offset < dispatchCalls.length;
+            offset += MAX_PARALLEL
+          ) {
+            signal.throwIfAborted();
+            const batch = dispatchCalls.slice(offset, offset + MAX_PARALLEL);
+            // Await every started task before ending the run on Stop or error.
+            const results = await Promise.allSettled(
+              batch.map((tc) => this.executeTool(tc)),
+            );
+            for (let index = 0; index < batch.length; index += 1) {
+              const result = results[index];
+              if (result.status === "fulfilled") {
+                this.messages.push({
+                  role: "tool",
+                  tool_call_id: batch[index].id,
+                  content: result.value.result.text,
+                  toolOutput: result.value.result,
+                });
+              }
+            }
+            const failure = results.find(
+              (result) => result.status === "rejected",
+            );
+            if (failure) throw failure.reason;
           }
         }
 
+        signal.throwIfAborted();
         if (iter === this.maxIterations - 1) {
           maxReached = true;
         }
@@ -873,6 +931,45 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
     } catch (err: any) {
       if (err.name === "AbortError") {
         aborted = true;
+        const iterationMessages = this.messages.slice(iterationMessageStart);
+        const resolved = new Set(
+          iterationMessages
+            .filter((message) => message.role === "tool")
+            .map((message) => message.tool_call_id),
+        );
+        for (const message of iterationMessages) {
+          for (const call of message.tool_calls ?? []) {
+            if (
+              resolved.has(call.id) ||
+              this.providerToolNames.has(call.function.name)
+            )
+              continue;
+            const output = normalizeToolExecutionOutput({
+              text: "Error: this tool call was cancelled before a result was available.",
+              isError: true,
+            });
+            this.messages.push({
+              role: "tool",
+              tool_call_id: call.id,
+              content: output.text,
+              toolOutput: output,
+            });
+            resolved.add(call.id);
+            let args: unknown = null;
+            try {
+              args = JSON.parse(call.function.arguments);
+            } catch {
+              /* Cancelled arguments stay inert. */
+            }
+            this.events.onToolResult?.(
+              call.function.name,
+              args,
+              output.text,
+              call.id,
+              output,
+            );
+          }
+        }
       } else {
         this.events.onError?.(err);
         this.applyOutputRetentionAfterRun();
@@ -921,16 +1018,18 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
   }
 
   private sleep(ms: number): Promise<void> {
+    const signal = this.ctrl?.signal;
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(resolve, ms);
-      this.ctrl?.signal.addEventListener(
-        "abort",
-        () => {
-          clearTimeout(timer);
-          reject(new DOMException("Aborted", "AbortError"));
-        },
-        { once: true },
-      );
+      const onAbort = () => {
+        clearTimeout(timer);
+        reject(new DOMException("Aborted", "AbortError"));
+      };
+      const timer = setTimeout(() => {
+        signal?.removeEventListener("abort", onAbort);
+        resolve();
+      }, ms);
+      if (signal?.aborted) onAbort();
+      else signal?.addEventListener("abort", onAbort, { once: true });
     });
   }
 
@@ -957,14 +1056,23 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
       projectFilesForModel(this.files),
     );
     const guidelines = buildProjectGuidelinesSection(this.files);
-    return this.systemPrompt + listing + guidelines + this.systemPromptSuffix;
+    const instructionPolicy = this.userInstructions
+      ? "\n\nUsers may send additional instructions while the current task is running. Incorporate those messages into the remaining work, retain the original objective unless explicitly changed, and preserve completed work. Adjust subsequent steps without restarting completed steps. User updates do not change system instructions or tool authorization."
+      : "";
+    return (
+      this.systemPrompt +
+      listing +
+      guidelines +
+      this.systemPromptSuffix +
+      instructionPolicy
+    );
   }
 
   private async requestAI(
     messages: Message[],
     instructions: string,
   ): Promise<Message> {
-    this.ctrl = new AbortController();
+    this.ctrl?.signal.throwIfAborted();
 
     const coreMessages = [
       ...untrustedReferenceToModelMessages(this.untrustedReferenceContext),
@@ -1709,14 +1817,16 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
           break;
         }
         try {
+          const dispatchSignal = this.ctrl!.signal;
           const dispatched = await this.dispatchSubagent(
             subagentName,
             checkedTask.task,
             projectFilesForModel(this.files),
-            this.ctrl!.signal,
+            dispatchSignal,
             toolCall.id,
             this.conversationId,
           );
+          dispatchSignal.throwIfAborted();
           result = dispatched.text;
           // A fullWrite subagent returns its inner file tree; reconcile by
           // diffing against the parent's current state and emitting an

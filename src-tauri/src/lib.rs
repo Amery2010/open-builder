@@ -29,9 +29,11 @@ mod mcp_remote;
 #[cfg(desktop)]
 mod mcp_stdio;
 mod proxy;
+mod response_stream;
 #[cfg(desktop)]
 mod skills;
 mod sse;
+mod timeouts;
 
 use serde::Serialize;
 #[cfg(desktop)]

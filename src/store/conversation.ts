@@ -6,6 +6,7 @@ import { useProjectTemplateStore } from "./project-templates";
 import { runMigrations, type MigrationStep } from "./utils/migrate";
 import type {
   Conversation,
+  PendingUserInstruction,
   CompressedContext,
   LocalAgentProvider,
   LocalAgentSessionRef,
@@ -37,6 +38,18 @@ import {
 
 const CONVERSATION_STORE_VERSION = 6;
 const DEFAULT_PROJECT_TEMPLATE = "vite-react-ts";
+
+function attachmentMessages(conversation: Conversation | undefined): Message[] {
+  if (!conversation) return [];
+  return [
+    ...conversation.messages,
+    ...(conversation.pendingUserInstructions ?? []).map((item): Message => ({
+      role: "user",
+      content: item.content,
+      metadata: { attachments: item.attachments },
+    })),
+  ];
+}
 
 function retainedProjectAssetCollections(conversationState: {
   conversations: Record<string, Conversation>;
@@ -259,6 +272,17 @@ interface ConversationState {
   migrateLegacyPlanMode: (enabled: boolean) => boolean;
 
   forkConversation: () => string;
+  setPendingUserInstructions: (
+    id: string,
+    updater: Updater<PendingUserInstruction[]>,
+  ) => void;
+  cancelUserInstructions: (id: string, runId?: string) => void;
+  commitUserInstructions: (
+    id: string,
+    runId: string,
+    instructionIds: readonly string[],
+    messages: Message[],
+  ) => boolean;
   setMessages: (updater: Updater<Message[]>) => void;
   setMessagesForConversation: (id: string, updater: Updater<Message[]>) => void;
   /** Remove the final visible genuine user message plus trailing hidden
@@ -421,10 +445,10 @@ export const useConversationStore = create<ConversationState>()(
       deleteConversation: (id) => {
         const current = get();
         const deletedAssets = current.conversations[id]?.assets;
-        const deletedMessages = current.conversations[id]?.messages ?? [];
+        const deletedMessages = attachmentMessages(current.conversations[id]);
         const retainedMessages = Object.values(current.conversations)
           .filter((conversation) => conversation.id !== id)
-          .flatMap((conversation) => conversation.messages);
+          .flatMap(attachmentMessages);
         useSnapshotStore.getState().deleteSnapshotsForConversation(id);
         set((s) => {
           const { [id]: _, ...rest } = s.conversations;
@@ -461,6 +485,9 @@ export const useConversationStore = create<ConversationState>()(
       },
 
       switchConversation: (id) => {
+        const previousId = get().activeId;
+        if (previousId && previousId !== id)
+          get().cancelUserInstructions(previousId);
         set({ activeId: id });
       },
 
@@ -587,6 +614,84 @@ export const useConversationStore = create<ConversationState>()(
           };
         });
         return enabled && !!id;
+      },
+
+      setPendingUserInstructions: (id, updater) => {
+        set((state) => {
+          const conversation = state.conversations[id];
+          if (!conversation) return state;
+          return {
+            conversations: {
+              ...state.conversations,
+              [id]: {
+                ...conversation,
+                pendingUserInstructions: applyUpdater(
+                  updater,
+                  conversation.pendingUserInstructions ?? [],
+                ),
+                updatedAt: Date.now(),
+              },
+            },
+          };
+        });
+      },
+
+      cancelUserInstructions: (id, runId) => {
+        get().setPendingUserInstructions(id, (items) =>
+          items.map((item) =>
+            (!runId || item.runId === runId) &&
+            (item.status === "queued" || item.status === "delivering")
+              ? { ...item, status: "cancelled" }
+              : item,
+          ),
+        );
+      },
+
+      commitUserInstructions: (id, runId, instructionIds, messages) => {
+        let committed = false;
+        set((state) => {
+          const conversation = state.conversations[id];
+          if (!conversation || state.activeId !== id) return state;
+          const pending = conversation.pendingUserInstructions ?? [];
+          if (
+            !instructionIds.length ||
+            !instructionIds.every((instructionId) =>
+              pending.some(
+                (item) =>
+                  item.id === instructionId &&
+                  item.runId === runId &&
+                  item.status === "delivering",
+              ),
+            )
+          )
+            return state;
+          const ids = new Set(instructionIds);
+          const existing = new Set(
+            conversation.messages.map(
+              (message) => message.metadata?.instructionId,
+            ),
+          );
+          committed = true;
+          return {
+            conversations: {
+              ...state.conversations,
+              [id]: {
+                ...conversation,
+                messages: [
+                  ...conversation.messages,
+                  ...messages.filter(
+                    (message) => !existing.has(message.metadata?.instructionId),
+                  ),
+                ],
+                pendingUserInstructions: pending.filter(
+                  (item) => !ids.has(item.id),
+                ),
+                updatedAt: Date.now(),
+              },
+            },
+          };
+        });
+        return committed;
       },
 
       setMessages: (updater) => {
@@ -863,6 +968,11 @@ export const useConversationStore = create<ConversationState>()(
               ...state.conversations,
               [activeId]: {
                 ...conversation,
+                pendingUserInstructions:
+                  conversation.pendingUserInstructions?.map((item) => ({
+                    ...item,
+                    status: "cancelled" as const,
+                  })),
                 files: { ...preparedFiles },
                 assets: { ...preparedAssets },
                 template,
@@ -1144,6 +1254,23 @@ export const useConversationStore = create<ConversationState>()(
           const convs = state.conversations;
           let changed = false;
           for (const id of Object.keys(convs)) {
+            if (
+              convs[id].pendingUserInstructions?.some(
+                (item) =>
+                  item.status === "queued" || item.status === "delivering",
+              )
+            ) {
+              convs[id] = {
+                ...convs[id],
+                pendingUserInstructions: convs[id].pendingUserInstructions?.map(
+                  (item) =>
+                    item.status === "queued" || item.status === "delivering"
+                      ? { ...item, status: "cancelled" as const }
+                      : item,
+                ),
+              };
+              changed = true;
+            }
             if (convs[id].title === "新应用" || convs[id].title === "New App") {
               convs[id] = { ...convs[id], title: DEFAULT_TITLE };
               changed = true;

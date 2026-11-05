@@ -1,4 +1,8 @@
 import * as tauri from "./tauri";
+import {
+  LOCAL_CLI_ISOLATION_REASONS,
+  LOCAL_CLI_ISOLATION_ITEM_KINDS,
+} from "./types";
 import { redactSecrets } from "../security/redact";
 import type {
   LocalAgentEvent,
@@ -55,6 +59,7 @@ const LOCAL_CLI_FAILURE_CODES: readonly LocalCliFailureCode[] = [
   "handshakeFailed",
   "sessionUnavailable",
   "toolBridgeFailed",
+  "toolBudgetExceeded",
   "isolationViolation",
   "protocolViolation",
   "outputLimit",
@@ -157,7 +162,11 @@ export function isLocalCliFailure(value: unknown): value is LocalCliFailure {
     value.diagnosticId.trim().length > 0 &&
     typeof value.hadActivity === "boolean" &&
     typeof value.hadHostSideEffect === "boolean" &&
-    isOneOf(value.retryPolicy, LOCAL_CLI_RETRY_POLICIES)
+    isOneOf(value.retryPolicy, LOCAL_CLI_RETRY_POLICIES) &&
+    (value.isolationReason === undefined ||
+      isOneOf(value.isolationReason, LOCAL_CLI_ISOLATION_REASONS)) &&
+    (value.itemKind === undefined ||
+      isOneOf(value.itemKind, LOCAL_CLI_ISOLATION_ITEM_KINDS))
   );
 }
 
@@ -205,6 +214,12 @@ function normalizeFailure(
             ),
           ) ?? fallback.hadHostSideEffect,
         retryPolicy,
+        ...(isOneOf(value.isolationReason, LOCAL_CLI_ISOLATION_REASONS)
+          ? { isolationReason: value.isolationReason }
+          : {}),
+        ...(isOneOf(value.itemKind, LOCAL_CLI_ISOLATION_ITEM_KINDS)
+          ? { itemKind: value.itemKind }
+          : {}),
       };
     }
   }
@@ -316,9 +331,11 @@ export interface LocalCliHostToolRequest {
   callId: string;
   name: string;
   arguments: unknown;
+  authorityEpoch?: number;
 }
 
 export interface LocalCliRuntimeHooks {
+  getToolAuthorityEpoch?: () => number;
   onEvent?: (event: LocalAgentEvent) => void;
   executeHostTool?: (
     request: LocalCliHostToolRequest,
@@ -680,6 +697,10 @@ export class LocalCliRuntime {
   ): Promise<LocalCliRunResult> {
     if (signal?.aborted) throw createAbortError(request.provider);
 
+    const startedAt = performance.now();
+    let preparedAt: number | undefined;
+    let sessionAt: number | undefined;
+    let firstActivityAt: number | undefined;
     let runId: string | undefined;
     let settled = false;
     let abortRequested = false;
@@ -697,6 +718,10 @@ export class LocalCliRuntime {
     let failure: LocalCliFailure | undefined;
     let doneEvent: Extract<LocalAgentEvent, { type: "done" }> | undefined;
     let toolQueue = Promise.resolve();
+    let deliveryBarrier = false;
+    let barrierAuthorityEpoch: number | undefined;
+    const bufferedEvents: LocalAgentEvent[] = [];
+    const receivedAuthorityEpochs = new Map<string, number | undefined>();
     const resolvedToolCalls = new Set<string>();
     let removeAbortListener: (() => void) | undefined;
     let startResolved = false;
@@ -707,12 +732,47 @@ export class LocalCliRuntime {
       rejectRun = reject;
     });
 
+    const logTiming = (
+      outcome: "completed" | "aborted" | "failed",
+      runFailure?: LocalCliFailure,
+    ) => {
+      console.debug("[local-cli] run timing", {
+        runId: runId ?? "unknown",
+        provider: request.provider,
+        preparationMs: preparedAt === undefined ? null : preparedAt - startedAt,
+        handshakeMs:
+          preparedAt === undefined || sessionAt === undefined
+            ? null
+            : sessionAt - preparedAt,
+        firstActivityMs:
+          firstActivityAt === undefined ? null : firstActivityAt - startedAt,
+        totalMs: performance.now() - startedAt,
+        outcome,
+        resumed: prepared?.resumed ?? null,
+        ...(runFailure
+          ? {
+              failure: {
+                diagnosticId: runFailure.diagnosticId,
+                code: runFailure.code,
+                phase: runFailure.phase,
+                retryPolicy: runFailure.retryPolicy,
+                hadActivity: runFailure.hadActivity,
+                hadHostSideEffect: runFailure.hadHostSideEffect,
+                isolationReason: runFailure.isolationReason,
+                itemKind: runFailure.itemKind,
+              },
+            }
+          : {}),
+      });
+    };
+
     const resolveCompletedRun = (
       done: Extract<LocalAgentEvent, { type: "done" }>,
     ) => {
       if (settled || !startResolved) return;
       settled = true;
       removeAbortListener?.();
+      logTiming(done.aborted || abortRequested ? "aborted" : "completed");
       resolveRun({
         runId: runId ?? "unknown",
         aborted: done.aborted || abortRequested,
@@ -734,6 +794,7 @@ export class LocalCliRuntime {
       if (settled) return;
       settled = true;
       removeAbortListener?.();
+      logTiming("failed", nextFailure);
       rejectRun(new LocalCliRuntimeError(nextFailure, runId, cause));
     };
 
@@ -743,15 +804,31 @@ export class LocalCliRuntime {
       void toolQueue.then(
         () => {
           if (settled || !startResolved) return;
-          const finalFailure = failure
-            ? failureWithActivity(failure, hadActivity, hadHostSideEffect)
-            : undefined;
+          const requestedCancellation =
+            externallyAborted || (abortRequested && !failure);
+          const unexpectedCancellation =
+            !requestedCancellation &&
+            (failure?.code === "cancelled" || (!failure && done.aborted));
+          const finalFailure: LocalCliFailure | undefined =
+            unexpectedCancellation
+              ? {
+                  code: "processExit",
+                  phase: "stream",
+                  provider: request.provider,
+                  safeMessage:
+                    "The local CLI stopped before completing the request. Your changes have been kept. Retry to continue.",
+                  diagnosticId: diagnosticId(),
+                  hadActivity: hadActivity || failure?.hadActivity === true,
+                  hadHostSideEffect:
+                    hadHostSideEffect || failure?.hadHostSideEffect === true,
+                  retryPolicy: "manual",
+                }
+              : failure
+                ? failureWithActivity(failure, hadActivity, hadHostSideEffect)
+                : undefined;
           if (
             finalFailure &&
-            !(
-              finalFailure.code === "cancelled" &&
-              (done.aborted || abortRequested)
-            )
+            !(finalFailure.code === "cancelled" && requestedCancellation)
           ) {
             rejectWithFailure(finalFailure);
             return;
@@ -761,7 +838,7 @@ export class LocalCliRuntime {
         (cause) => {
           if (
             startResolved &&
-            (externallyAborted || (done.aborted && !failure))
+            (externallyAborted || (abortRequested && !failure))
           ) {
             resolveCompletedRun(done);
             return;
@@ -809,6 +886,21 @@ export class LocalCliRuntime {
       }
 
       const event = normalized.event;
+      if (
+        event.type === "toolRequest" &&
+        !receivedAuthorityEpochs.has(event.callId)
+      ) {
+        receivedAuthorityEpochs.set(
+          event.callId,
+          deliveryBarrier
+            ? barrierAuthorityEpoch
+            : hooks.getToolAuthorityEpoch?.(),
+        );
+      }
+      if (deliveryBarrier && event.type !== "error") {
+        bufferedEvents.push(event);
+        return;
+      }
       try {
         hooks.onEvent?.(event);
       } catch (cause) {
@@ -829,11 +921,13 @@ export class LocalCliRuntime {
           status = { state: event.state, message: event.message };
           break;
         case "session":
+          sessionAt ??= performance.now();
           sessionId = event.sessionId;
           cliVersion = event.cliVersion;
           hadActivity = true;
           break;
         case "prepared":
+          preparedAt ??= performance.now();
           prepared = {
             compatibilityKey: event.compatibilityKey,
             installationFingerprint: event.installationFingerprint,
@@ -845,14 +939,17 @@ export class LocalCliRuntime {
           cliVersion = event.cliVersion;
           break;
         case "textDelta":
+          if (event.delta) firstActivityAt ??= performance.now();
           text += event.delta;
           hadActivity = true;
           break;
         case "reasoningDelta":
+          if (event.delta) firstActivityAt ??= performance.now();
           reasoning += event.delta;
           hadActivity = true;
           break;
         case "toolRequest": {
+          firstActivityAt ??= performance.now();
           runId = runId ?? event.runId;
           hadActivity = true;
           if (resolvedToolCalls.has(event.callId)) break;
@@ -888,14 +985,18 @@ export class LocalCliRuntime {
           toolQueue = toolQueue.then(async () => {
             if (abortRequested || signal?.aborted) return;
             let resultReady = false;
+            let outcome: LocalCliHostToolOutcome | undefined;
             try {
-              const outcome = await hooks.executeHostTool!(
+              barrierAuthorityEpoch = hooks.getToolAuthorityEpoch?.();
+              deliveryBarrier = hooks.getToolAuthorityEpoch !== undefined;
+              outcome = await hooks.executeHostTool!(
                 {
                   type: "toolRequest",
                   runId: event.runId,
                   callId: event.callId,
                   name: event.name,
                   arguments: event.arguments,
+                  authorityEpoch: receivedAuthorityEpochs.get(event.callId),
                 },
                 signal ?? new AbortController().signal,
               );
@@ -906,7 +1007,10 @@ export class LocalCliRuntime {
                 event.callId,
                 outcome.resolution,
               );
+              if (!abortRequested && !signal?.aborted) outcome.onDelivered?.();
+              else outcome.onDeliveryFailed?.();
             } catch (cause) {
+              outcome?.onDeliveryFailed?.();
               // A Stop request unregisters the backend bridge immediately, so a
               // host tool that finishes afterwards cannot deliver its result.
               // That is the expected aborted outcome, not a bridge failure.
@@ -939,11 +1043,25 @@ export class LocalCliRuntime {
               }
               abort();
               throw new LocalCliRuntimeError(failure, event.runId, cause);
+            } finally {
+              deliveryBarrier = false;
+              const pending = bufferedEvents.splice(0);
+              if (!abortRequested && !signal?.aborted) {
+                for (const event of pending) onEvent(event);
+              } else {
+                const done = pending.find((event) => event.type === "done");
+                if (done?.type === "done") finish(done);
+              }
             }
           });
+          // The native Done event waits for this queue. Observe an early failure
+          // too, so it cannot become an unhandled rejection while cancellation
+          // is still waiting for that terminal event.
+          void toolQueue.catch(() => undefined);
           break;
         }
         case "nativeTool":
+          firstActivityAt ??= performance.now();
           hadActivity = true;
           break;
         case "usage":

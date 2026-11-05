@@ -1,3 +1,8 @@
+export interface ProjectFileChangeGuard {
+  /** An absent file is a baseline too; omitting the guard skips the check. */
+  expectedContent: string | undefined;
+}
+
 export interface PendingSandpackFileChange {
   conversationId: string;
   path: string;

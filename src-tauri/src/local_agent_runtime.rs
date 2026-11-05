@@ -5,8 +5,41 @@ use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tokio_util::sync::CancellationToken;
 
 use crate::local_agent::LocalAgentProvider;
+
+/// An explicit Stop cancels the parent; protocol completion only closes the
+/// child used by the Provider and Host authority. Cleanup is not a Stop reason.
+#[derive(Clone)]
+pub(crate) struct RunCancellation {
+    stop: CancellationToken,
+    authority: CancellationToken,
+}
+
+impl RunCancellation {
+    pub(crate) fn new() -> Self {
+        let stop = CancellationToken::new();
+        let authority = stop.child_token();
+        Self { stop, authority }
+    }
+
+    pub(crate) fn authority_token(&self) -> CancellationToken {
+        self.authority.clone()
+    }
+
+    pub(crate) fn request_stop(&self) {
+        self.stop.cancel();
+    }
+
+    pub(crate) fn stop_requested(&self) -> bool {
+        self.stop.is_cancelled()
+    }
+
+    pub(crate) async fn stopped(&self) {
+        self.stop.cancelled().await;
+    }
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -25,6 +58,7 @@ pub enum LocalCliFailureCode {
     SessionUnavailable,
     ProviderApprovalRejected,
     ToolBridgeFailed,
+    ToolBudgetExceeded,
     IsolationViolation,
     ProtocolViolation,
     OutputLimit,
@@ -58,6 +92,38 @@ pub enum LocalCliRetryPolicy {
     Manual,
 }
 
+/// Fixed diagnostics attached by a trusted adapter validation branch.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum LocalCliIsolationReason {
+    ExternalMcpServer,
+    UnauthorizedHostTool,
+    NativeCapability,
+    InvalidDiscovery,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum LocalCliItemKind {
+    McpToolCall,
+    AgentMessage,
+    Reasoning,
+    Plan,
+    UserMessage,
+    ContextCompaction,
+    WebSearch,
+    CommandExecution,
+    FileChange,
+    DynamicToolCall,
+    CollabAgentToolCall,
+    HookPrompt,
+    ImageView,
+    ImageGeneration,
+    ComputerUse,
+    BrowserUse,
+    SubAgentActivity,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalCliFailure {
@@ -69,6 +135,10 @@ pub struct LocalCliFailure {
     pub had_activity: bool,
     pub had_host_side_effect: bool,
     pub retry_policy: LocalCliRetryPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolation_reason: Option<LocalCliIsolationReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_kind: Option<LocalCliItemKind>,
 }
 
 /// A provider adapter failure. Adapters that already know the failure
@@ -77,6 +147,8 @@ pub struct LocalCliFailure {
 pub struct AdapterError {
     pub code: Option<LocalCliFailureCode>,
     pub message: String,
+    pub isolation_reason: Option<LocalCliIsolationReason>,
+    pub item_kind: Option<LocalCliItemKind>,
 }
 
 impl AdapterError {
@@ -84,6 +156,8 @@ impl AdapterError {
         Self {
             code: Some(code),
             message: message.into(),
+            isolation_reason: None,
+            item_kind: None,
         }
     }
 }
@@ -93,6 +167,8 @@ impl From<String> for AdapterError {
         Self {
             code: None,
             message,
+            isolation_reason: None,
+            item_kind: None,
         }
     }
 }
@@ -126,6 +202,8 @@ impl LocalCliFailure {
             had_activity: false,
             had_host_side_effect: false,
             retry_policy,
+            isolation_reason: None,
+            item_kind: None,
         }
     }
 
@@ -143,7 +221,13 @@ impl LocalCliFailure {
                 if let Some((safe_message, retry_policy)) =
                     coded_failure(code, attempted_resume, &error.message)
                 {
-                    return Self::new(provider, code, phase, safe_message, retry_policy);
+                    let mut failure =
+                        Self::new(provider, code, phase, safe_message, retry_policy);
+                    if code == LocalCliFailureCode::IsolationViolation {
+                        failure.isolation_reason = error.isolation_reason;
+                        failure.item_kind = error.item_kind;
+                    }
+                    return failure;
                 }
             }
         }
@@ -398,6 +482,30 @@ fn coded_failure(
             "The local CLI attempted to use a capability outside the Open Builder sandbox.",
             LocalCliRetryPolicy::None,
         )),
+        LocalCliFailureCode::ProtocolViolation => Some((
+            "The local CLI returned an unsupported structured response.",
+            LocalCliRetryPolicy::None,
+        )),
+        LocalCliFailureCode::OutputLimit => Some((
+            if message == "local agent tool arguments exceeded the request limit" {
+                "The local CLI tool arguments exceeded the allowed size."
+            } else {
+                "The local CLI exceeded a bounded output limit."
+            },
+            LocalCliRetryPolicy::None,
+        )),
+        LocalCliFailureCode::ToolBudgetExceeded => Some((
+            "The local CLI tool-call budget was exhausted.",
+            LocalCliRetryPolicy::Manual,
+        )),
+        LocalCliFailureCode::ToolBridgeFailed => Some((
+            "The Open Builder tool bridge could not complete the local CLI request.",
+            LocalCliRetryPolicy::Manual,
+        )),
+        LocalCliFailureCode::ConsumerGone => Some((
+            "The local CLI event consumer is no longer available.",
+            LocalCliRetryPolicy::None,
+        )),
         LocalCliFailureCode::ProcessExit => Some((
             if is_rate_limited(&message.to_ascii_lowercase()) {
                 "The local CLI provider rate limit prevented this request from completing."
@@ -644,6 +752,52 @@ pub fn compatibility_key(material: CompatibilityKeyMaterial<'_>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn isolation_metadata_is_optional_typed_and_cleared_by_cancellation() {
+        let mut error =
+            AdapterError::coded(LocalCliFailureCode::IsolationViolation, "private details");
+        error.isolation_reason = Some(LocalCliIsolationReason::InvalidDiscovery);
+        error.item_kind = Some(LocalCliItemKind::McpToolCall);
+        let failure = LocalCliFailure::from_adapter(
+            LocalAgentProvider::Codex,
+            LocalCliFailurePhase::Tool,
+            &error,
+            false,
+            false,
+        );
+        let mut json = serde_json::to_value(&failure).unwrap();
+        assert_eq!(json["isolationReason"], "invalidDiscovery");
+        assert_eq!(json["itemKind"], "mcpToolCall");
+        assert!(!json.to_string().contains("private details"));
+        json.as_object_mut().unwrap().remove("isolationReason");
+        json.as_object_mut().unwrap().remove("itemKind");
+        let legacy: LocalCliFailure = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(legacy.isolation_reason, None);
+        assert_eq!(legacy.item_kind, None);
+        assert_eq!(serde_json::to_value(legacy).unwrap(), json);
+        json["isolationReason"] = serde_json::json!("provider-controlled-text");
+        assert!(serde_json::from_value::<LocalCliFailure>(json).is_err());
+        let cancelled = LocalCliFailure::from_adapter(
+            LocalAgentProvider::Codex,
+            LocalCliFailurePhase::Tool,
+            &error,
+            false,
+            true,
+        );
+        assert_eq!(cancelled.code, LocalCliFailureCode::Cancelled);
+        assert_eq!(cancelled.isolation_reason, None);
+        assert_eq!(cancelled.item_kind, None);
+        let untyped = LocalCliFailure::classified(
+            LocalAgentProvider::Codex,
+            LocalCliFailurePhase::Stream,
+            "isolation: externalMcpServer private details",
+            false,
+            false,
+        );
+        assert_eq!(untyped.isolation_reason, None);
+        assert_eq!(untyped.item_kind, None);
+    }
 
     #[test]
     fn session_unavailable_is_the_only_fresh_session_retry() {

@@ -1,8 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   collectDesignReviewCaptures,
   DESIGN_REVIEW_VIEWPORTS,
   isDesignReviewViewportReady,
+  waitForPreviewReadiness,
 } from "./preview-capture";
 import type { DesignBridgeCaptureResult } from "./preview-bridge";
 
@@ -13,6 +14,79 @@ function capture(name: "desktop" | "tablet" | "mobile") {
 }
 
 describe("Design preview capture sequence", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it("allows three readiness windows and stops immediately when cancelled or superseded", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(performance, "now").mockImplementation(() => Date.now());
+    const controller = new AbortController();
+    let ready = false;
+    let current = true;
+    let error: unknown;
+    const wait = () =>
+      waitForPreviewReadiness({
+        isReady: () => ready,
+        isCurrent: () => current,
+        signal: controller.signal,
+        timeoutMs: 10,
+        pollIntervalMs: 1,
+        errorMessage: "not ready",
+      });
+    const first = wait().catch((cause) => {
+      error = cause;
+    });
+    await vi.advanceTimersByTimeAsync(21);
+    expect(error).toBeUndefined();
+    ready = true;
+    await vi.advanceTimersByTimeAsync(1);
+    await first;
+    expect(error).toBeUndefined();
+
+    ready = false;
+    const second = wait().catch((cause) => {
+      error = cause;
+    });
+    await vi.advanceTimersByTimeAsync(11);
+    current = false;
+    await vi.advanceTimersByTimeAsync(1);
+    await second;
+    expect(error).toMatchObject({ code: "stale_generation" });
+
+    current = true;
+    error = undefined;
+    const third = wait().catch((cause) => {
+      error = cause;
+    });
+    controller.abort();
+    await third;
+    expect(error).toMatchObject({ name: "AbortError" });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("fails readiness after the third timeout window", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(performance, "now").mockImplementation(() => Date.now());
+    let error: unknown;
+    const pending = waitForPreviewReadiness({
+      isReady: () => false,
+      signal: new AbortController().signal,
+      timeoutMs: 10,
+      pollIntervalMs: 1,
+      errorMessage: "not ready",
+    }).catch((cause) => {
+      error = cause;
+    });
+    await vi.advanceTimersByTimeAsync(20);
+    expect(error).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(10);
+    await pending;
+    expect(error).toMatchObject({ message: "not ready" });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("waits for the runtime-capable Bridge at the requested viewport", () => {
     const desktop = DESIGN_REVIEW_VIEWPORTS[0];
     const readiness = {

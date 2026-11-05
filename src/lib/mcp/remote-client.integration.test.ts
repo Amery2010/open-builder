@@ -1,7 +1,177 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import { createServer, type Server } from "node:http";
 import { createMcpServerEntry } from "./validation";
 import { RemoteMcpClient } from "./remote-client";
+
+describe("RemoteMcpClient timeout waiting with the real SDK", () => {
+  const clients: RemoteMcpClient[] = [];
+
+  afterEach(async () => {
+    for (const client of clients.splice(0)) await client.close();
+    vi.useRealTimers();
+  });
+
+  async function fixture() {
+    let calls = 0;
+    let finish!: (result: unknown, error?: boolean) => void;
+    const entry = createMcpServerEntry(
+      {
+        name: "Memory fixture",
+        transport: "streamable-http",
+        url: "https://mcp.example.test/rpc",
+        requestTimeoutMs: 1_000,
+      },
+      { id: "memory" },
+    );
+    const client = new RemoteMcpClient(entry, {
+      fetch: async (_url, init) => {
+        if (init?.method !== "POST") return new Response(null, { status: 405 });
+        const message = JSON.parse(String(init.body));
+        const reply = (result: unknown, error = false) =>
+          Response.json({
+            jsonrpc: "2.0",
+            id: message.id,
+            [error ? "error" : "result"]: result,
+          });
+        if (message.method === "server/discover")
+          return reply({
+            resultType: "complete",
+            supportedVersions: ["2026-07-28"],
+            capabilities: { tools: { listChanged: false } },
+            ttlMs: 0,
+            cacheScope: "private",
+            _meta: {
+              "io.modelcontextprotocol/serverInfo": {
+                name: "memory",
+                version: "1",
+              },
+            },
+          });
+        if (message.method === "tools/list")
+          return reply({
+            resultType: "complete",
+            ttlMs: 0,
+            cacheScope: "private",
+            tools: [
+              {
+                name: "write_note",
+                inputSchema: { type: "object" },
+                annotations: { readOnlyHint: false, idempotentHint: false },
+              },
+            ],
+          });
+        if (message.method === "tools/call") {
+          calls += 1;
+          return new Promise<Response>((resolve) => {
+            finish = (result, error = false) => resolve(reply(result, error));
+          });
+        }
+        return new Response(null, { status: 202 });
+      },
+    });
+    clients.push(client);
+    await client.connect();
+    return {
+      client,
+      calls: () => calls,
+      finish: (result: unknown, error?: boolean) => finish(result, error),
+    };
+  }
+
+  it("accepts a second-window result without resending a write tool", async () => {
+    vi.useFakeTimers();
+    const server = await fixture();
+    const settled = vi.fn();
+    const pending = server.client.callTool("write_note", {}).then(
+      (result) => settled({ result }),
+      (error) => settled({ error }),
+    );
+    await vi.waitFor(() => expect(server.calls()).toBe(1));
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(settled).not.toHaveBeenCalled();
+    server.finish({
+      resultType: "complete",
+      content: [{ type: "text", text: "saved once" }],
+    });
+    await pending;
+    expect(settled).toHaveBeenCalledWith({
+      result: expect.objectContaining({
+        content: [{ type: "text", text: "saved once" }],
+      }),
+    });
+    expect(server.calls()).toBe(1);
+  });
+
+  it("fails only after three timeout windows while sending once", async () => {
+    vi.useFakeTimers();
+    const server = await fixture();
+    const settled = vi.fn();
+    const pending = server.client.callTool("write_note", {}).then(
+      (result) => settled({ result }),
+      (error) => settled({ error }),
+    );
+    await vi.waitFor(() => expect(server.calls()).toBe(1));
+    await vi.advanceTimersByTimeAsync(2_800);
+    expect(settled).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(200);
+    await pending;
+    expect(settled).toHaveBeenCalledWith({
+      error: expect.objectContaining({
+        message: expect.stringMatching(/timed out|timeout/i),
+      }),
+    });
+    expect(server.calls()).toBe(1);
+  });
+
+  it("honors Stop immediately during the second waiting window", async () => {
+    vi.useFakeTimers();
+    const server = await fixture();
+    const controller = new AbortController();
+    const settled = vi.fn();
+    const pending = server.client
+      .callTool("write_note", {}, controller.signal)
+      .then(
+        (result) => settled({ result }),
+        (error) => settled({ error }),
+      );
+    await vi.waitFor(() => expect(server.calls()).toBe(1));
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(settled).not.toHaveBeenCalled();
+    controller.abort(new DOMException("Stopped", "AbortError"));
+    await pending;
+    expect(settled).toHaveBeenCalledWith({
+      error: expect.objectContaining({ name: "AbortError" }),
+    });
+    expect(server.calls()).toBe(1);
+  });
+
+  it("reports a server rejection without waiting or retrying", async () => {
+    vi.useFakeTimers();
+    const server = await fixture();
+    const settled = vi.fn();
+    const pending = server.client.callTool("write_note", {}).then(
+      (result) => settled({ result }),
+      (error) => settled({ error }),
+    );
+    await vi.waitFor(() => expect(server.calls()).toBe(1));
+    server.finish({ code: -32602, message: "invalid input" }, true);
+    await pending;
+    expect(settled).toHaveBeenCalledWith({
+      error: expect.objectContaining({
+        message: expect.stringContaining("invalid input"),
+      }),
+    });
+    expect(server.calls()).toBe(1);
+  });
+});
 
 describe("RemoteMcpClient with Streamable HTTP", () => {
   let server: Server;

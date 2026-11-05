@@ -54,6 +54,68 @@ describe("ToolCallCard UI", () => {
     expect(screen.queryByText(/path=/)).not.toBeInTheDocument();
   });
 
+  it("shows npm package names, versions and descriptions only after expansion", async () => {
+    const user = userEvent.setup();
+    render(
+      <ToolCallCard
+        toolName="search_npm_packages"
+        title="Search NPM Packages"
+        path=""
+        toolCallId="npm-search"
+        result={JSON.stringify({
+          success: true,
+          data: [
+            {
+              name: "@tanstack/react-query",
+              version: "5.0.0",
+              description: "Async state management",
+            },
+            { name: "zod", version: "4.0.0" },
+          ],
+        })}
+      />,
+    );
+
+    const trigger = screen.getByRole("button", {
+      name: /Search NPM Packages.*2 packages/,
+    });
+    expect(screen.queryByText("@tanstack/react-query")).toBeNull();
+    await user.click(trigger);
+    expect(screen.getByText("@tanstack/react-query")).toBeInTheDocument();
+    expect(screen.getByText("5.0.0")).toBeInTheDocument();
+    expect(screen.getByText("Async state management")).toBeInTheDocument();
+    expect(screen.getByText("zod")).toBeInTheDocument();
+    await user.click(trigger);
+    expect(screen.queryByText("zod")).toBeNull();
+  });
+
+  it.each([
+    ['{"success":true,"data":[]}', "Found 0 npm packages"],
+    [
+      '{"success":false,"error":"registry unavailable"}',
+      "registry unavailable",
+    ],
+  ])(
+    "keeps npm empty and failed results readable: %s",
+    async (result, text) => {
+      const user = userEvent.setup();
+      render(
+        <ToolCallCard
+          toolName="search_npm_packages"
+          title="Search NPM Packages"
+          path=""
+          toolCallId="npm-search"
+          result={result}
+        />,
+      );
+      await user.click(
+        screen.getByRole("button", { name: /Search NPM Packages/ }),
+      );
+      expect(screen.getByText(text, { exact: false })).toBeInTheDocument();
+      expect(screen.queryByRole("list")).toBeNull();
+    },
+  );
+
   it("localizes MCP result chrome while preserving third-party content", async () => {
     useSettingsStore.getState().setSystem({
       ...originalSystem,

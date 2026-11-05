@@ -1,9 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   TOOL_ERROR_MAX_CHARS,
   TOOL_QUERY_MAX_CHARS,
   TOOL_URL_MAX_CHARS,
   clampInt,
+  fetchWithTimeout,
   formatHttpError,
   limitArray,
   limitRecord,
@@ -17,6 +18,126 @@ import {
 } from "./network-guard";
 
 describe("network guard helpers", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it("retries its own read-request timeout twice before a third successful attempt", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockImplementationOnce(
+        (_input, init) =>
+          new Promise((_resolve, reject) => {
+            init?.signal?.addEventListener(
+              "abort",
+              () => reject(init.signal?.reason),
+              { once: true },
+            );
+          }),
+      )
+      .mockImplementationOnce(
+        (_input, init) =>
+          new Promise((_resolve, reject) => {
+            init?.signal?.addEventListener(
+              "abort",
+              () => reject(init.signal?.reason),
+              { once: true },
+            );
+          }),
+      )
+      .mockResolvedValueOnce(new Response("third attempt"));
+    vi.stubGlobal("fetch", fetchMock);
+    const request = fetchWithTimeout(
+      "https://registry.example.test/package",
+      {},
+      10,
+    );
+    await Promise.all([
+      vi.advanceTimersByTimeAsync(20),
+      expect(request).resolves.toBeInstanceOf(Response),
+    ]);
+    expect(await (await request).text()).toBe("third attempt");
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("reports failure only after three timeout attempts", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(
+      (_input, init) =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            "abort",
+            () => reject(init.signal?.reason),
+            { once: true },
+          );
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const request = fetchWithTimeout("https://example.test", {}, 10);
+    await Promise.all([
+      vi.advanceTimersByTimeAsync(30),
+      expect(request).rejects.toMatchObject({
+        name: "ToolTimeoutError",
+        attempts: 3,
+      }),
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("preserves caller cancellation without retrying or converting it to a timeout", async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(
+      (_input, init) =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            "abort",
+            () => reject(init.signal?.reason),
+            { once: true },
+          );
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const request = fetchWithTimeout(
+      "https://example.test",
+      { signal: controller.signal },
+      10,
+    );
+    controller.abort();
+    await Promise.all([
+      vi.advanceTimersByTimeAsync(30),
+      expect(request).rejects.toMatchObject({ name: "AbortError" }),
+    ]);
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("does not retry unrelated network errors, HTTP failures, or foreign AbortErrors", async () => {
+    const error = new TypeError("network unavailable");
+    const fetchMock = vi.fn<typeof fetch>().mockRejectedValueOnce(error);
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(fetchWithTimeout("https://example.test")).rejects.toBe(error);
+    expect(fetchMock).toHaveBeenCalledOnce();
+    fetchMock
+      .mockClear()
+      .mockResolvedValueOnce(new Response("denied", { status: 403 }));
+    expect((await fetchWithTimeout("https://example.test")).status).toBe(403);
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const aborted = new DOMException(
+      "fetch aborted independently",
+      "AbortError",
+    );
+    fetchMock.mockClear().mockRejectedValueOnce(aborted);
+    await expect(fetchWithTimeout("https://example.test")).rejects.toBe(
+      aborted,
+    );
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
   it("clamps numeric tool arguments", () => {
     expect(clampInt(undefined, 5, 1, 10)).toBe(5);
     expect(clampInt("20", 5, 1, 10)).toBe(10);

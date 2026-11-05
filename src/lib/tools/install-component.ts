@@ -150,14 +150,31 @@ interface FetchedRegistryItem {
 async function fetchRegistryItem(
   base: string,
   name: string,
+  signal?: AbortSignal,
 ): Promise<FetchedRegistryItem | { error: string }> {
   const url = buildItemUrl(base, name);
   const expectedOrigin = new URL(base).origin;
   try {
-    const res = await fetchWithTimeout(url, {
-      headers: { Accept: "application/json" },
-      redirect: "error",
-    });
+    const { res, body } = await fetchWithTimeout(
+      url,
+      {
+        headers: { Accept: "application/json" },
+        signal,
+        redirect: "error",
+      },
+      undefined,
+      async (res) => ({
+        res,
+        body:
+          res.ok && (!res.url || new URL(res.url).origin === expectedOrigin)
+            ? await readResponseTextWithLimit(
+                res,
+                INSTALL_COMPONENT_LIMITS.maxRegistryItemBytes,
+                "Component registry response",
+              )
+            : "",
+      }),
+    );
     if (!res.ok) {
       if (res.status === 404) {
         return {
@@ -169,11 +186,6 @@ async function fetchRegistryItem(
     if (res.url && new URL(res.url).origin !== expectedOrigin) {
       return { error: "component registry redirected to an unapproved origin" };
     }
-    const body = await readResponseTextWithLimit(
-      res,
-      INSTALL_COMPONENT_LIMITS.maxRegistryItemBytes,
-      "Component registry response",
-    );
     let json: RegistryItem;
     try {
       json = JSON.parse(body) as RegistryItem;
@@ -188,6 +200,7 @@ async function fetchRegistryItem(
       responseBytes: new TextEncoder().encode(body).byteLength,
     };
   } catch (err: any) {
+    signal?.throwIfAborted();
     return { error: `fetch failed for ${url}: ${safeErrorMessage(err)}` };
   }
 }
@@ -314,7 +327,11 @@ export function createInstallComponentHandler(deps: InstallComponentDeps) {
       }
       const nextLayer: string[] = [];
       for (const itemName of toFetch) {
-        const fetched = await fetchRegistryItem(base, itemName);
+        const fetched = await fetchRegistryItem(
+          base,
+          itemName,
+          context?.signal,
+        );
         if ("error" in fetched) {
           return JSON.stringify({ ok: false, error: fetched.error });
         }

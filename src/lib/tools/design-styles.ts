@@ -146,7 +146,12 @@ async function sha256Hex(content: string): Promise<string> {
 }
 
 export function createApplyDesignStyleHandler(deps: ApplyDesignStyleDeps) {
-  return async (_name: string, args: unknown): Promise<string> => {
+  return async (
+    _name: string,
+    args: unknown,
+    signal?: AbortSignal,
+  ): Promise<string> => {
+    signal?.throwIfAborted();
     const parsed = args as ApplyDesignStyleArgs;
     const requested =
       typeof parsed?.style === "string"
@@ -166,22 +171,34 @@ export function createApplyDesignStyleHandler(deps: ApplyDesignStyleDeps) {
     const url = `${RAW_BASE}/${slug}/DESIGN.md`;
     let spec: string;
     try {
-      const res = await fetchWithTimeout(url, {
-        headers: { Accept: "text/plain" },
-        redirect: "error",
-      });
+      const { res, body } = await fetchWithTimeout(
+        url,
+        {
+          headers: { Accept: "text/plain" },
+          signal,
+          redirect: "error",
+        },
+        undefined,
+        async (res) => ({
+          res,
+          body: res.ok
+            ? await readResponseTextWithLimit(
+                res,
+                DESIGN_STYLE_MAX_BYTES,
+                "Design spec",
+              )
+            : "",
+        }),
+      );
       if (!res.ok) {
         return JSON.stringify({
           ok: false,
           error: `HTTP ${res.status} fetching ${url}`,
         });
       }
-      spec = await readResponseTextWithLimit(
-        res,
-        DESIGN_STYLE_MAX_BYTES,
-        "Design spec",
-      );
+      spec = body;
     } catch (err: any) {
+      signal?.throwIfAborted();
       return JSON.stringify({
         ok: false,
         error: `fetch failed for ${url}: ${safeErrorMessage(err)}`,

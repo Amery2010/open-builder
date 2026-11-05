@@ -1,8 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use crate::response_stream::forward_response_stream;
+use crate::timeouts::wait_with_timeout_retries;
 use futures_util::StreamExt;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
@@ -18,10 +20,7 @@ const MAX_HEADER_VALUE_BYTES: usize = 16 * 1024;
 const MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
 const MAX_EVENT_CHUNK_BYTES: usize = 256 * 1024;
 const MAX_REDIRECTS: usize = 5;
-const MAX_RESPONSE_BYTES: usize = 20 * 1024 * 1024;
-const MAX_STREAM_BYTES_PER_SECOND: usize = 8 * 1024 * 1024;
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
-const STREAM_TOTAL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const MAX_IN_FLIGHT_EVENTS: usize = 4;
 const EVENT_ACK_TIMEOUT: Duration = Duration::from_secs(30);
 static NEXT_REMOTE_GENERATION: AtomicU64 = AtomicU64::new(1);
@@ -147,7 +146,7 @@ impl McpEventFlow {
     }
 
     async fn reserve(&self) -> Result<u64, String> {
-        let permit = tokio::time::timeout(EVENT_ACK_TIMEOUT, self.permits.acquire())
+        let permit = wait_with_timeout_retries(self.permits.acquire(), EVENT_ACK_TIMEOUT)
             .await
             .map_err(|_| "MCP remote consumer acknowledgement timeout".to_string())?
             .map_err(|_| "MCP remote consumer flow control closed".to_string())?;
@@ -462,44 +461,6 @@ async fn emit_chunked(
     Ok(())
 }
 
-struct StreamBudget {
-    total_bytes: usize,
-    started: Instant,
-    rate_window_started: Instant,
-    rate_window_bytes: usize,
-}
-
-impl StreamBudget {
-    fn new() -> Self {
-        let now = Instant::now();
-        Self {
-            total_bytes: 0,
-            started: now,
-            rate_window_started: now,
-            rate_window_bytes: 0,
-        }
-    }
-
-    fn record(&mut self, bytes: usize) -> Result<(), String> {
-        if self.started.elapsed() > STREAM_TOTAL_TIMEOUT {
-            return Err("MCP remote stream exceeded its total duration".to_string());
-        }
-        self.total_bytes = self.total_bytes.saturating_add(bytes);
-        if self.total_bytes > MAX_RESPONSE_BYTES {
-            return Err("MCP remote stream exceeded its cumulative byte budget".to_string());
-        }
-        if self.rate_window_started.elapsed() >= Duration::from_secs(1) {
-            self.rate_window_started = Instant::now();
-            self.rate_window_bytes = 0;
-        }
-        self.rate_window_bytes = self.rate_window_bytes.saturating_add(bytes);
-        if self.rate_window_bytes > MAX_STREAM_BYTES_PER_SECOND {
-            return Err("MCP remote stream exceeded its rate budget".to_string());
-        }
-        Ok(())
-    }
-}
-
 fn set_remote_policy(
     state: &McpRemoteState,
     server_id: String,
@@ -656,56 +617,28 @@ pub async fn mcp_remote_connect(
                 let headers = response_headers(&response);
                 let _ = app.emit(&event_name, McpRemotePayload::Connected { status, headers });
 
-                let mut stream = response.bytes_stream();
-                let mut completed = true;
-                let mut budget = StreamBudget::new();
-                loop {
-                    let next = match tokio::time::timeout(STREAM_IDLE_TIMEOUT, stream.next()).await
-                    {
-                        Ok(next) => next,
-                        Err(_) => {
-                            completed = false;
-                            let _ = app.emit(
-                                &event_name,
-                                McpRemotePayload::Error {
-                                    message: "MCP remote stream idle timeout".to_string(),
-                                },
-                            );
-                            break;
-                        }
-                    };
-                    let Some(next) = next else {
-                        break;
-                    };
-                    match next {
-                        Ok(bytes) => {
-                            if let Err(message) = budget.record(bytes.len()) {
-                                completed = false;
-                                let _ = app.emit(&event_name, McpRemotePayload::Error { message });
-                                break;
-                            }
-                            if let Err(message) =
-                                emit_chunked(&app, &event_name, &bytes, &task_flow).await
-                            {
-                                completed = false;
-                                let _ = app.emit(&event_name, McpRemotePayload::Error { message });
-                                break;
-                            }
-                        }
-                        Err(error) => {
-                            completed = false;
-                            let _ = app.emit(
-                                &event_name,
-                                McpRemotePayload::Error {
-                                    message: classify_reqwest_error(&error),
-                                },
-                            );
-                            break;
-                        }
+                let stream = response
+                    .bytes_stream()
+                    .map(|chunk| chunk.map_err(|error| classify_reqwest_error(&error)));
+                let result = forward_response_stream(
+                    stream,
+                    STREAM_IDLE_TIMEOUT,
+                    "MCP remote stream idle timeout",
+                    |bytes| {
+                        let app = &app;
+                        let event_name = &event_name;
+                        let flow = &task_flow;
+                        async move { emit_chunked(app, event_name, &bytes, flow).await }
+                    },
+                )
+                .await;
+                match result {
+                    Ok(()) => {
+                        let _ = app.emit(&event_name, McpRemotePayload::Done);
                     }
-                }
-                if completed {
-                    let _ = app.emit(&event_name, McpRemotePayload::Done);
+                    Err(message) => {
+                        let _ = app.emit(&event_name, McpRemotePayload::Error { message });
+                    }
                 }
             }
             Err(error) => {
@@ -1037,17 +970,6 @@ mod tests {
             assert!(state.policies.lock().unwrap().is_empty());
             assert!(state.connections.lock().unwrap().is_empty());
         }
-    }
-
-    #[test]
-    fn stream_budget_rejects_rate_and_cumulative_overruns() {
-        let mut rate = StreamBudget::new();
-        assert!(rate.record(MAX_STREAM_BYTES_PER_SECOND + 1).is_err());
-
-        let mut total = StreamBudget::new();
-        total.total_bytes = MAX_RESPONSE_BYTES;
-        total.rate_window_started = Instant::now() - Duration::from_secs(2);
-        assert!(total.record(1).is_err());
     }
 
     #[tokio::test]

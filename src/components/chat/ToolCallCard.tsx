@@ -95,17 +95,35 @@ export function parseNpmSearchResult(
 ): {
   success: boolean;
   count: number;
+  packages: { name: string; version?: string; description?: string }[];
   error?: string;
 } {
   const d = parseToolJson(result);
-  if (!d) {
+  if (!d || d.success !== true || !Array.isArray(d.data)) {
     return {
       success: false,
       count: 0,
-      error: truncateToolCardText(result, truncatedMessage),
+      packages: [],
+      error:
+        typeof d?.error === "string"
+          ? truncateToolCardText(d.error, truncatedMessage)
+          : truncateToolCardText(result, truncatedMessage),
     };
   }
-  return { success: d.success, count: d.data?.length ?? 0, error: d.error };
+  const packages = (d.data as unknown[]).flatMap((value) => {
+    if (!value || typeof value !== "object") return [];
+    const pkg = value as Record<string, unknown>;
+    if (typeof pkg.name !== "string" || !pkg.name.trim()) return [];
+    return [
+      {
+        name: pkg.name,
+        version: typeof pkg.version === "string" ? pkg.version : undefined,
+        description:
+          typeof pkg.description === "string" ? pkg.description : undefined,
+      },
+    ];
+  });
+  return { success: true, count: packages.length, packages };
 }
 
 export function parseNpmDetailResult(
@@ -482,11 +500,36 @@ export const ToolCallCard = memo(function ToolCallCard({
                 : `${t.tool.found}${imageResultCount} ${t.tool.imageResults}`}
             </p>
           ) : toolName === "search_npm_packages" ? (
-            <p className="text-xs text-muted-foreground">
-              {!npmSearchSummary?.success
-                ? `${t.tool.failed}${npmSearchSummary?.error ?? result}`
-                : `${t.tool.found}${npmSearchCount} ${t.tool.npmPackages}`}
-            </p>
+            <div className="space-y-2 text-xs">
+              <p className="text-muted-foreground">
+                {!npmSearchSummary?.success
+                  ? `${t.tool.failed}${npmSearchSummary?.error ?? result}`
+                  : `${t.tool.found}${npmSearchCount} ${t.tool.npmPackages}`}
+              </p>
+              {npmSearchSummary?.success && npmSearchCount > 0 && (
+                <ul className="space-y-2">
+                  {npmSearchSummary.packages.map((pkg, index) => (
+                    <li key={`${pkg.name}-${index}`}>
+                      <div className="flex flex-wrap items-baseline gap-2">
+                        <span className="font-mono text-foreground break-all">
+                          {pkg.name}
+                        </span>
+                        {pkg.version && (
+                          <span className="font-mono text-muted-foreground">
+                            {pkg.version}
+                          </span>
+                        )}
+                      </div>
+                      {pkg.description && (
+                        <p className="text-muted-foreground break-words">
+                          {pkg.description}
+                        </p>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
           ) : toolName === "get_npm_package_detail" ? (
             <p className="text-xs text-muted-foreground">
               {!npmDetailSummary?.success

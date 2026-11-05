@@ -19,7 +19,7 @@ use crate::local_agent_models::{
 use crate::local_agent_protocol::{
     apply_minimal_environment, command_output_capped, finish_process, read_capped_line,
     spawn_stderr_drain, spawn_wrapped, terminate, turn_prompt, write_json, FrozenProcessSpec,
-    LocalCliRunState, PreparedPrivateFile, ProtocolContext, ProtocolOutcome, ProtocolOutputBudget,
+    LocalCliRunState, PreparedPrivateFile, ProbeOutputBudget, ProtocolContext, ProtocolOutcome,
     RunSupervisor,
 };
 use crate::local_agent_runtime::{
@@ -759,7 +759,7 @@ fn validate_preflight_line(line: &str) -> Result<(), String> {
 
 async fn drain_preflight_output<R: AsyncBufRead + Unpin>(
     reader: &mut R,
-    budget: &mut ProtocolOutputBudget,
+    budget: &mut ProbeOutputBudget,
 ) -> Result<(), String> {
     while let Some(line) = read_capped_line(reader).await? {
         if line.trim().is_empty() {
@@ -792,10 +792,10 @@ async fn run_isolation_preflight(executable: &Path) -> Result<(), ProbeFailure> 
     let mut reader = BufReader::new(process.stdout);
     let mut tree_guard = process.tree_guard;
     drop(process.stdin);
-    let mut budget = ProtocolOutputBudget::default();
-    let read_result = tokio::time::timeout(
-        PROBE_TIMEOUT,
+    let mut budget = ProbeOutputBudget::default();
+    let read_result = crate::timeouts::wait_with_timeout_retries(
         drain_preflight_output(&mut reader, &mut budget),
+        PROBE_TIMEOUT,
     )
     .await;
     let read_result = match read_result {
@@ -1214,7 +1214,6 @@ struct ClaudeIo {
     stdin: ChildStdin,
     reader: BufReader<ChildStdout>,
     cancellation: CancellationToken,
-    output_budget: ProtocolOutputBudget,
 }
 
 impl ClaudeIo {
@@ -1230,7 +1229,6 @@ impl ClaudeIo {
             if line.trim().is_empty() {
                 continue;
             }
-            self.output_budget.record(&line)?;
             return serde_json::from_str(&line)
                 .map_err(|_| "Claude stream-json emitted malformed JSON".to_string());
         }
@@ -1664,68 +1662,73 @@ async fn wait_for_init(
     context: &ProtocolContext,
     gateway_configured: bool,
 ) -> Result<String, AdapterError> {
-    tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
-        loop {
-            let value = io.read_value().await?;
-            if event_type(&value)? == "system"
-                && value.get("subtype").and_then(Value::as_str) == Some("init")
-            {
-                let session_id = session_from_value(&value)
-                    .ok_or_else(|| "Claude init record omitted its session id".to_string())?;
-                valid_session_id(session_id)?;
-                if context
-                    .request
-                    .session_id
-                    .as_deref()
-                    .filter(|value| !value.is_empty())
-                    .is_some_and(|expected| expected != session_id)
+    crate::timeouts::wait_with_timeout_retries(
+        async {
+            loop {
+                let value = io.read_value().await?;
+                if event_type(&value)? == "system"
+                    && value.get("subtype").and_then(Value::as_str) == Some("init")
                 {
-                    return Err("Claude resumed a different session".into());
+                    let session_id = session_from_value(&value)
+                        .ok_or_else(|| "Claude init record omitted its session id".to_string())?;
+                    valid_session_id(session_id)?;
+                    if context
+                        .request
+                        .session_id
+                        .as_deref()
+                        .filter(|value| !value.is_empty())
+                        .is_some_and(|expected| expected != session_id)
+                    {
+                        return Err("Claude resumed a different session".into());
+                    }
+                    let cwd = value.get("cwd").and_then(Value::as_str).ok_or_else(|| {
+                        "Claude init record omitted its working directory".to_string()
+                    })?;
+                    let expected_cwd = std::fs::canonicalize(&context.run_dir).map_err(|_| {
+                        "failed to resolve the private Claude workspace".to_string()
+                    })?;
+                    let actual_cwd = std::fs::canonicalize(cwd).map_err(|_| {
+                        "Claude init reported an invalid working directory".to_string()
+                    })?;
+                    if actual_cwd != expected_cwd {
+                        return Err(
+                            "Claude isolation init reported an unexpected working directory".into(),
+                        );
+                    }
+                    if value.get("permissionMode").and_then(Value::as_str) != Some("dontAsk") {
+                        return Err(
+                            "Claude isolation init reported an unexpected permission mode".into(),
+                        );
+                    }
+                    validate_init_inventory(&value, &context.request)?;
+                    return Ok(session_id.to_string());
                 }
-                let cwd = value.get("cwd").and_then(Value::as_str).ok_or_else(|| {
-                    "Claude init record omitted its working directory".to_string()
-                })?;
-                let expected_cwd = std::fs::canonicalize(&context.run_dir)
-                    .map_err(|_| "failed to resolve the private Claude workspace".to_string())?;
-                let actual_cwd = std::fs::canonicalize(cwd)
-                    .map_err(|_| "Claude init reported an invalid working directory".to_string())?;
-                if actual_cwd != expected_cwd {
+                if matches!(
+                    event_type(&value)?,
+                    "assistant" | "tool_use" | "tool_result" | "result"
+                ) {
                     return Err(
-                        "Claude isolation init reported an unexpected working directory".into(),
+                        "Claude emitted user-visible activity before isolation attestation".into(),
                     );
                 }
-                if value.get("permissionMode").and_then(Value::as_str) != Some("dontAsk") {
-                    return Err(
-                        "Claude isolation init reported an unexpected permission mode".into(),
-                    );
+                if event_type(&value)? == "error" {
+                    return Err(safe_error_text(
+                        value.get("message").and_then(Value::as_str),
+                        "Claude failed its isolated startup handshake",
+                        gateway_configured,
+                        context.request.session_id.is_some(),
+                    ));
                 }
-                validate_init_inventory(&value, &context.request)?;
-                return Ok(session_id.to_string());
-            }
-            if matches!(
-                event_type(&value)?,
-                "assistant" | "tool_use" | "tool_result" | "result"
-            ) {
-                return Err(
-                    "Claude emitted user-visible activity before isolation attestation".into(),
-                );
-            }
-            if event_type(&value)? == "error" {
-                return Err(safe_error_text(
-                    value.get("message").and_then(Value::as_str),
-                    "Claude failed its isolated startup handshake",
-                    gateway_configured,
-                    context.request.session_id.is_some(),
-                ));
-            }
-            if capability_semantic_event(&value) {
-                return Err(
+                if capability_semantic_event(&value) {
+                    return Err(
                     "Claude emitted an unexpected capability event before isolation attestation"
                         .into(),
                 );
+                }
             }
-        }
-    })
+        },
+        HANDSHAKE_TIMEOUT,
+    )
     .await
     .map_err(|_| "Claude isolation handshake timed out".to_string())?
 }
@@ -2305,7 +2308,6 @@ async fn run_prepared(
         stdin: process.stdin,
         reader: BufReader::new(process.stdout),
         cancellation: context.cancellation.clone(),
-        output_budget: ProtocolOutputBudget::default(),
     };
     let run_result = supervisor
         .monitor(run_claude_protocol(context, &mut io, gateway_configured))
@@ -2416,7 +2418,6 @@ mod tests {
             stdin: process.stdin,
             reader: BufReader::new(process.stdout),
             cancellation: context.cancellation.clone(),
-            output_budget: ProtocolOutputBudget::default(),
         };
         let result = supervisor
             .monitor(run_claude_protocol(context, &mut io, false))

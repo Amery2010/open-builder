@@ -1,4 +1,5 @@
 export const TOOL_FETCH_TIMEOUT_MS = 12_000;
+export const TOOL_FETCH_TIMEOUT_ATTEMPTS = 3;
 export const TOOL_MAX_CONCURRENCY = 3;
 export const WEB_SEARCH_MAX_RESULTS = 10;
 export const WEB_READER_MAX_URLS = 5;
@@ -20,8 +21,13 @@ function formatByteLimit(bytes: number): string {
 }
 
 export class ToolTimeoutError extends Error {
-  constructor(timeoutMs: number) {
-    super(`Request timed out after ${timeoutMs}ms`);
+  constructor(
+    timeoutMs: number,
+    readonly attempts = 1,
+  ) {
+    super(
+      `Request timed out after ${timeoutMs}ms${attempts > 1 ? ` (${attempts} attempts)` : ""}`,
+    );
     this.name = "ToolTimeoutError";
   }
 }
@@ -168,26 +174,87 @@ export function normalizeHttpUrlList(
   return { ok: true, urls, truncated: limited.truncated };
 }
 
-export async function fetchWithTimeout(
+export function fetchWithTimeout(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+  timeoutMs?: number,
+): Promise<Response>;
+export function fetchWithTimeout<T>(
+  input: RequestInfo | URL,
+  init: RequestInit,
+  timeoutMs: number | undefined,
+  readResponse: (response: Response) => Promise<T>,
+): Promise<T>;
+/** Read-only tool requests may be retried when our own deadline expires. A
+ * response reader includes its body in the same attempt without buffering an
+ * unbounded response before the caller can enforce its normal size limit. */
+export async function fetchWithTimeout<T>(
   input: RequestInfo | URL,
   init: RequestInit = {},
   timeoutMs = TOOL_FETCH_TIMEOUT_MS,
-): Promise<Response> {
-  const controller = new AbortController();
-  const timer = globalThis.setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetch(input, { ...init, signal: controller.signal });
-  } catch (error) {
-    if (
-      error instanceof DOMException &&
-      (error.name === "AbortError" || error.name === "TimeoutError")
-    ) {
-      throw new ToolTimeoutError(timeoutMs);
+  readResponse?: (response: Response) => Promise<T>,
+): Promise<Response | T> {
+  const inputRequest =
+    typeof Request !== "undefined" && input instanceof Request
+      ? input
+      : undefined;
+  const signal = init.signal ?? inputRequest?.signal;
+  for (let attempt = 1; ; attempt += 1) {
+    signal?.throwIfAborted();
+    const controller = new AbortController();
+    let timedOut = false;
+    let retryableResponse = true;
+    let rejectInterrupted!: (reason: unknown) => void;
+    const interrupted = new Promise<never>((_resolve, reject) => {
+      rejectInterrupted = reject;
+    });
+    const onAbort = () => {
+      const reason =
+        signal?.reason ?? new DOMException("Request was aborted", "AbortError");
+      controller.abort(reason);
+      rejectInterrupted(reason);
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    const timer = globalThis.setTimeout(() => {
+      timedOut = true;
+      const error = new ToolTimeoutError(timeoutMs, attempt);
+      controller.abort(error);
+      rejectInterrupted(error);
+    }, timeoutMs);
+    try {
+      const request = fetch(inputRequest?.clone() ?? input, {
+        ...init,
+        signal: controller.signal,
+      }).then<Response | T>((response) => {
+        controller.signal.throwIfAborted();
+        retryableResponse = response.ok;
+        return readResponse ? readResponse(response) : response;
+      });
+      return await Promise.race([request, interrupted]);
+    } catch (error) {
+      signal?.throwIfAborted();
+      if (
+        !timedOut ||
+        !retryableResponse ||
+        attempt >= TOOL_FETCH_TIMEOUT_ATTEMPTS
+      )
+        throw error;
+    } finally {
+      globalThis.clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
     }
-    throw error;
-  } finally {
-    globalThis.clearTimeout(timer);
   }
+}
+
+export function fetchTextWithTimeout(
+  input: RequestInfo | URL,
+  init: RequestInit = {},
+  timeoutMs = TOOL_FETCH_TIMEOUT_MS,
+): Promise<{ response: Response; text: string }> {
+  return fetchWithTimeout(input, init, timeoutMs, async (response) => ({
+    response,
+    text: await response.text(),
+  }));
 }
 
 export async function readResponseBytesWithLimit(

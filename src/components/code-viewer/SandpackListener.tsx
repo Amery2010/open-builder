@@ -22,10 +22,15 @@ export function SandpackListener({
     showSyntaxError: true,
   });
   const setConsoleLogs = useSandpackStore((s) => s.setConsoleLogs);
+  const onFileChangeRef = useRef(onFileChange);
   const schedulerRef = useRef<
     ReturnType<typeof createSandpackFileChangeScheduler> | undefined
   >(undefined);
   schedulerRef.current ??= createSandpackFileChangeScheduler();
+
+  useEffect(() => {
+    onFileChangeRef.current = onFileChange;
+  }, [onFileChange]);
 
   useEffect(() => {
     if (!requestedActiveFile) return;
@@ -50,9 +55,11 @@ export function SandpackListener({
       conversationId,
       path: normalizedPath,
       content: code,
-      commit: onFileChange,
+      // Capture this edit's callback and canonical baseline. A later Host
+      // update must not reinterpret pending editor content as a new edit.
+      commit: onFileChangeRef.current,
     });
-  }, [code, activeFile, conversationId, onFileChange]);
+  }, [code, activeFile, conversationId]);
 
   useEffect(
     () => () => {

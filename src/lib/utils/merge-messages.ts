@@ -227,12 +227,14 @@ export function mergeMessages(
       }
       const blocks: Block[] = [];
       const origin = msg.metadata?.origin;
+      const instructionId = msg.metadata?.instructionId;
       let j = i;
       let bi = 0;
       while (
         j < messages.length &&
         messages[j].role === "user" &&
-        messages[j].metadata?.origin === origin
+        messages[j].metadata?.origin === origin &&
+        messages[j].metadata?.instructionId === instructionId
       ) {
         const text = getTextContent(messages[j].content);
         if (text) {
@@ -272,7 +274,13 @@ export function mergeMessages(
         j++;
       }
       if (blocks.length > 0) {
-        merged.push({ role: "user", blocks, id: `user-${i}`, origin });
+        merged.push({
+          role: "user",
+          blocks,
+          id: `user-${i}`,
+          origin,
+          ...(instructionId ? { instructionId } : {}),
+        });
       }
       i = j - 1;
     } else if (msg.role === "assistant") {

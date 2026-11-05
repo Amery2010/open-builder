@@ -213,19 +213,29 @@ export class RemoteMcpClient {
     if (!this.client || !this.connected) {
       throw new Error("MCP server is not connected.");
     }
-    return this.client.callTool(
-      {
-        name,
-        arguments:
-          args && typeof args === "object"
-            ? (args as Record<string, unknown>)
-            : {},
-      },
-      {
-        timeout: timeoutFor(this.entry),
-        signal,
-      },
-    );
+    signal?.throwIfAborted();
+    try {
+      return await this.client.callTool(
+        {
+          name,
+          arguments:
+            args && typeof args === "object"
+              ? (args as Record<string, unknown>)
+              : {},
+        },
+        {
+          // Keep the original request alive for three waiting windows. Reissuing
+          // an MCP tool could duplicate writes that completed after a timeout.
+          timeout: timeoutFor(this.entry) * 3,
+          signal,
+        },
+      );
+    } catch (error) {
+      // The SDK can wrap cancellation as REQUEST_TIMEOUT. Preserve Stop so it
+      // cannot be mistaken for a retryable transport failure by callers.
+      signal?.throwIfAborted();
+      throw error;
+    }
   }
 
   async close(): Promise<void> {

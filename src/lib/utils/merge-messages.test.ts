@@ -34,6 +34,35 @@ describe("mergeMessages", () => {
     vi.unstubAllGlobals();
   });
 
+  it("keeps separately submitted updates as individual user messages", async () => {
+    const { mergeMessages } = await import("./merge-messages");
+    const messages: Message[] = [
+      { role: "user", content: "Original request" },
+      {
+        role: "user",
+        content: "Use blue",
+        metadata: { instructionId: "update-1" },
+      },
+      {
+        role: "user",
+        content: "Keep the layout",
+        metadata: { instructionId: "update-2" },
+      },
+    ];
+    const merged = mergeMessages(messages);
+    expect(merged.map((message) => message.id)).toEqual([
+      "user-0",
+      "user-1",
+      "user-2",
+    ]);
+    expect(merged.map((message) => message.instructionId)).toEqual([
+      undefined,
+      "update-1",
+      "update-2",
+    ]);
+    expect(messages).toHaveLength(3);
+  });
+
   it("allows withdrawal through hidden records but not through visible activity", async () => {
     const { findWithdrawableUserMessageIndex } =
       await import("./merge-messages");

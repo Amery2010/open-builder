@@ -214,9 +214,15 @@ pub(crate) fn identity(provider: LocalAgentProvider) -> AdapterIdentity {
     }
 }
 
-async fn provider_probe(provider: LocalAgentProvider, executable: &Path) -> AdapterProbe {
+async fn provider_probe(
+    provider: LocalAgentProvider,
+    executable: &Path,
+    force_refresh: bool,
+) -> AdapterProbe {
     match provider {
-        LocalAgentProvider::Codex => crate::local_agent_codex::probe(executable).await,
+        LocalAgentProvider::Codex => {
+            crate::local_agent_codex::probe(executable, force_refresh).await
+        }
         LocalAgentProvider::Claude => crate::local_agent_claude::probe(executable).await,
         LocalAgentProvider::Pi => crate::local_agent_pi::probe(executable).await,
         LocalAgentProvider::Antigravity => crate::local_agent_antigravity::probe(executable).await,
@@ -310,7 +316,7 @@ pub(crate) async fn probe(
     preference: LocalAgentPreference,
     force_refresh: bool,
 ) -> ResolvedAdapterProbe {
-    let mut probe = provider_probe(provider, executable).await;
+    let mut probe = provider_probe(provider, executable, force_refresh).await;
     if !matches!(
         probe.availability,
         LocalAgentAvailability::Ready | LocalAgentAvailability::NeedsSetup

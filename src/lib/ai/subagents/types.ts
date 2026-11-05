@@ -12,7 +12,7 @@ export interface SubagentDefinition {
   toolWhitelist: string[];
   /** Optional per-subagent provider/model override. Undefined inherits the main agent. */
   modelOverride?: Partial<AISettings>;
-  /** Max inner-loop iterations (default 10). */
+  /** Optional explicit inner-loop limit. Undefined allows the subagent to finish naturally. */
   maxIterations?: number;
   /** Truncate the subagent text result to this many chars before returning (default 4000). */
   maxResultLength?: number;

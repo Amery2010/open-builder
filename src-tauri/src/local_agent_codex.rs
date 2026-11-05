@@ -1,10 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout, Command};
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::local_agent::{
@@ -21,13 +22,25 @@ use crate::local_agent_models::{
 use crate::local_agent_protocol::{
     apply_minimal_environment, command_output_capped, contains_capability_semantics,
     read_capped_line, turn_prompt, FrozenProcessSpec, LocalCliRunState, PreparedPrivateFile,
-    ProtocolContext, ProtocolOutcome, ProtocolOutputBudget, RunSupervisor,
+    ProtocolContext, ProtocolOutcome, RunSupervisor,
 };
 use crate::local_agent_runtime::{
-    is_operating_system_permission_error, AdapterError, LocalCliFailureCode,
+    is_operating_system_permission_error, AdapterError, InstallationIdentity, LocalCliFailureCode,
+    LocalCliIsolationReason, LocalCliItemKind,
 };
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const CAPABILITY_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+// Only executable capabilities are cached. Credentials, provider configuration,
+// model catalogs and launch authority are still inspected for every request.
+static CAPABILITY_CACHE: Mutex<Option<CachedCapabilities>> = Mutex::const_new(None);
+
+struct CachedCapabilities {
+    installation: InstallationIdentity,
+    version: String,
+    expires_at: Instant,
+}
+
 const MAX_PROBE_OUTPUT_BYTES: usize = 256 * 1024;
 const MAX_MODEL_PROBE_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_CODEX_CONFIG_BYTES: u64 = 2 * 1024 * 1024;
@@ -1046,8 +1059,9 @@ fn sorted_tool_names(tools: &[LocalToolSpec]) -> Vec<String> {
 fn open_builder_mcp_config(bridge_url: &str, tool_names: &[String]) -> String {
     let enabled_tools = serde_json::to_string(tool_names).unwrap_or_else(|_| "[]".to_string());
     format!(
-        "{{open_builder={{url={}, bearer_token_env_var=\"{CODEX_MCP_TOKEN_ENV}\", required=true, default_tools_approval_mode=\"approve\", enabled_tools={enabled_tools}}}}}",
-        toml_string(bridge_url)
+        "{{open_builder={{url={}, bearer_token_env_var=\"{CODEX_MCP_TOKEN_ENV}\", required=true, tool_timeout_sec={}, default_tools_approval_mode=\"approve\", enabled_tools={enabled_tools}}}}}",
+        toml_string(bridge_url),
+        (crate::local_agent_bridge::TOOL_CALL_TIMEOUT * crate::timeouts::TIMEOUT_ATTEMPTS).as_secs(),
     )
 }
 
@@ -1083,14 +1097,52 @@ async fn probe_mcp_approval_capability(executable: &Path) -> Result<bool, String
         })
 }
 
-pub(crate) async fn probe(executable: &Path) -> AdapterProbe {
+pub(crate) async fn probe(executable: &Path, force_refresh: bool) -> AdapterProbe {
+    probe_with_user_config(
+        executable,
+        read_user_config(),
+        force_refresh,
+        &CAPABILITY_CACHE,
+    )
+    .await
+}
+
+async fn probe_with_user_config(
+    executable: &Path,
+    user_config: Result<Option<String>, String>,
+    force_refresh: bool,
+    cache: &Mutex<Option<CachedCapabilities>>,
+) -> AdapterProbe {
+    if force_refresh {
+        cache.lock().await.take();
+    }
+    let result = probe_current_state(executable, user_config, force_refresh, cache).await;
+    if result.availability != LocalAgentAvailability::Ready
+        || result.message.as_deref() == Some(MODEL_DISCOVERY_WARNING)
+    {
+        cache.lock().await.take();
+    }
+    result
+}
+
+async fn probe_current_state(
+    executable: &Path,
+    user_config: Result<Option<String>, String>,
+    force_refresh: bool,
+    cache: &Mutex<Option<CachedCapabilities>>,
+) -> AdapterProbe {
+    let installation = match InstallationIdentity::capture(executable) {
+        Ok(installation) => installation,
+        Err(message) => return error_probe(None, &message),
+    };
+    let executable = installation.canonical_path();
     let version_output = match run_capability_command(executable, &["--version"]).await {
         Ok(output) if output.status.success() => output,
         Ok(_) => return error_probe(None, "Codex version probe failed."),
         Err(_) => return error_probe(None, "Codex version probe failed."),
     };
     let version = first_output_line(&version_output);
-    let user_config = match read_user_config() {
+    let user_config = match user_config {
         Ok(config) => config,
         Err(message) => return error_probe(version, &message),
     };
@@ -1108,41 +1160,67 @@ pub(crate) async fn probe(executable: &Path) -> AdapterProbe {
         Err(message) => return error_probe(version, &message),
     };
 
-    let exec_help = match run_capability_command(executable, &["exec", "--help"]).await {
-        Ok(output) if output.status.success() => output_text(&output),
-        Ok(_) => return error_probe(version, "Codex structured execution probe failed."),
-        Err(_) => return error_probe(version, "Codex structured execution probe timed out."),
-    };
-    if !required_flags_present(
-        &exec_help,
-        &[
-            "--json",
-            "--ignore-user-config",
-            "--ignore-rules",
-            "--sandbox",
-            "--cd",
-        ],
-    ) {
-        return unsupported_probe(version);
-    }
+    // Serialize only the static checks so concurrent inspections share their
+    // result, without caching or locking the subsequent dynamic checks.
+    let mut cached = cache.lock().await;
+    let cache_hit = !force_refresh
+        && cached.as_ref().is_some_and(|entry| {
+            entry.installation == installation
+                && version.as_deref() == Some(entry.version.as_str())
+                && Instant::now() < entry.expires_at
+        });
+    if !cache_hit {
+        *cached = None;
+        let exec_help = match run_capability_command(executable, &["exec", "--help"]).await {
+            Ok(output) if output.status.success() => output_text(&output),
+            Ok(_) => return error_probe(version, "Codex structured execution probe failed."),
+            Err(_) => return error_probe(version, "Codex structured execution probe timed out."),
+        };
+        if !required_flags_present(
+            &exec_help,
+            &[
+                "--json",
+                "--ignore-user-config",
+                "--ignore-rules",
+                "--sandbox",
+                "--cd",
+            ],
+        ) {
+            return unsupported_probe(version);
+        }
 
-    let resume_help = match run_capability_command(executable, &["exec", "resume", "--help"]).await
-    {
-        Ok(output) if output.status.success() => output_text(&output),
-        Ok(_) => return error_probe(version, "Codex session resume probe failed."),
-        Err(_) => return error_probe(version, "Codex session resume probe timed out."),
-    };
-    if !required_flags_present(
-        &resume_help,
-        &["--json", "--ignore-user-config", "--ignore-rules"],
-    ) {
-        return unsupported_probe(version);
-    }
+        let resume_help =
+            match run_capability_command(executable, &["exec", "resume", "--help"]).await {
+                Ok(output) if output.status.success() => output_text(&output),
+                Ok(_) => return error_probe(version, "Codex session resume probe failed."),
+                Err(_) => return error_probe(version, "Codex session resume probe timed out."),
+            };
+        if !required_flags_present(
+            &resume_help,
+            &["--json", "--ignore-user-config", "--ignore-rules"],
+        ) {
+            return unsupported_probe(version);
+        }
 
-    match probe_mcp_approval_capability(executable).await {
-        Ok(true) => {}
-        Ok(false) | Err(_) => return unsupported_probe(version),
+        match probe_mcp_approval_capability(executable).await {
+            Ok(true) => {}
+            Ok(false) | Err(_) => return unsupported_probe(version),
+        }
+
+        if let Err(message) = installation.verify_unchanged() {
+            return error_probe(version, &message);
+        }
+        // An absent version cannot prove that a launcher still targets the
+        // same underlying CLI, so do not cache it.
+        if let Some(version) = &version {
+            *cached = Some(CachedCapabilities {
+                installation: installation.clone(),
+                version: version.clone(),
+                expires_at: Instant::now() + CAPABILITY_CACHE_TTL,
+            });
+        }
     }
+    drop(cached);
 
     let login_status = if provider_config.bypasses_login_status() {
         LoginStatus::Authenticated
@@ -1460,7 +1538,6 @@ struct CodexAppServerIo {
     stdin: ChildStdin,
     reader: BufReader<ChildStdout>,
     cancellation: CancellationToken,
-    output_budget: ProtocolOutputBudget,
     pending_notifications: Vec<Value>,
 }
 
@@ -1477,7 +1554,6 @@ impl CodexAppServerIo {
             line = read_capped_line(&mut self.reader) => line?,
         }
         .ok_or_else(|| "Codex app server closed before completing the image task".to_string())?;
-        self.output_budget.record(&line)?;
         serde_json::from_str(&line)
             .map_err(|_| "Codex app server emitted malformed JSON".to_string())
     }
@@ -1485,40 +1561,44 @@ impl CodexAppServerIo {
     async fn request(&mut self, id: u64, method: &str, params: Value) -> Result<Value, String> {
         self.write(&json!({"id":id,"method":method,"params":params}))
             .await?;
-        let response = tokio::time::timeout(APP_SERVER_HANDSHAKE_TIMEOUT, async {
-            loop {
-                let value = self.read_value().await?;
-                if value.get("id").and_then(Value::as_u64) == Some(id) {
-                    if value.get("method").is_some() {
+        let response = crate::timeouts::wait_with_timeout_retries(
+            async {
+                loop {
+                    let value = self.read_value().await?;
+                    if value.get("id").and_then(Value::as_u64) == Some(id) {
+                        if value.get("method").is_some() {
+                            return Err(
+                                "Codex app server requested an unauthorized client capability"
+                                    .to_string(),
+                            );
+                        }
+                        if value.get("error").is_some() {
+                            return Err(format!("Codex app server rejected {method}"));
+                        }
+                        return value.get("result").cloned().ok_or_else(|| {
+                            "Codex app server response omitted its result".to_string()
+                        });
+                    }
+                    if value.get("id").is_some() && value.get("method").is_some() {
                         return Err(
                             "Codex app server requested an unauthorized client capability"
                                 .to_string(),
                         );
                     }
-                    if value.get("error").is_some() {
-                        return Err(format!("Codex app server rejected {method}"));
+                    if value.get("method").is_none() {
+                        return Err("Codex app server emitted an invalid response".to_string());
                     }
-                    return value
-                        .get("result")
-                        .cloned()
-                        .ok_or_else(|| "Codex app server response omitted its result".to_string());
+                    if self.pending_notifications.len() >= APP_SERVER_MAX_PRE_RESPONSE_NOTIFICATIONS
+                    {
+                        return Err(
+                            "Codex app server exceeded the pre-response event limit".to_string()
+                        );
+                    }
+                    self.pending_notifications.push(value);
                 }
-                if value.get("id").is_some() && value.get("method").is_some() {
-                    return Err(
-                        "Codex app server requested an unauthorized client capability".to_string(),
-                    );
-                }
-                if value.get("method").is_none() {
-                    return Err("Codex app server emitted an invalid response".to_string());
-                }
-                if self.pending_notifications.len() >= APP_SERVER_MAX_PRE_RESPONSE_NOTIFICATIONS {
-                    return Err(
-                        "Codex app server exceeded the pre-response event limit".to_string()
-                    );
-                }
-                self.pending_notifications.push(value);
-            }
-        })
+            },
+            APP_SERVER_HANDSHAKE_TIMEOUT,
+        )
         .await
         .map_err(|_| format!("Codex app server {method} handshake timed out"))??;
         Ok(response)
@@ -1875,7 +1955,6 @@ pub(crate) async fn probe_image_capabilities(executable: &Path) -> LocalAgentCap
                     stdin: process.stdin,
                     reader: BufReader::new(process.stdout),
                     cancellation,
-                    output_budget: ProtocolOutputBudget::default(),
                     pending_notifications: Vec::new(),
                 };
                 let result = supervisor.monitor(run_capability_app_server(&mut io)).await;
@@ -1915,7 +1994,6 @@ async fn generate_image_with_config(
         stdin: process.stdin,
         reader: BufReader::new(process.stdout),
         cancellation,
-        output_budget: ProtocolOutputBudget::default(),
         pending_notifications: Vec::new(),
     };
     let result = supervisor
@@ -1927,7 +2005,6 @@ async fn generate_image_with_config(
 struct CodexIo {
     reader: BufReader<ChildStdout>,
     cancellation: CancellationToken,
-    output_budget: ProtocolOutputBudget,
 }
 
 impl CodexIo {
@@ -1937,7 +2014,6 @@ impl CodexIo {
             line = read_capped_line(&mut self.reader) => line?,
         }
         .ok_or_else(|| "Codex exec closed before completing the turn".to_string())?;
-        self.output_budget.record(&line)?;
         serde_json::from_str(&line).map_err(|_| "Codex exec emitted malformed JSON".to_string())
     }
 }
@@ -1957,11 +2033,7 @@ fn item_tool_name(item: &Value) -> Option<&str> {
     item.get("tool")
         .or_else(|| item.get("name"))
         .and_then(Value::as_str)
-        .and_then(|name| {
-            name.strip_prefix("mcp__open_builder__")
-                .or_else(|| name.strip_prefix("mcp__open-builder__"))
-                .or(Some(name))
-        })
+        .map(host_tool_name)
         .filter(|name| !name.is_empty())
 }
 
@@ -1982,19 +2054,247 @@ fn is_provider_approval_rejection(message: &str) -> bool {
         || message.contains("user cancelled mcp tool call")
 }
 
-fn validate_mcp_item(item: &Value, expected_tools: &BTreeSet<String>) -> Result<(), String> {
-    let server = item_server(item);
-    let encoded_name = item.get("name").and_then(Value::as_str).unwrap_or_default();
-    if !matches!(server, Some("open_builder" | "open-builder"))
-        && !encoded_name.starts_with("mcp__open_builder__")
-        && !encoded_name.starts_with("mcp__open-builder__")
+fn isolation_error(item: &Value, reason: LocalCliIsolationReason) -> AdapterError {
+    let message = match reason {
+        LocalCliIsolationReason::ExternalMcpServer => {
+            "Codex attempted to use an external MCP server"
+        }
+        LocalCliIsolationReason::UnauthorizedHostTool => {
+            "Codex attempted to use an unauthorized Open Builder tool"
+        }
+        LocalCliIsolationReason::NativeCapability => {
+            "Codex attempted to use a disabled native capability"
+        }
+        LocalCliIsolationReason::InvalidDiscovery => {
+            "Codex emitted an invalid private resource discovery item"
+        }
+    };
+    let mut error = AdapterError::coded(LocalCliFailureCode::IsolationViolation, message);
+    error.isolation_reason = Some(reason);
+    error.item_kind = match item_kind(item) {
+        "mcp_tool_call" | "mcpToolCall" => Some(LocalCliItemKind::McpToolCall),
+        "agent_message" | "agentMessage" | "assistant_message" => {
+            Some(LocalCliItemKind::AgentMessage)
+        }
+        "reasoning" => Some(LocalCliItemKind::Reasoning),
+        "plan" => Some(LocalCliItemKind::Plan),
+        "user_message" | "userMessage" => Some(LocalCliItemKind::UserMessage),
+        "context_compaction" => Some(LocalCliItemKind::ContextCompaction),
+        "web_search_call" | "web_search" | "webSearch" => Some(LocalCliItemKind::WebSearch),
+        "command_execution" | "local_shell_call" | "shell_call" => {
+            Some(LocalCliItemKind::CommandExecution)
+        }
+        "file_change" | "fileChange" => Some(LocalCliItemKind::FileChange),
+        "dynamic_tool_call" | "dynamicToolCall" => Some(LocalCliItemKind::DynamicToolCall),
+        "collab_agent_tool_call" | "collabAgentToolCall" => {
+            Some(LocalCliItemKind::CollabAgentToolCall)
+        }
+        "hook_prompt" | "hookPrompt" => Some(LocalCliItemKind::HookPrompt),
+        "image_view" | "imageView" => Some(LocalCliItemKind::ImageView),
+        "image_generation" | "imageGeneration" => Some(LocalCliItemKind::ImageGeneration),
+        "computer_use" => Some(LocalCliItemKind::ComputerUse),
+        "browser_use" => Some(LocalCliItemKind::BrowserUse),
+        "sub_agent_activity" | "subAgentActivity" => Some(LocalCliItemKind::SubAgentActivity),
+        _ => None,
+    };
+    error
+}
+
+fn is_private_mcp_server(server: &str) -> bool {
+    matches!(server, "open_builder" | "open-builder")
+}
+
+fn host_tool_name(name: &str) -> &str {
+    name.strip_prefix("mcp__open_builder__")
+        .or_else(|| name.strip_prefix("mcp__open-builder__"))
+        .unwrap_or(name)
+}
+
+fn empty_discovery_payload(payload: &Value, key: &str, server: Option<&str>) -> bool {
+    let Some(object) = payload.as_object() else {
+        return false;
+    };
+    object
+        .keys()
+        .all(|field| field == key || matches!(field.as_str(), "server" | "nextCursor"))
+        && object
+            .get(key)
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty)
+        && object.get("nextCursor").is_none_or(Value::is_null)
+        && match server {
+            Some(server) => object.get("server").and_then(Value::as_str) == Some(server),
+            None => object.get("server").is_none_or(Value::is_null),
+        }
+}
+
+/// Codex reports its own directory queries as MCP calls with synthetic server
+/// `codex`. The isolated bridge advertises tools only, so only empty catalogs
+/// are valid. These events never become Host calls or consume the Host budget.
+fn validate_resource_discovery(item: &Value, tool: &str) -> Result<(), AdapterError> {
+    let invalid = || isolation_error(item, LocalCliIsolationReason::InvalidDiscovery);
+    let server = item_server(item).ok_or_else(invalid)?;
+    if ["tool", "name"].iter().any(|field| {
+        item.get(field)
+            .is_some_and(|value| value.as_str() != Some(tool))
+    }) || ["approval", "permission"]
+        .iter()
+        .any(|field| item.get(field).is_some_and(|value| !value.is_null()))
     {
-        return Err("Codex attempted to use an external MCP server".to_string());
+        return Err(invalid());
     }
-    let tool_name = item_tool_name(item)
-        .ok_or_else(|| "Codex emitted an Open Builder MCP item without a tool name".to_string())?;
+    let arguments = item.get("arguments").filter(|value| !value.is_null());
+    let args = arguments
+        .map(|value| value.as_object().ok_or_else(invalid))
+        .transpose()?;
+    if args.is_some_and(|args| {
+        args.keys()
+            .any(|key| !matches!(key.as_str(), "server" | "cursor"))
+    }) {
+        return Err(invalid());
+    }
+    let optional_string = |key| -> Result<Option<&str>, AdapterError> {
+        match args
+            .and_then(|args| args.get(key))
+            .filter(|value| !value.is_null())
+        {
+            Some(value) => value
+                .as_str()
+                .map(str::trim)
+                .map(|text| (!text.is_empty()).then_some(text))
+                .ok_or_else(invalid),
+            None => Ok(None),
+        }
+    };
+    let target = optional_string("server")?;
+    if optional_string("cursor")?.is_some()
+        || !(server == "codex" && target.is_none()
+            || is_private_mcp_server(server) && target == Some(server))
+    {
+        return Err(invalid());
+    }
+    if item.get("error").is_some_and(|value| !value.is_null()) {
+        return Err(invalid());
+    }
+    let status = item.get("status").and_then(Value::as_str);
+    if matches!(status, Some("in_progress" | "inProgress")) {
+        return if item.get("result").is_none_or(Value::is_null) {
+            Ok(())
+        } else {
+            Err(invalid())
+        };
+    }
+    if status != Some("completed") {
+        return Err(invalid());
+    }
+    let result = item
+        .get("result")
+        .and_then(Value::as_object)
+        .ok_or_else(invalid)?;
+    if result.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "content" | "structured_content" | "structuredContent" | "_meta"
+        )
+    }) || result.get("_meta").is_some_and(|value| !value.is_null())
+    {
+        return Err(invalid());
+    }
+    let key = if tool == "list_mcp_resources" {
+        "resources"
+    } else {
+        "resourceTemplates"
+    };
+    let content = result
+        .get("content")
+        .and_then(Value::as_array)
+        .ok_or_else(invalid)?;
+    if content.len() != 1 {
+        return Err(invalid());
+    }
+    let text = content[0].as_object().ok_or_else(invalid)?;
+    if text.len() != 2 || text.get("type").and_then(Value::as_str) != Some("text") {
+        return Err(invalid());
+    }
+    let payload: Value = serde_json::from_str(
+        text.get("text")
+            .and_then(Value::as_str)
+            .ok_or_else(invalid)?,
+    )
+    .map_err(|_| invalid())?;
+    if !empty_discovery_payload(&payload, key, target) {
+        return Err(invalid());
+    }
+    for field in ["structured_content", "structuredContent"] {
+        if result
+            .get(field)
+            .is_some_and(|value| !value.is_null() && !empty_discovery_payload(value, key, target))
+        {
+            return Err(invalid());
+        }
+    }
+    Ok(())
+}
+
+fn validate_mcp_item(item: &Value, expected_tools: &BTreeSet<String>) -> Result<(), AdapterError> {
+    let server = item_server(item);
+    // If aliases coexist, every supplied identity must agree. An encoded name
+    // must never override an explicit external server or another tool name.
+    for field in ["server", "server_name", "serverName"] {
+        if item
+            .get(field)
+            .is_some_and(|value| value.as_str().is_none() || value.as_str() != server)
+        {
+            return Err(isolation_error(
+                item,
+                LocalCliIsolationReason::ExternalMcpServer,
+            ));
+        }
+    }
+    let tool_name = item_tool_name(item).ok_or_else(|| {
+        AdapterError::from("Codex emitted an Open Builder MCP item without a tool name")
+    })?;
+    for field in ["tool", "name"] {
+        if item.get(field).is_some_and(|value| {
+            value
+                .as_str()
+                .is_none_or(|name| host_tool_name(name) != tool_name)
+        }) {
+            return Err(isolation_error(
+                item,
+                LocalCliIsolationReason::UnauthorizedHostTool,
+            ));
+        }
+    }
+    let raw_name = item
+        .get("tool")
+        .or_else(|| item.get("name"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if matches!(
+        raw_name,
+        "list_mcp_resources" | "list_mcp_resource_templates"
+    ) {
+        return validate_resource_discovery(item, raw_name);
+    }
+    let encoded_private = ["tool", "name"].iter().any(|field| {
+        item.get(field).and_then(Value::as_str).is_some_and(|name| {
+            name.starts_with("mcp__open_builder__") || name.starts_with("mcp__open-builder__")
+        })
+    });
+    if server.is_some_and(|server| !is_private_mcp_server(server))
+        || server.is_none() && !encoded_private
+    {
+        return Err(isolation_error(
+            item,
+            LocalCliIsolationReason::ExternalMcpServer,
+        ));
+    }
     if !expected_tools.contains(tool_name) {
-        return Err("Codex attempted to use an unauthorized Open Builder tool".to_string());
+        return Err(isolation_error(
+            item,
+            LocalCliIsolationReason::UnauthorizedHostTool,
+        ));
     }
 
     if let Some(status) = item.get("status").and_then(Value::as_str) {
@@ -2008,18 +2308,18 @@ fn validate_mcp_item(item: &Value, expected_tools: &BTreeSet<String>) -> Result<
                 | "cancelled"
                 | "canceled"
         ) {
-            return Err("Codex emitted an unsupported Open Builder MCP item status".to_string());
+            return Err("Codex emitted an unsupported Open Builder MCP item status".into());
         }
     }
-
     let status_is_rejected = item
         .get("status")
         .and_then(Value::as_str)
         .is_some_and(|status| matches!(status, "failed" | "declined" | "cancelled" | "canceled"));
     let approval_field = item.get("approval").is_some() || item.get("permission").is_some();
-    let approval_message = mcp_item_error_message(item).is_some_and(is_provider_approval_rejection);
-    if approval_message || status_is_rejected && approval_field {
-        return Err(MCP_APPROVAL_REJECTION_ERROR.to_string());
+    if mcp_item_error_message(item).is_some_and(is_provider_approval_rejection)
+        || status_is_rejected && approval_field
+    {
+        return Err(MCP_APPROVAL_REJECTION_ERROR.into());
     }
     Ok(())
 }
@@ -2028,15 +2328,15 @@ fn validate_item_kind(
     item: &Value,
     native_search: bool,
     expected_tools: &BTreeSet<String>,
-) -> Result<(), String> {
+) -> Result<(), AdapterError> {
     match item_kind(item) {
         "agent_message" | "agentMessage" | "assistant_message" | "reasoning" | "plan"
         | "user_message" | "userMessage" | "context_compaction" => {
             if contains_capability_semantics(item) {
-                Err(
-                    "Codex attempted to use disabled native capability in a passive item"
-                        .to_string(),
-                )
+                Err(isolation_error(
+                    item,
+                    LocalCliIsolationReason::NativeCapability,
+                ))
             } else {
                 Ok(())
             }
@@ -2046,7 +2346,10 @@ fn validate_item_kind(
             if native_search {
                 Ok(())
             } else {
-                Err("Codex attempted to use disabled native web search".to_string())
+                Err(isolation_error(
+                    item,
+                    LocalCliIsolationReason::NativeCapability,
+                ))
             }
         }
         ""
@@ -2068,11 +2371,11 @@ fn validate_item_kind(
         | "computer_use"
         | "browser_use"
         | "sub_agent_activity"
-        | "subAgentActivity" => Err(format!(
-            "Codex attempted to use disabled native capability {}",
-            item_kind(item)
+        | "subAgentActivity" => Err(isolation_error(
+            item,
+            LocalCliIsolationReason::NativeCapability,
         )),
-        other => Err(format!("Codex emitted an unsupported thread item {other}")),
+        other => Err(format!("Codex emitted an unsupported thread item {other}").into()),
     }
 }
 
@@ -2155,8 +2458,19 @@ fn item_events(
     native_search: bool,
     expected_tools: &BTreeSet<String>,
     text_state: &mut HashMap<String, String>,
-) -> Result<Vec<LocalAgentEvent>, String> {
+) -> Result<Vec<LocalAgentEvent>, AdapterError> {
     validate_item_kind(item, native_search, expected_tools)?;
+    if matches!(
+        item_tool_name(item),
+        Some("list_mcp_resources" | "list_mcp_resource_templates")
+    ) && matches!(method, "item.completed" | "item/completed")
+        && item.get("status").and_then(Value::as_str) != Some("completed")
+    {
+        return Err(isolation_error(
+            item,
+            LocalCliIsolationReason::InvalidDiscovery,
+        ));
+    }
     let kind = item_kind(item);
     let item_id = item.get("id").and_then(Value::as_str);
     let mut events = Vec::new();
@@ -2441,7 +2755,6 @@ async fn run_prepared(
     let mut io = CodexIo {
         reader: BufReader::new(process.stdout),
         cancellation: context.cancellation.clone(),
-        output_budget: ProtocolOutputBudget::default(),
     };
     let expected_tools = context
         .request
@@ -2479,7 +2792,7 @@ async fn run_prepared(
         let mut awaiting_thread = true;
         loop {
             let event_result: Result<Result<Value, String>, String> = if awaiting_thread {
-                match tokio::time::timeout(HANDSHAKE_TIMEOUT, io.read_value()).await {
+                match crate::timeouts::wait_with_timeout_retries(io.read_value(), HANDSHAKE_TIMEOUT).await {
                     Ok(result) => Ok(result),
                     Err(_) => return Err(HANDSHAKE_TIMEOUT_ERROR.into()),
                 }
@@ -2652,6 +2965,250 @@ mod tests {
 
     const CONTRACT_HOST_TOOL: &str = "host_write_probe";
     const CONTRACT_HOST_RESULT: &str = "host-resolution-ok:codex";
+
+    #[tokio::test]
+    #[ignore = "explicitly probes an installed Codex CLI and its login state without sending model requests"]
+    async fn manual_real_codex_probe_timings() {
+        let executable = PathBuf::from(
+            std::env::var_os("OPEN_BUILDER_MANUAL_CLI_EXECUTABLE")
+                .expect("set OPEN_BUILDER_MANUAL_CLI_EXECUTABLE"),
+        );
+        let cache = Mutex::new(None);
+        let mut previous_expiry = None;
+        for (round, force_refresh) in [("cold", false), ("warm", false), ("force", true)] {
+            let started = Instant::now();
+            let result =
+                probe_with_user_config(&executable, read_user_config(), force_refresh, &cache)
+                    .await;
+            println!(
+                "{}",
+                json!({
+                    "provider": "codex",
+                    "round": round,
+                    "elapsedMs": started.elapsed().as_millis(),
+                    "availability": result.availability,
+                })
+            );
+            assert_eq!(result.availability, LocalAgentAvailability::Ready);
+            let cached = cache.lock().await;
+            let expiry = cached
+                .as_ref()
+                .expect("static capabilities must be cacheable")
+                .expires_at;
+            if round == "warm" {
+                assert_eq!(
+                    Some(expiry),
+                    previous_expiry,
+                    "warm probe must reuse the cache"
+                );
+            } else if round == "force" {
+                assert_ne!(
+                    Some(expiry),
+                    previous_expiry,
+                    "forced probe must refresh the cache"
+                );
+            }
+            previous_expiry = Some(expiry);
+        }
+        println!("Verified cold, cached and forced Codex probes; no model request was sent. Timings are observations, not a performance gate.");
+    }
+
+    #[test]
+    fn fresh_and_resume_tools_allow_all_host_timeout_windows() {
+        for session in [None, Some("thread-123".to_string())] {
+            let mut request = request();
+            request.session_id = session;
+            let args = build_exec_args(
+                &request,
+                Path::new("/private/run"),
+                Path::new("/private/run/instructions"),
+                "http://127.0.0.1:43123/mcp",
+                &CodexProviderConfig::default(),
+            )
+            .unwrap();
+            let config = args
+                .iter()
+                .find_map(|arg| arg.strip_prefix("mcp_servers="))
+                .unwrap();
+            let parsed = config.parse::<toml::Value>().unwrap();
+            assert_eq!(
+                parsed["open_builder"]
+                    .get("tool_timeout_sec")
+                    .and_then(toml::Value::as_integer),
+                Some(
+                    (crate::local_agent_bridge::TOOL_CALL_TIMEOUT
+                        * crate::timeouts::TIMEOUT_ATTEMPTS)
+                        .as_secs() as i64
+                ),
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn repeated_probe_rechecks_dynamic_state_without_repeating_static_commands() {
+        let (root, executable) = compile_contract_cli("probe");
+        let cache = Mutex::new(None);
+        for _ in 0..2 {
+            let result = probe_with_user_config(&executable, Ok(None), false, &cache).await;
+            assert_eq!(result.availability, LocalAgentAvailability::Ready);
+        }
+        let commands = std::fs::read_to_string(root.join("probe-commands")).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(
+            commands.lines().collect::<Vec<_>>(),
+            [
+                "version",
+                "exec-help",
+                "resume-help",
+                "mcp",
+                "login",
+                "models",
+                "version",
+                "login",
+                "models",
+            ]
+        );
+    }
+
+    fn take_probe_commands(root: &Path) -> Vec<String> {
+        let path = root.join("probe-commands");
+        let commands = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        commands.lines().map(str::to_string).collect()
+    }
+
+    #[tokio::test]
+    async fn capability_cache_expires_and_invalidates_on_refresh_version_identity_and_path() {
+        let (root, executable) = compile_contract_cli("probe");
+        let cache = Mutex::new(None);
+        let full_probe = [
+            "version",
+            "exec-help",
+            "resume-help",
+            "mcp",
+            "login",
+            "models",
+        ];
+        probe_with_user_config(&executable, Ok(None), false, &cache).await;
+        assert_eq!(take_probe_commands(&root), full_probe);
+
+        probe_with_user_config(&executable, Ok(None), true, &cache).await;
+        assert_eq!(take_probe_commands(&root), full_probe);
+
+        cache.lock().await.as_mut().unwrap().expires_at = Instant::now();
+        probe_with_user_config(&executable, Ok(None), false, &cache).await;
+        assert_eq!(take_probe_commands(&root), full_probe);
+
+        std::fs::write(root.join("probe-version"), "codex 0.152.0-test").unwrap();
+        probe_with_user_config(&executable, Ok(None), false, &cache).await;
+        assert_eq!(take_probe_commands(&root), full_probe);
+
+        let before = InstallationIdentity::capture(&executable).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&executable)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() + Duration::from_secs(2))
+            .unwrap();
+        assert_ne!(before, InstallationIdentity::capture(&executable).unwrap());
+        probe_with_user_config(&executable, Ok(None), false, &cache).await;
+        assert_eq!(take_probe_commands(&root), full_probe);
+
+        let other = root.join(if cfg!(windows) {
+            "codex-contract-probe-other.exe"
+        } else {
+            "codex-contract-probe-other"
+        });
+        std::fs::copy(&executable, &other).unwrap();
+        probe_with_user_config(&other, Ok(None), false, &cache).await;
+        assert_eq!(take_probe_commands(&root), full_probe);
+        assert_eq!(
+            cache
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .installation
+                .canonical_path(),
+            other.canonicalize().unwrap()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn probe_failures_and_missing_versions_never_leave_cached_capabilities() {
+        let (root, executable) = compile_contract_cli("probe");
+        let cache = Mutex::new(None);
+        for stage in [
+            "version",
+            "exec-help",
+            "resume-help",
+            "mcp",
+            "login",
+            "models",
+        ] {
+            std::fs::write(root.join("probe-fail"), stage).unwrap();
+            probe_with_user_config(&executable, Ok(None), true, &cache).await;
+            assert!(cache.lock().await.is_none(), "cached failed {stage} probe");
+            take_probe_commands(&root);
+            std::fs::remove_file(root.join("probe-fail")).unwrap();
+            let result = probe_with_user_config(&executable, Ok(None), false, &cache).await;
+            assert_eq!(result.availability, LocalAgentAvailability::Ready);
+            assert_eq!(
+                take_probe_commands(&root).len(),
+                6,
+                "recovery after {stage}"
+            );
+        }
+        std::fs::write(root.join("probe-version"), "").unwrap();
+        for _ in 0..2 {
+            let result = probe_with_user_config(&executable, Ok(None), false, &cache).await;
+            assert_eq!(result.availability, LocalAgentAvailability::Ready);
+            assert!(cache.lock().await.is_none());
+            assert_eq!(take_probe_commands(&root).len(), 6);
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn warm_capabilities_never_cache_login_configuration_or_model_catalog() {
+        let (root, executable) = compile_contract_cli("probe");
+        let cache = Mutex::new(None);
+        probe_with_user_config(&executable, Ok(None), false, &cache).await;
+        take_probe_commands(&root);
+
+        std::fs::write(
+            root.join("probe-models"),
+            r#"{"models":[{"slug":"gpt-updated","supported_reasoning_levels":["low"]}]}"#,
+        )
+        .unwrap();
+        let updated = probe_with_user_config(&executable, Ok(None), false, &cache).await;
+        assert_eq!(updated.models[0].id, "gpt-updated");
+        assert_eq!(updated.models[0].efforts, ["low"]);
+        assert_eq!(take_probe_commands(&root), ["version", "login", "models"]);
+
+        std::fs::write(root.join("probe-logged-out"), "").unwrap();
+        let logged_out = probe_with_user_config(&executable, Ok(None), false, &cache).await;
+        assert_eq!(logged_out.availability, LocalAgentAvailability::NeedsSetup);
+        assert!(cache.lock().await.is_none());
+        assert_eq!(take_probe_commands(&root), ["version", "login", "models"]);
+        std::fs::remove_file(root.join("probe-logged-out")).unwrap();
+
+        probe_with_user_config(&executable, Ok(None), false, &cache).await;
+        assert!(cache.lock().await.is_some());
+        take_probe_commands(&root);
+        let invalid = probe_with_user_config(
+            &executable,
+            Ok(Some("[malformed".to_string())),
+            false,
+            &cache,
+        )
+        .await;
+        assert_eq!(invalid.availability, LocalAgentAvailability::Error);
+        assert!(cache.lock().await.is_none());
+        assert_eq!(take_probe_commands(&root), ["version"]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     fn compile_contract_cli(mode: &str) -> (PathBuf, PathBuf) {
         let root = std::env::temp_dir().join(format!(
@@ -3400,6 +3957,188 @@ enabled = true
         std::fs::remove_dir_all(directory).unwrap();
     }
 
+    fn discovery_item(tool: &str, kind: &str, status: &str) -> Value {
+        let key = if tool == "list_mcp_resources" {
+            "resources"
+        } else {
+            "resourceTemplates"
+        };
+        let mut payload = serde_json::Map::new();
+        payload.insert(key.to_string(), json!([]));
+        json!({
+            "id":"discovery-1", "type":kind, "server":"codex", "tool":tool,
+            "arguments":{}, "status":status, "error":null,
+            "result": if status == "completed" { json!({
+                "content":[{"type":"text","text":Value::Object(payload).to_string()}],
+                "structured_content":null
+            }) } else { Value::Null }
+        })
+    }
+
+    #[test]
+    fn codex_resource_discovery_accepts_empty_private_catalog_without_host_events() {
+        let expected = BTreeSet::from(["list_files".to_string()]);
+        for tool in ["list_mcp_resources", "list_mcp_resource_templates"] {
+            for kind in ["mcp_tool_call", "mcpToolCall"] {
+                for (method, status) in [
+                    ("item.started", "in_progress"),
+                    ("item.updated", "inProgress"),
+                    ("item.completed", "completed"),
+                    ("item/started", "inProgress"),
+                    ("item/completed", "completed"),
+                ] {
+                    let item = discovery_item(tool, kind, status);
+                    let events =
+                        item_events(method, &item, false, &expected, &mut HashMap::new()).unwrap();
+                    assert!(events.is_empty());
+                }
+            }
+        }
+        assert!(validate_item_kind(&json!({"type":"mcp_tool_call","server":"open_builder","tool":"list_files","status":"completed"}), false, &expected).is_ok());
+    }
+
+    #[test]
+    fn codex_resource_discovery_rejects_escaping_or_ambiguous_payloads() {
+        let expected = BTreeSet::from(["write_file".to_string()]);
+        let valid = discovery_item("list_mcp_resources", "mcp_tool_call", "completed");
+        let mut cases = Vec::new();
+        for (key, value) in [
+            ("server", json!("external")),
+            ("arguments", json!({"server":"external"})),
+            ("arguments", json!({"server":"open_builder"})),
+            ("arguments", json!({"cursor":"next"})),
+            ("arguments", json!({"uri":"file:///secret"})),
+            ("arguments", json!("{}")),
+            ("tool", json!("read_mcp_resource")),
+            ("tool", json!("spawn_agent")),
+            ("status", json!("failed")),
+            ("error", json!({"message":"secret-sentinel"})),
+            ("name", json!("mcp__open_builder__list_mcp_resources")),
+            ("permission", json!({"allow":true})),
+            ("result", Value::Null),
+        ] {
+            let mut item = valid.clone();
+            item[key] = value;
+            cases.push(item);
+        }
+        for payload in [
+            json!({"resources":[{"uri":"file:///secret"}]}),
+            json!({"resources":[],"server":"external"}),
+            json!({"resources":[],"nextCursor":"next"}),
+            json!({"resources":[],"instructions":"secret-sentinel"}),
+            json!({"resourceTemplates":[]}),
+        ] {
+            let mut item = valid.clone();
+            item["result"]["content"][0]["text"] = json!(payload.to_string());
+            cases.push(item);
+        }
+        for field in ["structured_content", "structuredContent", "_meta"] {
+            let mut item = valid.clone();
+            item["result"][field] = json!({"resources":[{"uri":"file:///secret"}]});
+            cases.push(item);
+        }
+        for item in cases {
+            let error = item_events(
+                "item.completed",
+                &item,
+                false,
+                &expected,
+                &mut HashMap::new(),
+            )
+            .unwrap_err();
+            assert_eq!(error.code, Some(LocalCliFailureCode::IsolationViolation));
+            assert_eq!(error.item_kind, Some(LocalCliItemKind::McpToolCall));
+            assert!(!error.message.contains("secret-sentinel"));
+        }
+        let started = discovery_item("list_mcp_resources", "mcp_tool_call", "in_progress");
+        assert!(item_events(
+            "item.completed",
+            &started,
+            false,
+            &expected,
+            &mut HashMap::new()
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn codex_resource_discovery_accepts_only_matching_explicit_private_server() {
+        for server in ["open_builder", "open-builder"] {
+            for tool in ["list_mcp_resources", "list_mcp_resource_templates"] {
+                let mut item = discovery_item(tool, "mcpToolCall", "completed");
+                item["server"] = json!(server);
+                item["arguments"] = json!({"server":server});
+                let key = if tool == "list_mcp_resources" {
+                    "resources"
+                } else {
+                    "resourceTemplates"
+                };
+                let mut payload = serde_json::Map::new();
+                payload.insert(key.to_string(), json!([]));
+                payload.insert("server".to_string(), json!(server));
+                item["result"]["content"][0]["text"] = json!(Value::Object(payload).to_string());
+                assert!(validate_item_kind(&item, false, &BTreeSet::new()).is_ok());
+                item["arguments"]["server"] = json!("external");
+                assert!(validate_item_kind(&item, false, &BTreeSet::new()).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn codex_isolation_diagnostics_are_typed_and_never_copy_provider_payloads() {
+        let item = json!({"type":"mcp_tool_call","server":"secret-sentinel","tool":"list_files"});
+        let error = validate_item_kind(&item, false, &BTreeSet::new()).unwrap_err();
+        let failure = crate::local_agent_runtime::LocalCliFailure::from_adapter(
+            LocalAgentProvider::Codex,
+            crate::local_agent_runtime::LocalCliFailurePhase::Stream,
+            &error,
+            false,
+            false,
+        );
+        let json = serde_json::to_value(failure).unwrap();
+        assert_eq!(json["isolationReason"], "externalMcpServer");
+        assert_eq!(json["itemKind"], "mcpToolCall");
+        assert!(!json.to_string().contains("secret-sentinel"));
+        assert_eq!(
+            validate_item_kind(&json!({"type":"file_change"}), false, &BTreeSet::new())
+                .unwrap_err()
+                .isolation_reason,
+            Some(LocalCliIsolationReason::NativeCapability)
+        );
+    }
+
+    #[test]
+    fn codex_mcp_identity_cannot_hide_an_external_server_behind_encoded_name() {
+        let expected = BTreeSet::from(["write_file".to_string()]);
+        for item in [
+            json!({"type":"mcp_tool_call","server":"external","name":"mcp__open_builder__write_file"}),
+            json!({"type":"mcp_tool_call","server":"open_builder","serverName":"external","tool":"write_file"}),
+            json!({"type":"mcp_tool_call","server":"open_builder","tool":"write_file","name":"mcp__external__write_file"}),
+            json!({"type":"mcp_tool_call","server":"open_builder","tool":"write_file","name":"mcp__open_builder__delete_file"}),
+        ] {
+            assert!(
+                validate_item_kind(&item, false, &expected).is_err(),
+                "{item}"
+            );
+        }
+    }
+
+    #[test]
+    fn codex_mcp_identity_preserves_unambiguous_legacy_encoded_names() {
+        let expected = BTreeSet::from(["write_file".to_string()]);
+        for item in [
+            json!({"type":"mcp_tool_call","name":"mcp__open_builder__write_file"}),
+            json!({"type":"mcpToolCall","tool":"mcp__open-builder__write_file"}),
+            json!({"type":"mcp_tool_call","tool":"write_file","name":"mcp__open_builder__write_file"}),
+            json!({"type":"mcpToolCall","serverName":"open_builder","name":"write_file"}),
+        ] {
+            assert!(
+                validate_item_kind(&item, false, &expected).is_ok(),
+                "{item}"
+            );
+        }
+    }
+
     #[test]
     fn unauthorized_native_items_fail_closed() {
         let expected = BTreeSet::from(["write_file".to_string()]);
@@ -3470,8 +4209,8 @@ enabled = true
                 &expected,
             )
             .expect_err("provider approval failures must terminate the run");
-            assert_eq!(error, MCP_APPROVAL_REJECTION_ERROR);
-            assert!(!error.contains("secret-sentinel"));
+            assert_eq!(error.message, MCP_APPROVAL_REJECTION_ERROR);
+            assert!(!error.message.contains("secret-sentinel"));
         }
     }
 
@@ -3635,15 +4374,13 @@ enabled = true
     }
 
     #[test]
-    fn malformed_json_and_output_budget_are_reported_without_raw_output() {
+    fn malformed_json_is_reported_without_raw_output() {
         assert!(parse_json_document("not-json").is_err());
-        let mut budget = ProtocolOutputBudget::exhausted_for_test();
-        assert!(budget.record("fixture").is_err());
         assert!(!RUN_ERROR.contains("fixture"));
     }
 
     #[test]
-    fn handshake_timeout_is_single_attempt_and_not_replayed() {
+    fn handshake_wait_window_keeps_its_duration_without_replaying_requests() {
         assert_eq!(HANDSHAKE_TIMEOUT, Duration::from_secs(120));
         assert_eq!(HANDSHAKE_TIMEOUT_ERROR, "Codex exec handshake timed out");
     }
@@ -3693,11 +4430,13 @@ enabled = true
     #[tokio::test]
     async fn real_fake_process_proves_fresh_and_resume_codex_contracts() {
         for resumed in [false, true] {
-            let (root, executable) = compile_contract_cli("success");
+            let (root, executable) = compile_contract_cli("resource-discovery-success");
             let (channel, mut events) = event_channel();
             let mut request = request();
             request.native_search = true;
             request.tools = vec![tool(CONTRACT_HOST_TOOL)];
+            // Directory discovery must leave the sole Host call budget intact.
+            request.max_tool_calls = 1;
             request.session_id = resumed.then(|| "resume-codex-thread".to_string());
             let expected_session = request
                 .session_id

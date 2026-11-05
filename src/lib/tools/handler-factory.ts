@@ -293,8 +293,8 @@ export async function buildToolHandlers(
     }
   }
   for (const name of ["search_npm_packages", "get_npm_package_detail"]) {
-    runtimeHandlers.set(name, (handlerArgs) =>
-      npmSearchHandler(name, handlerArgs),
+    runtimeHandlers.set(name, (handlerArgs, context) =>
+      npmSearchHandler(name, handlerArgs, context?.signal),
     );
   }
   if (installComponentHandler) {
@@ -308,8 +308,12 @@ export async function buildToolHandlers(
     );
   }
   if (applyDesignStyleHandler) {
-    runtimeHandlers.set("apply_design_style", (handlerArgs) =>
-      applyDesignStyleHandler("apply_design_style", handlerArgs),
+    runtimeHandlers.set("apply_design_style", (handlerArgs, context) =>
+      applyDesignStyleHandler(
+        "apply_design_style",
+        handlerArgs,
+        context?.signal,
+      ),
     );
   }
   if (projectHealthCheckHandler) {
@@ -330,19 +334,19 @@ export async function buildToolHandlers(
     );
   }
   if (assetSearchHandler) {
-    runtimeHandlers.set("image_search", (handlerArgs) =>
-      assetSearchHandler("image_search", handlerArgs),
+    runtimeHandlers.set("image_search", (handlerArgs, context) =>
+      assetSearchHandler("image_search", handlerArgs, context?.signal),
     );
   }
   if (jinaReaderHandler) {
-    runtimeHandlers.set("web_reader", (handlerArgs) =>
-      jinaReaderHandler("web_reader", handlerArgs),
+    runtimeHandlers.set("web_reader", (handlerArgs, context) =>
+      jinaReaderHandler("web_reader", handlerArgs, context?.signal),
     );
   }
   if (searchHandler) {
     for (const name of Object.keys(SEARCH_TOOLS)) {
-      runtimeHandlers.set(name, (handlerArgs) =>
-        searchHandler(name, handlerArgs),
+      runtimeHandlers.set(name, (handlerArgs, context) =>
+        searchHandler(name, handlerArgs, context?.signal),
       );
     }
   }

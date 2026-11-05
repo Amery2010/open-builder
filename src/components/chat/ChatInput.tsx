@@ -123,6 +123,7 @@ interface ChatInputProps {
   onSubmit: (e: React.SyntheticEvent<HTMLFormElement>) => void;
   onStop: () => void;
   isGenerating: boolean;
+  isSubmitting?: boolean;
   /** Questionnaire overlays own the chat pane while this is true. */
   isQuestionnairePending?: boolean;
   /** Non-blocking warning for attachments that could not be rehydrated after
@@ -203,6 +204,7 @@ export function ChatInput({
   onSubmit,
   onStop,
   isGenerating,
+  isSubmitting = false,
   isQuestionnairePending = false,
   attachmentRestoreWarning,
   messages,
@@ -624,7 +626,8 @@ export function ChatInput({
     onAttachmentsChange(attachments.filter((_, i) => i !== index));
   };
 
-  const hasContent = input.trim() || attachments.length > 0;
+  const hasContent =
+    input.trim() || attachments.length > 0 || forcedSkillIds.length > 0;
   const designSystemName = designState?.selectedSystem
     ? designState.selectedSystem.name
     : designState?.recommendation?.systemId === null
@@ -655,7 +658,7 @@ export function ChatInput({
     >
       <form
         onSubmit={(event) => {
-          if (isQuestionnairePending || isProcessingImages) {
+          if (isQuestionnairePending || isProcessingImages || isSubmitting) {
             event.preventDefault();
             return;
           }
@@ -793,10 +796,14 @@ export function ChatInput({
               }}
               onKeyDown={handleKeyDown}
               onPaste={handlePaste}
-              placeholder={t.chat.placeholder}
+              placeholder={
+                isGenerating
+                  ? t.chat.instructions.placeholder
+                  : t.chat.placeholder
+              }
               rows={2}
-              disabled={isGenerating || isQuestionnairePending}
-              className="border-0 shadow-none focus-visible:ring-0 focus-visible:border-0 resize-none overflow-y-auto bg-transparent px-3 py-2 md:text-base min-h-0 field-sizing-fixed"
+              disabled={isQuestionnairePending || isSubmitting}
+              className="border-0 shadow-none focus-visible:ring-0 focus-visible:border-0 resize-none overflow-y-auto bg-transparent px-3 py-2 text-sm md:text-sm min-h-0 field-sizing-fixed"
               style={{ maxHeight: 200 }}
             />
             <ChatInputToolbar
@@ -829,6 +836,7 @@ export function ChatInput({
               setWorkspaceMode={setWorkspaceMode}
               isGenerating={isGenerating}
               isProcessingImages={isProcessingImages}
+              isSubmitting={isSubmitting}
               hasContent={Boolean(hasContent)}
               isHoveringStop={isHoveringStop}
               onHoveringStopChange={setIsHoveringStop}

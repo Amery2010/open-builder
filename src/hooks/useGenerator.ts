@@ -6,6 +6,12 @@ import type {
   GenerationBackend,
   GeneratorEvents,
 } from "../lib/ai/generator";
+import type {
+  UserInstructionSource,
+  PreparedUserInstruction,
+  PreparedUserInstructionBatch,
+  ResolvedAttachment,
+} from "../lib/ai/generator-types";
 import { DEFAULT_TITLE, useConversationStore } from "../store/conversation";
 import { useSettingsStore } from "../store/settings";
 import { useInteractiveStore } from "../store/interactive";
@@ -35,6 +41,7 @@ import {
   formatGenerationErrorMessage,
 } from "../lib/ai/generation-error";
 import {
+  cancelPendingToolCalls,
   findPendingToolCall,
   isGenerationRunCurrent,
   isGeneratorConstructionCurrent,
@@ -60,7 +67,6 @@ import {
   serializeToolArgumentsForHistory,
 } from "../lib/utils/message-security";
 import {
-  isErrorMessage,
   messagesForConversationContinuation,
   removeErrorMessages,
 } from "../lib/ai/conversation-context";
@@ -301,7 +307,9 @@ function appendAgnesManifestToLastUserMessage(
 
 /** Apply compression and hydrate attachment references only for model input. */
 async function getMessagesForAPI(conv: Conversation): Promise<Message[]> {
-  return hydrateMessageAttachments(messagesForConversationContinuation(conv));
+  return hydrateMessageAttachments(
+    cancelPendingToolCalls(messagesForConversationContinuation(conv)),
+  );
 }
 
 const AUTO_QA_PROMPT =
@@ -409,6 +417,19 @@ function hasIncompletePrototypeBuild(files: ProjectFiles): boolean {
   );
 }
 
+function assertPrototypeBatchProgress(
+  before: ProjectFiles,
+  after: ProjectFiles,
+): void {
+  if (
+    hasIncompletePrototypeBuild(after) &&
+    Object.keys(before).length === Object.keys(after).length &&
+    Object.entries(before).every(([path, content]) => after[path] === content)
+  ) {
+    throw new Error(getT().message.prototypeNoProgress);
+  }
+}
+
 function bindReviewContractToCurrentBlueprint(
   contract: DesignContract,
   files: ProjectFiles,
@@ -500,7 +521,6 @@ function expectedPrototypeReviewCoverage(
   return targets.slice(0, 120);
 }
 
-const MAX_AUTOMATIC_PROTOTYPE_BATCHES = 3;
 const AUTOMATIC_PROTOTYPE_BATCH_PROMPT =
   "Continue the next incomplete prototype batch automatically. Read design-project.json, do not repeat completed pages or flows, load the required Design Skill, submit a contract bound to the current blueprint revision and batch scope, implement one coherent batch, update build progress and revision, run project_health_check, then stop this batch.";
 
@@ -851,6 +871,18 @@ export function useGenerator({
   const runConversationIdRef = useRef<string | null>(null);
   const generationRunEpochRef = useRef(0);
   const forcedSkillsPromptRef = useRef("");
+  const forcedSkillIdsRef = useRef<string[]>([]);
+  const systemPromptSuffixRef = useRef("");
+  const foregroundForcedSkillIdsRef = useRef<string[]>([]);
+  const foregroundCustomPromptRef = useRef("");
+  const runAttachmentsRef = useRef<{
+    epoch: number;
+    conversationId: string;
+    attachments: Map<string, ResolvedAttachment>;
+    clear: () => void;
+  } | null>(null);
+  const logicalRunIdRef = useRef<string | null>(null);
+  const instructionSequenceRef = useRef(0);
   const customSystemPromptRef = useRef("");
   const requestPromptContextRef = useRef("");
   const baseCustomToolSetRef = useRef<ToolSet>({});
@@ -930,6 +962,12 @@ export function useGenerator({
 
   useEffect(
     () => () => {
+      if (runConversationIdRef.current)
+        useConversationStore
+          .getState()
+          .cancelUserInstructions(runConversationIdRef.current);
+      runAttachmentsRef.current?.clear();
+      runAttachmentsRef.current = null;
       generationRunEpochRef.current += 1;
       generatorConstructionEpochRef.current += 1;
       clearOutputBuffers();
@@ -947,6 +985,12 @@ export function useGenerator({
   );
 
   const invalidateGenerator = useCallback(() => {
+    if (runConversationIdRef.current)
+      useConversationStore
+        .getState()
+        .cancelUserInstructions(runConversationIdRef.current);
+    runAttachmentsRef.current?.clear();
+    runAttachmentsRef.current = null;
     generationRunEpochRef.current += 1;
     generatorConstructionEpochRef.current += 1;
     generatorRef.current?.abort();
@@ -975,6 +1019,12 @@ export function useGenerator({
       return;
     }
     previousPermissionBypassRef.current = permissionBrokerBypassEnabled;
+    if (runConversationIdRef.current)
+      useConversationStore
+        .getState()
+        .cancelUserInstructions(runConversationIdRef.current);
+    runAttachmentsRef.current?.clear();
+    runAttachmentsRef.current = null;
     generationRunEpochRef.current += 1;
     generatorConstructionEpochRef.current += 1;
     generatorRef.current?.abort();
@@ -987,6 +1037,12 @@ export function useGenerator({
 
   useEffect(() => {
     if (prevActiveIdRef.current === activeId) return;
+    if (runConversationIdRef.current)
+      useConversationStore
+        .getState()
+        .cancelUserInstructions(runConversationIdRef.current);
+    runAttachmentsRef.current?.clear();
+    runAttachmentsRef.current = null;
     generationRunEpochRef.current += 1;
     generatorConstructionEpochRef.current += 1;
     generatorRef.current?.abort();
@@ -1278,7 +1334,248 @@ export function useGenerator({
     [flushOutputBuffers, setMessages],
   );
 
+  const registerRunAttachments = useCallback(
+    (
+      conversationId: string,
+      attachments: ResolvedAttachment[],
+    ): (() => void) => {
+      const registration = {
+        epoch: generationRunEpochRef.current,
+        conversationId,
+        attachments: new Map(
+          attachments.map((attachment) => [attachment.id, attachment]),
+        ),
+        clear: registerAgnesRunAttachments(conversationId, attachments),
+      };
+      runAttachmentsRef.current = registration;
+      return () => {
+        registration.clear();
+        if (runAttachmentsRef.current === registration)
+          runAttachmentsRef.current = null;
+      };
+    },
+    [],
+  );
+
+  const enqueueInstruction = useCallback(
+    async (
+      prompt: string,
+      attachments: Attachment[] = [],
+      options: GenerateRunOptions = {},
+    ): Promise<boolean> => {
+      const conversationId = runConversationIdRef.current;
+      const runId = logicalRunIdRef.current;
+      const epoch = generationRunEpochRef.current;
+      if (
+        !conversationId ||
+        !runId ||
+        !isCurrentGeneratorRun(conversationId) ||
+        (!prompt.trim() &&
+          attachments.length === 0 &&
+          !options.forcedSkillIds?.length)
+      )
+        return false;
+      try {
+        // Validate before accepting ownership of the draft; the queue retains only references.
+        if (attachments.length) await resolveAttachmentsForModel(attachments);
+        if (options.forcedSkillIds?.length) {
+          const runtime = await loadGeneratorRuntime();
+          if (!runtime.isSkillsAvailable()) return false;
+          const registry = await runtime.getSkillRegistry();
+          await registry.prepareForcedSkills(options.forcedSkillIds);
+        }
+      } catch {
+        return false;
+      }
+      if (
+        epoch !== generationRunEpochRef.current ||
+        runId !== logicalRunIdRef.current ||
+        !isCurrentGeneratorRun(conversationId)
+      )
+        return false;
+      flushOutputBuffers();
+      const afterMessageIndex =
+        useConversationStore.getState().conversations[conversationId]?.messages
+          .length ?? 0;
+      useConversationStore
+        .getState()
+        .setPendingUserInstructions(conversationId, (items) => [
+          ...items,
+          {
+            id: crypto.randomUUID(),
+            conversationId,
+            runId,
+            sequence: ++instructionSequenceRef.current,
+            afterMessageIndex,
+            content:
+              prompt.trim() ||
+              (options.forcedSkillIds?.length
+                ? getT().chat.instructions.applySkills
+                : ""),
+            attachments: attachments.map(toAttachmentRef),
+            forcedSkillIds: [...new Set(options.forcedSkillIds ?? [])],
+            status: "queued",
+          },
+        ]);
+      return true;
+    },
+    [flushOutputBuffers, isCurrentGeneratorRun],
+  );
+
+  const prepareUserInstructions = useCallback<UserInstructionSource["prepare"]>(
+    async (backend, signal) => {
+      const conversationId = runConversationIdRef.current;
+      const runId = logicalRunIdRef.current;
+      const epoch = generationRunEpochRef.current;
+      const current = () =>
+        !signal.aborted &&
+        generatorRef.current === backend &&
+        generationRunEpochRef.current === epoch &&
+        logicalRunIdRef.current === runId &&
+        isCurrentGeneratorRun(conversationId);
+      if (
+        !conversationId ||
+        !runId ||
+        !current() ||
+        activeToolProfileRef.current === "design_review" ||
+        (backend.getRunContext().mode !== "chat" &&
+          backend.getRunContext().mode !== "plan")
+      )
+        return null;
+      const store = useConversationStore.getState();
+      const queued = (
+        store.conversations[conversationId]?.pendingUserInstructions ?? []
+      )
+        .filter((item) => item.runId === runId && item.status === "queued")
+        .sort((a, b) => a.sequence - b.sequence);
+      if (!queued.length) return null;
+      const instructions: PreparedUserInstruction[] = [];
+      for (const item of queued) {
+        try {
+          const attachments = await resolveAttachmentsForModel(
+            item.attachments,
+          );
+          let skillPrompt = "";
+          if (item.forcedSkillIds.length) {
+            const runtime = await loadGeneratorRuntime();
+            if (!runtime.isSkillsAvailable())
+              throw new Error("Skill storage unavailable");
+            const registry = await runtime.getSkillRegistry();
+            const ids = [
+              ...new Set([
+                ...forcedSkillIdsRef.current,
+                ...item.forcedSkillIds,
+              ]),
+            ];
+            const prepared = await registry.prepareForcedSkills(ids);
+            if (!current()) return null;
+            backend
+              .getSkillContext()
+              .activateMany(prepared.map((skill) => skill.entry));
+            skillPrompt = runtime.buildForcedSkillsPromptSection(prepared);
+            const previous = forcedSkillsPromptRef.current;
+            systemPromptSuffixRef.current = previous
+              ? systemPromptSuffixRef.current.replace(previous, skillPrompt)
+              : systemPromptSuffixRef.current + skillPrompt;
+            requestPromptContextRef.current = previous
+              ? requestPromptContextRef.current.replace(previous, skillPrompt)
+              : requestPromptContextRef.current + skillPrompt;
+            foregroundForcedSkillIdsRef.current = ids;
+            forcedSkillIdsRef.current = ids;
+            forcedSkillsPromptRef.current = skillPrompt;
+            backend.setSystemPromptSuffix(systemPromptSuffixRef.current);
+          }
+          if (!current()) return null;
+          instructions.push({
+            id: item.id,
+            attachments,
+            skillPrompt,
+            message: {
+              role: "user",
+              content:
+                item.content ||
+                (item.forcedSkillIds.length
+                  ? getT().chat.instructions.applySkills
+                  : ""),
+              forcedSkillIds: [...foregroundForcedSkillIdsRef.current],
+              metadata: {
+                instructionId: item.id,
+                ...(item.attachments.length
+                  ? { attachments: item.attachments }
+                  : {}),
+              },
+            },
+          });
+        } catch {
+          if (!current()) return null;
+          store.setPendingUserInstructions(conversationId, (items) =>
+            items.map((entry) =>
+              entry.id === item.id && entry.status === "queued"
+                ? { ...entry, status: "failed" }
+                : entry,
+            ),
+          );
+        }
+      }
+      if (!instructions.length || !current()) return null;
+      const registration = runAttachmentsRef.current;
+      if (
+        registration?.epoch === epoch &&
+        registration.conversationId === conversationId
+      ) {
+        for (const instruction of instructions) {
+          for (const attachment of instruction.attachments)
+            registration.attachments.set(attachment.id, attachment);
+          if (isAgnesImageToolAvailable()) {
+            const manifest = formatAgnesAttachmentManifest(
+              instruction.attachments,
+            );
+            if (manifest)
+              instruction.modelPrompt = `${String(instruction.message.content ?? "")}\n\n${manifest}`;
+          }
+        }
+        registration.clear();
+        registration.clear = registerAgnesRunAttachments(conversationId, [
+          ...registration.attachments.values(),
+        ]);
+      }
+      const ids = new Set(instructions.map((item) => item.id));
+      store.setPendingUserInstructions(conversationId, (items) =>
+        items.map((item) =>
+          ids.has(item.id) && item.status === "queued"
+            ? { ...item, status: "delivering" }
+            : item,
+        ),
+      );
+      return {
+        instructions,
+        commit() {
+          if (!current()) return false;
+          flushOutputBuffers();
+          return store.commitUserInstructions(
+            conversationId,
+            runId,
+            [...ids],
+            instructions.map((item) => item.message),
+          );
+        },
+        fail(reason) {
+          if (!current()) return;
+          store.setPendingUserInstructions(conversationId, (items) =>
+            items.map((item) =>
+              ids.has(item.id) && item.status === "delivering"
+                ? { ...item, status: reason }
+                : item,
+            ),
+          );
+        },
+      } satisfies PreparedUserInstructionBatch;
+    },
+    [flushOutputBuffers, isCurrentGeneratorRun],
+  );
+
   const getGenerator = useCallback(async () => {
+    const requestedRunEpoch = generationRunEpochRef.current;
     const isLocalRuntime = settings.runtime === "localCli";
     const localProvider = settings.localAgent.provider;
     const currentApiType = settings.apiType;
@@ -1307,6 +1604,7 @@ export function useGenerator({
       }
     }
 
+    if (requestedRunEpoch !== generationRunEpochRef.current) return null;
     const currentActiveId = useConversationStore.getState().activeId;
     if (!currentActiveId) return null;
 
@@ -1353,8 +1651,15 @@ export function useGenerator({
 
     if (!generatorRef.current) {
       const constructionEpoch = ++generatorConstructionEpochRef.current;
+      const constructionRunEpoch = requestedRunEpoch;
       const runtime = await loadGeneratorRuntime();
       const generatorConversationId = currentActiveId;
+      let candidate: GenerationBackend | null = null;
+      const isCurrentCandidate = () =>
+        candidate !== null &&
+        generatorRef.current === candidate &&
+        isCurrentGeneratorRun(generatorConversationId);
+
       const isBuiltinSearch =
         !isLocalRuntime && webSearchSettings.engine === "builtin";
       const webConfigured =
@@ -1392,7 +1697,7 @@ export function useGenerator({
         developerSkillScriptsEnabled:
           useSettingsStore.getState().system.developerSkillScriptsEnabled,
         requestRegistryOriginApproval: async (origin, context) => {
-          if (!isCurrentGeneratorRun(generatorConversationId)) return false;
+          if (!isCurrentCandidate()) return false;
           const translations = getT();
           recordPermissionActivity({
             conversationId: context.run.conversationId,
@@ -1427,6 +1732,7 @@ export function useGenerator({
               },
             ],
           });
+          if (!isCurrentCandidate() || context.signal.aborted) return false;
           const approved = answers.answers[0]?.selected.includes(
             translations.approvals.approveOnce,
           );
@@ -1446,12 +1752,14 @@ export function useGenerator({
           if (
             !context ||
             context.run.conversationId !== generatorConversationId ||
-            !isCurrentGeneratorRun(generatorConversationId)
+            !isCurrentCandidate()
           ) {
             throw new DOMException("conversation switched", "AbortError");
           }
           const { setConversationDefaultPreviewView } =
             await import("../lib/design/preview-preference");
+          if (!isCurrentCandidate() || context.signal.aborted)
+            throw new DOMException("run stopped", "AbortError");
           const result = setConversationDefaultPreviewView({
             conversationId: generatorConversationId,
             view: (args as { view?: unknown })?.view,
@@ -1466,7 +1774,7 @@ export function useGenerator({
           if (
             !context ||
             context.run.conversationId !== generatorConversationId ||
-            !isCurrentGeneratorRun(generatorConversationId)
+            !isCurrentCandidate()
           ) {
             throw new DOMException("conversation switched", "AbortError");
           }
@@ -1485,10 +1793,10 @@ export function useGenerator({
               designContractControllerRef.current.getContract(),
             snapshotLabel: getT().designTokens.snapshotLabel,
             onProjectFilesChanged: (nextFiles) => {
-              if (!isCurrentGeneratorRun(generatorConversationId)) {
+              if (!isCurrentCandidate()) {
                 throw new DOMException("conversation switched", "AbortError");
               }
-              generatorRef.current?.setFiles(nextFiles);
+              candidate?.setFiles(nextFiles);
             },
           });
           const summary = result.ok
@@ -1511,7 +1819,7 @@ export function useGenerator({
           if (
             !context ||
             context.run.conversationId !== generatorConversationId ||
-            !isCurrentGeneratorRun(generatorConversationId)
+            !isCurrentCandidate()
           ) {
             throw new DOMException("conversation switched", "AbortError");
           }
@@ -1524,8 +1832,7 @@ export function useGenerator({
           }
           const { capturePreviewEvidence } =
             await import("../lib/design/preview-evidence");
-          const currentFiles =
-            generatorRef.current?.getFiles() ?? conversation.files;
+          const currentFiles = candidate?.getFiles() ?? conversation.files;
           const rawTarget = (
             args as {
               target?: {
@@ -1580,7 +1887,7 @@ export function useGenerator({
           if (
             !context ||
             context.run.conversationId !== generatorConversationId ||
-            !isCurrentGeneratorRun(generatorConversationId)
+            !isCurrentCandidate()
           ) {
             throw new DOMException("conversation switched", "AbortError");
           }
@@ -1598,7 +1905,7 @@ export function useGenerator({
             args,
             {
               conversationId: generatorConversationId,
-              files: generatorRef.current?.getFiles() ?? conversation.files,
+              files: candidate?.getFiles() ?? conversation.files,
               beforeFiles: designRunInitialFilesRef.current,
               template: conversation.template,
               previewMode: conversation.previewMode ?? "sandpack",
@@ -1610,11 +1917,11 @@ export function useGenerator({
           );
         },
         onDesignReviewSubmitted: (report) => {
-          if (!isCurrentGeneratorRun(generatorConversationId)) return;
+          if (!isCurrentCandidate()) return;
           useDesignReviewStore.getState().complete(report);
         },
         submitDesignContract: (args, context) => {
-          if (!isCurrentGeneratorRun(generatorConversationId)) {
+          if (!isCurrentCandidate()) {
             throw new DOMException("conversation switched", "AbortError");
           }
           const appliedSystem =
@@ -1624,9 +1931,7 @@ export function useGenerator({
           const contract = designContractControllerRef.current.submit(args, {
             expectedSystemId: appliedSystem?.id ?? null,
             skillContext: context.skillContext,
-            blueprint: designBlueprintBindings(
-              generatorRef.current?.getFiles() ?? {},
-            ),
+            blueprint: designBlueprintBindings(candidate?.getFiles() ?? {}),
           });
           lastAcceptedDesignContractRef.current = contract;
           const sourceConversation =
@@ -1669,12 +1974,10 @@ export function useGenerator({
         },
         filesBridge: {
           getFiles: () =>
-            isCurrentGeneratorRun(generatorConversationId)
-              ? (generatorRef.current?.getFiles() ?? {})
-              : {},
+            isCurrentCandidate() ? (candidate?.getFiles() ?? {}) : {},
           onFilesChanged: (newFiles, changes) => {
-            if (!isCurrentGeneratorRun(generatorConversationId)) return;
-            generatorRef.current?.setFiles(newFiles);
+            if (!isCurrentCandidate()) return;
+            candidate?.setFiles(newFiles);
             setFiles(newFiles);
             const depsChanged = changes.some(
               (c) =>
@@ -1684,7 +1987,7 @@ export function useGenerator({
           },
         },
         onProjectDesignUpdated: (nextFiles) => {
-          if (!isCurrentGeneratorRun(generatorConversationId)) return;
+          if (!isCurrentCandidate()) return;
           const currentConversation =
             useConversationStore.getState().conversations[
               generatorConversationId
@@ -1786,7 +2089,7 @@ export function useGenerator({
 
       const generatorEvents = {
         onText: (delta) => {
-          if (!isCurrentGeneratorRun(generatorConversationId)) return;
+          if (!isCurrentCandidate()) return;
           setRunState("streaming");
           setIsThinkingStreaming(false);
           flushThinkingBuffer();
@@ -1794,7 +2097,7 @@ export function useGenerator({
           if (!typewriterTimerRef.current) {
             const typeChar = (timestamp: number) => {
               typewriterTimerRef.current = null;
-              if (!isCurrentGeneratorRun(generatorConversationId)) {
+              if (!isCurrentCandidate()) {
                 textBufferRef.current = "";
                 return;
               }
@@ -1829,14 +2132,14 @@ export function useGenerator({
           }
         },
         onThinking: (delta) => {
-          if (!isCurrentGeneratorRun(generatorConversationId)) return;
+          if (!isCurrentCandidate()) return;
           setRunState("streaming");
           setIsThinkingStreaming(true);
           thinkingBufferRef.current += delta;
           if (!thinkingTimerRef.current) {
             const typeThinking = (timestamp: number) => {
               thinkingTimerRef.current = null;
-              if (!isCurrentGeneratorRun(generatorConversationId)) {
+              if (!isCurrentCandidate()) {
                 thinkingBufferRef.current = "";
                 return;
               }
@@ -1869,7 +2172,7 @@ export function useGenerator({
           }
         },
         onToolCall: (name, id) => {
-          if (!isCurrentGeneratorRun(generatorConversationId)) return;
+          if (!isCurrentCandidate()) return;
           setIsThinkingStreaming(false);
           setRunState(
             name === "ask_user_question"
@@ -1911,7 +2214,7 @@ export function useGenerator({
           });
         },
         onToolResult: (_name, _args, result, _toolCallId, output) => {
-          if (!isCurrentGeneratorRun(generatorConversationId)) return;
+          if (!isCurrentCandidate()) return;
           const persistedArguments = serializeToolArgumentsForHistory(
             _name,
             _args,
@@ -1959,31 +2262,56 @@ export function useGenerator({
           });
         },
         onFileChange: (newFiles) => {
-          if (!isCurrentGeneratorRun(generatorConversationId)) return;
+          if (!isCurrentCandidate()) return;
           setFiles(newFiles);
         },
         onTemplateChange: (tmpl, newFiles) => {
-          if (!isCurrentGeneratorRun(generatorConversationId)) return;
+          if (!isCurrentCandidate()) return;
           setTemplate(tmpl);
           setFiles(newFiles);
           restartSandpack();
         },
         onDependenciesChange: (newFiles) => {
-          if (!isCurrentGeneratorRun(generatorConversationId)) return;
+          if (!isCurrentCandidate()) return;
           setFiles(newFiles);
           restartSandpack();
         },
-        onComplete: () => {
-          if (!isCurrentGeneratorRun(generatorConversationId)) return;
+        onComplete: (result) => {
+          if (!isCurrentCandidate()) return;
+          const pending =
+            useConversationStore.getState().conversations[
+              generatorConversationId
+            ]?.pendingUserInstructions ?? [];
+          if (
+            pending.some(
+              (item) =>
+                item.runId === logicalRunIdRef.current &&
+                (item.status === "queued" || item.status === "delivering"),
+            )
+          ) {
+            flushOutputBuffers();
+            setRunState("preparing");
+            return;
+          }
           setIsThinkingStreaming(false);
-          setRunState("completed");
+          setRunState(
+            result.aborted || result.maxIterationsReached
+              ? "idle"
+              : "completed",
+          );
           flushOutputBuffers();
+          if (result.maxIterationsReached) {
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: getT().message.toolBudgetReached },
+            ]);
+          }
           if (activeToolProfileRef.current !== "design_review") {
             createSnapshotForCurrentState();
           }
         },
         onError: (error) => {
-          if (!isCurrentGeneratorRun(generatorConversationId)) return;
+          if (!isCurrentCandidate()) return;
           setIsThinkingStreaming(false);
           setLastError(classifyGenerationError(error));
           setRunState("error");
@@ -1995,11 +2323,11 @@ export function useGenerator({
             .mergeLocalCliPreparedMetadata(provider, metadata);
         },
         onLocalCliStatus: (status) => {
-          if (!isCurrentGeneratorRun(generatorConversationId)) return;
+          if (!isCurrentCandidate()) return;
           setRunState(runStateForLocalCliStatus(status.state));
         },
         onRetry: (attempt, maxAttempts, error) => {
-          if (!isCurrentGeneratorRun(generatorConversationId)) return;
+          if (!isCurrentCandidate()) return;
           setIsThinkingStreaming(false);
           clearOutputBuffers();
           console.warn(
@@ -2015,7 +2343,8 @@ export function useGenerator({
           });
         },
         onCompact: async () => {
-          if (!isCurrentGeneratorRun(generatorConversationId)) return null;
+          const compactEpoch = generationRunEpochRef.current;
+          if (!isCurrentCandidate()) return null;
           const s = useConversationStore.getState();
           const conv = generatorConversationId
             ? s.conversations[generatorConversationId]
@@ -2031,9 +2360,13 @@ export function useGenerator({
             },
             conv,
             isLocalRuntime ? generateLocalUtilityText : undefined,
+            () =>
+              isCurrentCandidate() &&
+              compactEpoch === generationRunEpochRef.current,
           );
-          if (!isCurrentGeneratorRun(generatorConversationId)) return null;
-          if (!result) return null;
+          if (!isCurrentCandidate()) return null;
+          if (!result || compactEpoch !== generationRunEpochRef.current)
+            return null;
           return getMessagesForAPI({ ...conv, compressedContext: result });
         },
       } satisfies GeneratorEvents;
@@ -2043,12 +2376,12 @@ export function useGenerator({
         runtime: isLocalRuntime ? "local_cli" : "api",
         bypassEnabled: permissionBrokerBypassEnabled,
       });
-      let candidate: GenerationBackend | null = null;
       const generatorExtras = {
+        userInstructions: { prepare: prepareUserInstructions },
         conversationId: generatorConversationId,
         tools: initialTools,
         askUserQuestion: (toolCallId, questions) => {
-          if (!isCurrentGeneratorRun(generatorConversationId)) {
+          if (!isCurrentCandidate()) {
             return Promise.reject(
               new DOMException("conversation switched", "AbortError"),
             );
@@ -2059,7 +2392,7 @@ export function useGenerator({
           });
         },
         requestPlanApproval: (toolCallId, plan) => {
-          if (!isCurrentGeneratorRun(generatorConversationId)) {
+          if (!isCurrentCandidate()) {
             return Promise.reject(
               new DOMException("conversation switched", "AbortError"),
             );
@@ -2070,7 +2403,8 @@ export function useGenerator({
           });
         },
         onPlanApproved: async () => {
-          if (!isCurrentGeneratorRun(generatorConversationId)) return;
+          const approvalEpoch = generationRunEpochRef.current;
+          if (!isCurrentCandidate()) return;
           const returnMode = useConversationStore
             .getState()
             .returnFromPlan(generatorConversationId);
@@ -2080,30 +2414,28 @@ export function useGenerator({
           // its replacement tool set, even if the workspace selector changes
           // while MCP preparation is in flight.
           activeToolProfileRef.current = profile;
-          generatorRef.current?.setReadOnlyMode(false);
-          generatorRef.current?.setExecutionMode("chat");
+          candidate?.setReadOnlyMode(false);
+          candidate?.setExecutionMode("chat");
           const mcpRuntime = await runtime.mcpManager.prepareRuntime();
-          if (!isCurrentGeneratorRun(generatorConversationId)) return;
+          if (
+            !isCurrentCandidate() ||
+            approvalEpoch !== generationRunEpochRef.current
+          )
+            return;
           mcpRuntimeRef.current = mcpRuntime;
-          generatorRef.current?.setLocalToolAnnotations?.(
-            mcpRuntime.annotations,
-          );
+          candidate?.setLocalToolAnnotations?.(mcpRuntime.annotations);
           const custom = {
             ...baseCustomToolSetRef.current,
             ...mcpRuntime.tools,
           };
-          generatorRef.current?.setCustomToolSet(custom);
-          generatorRef.current?.setAllowedMcpAliases(
-            new Set(mcpRuntime.aliases.keys()),
-          );
-          generatorRef.current?.setUntrustedReferenceContext(
-            mcpRuntime.instructions,
-          );
-          generatorRef.current?.setSystemPromptSuffix(
+          candidate?.setCustomToolSet(custom);
+          candidate?.setAllowedMcpAliases(new Set(mcpRuntime.aliases.keys()));
+          candidate?.setUntrustedReferenceContext(mcpRuntime.instructions);
+          systemPromptSuffixRef.current =
             runtime.buildMemoryPromptSection(
               useMemoryStore.getState().getAll(),
-            ) + requestPromptContextRef.current,
-          );
+            ) + requestPromptContextRef.current;
+          candidate?.setSystemPromptSuffix(systemPromptSuffixRef.current);
           return runtime.buildToolSet({
             custom,
             planMode: false,
@@ -2115,7 +2447,7 @@ export function useGenerator({
           });
         },
         dispatchSubagent: async (...args) => {
-          if (!isCurrentGeneratorRun(generatorConversationId)) {
+          if (!isCurrentCandidate()) {
             throw new DOMException("conversation switched", "AbortError");
           }
           return dispatchSubagent(...args);
@@ -2127,10 +2459,7 @@ export function useGenerator({
           ) {
             return;
           }
-          if (
-            context.signal.aborted ||
-            !isCurrentGeneratorRun(generatorConversationId)
-          ) {
+          if (context.signal.aborted || !isCurrentCandidate()) {
             throw new DOMException("conversation switched", "AbortError");
           }
           const selectedAtStart =
@@ -2159,8 +2488,7 @@ export function useGenerator({
                     conversationId,
                     revision: conversation,
                     isCurrent:
-                      state.activeId === conversationId &&
-                      isCurrentGeneratorRun(conversationId),
+                      state.activeId === conversationId && isCurrentCandidate(),
                     files: conversation.files,
                     designState: conversation.designState,
                   };
@@ -2197,7 +2525,7 @@ export function useGenerator({
           if (
             context.signal.aborted ||
             generatorRef.current !== candidate ||
-            !isCurrentGeneratorRun(generatorConversationId) ||
+            !isCurrentCandidate() ||
             !currentRun ||
             currentRun.runId !== context.run.runId
           ) {
@@ -2231,6 +2559,7 @@ export function useGenerator({
         | "dispatchSubagent"
         | "prepareInitializedProject"
         | "authorizeToolCall"
+        | "userInstructions"
         | "projectPermissionSession"
         | "onProjectPermissionAuthorityChange"
         | "onProjectPermissionRequestFinished"
@@ -2252,10 +2581,7 @@ export function useGenerator({
                 generatorConversationId
               ] ?? null,
             saveSession: (session) => {
-              if (
-                generatorRef.current !== candidate ||
-                !isCurrentGeneratorRun(generatorConversationId)
-              ) {
+              if (generatorRef.current !== candidate || !isCurrentCandidate()) {
                 return;
               }
               useConversationStore
@@ -2299,7 +2625,10 @@ export function useGenerator({
         runConversationIdRef.current,
         sameGeneratorConfig(nextConfig, currentGeneratorConfigSnapshot()),
       );
-      if (!constructionIsCurrent) {
+      if (
+        !constructionIsCurrent ||
+        constructionRunEpoch !== generationRunEpochRef.current
+      ) {
         candidate.abort();
         return null;
       }
@@ -2317,6 +2646,7 @@ export function useGenerator({
 
     return generatorRef.current;
   }, [
+    prepareUserInstructions,
     settings,
     webSearchSettings,
     assetSearchSettings,
@@ -2481,6 +2811,11 @@ export function useGenerator({
         mode === "chat" || mode === "plan"
           ? buildCustomSystemPromptSection(customSystemPromptSnapshot)
           : "";
+      if (mode === "chat" || mode === "plan") {
+        foregroundForcedSkillIdsRef.current = [...forcedSkillIds];
+        foregroundCustomPromptRef.current = customSystemPromptSnapshot;
+      }
+      forcedSkillIdsRef.current = [...forcedSkillIds];
       forcedSkillsPromptRef.current = forcedSkillsSuffix;
       customSystemPromptRef.current = customSystemPromptSuffix;
       // Keep the exact request-start snapshot for an approved Plan's next
@@ -2497,6 +2832,7 @@ export function useGenerator({
       generator.setUntrustedReferenceContext(
         mode === "auto_qa" || isDesignReview ? "" : mcpRuntime.instructions,
       );
+      systemPromptSuffixRef.current = promptSuffix;
       generator.setSystemPromptSuffix(promptSuffix);
       assertCurrent();
     },
@@ -2559,7 +2895,9 @@ export function useGenerator({
           new Error(`Automatic QA failed: ${err?.message || "Unknown error"}`),
           { retryable: false },
         );
+        return false;
       }
+      return true;
     },
     [
       applyDynamicGeneratorState,
@@ -2567,6 +2905,81 @@ export function useGenerator({
       isCurrentGeneratorRun,
       setMessages,
     ],
+  );
+
+  const settleUserInstructions = useCallback(
+    async (
+      generator: GenerationBackend,
+      initialResult: GenerateResult,
+      conversationId: string,
+      epoch: number,
+      autoQa: boolean,
+    ): Promise<GenerateResult> => {
+      const current = () =>
+        epoch === generationRunEpochRef.current &&
+        generatorRef.current === generator &&
+        isCurrentGeneratorRun(conversationId);
+      const pending = () =>
+        (
+          useConversationStore.getState().conversations[conversationId]
+            ?.pendingUserInstructions ?? []
+        ).filter(
+          (item) =>
+            item.runId === logicalRunIdRef.current && item.status === "queued",
+        );
+      let result = initialResult;
+      while (current() && !result.aborted && !result.maxIterationsReached) {
+        const before = pending();
+        if (before.length) {
+          const workspace = getConversationWorkspaceContext(conversationId);
+          if (generator.getRunContext().mode !== workspace.mode) {
+            await applyDynamicGeneratorState(
+              generator,
+              foregroundForcedSkillIdsRef.current,
+              {
+                customSystemPromptSnapshot: foregroundCustomPromptRef.current,
+                mode: workspace.mode,
+                profile: workspace.profile,
+                promptWorkspaceMode: workspace.promptWorkspaceMode,
+                isCurrent: current,
+              },
+            );
+          }
+          if (!current()) return result;
+          result = await generator.generate(
+            "Continue the current task with the queued user updates. Preserve completed work.",
+          );
+          if (!current()) return result;
+          // A backend that cannot consume the batch must not spin or silently replay it.
+          const remaining = new Set(pending().map((item) => item.id));
+          if (before.some((item) => remaining.has(item.id))) {
+            const ids = new Set(before.map((item) => item.id));
+            useConversationStore
+              .getState()
+              .setPendingUserInstructions(conversationId, (items) =>
+                items.map((item) =>
+                  ids.has(item.id) && item.status === "queued"
+                    ? { ...item, status: "failed" }
+                    : item,
+                ),
+              );
+            return result;
+          }
+        }
+        if (autoQa && !hasIncompletePrototypeBuild(result.files)) {
+          const success = await runAutomaticQa(
+            generator,
+            result,
+            conversationId,
+            epoch,
+          );
+          if (success === false) return result;
+        }
+        if (!pending().length) return result;
+      }
+      return result;
+    },
+    [applyDynamicGeneratorState, isCurrentGeneratorRun, runAutomaticQa],
   );
 
   const scheduleAutomaticDesignReview = useCallback(
@@ -2759,6 +3172,7 @@ export function useGenerator({
       const runEpoch = ++generationRunEpochRef.current;
       const customSystemPromptSnapshot =
         useSettingsStore.getState().system.customSystemPrompt;
+      logicalRunIdRef.current = crypto.randomUUID();
       runConversationIdRef.current = runConversationId;
       setRunState("preparing");
       setLastError(null);
@@ -2796,7 +3210,12 @@ export function useGenerator({
             }
           : undefined;
 
-      const previousConversation = runStartConversation;
+      const previousConversation = runStartConversation
+        ? {
+            ...runStartConversation,
+            messages: cancelPendingToolCalls(runStartConversation.messages),
+          }
+        : undefined;
       const currentMessageIndex = removeErrorMessages(
         previousConversation?.messages ?? [],
       ).length;
@@ -2816,7 +3235,10 @@ export function useGenerator({
         isCurrentGeneratorRun(runConversationId);
 
       useInteractiveStore.getState().rejectAllPending("new generation started");
-      setMessages((prev) => [...removeErrorMessages(prev), currentRequest]);
+      setMessages((prev) => [
+        ...cancelPendingToolCalls(removeErrorMessages(prev)),
+        currentRequest,
+      ]);
       if (shouldGenerateTitle) {
         void triggerSmartTitle({
           conversationId: runConversationId,
@@ -2870,7 +3292,7 @@ export function useGenerator({
         const resolvedAttachments = attachments?.length
           ? await resolveAttachmentsForModel(attachments)
           : [];
-        clearAgnesAttachments = registerAgnesRunAttachments(
+        clearAgnesAttachments = registerRunAttachments(
           runConversationId,
           resolvedAttachments,
         );
@@ -2909,13 +3331,11 @@ export function useGenerator({
             resolvedAttachments.length ? resolvedAttachments : undefined,
             { currentMessageIndex },
           );
-          for (
-            let batch = 0;
-            batch < MAX_AUTOMATIC_PROTOTYPE_BATCHES &&
+          while (
+            isCurrentRun() &&
             !result.aborted &&
             !result.maxIterationsReached &&
-            hasIncompletePrototypeBuild(result.files);
-            batch += 1
+            hasIncompletePrototypeBuild(result.files)
           ) {
             const currentConversation =
               useConversationStore.getState().conversations[runConversationId];
@@ -2927,8 +3347,21 @@ export function useGenerator({
               ...designBlueprintRunPolicy(result.files),
             });
             designRunExpectedChangeModesRef.current = ["create", "extend"];
+            const beforeBatch = { ...result.files };
             result = await generator.generate(AUTOMATIC_PROTOTYPE_BATCH_PROMPT);
+            if (!isCurrentRun()) return;
+            if (!result.aborted && !result.maxIterationsReached) {
+              assertPrototypeBatchProgress(beforeBatch, result.files);
+            }
           }
+          result = await settleUserInstructions(
+            generator,
+            result,
+            runConversationId,
+            runEpoch,
+            !options.skipAutoQa,
+          );
+          if (!isCurrentRun()) return;
           const prototypeBuildIncomplete = hasIncompletePrototypeBuild(
             result.files,
           );
@@ -2938,14 +3371,6 @@ export function useGenerator({
               runConversationId,
               prompt,
               options,
-            );
-          }
-          if (!options.skipAutoQa && !prototypeBuildIncomplete) {
-            await runAutomaticQa(
-              generator,
-              result,
-              runConversationId,
-              runEpoch,
             );
           }
         }
@@ -2970,16 +3395,20 @@ export function useGenerator({
           forcedSkillsPromptRef.current = "";
           customSystemPromptRef.current = "";
           requestPromptContextRef.current = "";
+          useConversationStore
+            .getState()
+            .cancelUserInstructions(runConversationId);
           runConversationIdRef.current = null;
         }
       }
     },
     [
       getGenerator,
+      registerRunAttachments,
       setIsGenerating,
       setMessages,
       applyDynamicGeneratorState,
-      runAutomaticQa,
+      settleUserInstructions,
       scheduleAutomaticDesignReview,
       appendGenerationError,
       isCurrentGeneratorRun,
@@ -2992,9 +3421,24 @@ export function useGenerator({
   );
 
   const stop = useCallback(() => {
+    const stoppedConversationId = runConversationIdRef.current;
+    if (stoppedConversationId)
+      useConversationStore
+        .getState()
+        .cancelUserInstructions(stoppedConversationId);
+    runAttachmentsRef.current?.clear();
+    runAttachmentsRef.current = null;
     generationRunEpochRef.current += 1;
+    generatorConstructionEpochRef.current += 1;
     setIsThinkingStreaming(false);
     flushOutputBuffers();
+    if (stoppedConversationId)
+      useConversationStore
+        .getState()
+        .setMessagesForConversation(
+          stoppedConversationId,
+          cancelPendingToolCalls,
+        );
     generatorRef.current?.abort();
     generatorRef.current = null;
     generatorConfigRef.current = null;
@@ -3035,6 +3479,12 @@ export function useGenerator({
       return null;
     }
 
+    if (runConversationIdRef.current)
+      useConversationStore
+        .getState()
+        .cancelUserInstructions(runConversationIdRef.current);
+    runAttachmentsRef.current?.clear();
+    runAttachmentsRef.current = null;
     generationRunEpochRef.current += 1;
     generatorConstructionEpochRef.current += 1;
     generatorRef.current?.abort();
@@ -3115,6 +3565,7 @@ export function useGenerator({
     }
     const customSystemPromptSnapshot =
       useSettingsStore.getState().system.customSystemPrompt;
+    logicalRunIdRef.current = crypto.randomUUID();
     runConversationIdRef.current = runConversationId;
     const runEpoch = ++generationRunEpochRef.current;
     const isCurrentRun = () =>
@@ -3124,18 +3575,7 @@ export function useGenerator({
     setLastError(null);
     setIsThinkingStreaming(false);
     setIsGenerating(true);
-    setMessages((prev) => {
-      const toolResultIds = new Set(
-        prev.filter((m) => m.role === "tool").map((m) => m.tool_call_id),
-      );
-      return prev.filter((m) => {
-        if (isErrorMessage(m)) return false;
-        if (m.role === "assistant" && m.tool_calls?.length) {
-          return m.tool_calls.every((tc) => toolResultIds.has(tc.id));
-        }
-        return true;
-      });
-    });
+    setMessages((prev) => cancelPendingToolCalls(removeErrorMessages(prev)));
     let clearAgnesAttachments = () => {};
     try {
       const generator = await getGenerator();
@@ -3162,7 +3602,7 @@ export function useGenerator({
           ? await resolveAttachmentsForModel(lastRequest.metadata.attachments)
           : [];
         if (!isCurrentRun()) return;
-        clearAgnesAttachments = registerAgnesRunAttachments(
+        clearAgnesAttachments = registerRunAttachments(
           runConversationId,
           resolvedAttachments,
         );
@@ -3187,7 +3627,14 @@ export function useGenerator({
           },
         );
         if (!isCurrentRun()) return;
-        await generator.retry();
+        const result = await generator.retry();
+        await settleUserInstructions(
+          generator,
+          result,
+          runConversationId,
+          runEpoch,
+          false,
+        );
       }
     } catch (err: any) {
       if (!isCurrentRun()) return;
@@ -3207,11 +3654,16 @@ export function useGenerator({
         forcedSkillsPromptRef.current = "";
         customSystemPromptRef.current = "";
         requestPromptContextRef.current = "";
+        useConversationStore
+          .getState()
+          .cancelUserInstructions(runConversationId);
         runConversationIdRef.current = null;
       }
     }
   }, [
     getGenerator,
+    registerRunAttachments,
+    settleUserInstructions,
     setIsGenerating,
     setMessages,
     applyDynamicGeneratorState,
@@ -3868,6 +4320,7 @@ export function useGenerator({
       isCurrentGeneratorRun(runConversationId);
     const customSystemPromptSnapshot =
       useSettingsStore.getState().system.customSystemPrompt;
+    logicalRunIdRef.current = crypto.randomUUID();
     runConversationIdRef.current = runConversationId;
     setRunState("preparing");
     setLastError(null);
@@ -3888,24 +4341,26 @@ export function useGenerator({
             profile: continueWorkspace.profile,
           });
         }
-        await applyDynamicGeneratorState(generator, [], {
-          customSystemPromptSnapshot,
-          promptWorkspaceMode: continueWorkspace.promptWorkspaceMode,
-          mode: continueWorkspace.mode,
-          profile: continueWorkspace.profile,
-          isCurrent: isCurrentRun,
-        });
+        await applyDynamicGeneratorState(
+          generator,
+          getLastForcedSkillIds(activeConv?.messages ?? []),
+          {
+            customSystemPromptSnapshot,
+            promptWorkspaceMode: continueWorkspace.promptWorkspaceMode,
+            mode: continueWorkspace.mode,
+            profile: continueWorkspace.profile,
+            isCurrent: isCurrentRun,
+          },
+        );
         if (!isCurrentRun()) return;
         const continuePrompt =
           "Continue from the current design-project.json checkpoint. Do not repeat completed prototype pages, flows, or batches. Complete the next unfinished task and update the blueprint checkpoint.";
         let result = await generator.generate(continuePrompt);
-        for (
-          let batch = 0;
-          batch < MAX_AUTOMATIC_PROTOTYPE_BATCHES &&
+        while (
+          isCurrentRun() &&
           !result.aborted &&
           !result.maxIterationsReached &&
-          hasIncompletePrototypeBuild(result.files);
-          batch += 1
+          hasIncompletePrototypeBuild(result.files)
         ) {
           if (!isCurrentRun()) return;
           const currentConversation =
@@ -3918,8 +4373,21 @@ export function useGenerator({
             ...designBlueprintRunPolicy(result.files),
           });
           designRunExpectedChangeModesRef.current = ["create", "extend"];
+          const beforeBatch = { ...result.files };
           result = await generator.generate(AUTOMATIC_PROTOTYPE_BATCH_PROMPT);
+          if (!isCurrentRun()) return;
+          if (!result.aborted && !result.maxIterationsReached) {
+            assertPrototypeBatchProgress(beforeBatch, result.files);
+          }
         }
+        result = await settleUserInstructions(
+          generator,
+          result,
+          runConversationId,
+          runEpoch,
+          true,
+        );
+        if (!isCurrentRun()) return;
         const incomplete = hasIncompletePrototypeBuild(result.files);
         if (!incomplete) {
           scheduleAutomaticDesignReview(
@@ -3928,7 +4396,6 @@ export function useGenerator({
             continuePrompt,
             {},
           );
-          await runAutomaticQa(generator, result, runConversationId, runEpoch);
         }
       }
     } catch (err: any) {
@@ -3948,6 +4415,9 @@ export function useGenerator({
         forcedSkillsPromptRef.current = "";
         customSystemPromptRef.current = "";
         requestPromptContextRef.current = "";
+        useConversationStore
+          .getState()
+          .cancelUserInstructions(runConversationId);
         runConversationIdRef.current = null;
       }
     }
@@ -3959,12 +4429,13 @@ export function useGenerator({
     applyDynamicGeneratorState,
     appendGenerationError,
     isCurrentGeneratorRun,
-    runAutomaticQa,
+    settleUserInstructions,
     scheduleAutomaticDesignReview,
   ]);
 
   return {
     generate,
+    enqueueInstruction,
     stop,
     withdrawLastUserMessage,
     retry,

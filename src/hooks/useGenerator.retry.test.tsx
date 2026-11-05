@@ -30,6 +30,8 @@ import type {
   DesignContract,
 } from "../lib/design/run-contract";
 import { useGenerator } from "./useGenerator";
+import { getT } from "../i18n";
+import { SAAS_PROTOTYPE_BLUEPRINT_FIXTURE } from "../lib/design/fixtures/saas-prototype";
 
 const runtimeMocks = vi.hoisted(() => ({
   buildForcedSkillsPromptSection: vi.fn(),
@@ -106,6 +108,8 @@ const ART_DIRECT_SKILL: SkillEntry = {
 const records: BackendRecord[] = [];
 let seedContractForNextGeneration: DesignContract | undefined;
 let retryGateForNextBackend: Deferred<GenerateResult> | undefined;
+let generateActionForNextBackend:
+  ((backend: FakeBackend) => Promise<GenerateResult>) | undefined;
 
 const TEST_API_SETTINGS = {
   apiKey: "test-key",
@@ -115,7 +119,7 @@ const TEST_API_SETTINGS = {
 
 type GeneratorExtras = Pick<
   GeneratorOptions,
-  "conversationId" | "authorizeToolCall"
+  "conversationId" | "authorizeToolCall" | "userInstructions"
 >;
 
 type RetryAction = (backend: FakeBackend) => Promise<GenerateResult>;
@@ -144,6 +148,31 @@ function resultFor(backend: FakeBackend): GenerateResult {
   };
 }
 
+function prototypeFiles(completedPages: number): ProjectFiles {
+  const fixture = SAAS_PROTOTYPE_BLUEPRINT_FIXTURE;
+  const complete = completedPages >= fixture.pages.length;
+  return {
+    "package.json": JSON.stringify({
+      openBuilder: { profile: "complete-prototype", schemaVersion: 1 },
+    }),
+    "src/App.tsx": "export default function App() { return null; }",
+    "design-project.json": JSON.stringify({
+      ...fixture,
+      revision: fixture.revision + completedPages,
+      buildProgress: {
+        ...fixture.buildProgress,
+        status: complete ? "complete" : "in-progress",
+        percent: complete
+          ? 100
+          : Math.floor((completedPages / fixture.pages.length) * 100),
+        completedPageIds: fixture.pages
+          .slice(0, completedPages)
+          .map((page) => page.id),
+      },
+    }),
+  };
+}
+
 class FakeBackend implements GenerationBackend {
   private files: ProjectFiles;
   private messages: Message[] = [];
@@ -154,6 +183,7 @@ class FakeBackend implements GenerationBackend {
   private allowedMcpAliases = new Set<string>();
 
   retryAction: RetryAction = async (backend) => resultFor(backend);
+  generateAction = generateActionForNextBackend;
   retryCalls = 0;
   setFilesCalls: ProjectFiles[] = [];
   seedSubmission: unknown;
@@ -261,7 +291,7 @@ class FakeBackend implements GenerationBackend {
         throw new Error(this.seedSubmission);
       }
     }
-    return resultFor(this);
+    return this.generateAction ? this.generateAction(this) : resultFor(this);
   }
 }
 
@@ -391,6 +421,7 @@ describe("useGenerator retry Design policy", () => {
     records.length = 0;
     seedContractForNextGeneration = undefined;
     retryGateForNextBackend = undefined;
+    generateActionForNextBackend = undefined;
     configureRuntimeMocks();
     useConversationStore.setState({
       conversations: {},
@@ -406,6 +437,123 @@ describe("useGenerator retry Design policy", () => {
       },
     }));
     useInteractiveStore.setState({ pending: [] });
+  });
+
+  it.each(["generate", "continueTask"] as const)(
+    "continues prototype batches past the old limit through %s",
+    async (entry) => {
+      useConversationStore.getState().createConversation();
+      useConversationStore.getState().setFiles(prototypeFiles(0));
+      useSettingsStore.setState((state) => ({
+        system: { ...state.system, autoQaEnabled: false },
+      }));
+      let calls = 0;
+      generateActionForNextBackend = async (backend) => {
+        calls += 1;
+        backend.setFiles(prototypeFiles(calls));
+        return resultFor(backend);
+      };
+      const hook = renderGenerator();
+
+      await act(async () => {
+        if (entry === "generate")
+          await hook.result.current.generate("Build all pages", undefined, {
+            skipAutoQa: true,
+            skipAutomaticDesignReview: true,
+          });
+        else await hook.result.current.continueTask();
+      });
+
+      expect(calls).toBe(6);
+      expect(
+        JSON.parse(records[0].backend.getFiles()["design-project.json"])
+          .buildProgress.status,
+      ).toBe("complete");
+      expect(hook.result.current.isGenerating).toBe(false);
+    },
+  );
+
+  it.each(["generate", "continueTask"] as const)(
+    "reports an unchanged prototype checkpoint instead of repeatedly requesting %s",
+    async (entry) => {
+      const conversationId = useConversationStore
+        .getState()
+        .createConversation();
+      useConversationStore.getState().setFiles(prototypeFiles(0));
+      let calls = 0;
+      generateActionForNextBackend = async (backend) => {
+        calls += 1;
+        if (calls > 2) throw new Error("unexpected repeated batch fixture");
+        return resultFor(backend);
+      };
+      const hook = renderGenerator();
+
+      await act(async () => {
+        if (entry === "generate")
+          await hook.result.current.generate("Build all pages", undefined, {
+            skipAutoQa: true,
+            skipAutomaticDesignReview: true,
+          });
+        else await hook.result.current.continueTask();
+      });
+
+      expect(calls).toBe(2);
+      expect(hook.result.current.lastError?.message).toContain(
+        getT().message.prototypeNoProgress,
+      );
+      expect(
+        useConversationStore.getState().conversations[conversationId].files,
+      ).toEqual(prototypeFiles(0));
+    },
+  );
+
+  it.each(["aborted", "maxIterationsReached"] as const)(
+    "preserves a prototype backend's controlled %s outcome",
+    async (outcome) => {
+      useConversationStore.getState().createConversation();
+      useConversationStore.getState().setFiles(prototypeFiles(0));
+      let calls = 0;
+      generateActionForNextBackend = async (backend) => {
+        calls += 1;
+        return { ...resultFor(backend), [outcome]: calls === 2 };
+      };
+      const hook = renderGenerator();
+
+      await act(async () => {
+        await hook.result.current.generate("Build all pages", undefined, {
+          skipAutoQa: true,
+          skipAutomaticDesignReview: true,
+        });
+      });
+
+      expect(calls).toBe(2);
+      expect(hook.result.current.lastError).toBeNull();
+    },
+  );
+
+  it("does not start another prototype batch after Stop at a batch boundary", async () => {
+    useConversationStore.getState().createConversation();
+    useConversationStore.getState().setFiles(prototypeFiles(0));
+    let calls = 0;
+    let stop = () => {};
+    generateActionForNextBackend = async (backend) => {
+      calls += 1;
+      backend.setFiles(prototypeFiles(calls));
+      stop();
+      return resultFor(backend);
+    };
+    const hook = renderGenerator();
+    stop = hook.result.current.stop;
+
+    await act(async () => {
+      await hook.result.current.generate("Build all pages", undefined, {
+        skipAutoQa: true,
+        skipAutomaticDesignReview: true,
+      });
+    });
+
+    expect(calls).toBe(1);
+    expect(hook.result.current.isGenerating).toBe(false);
   });
 
   it("rebuilds Design retry policy from current files and persisted migrate mode", async () => {
@@ -586,6 +734,38 @@ describe("useGenerator retry Design policy", () => {
     ).toBe(true);
   });
 
+  it("shows a continuation notice instead of completion after reaching the tool budget", async () => {
+    const conversationId = useConversationStore.getState().createConversation();
+    const hook = renderGenerator();
+    await act(async () => {
+      await hook.result.current.generate("Build it", undefined, {
+        skipAutomaticDesignReview: true,
+      });
+    });
+    const record = records[0];
+    record.backend.retryAction = async (backend) => {
+      const result = { ...resultFor(backend), maxIterationsReached: true };
+      record.events?.onComplete?.(result);
+      return result;
+    };
+
+    await act(async () => {
+      await hook.result.current.retry();
+    });
+
+    expect(hook.result.current.runState).toBe("idle");
+    expect(hook.result.current.lastError).toBeNull();
+    expect(
+      useConversationStore
+        .getState()
+        .conversations[conversationId].messages.at(-1),
+    ).toMatchObject({
+      role: "assistant",
+      content: getT().message.toolBudgetReached,
+    });
+    expect(record.backend.retryCalls).toBe(1);
+  });
+
   it("keeps the default Auto retry profile ungated by Design policy", async () => {
     useConversationStore.getState().createConversation();
     useConversationStore
@@ -695,5 +875,350 @@ describe("useGenerator retry Design policy", () => {
       useConversationStore.getState().conversations[secondConversationId],
     ).toEqual(secondConversationBefore);
     expect(hook.result.current.isGenerating).toBe(false);
+  });
+
+  it("rejects stopped instance events after another run starts in the same conversation", async () => {
+    const conversationId = useConversationStore.getState().createConversation();
+    const firstGate = deferred<GenerateResult>();
+    const secondGate = deferred<GenerateResult>();
+    generateActionForNextBackend = () => firstGate.promise;
+    const hook = renderGenerator();
+    let first!: Promise<void>;
+    await act(async () => {
+      first = hook.result.current.generate("First");
+    });
+    await waitFor(() => expect(records).toHaveLength(1));
+    act(() => hook.result.current.stop());
+    generateActionForNextBackend = () => secondGate.promise;
+    let second!: Promise<void>;
+    await act(async () => {
+      second = hook.result.current.generate("Second");
+    });
+    await waitFor(() => expect(records).toHaveLength(2));
+    const before =
+      useConversationStore.getState().conversations[conversationId];
+    act(() => {
+      records[0].events?.onText?.("stale text");
+      records[0].events?.onFileChange?.({ "stale.ts": "bad" }, []);
+      records[0].events?.onError?.(new Error("old failure"));
+      records[0].events?.onComplete?.(resultFor(records[0].backend));
+    });
+    expect(
+      useConversationStore.getState().conversations[conversationId],
+    ).toEqual(before);
+    expect(hook.result.current.lastError).toBeNull();
+    expect(hook.result.current.isGenerating).toBe(true);
+    await act(async () => {
+      firstGate.resolve(resultFor(records[0].backend));
+      secondGate.resolve(resultFor(records[1].backend));
+      await Promise.all([first, second]);
+    });
+  });
+
+  it("persists supplements separately, commits once at the boundary, and cancels late ACKs", async () => {
+    const conversationId = useConversationStore.getState().createConversation();
+    const gate = deferred<GenerateResult>();
+    generateActionForNextBackend = () => gate.promise;
+    const hook = renderGenerator();
+    let generation!: Promise<void>;
+    await act(async () => {
+      generation = hook.result.current.generate("Build");
+    });
+    await waitFor(() => expect(records).toHaveLength(1));
+    let accepted = false;
+    await act(async () => {
+      accepted = await hook.result.current.enqueueInstruction("Use blue");
+    });
+    expect(accepted).toBe(true);
+    const store = useConversationStore.getState();
+    expect(store.conversations[conversationId].messages).toHaveLength(1);
+    expect(
+      store.conversations[conversationId].pendingUserInstructions?.[0],
+    ).toMatchObject({ content: "Use blue", status: "queued" });
+    const record = records[0];
+    let batch!: Awaited<
+      ReturnType<NonNullable<GeneratorOptions["userInstructions"]>["prepare"]>
+    >;
+    await act(async () => {
+      batch = await record.extras.userInstructions!.prepare(
+        record.backend,
+        new AbortController().signal,
+      );
+    });
+    expect(batch?.instructions[0].message.content).toBe("Use blue");
+    act(() => {
+      expect(batch?.commit()).toBe(true);
+      expect(batch?.commit()).toBe(false);
+    });
+    expect(
+      useConversationStore
+        .getState()
+        .conversations[conversationId].messages.map((m) => m.content),
+    ).toEqual(["Build", "Use blue"]);
+    await act(async () => {
+      await hook.result.current.enqueueInstruction("Also green");
+      batch = await record.extras.userInstructions!.prepare(
+        record.backend,
+        new AbortController().signal,
+      );
+    });
+    act(() => hook.result.current.stop());
+    expect(batch?.commit()).toBe(false);
+    expect(
+      useConversationStore.getState().conversations[conversationId]
+        .pendingUserInstructions?.[0].status,
+    ).toBe("cancelled");
+    await act(async () => {
+      gate.resolve(resultFor(record.backend));
+      await generation;
+    });
+  });
+
+  it("seals pending tool results on Stop and preserves completed assistant work", async () => {
+    const conversationId = useConversationStore.getState().createConversation();
+    const gate = deferred<GenerateResult>();
+    generateActionForNextBackend = () => gate.promise;
+    const hook = renderGenerator();
+    let generation!: Promise<void>;
+    await act(async () => {
+      generation = hook.result.current.generate("Build");
+    });
+    await waitFor(() => expect(records).toHaveLength(1));
+    act(() => {
+      records[0].events?.onText?.("Retain this progress");
+      records[0].events?.onToolCall?.("read_files", "pending");
+      hook.result.current.stop();
+    });
+    const messages =
+      useConversationStore.getState().conversations[conversationId].messages;
+    expect(messages.some((m) => m.content === "Retain this progress")).toBe(
+      true,
+    );
+    expect(messages.filter((m) => m.tool_call_id === "pending")).toHaveLength(
+      1,
+    );
+    expect(messages.at(-1)?.toolOutput?.isError).toBe(true);
+    await act(async () => {
+      gate.resolve(resultFor(records[0].backend));
+      await generation;
+    });
+  });
+
+  it("retains the effective forced-skill union in supplemented history and Retry", async () => {
+    const id = useConversationStore.getState().createConversation();
+    const secondSkill = {
+      ...ART_DIRECT_SKILL,
+      id: "code-review",
+      name: "Code Review",
+    };
+    runtimeMocks.isSkillsAvailable.mockReturnValue(true);
+    runtimeMocks.getSkillRegistry.mockResolvedValue({
+      getAutoEnabled: () => [],
+      prepareForcedSkills: async (ids: string[]) =>
+        ids.map((skillId) => ({
+          entry:
+            skillId === ART_DIRECT_SKILL.id ? ART_DIRECT_SKILL : secondSkill,
+          content: skillId,
+        })),
+    });
+    runtimeMocks.buildForcedSkillsPromptSection.mockImplementation((items) =>
+      items.map((item: { entry: SkillEntry }) => item.entry.id).join("|"),
+    );
+    const gate = deferred<GenerateResult>();
+    generateActionForNextBackend = () => gate.promise;
+    const hook = renderGenerator();
+    let running!: Promise<void>;
+    await act(async () => {
+      running = hook.result.current.generate("Build", undefined, {
+        forcedSkillIds: [ART_DIRECT_SKILL.id],
+      });
+    });
+    await waitFor(() => expect(records).toHaveLength(1));
+    const record = records[0];
+    await act(async () => {
+      expect(await hook.result.current.enqueueInstruction("Keep layout")).toBe(
+        true,
+      );
+      const textBatch = await record.extras.userInstructions!.prepare(
+        record.backend,
+        new AbortController().signal,
+      );
+      expect(textBatch?.instructions[0].message.forcedSkillIds).toEqual([
+        ART_DIRECT_SKILL.id,
+      ]);
+      expect(textBatch?.commit()).toBe(true);
+      expect(
+        await hook.result.current.enqueueInstruction("", undefined, {
+          forcedSkillIds: [secondSkill.id],
+        }),
+      ).toBe(true);
+      const skillBatch = await record.extras.userInstructions!.prepare(
+        record.backend,
+        new AbortController().signal,
+      );
+      expect(skillBatch?.instructions[0].message.forcedSkillIds).toEqual([
+        ART_DIRECT_SKILL.id,
+        secondSkill.id,
+      ]);
+      expect(skillBatch?.instructions[0].message.content).toBeTruthy();
+      expect(skillBatch?.commit()).toBe(true);
+      gate.resolve(resultFor(record.backend));
+      await running;
+    });
+    expect(
+      useConversationStore.getState().conversations[id].messages.at(-1)
+        ?.forcedSkillIds,
+    ).toEqual([ART_DIRECT_SKILL.id, secondSkill.id]);
+    await act(async () => {
+      await hook.result.current.retry();
+    });
+    expect(
+      record.backend
+        .getSkillContext()
+        .get()
+        ?.skills.map((skill) => skill.skillId),
+    ).toEqual([ART_DIRECT_SKILL.id, secondSkill.id]);
+  });
+
+  it("drains updates submitted during Auto QA after restoring foreground mode", async () => {
+    const id = useConversationStore.getState().createConversation();
+    useConversationStore
+      .getState()
+      .setFiles({ "src/App.tsx": "export const App=1" });
+    useSettingsStore.setState((state) => ({
+      system: { ...state.system, autoQaEnabled: true },
+    }));
+    const qaGate = deferred<GenerateResult>();
+    let calls = 0;
+    generateActionForNextBackend = async (backend) => {
+      calls++;
+      if (calls === 2) return qaGate.promise;
+      if (calls === 3) {
+        expect(backend.getRunContext().mode).toBe("chat");
+        const batch = await records[0].extras.userInstructions!.prepare(
+          backend,
+          new AbortController().signal,
+        );
+        expect(batch?.instructions[0].message.content).toBe(
+          "Also change the header",
+        );
+        expect(batch?.commit()).toBe(true);
+      }
+      return resultFor(backend);
+    };
+    const hook = renderGenerator();
+    let running!: Promise<void>;
+    await act(async () => {
+      running = hook.result.current.generate("Build");
+    });
+    await waitFor(() => expect(calls).toBe(2));
+    await act(async () => {
+      expect(
+        await hook.result.current.enqueueInstruction("Also change the header"),
+      ).toBe(true);
+    });
+    await act(async () => {
+      qaGate.resolve(resultFor(records[0].backend));
+      await running;
+    });
+    expect(calls).toBe(4);
+    expect(
+      useConversationStore.getState().conversations[id].pendingUserInstructions,
+    ).toEqual([]);
+    expect(
+      useConversationStore
+        .getState()
+        .conversations[id].messages.filter(
+          (message) => message.content === "Also change the header",
+        ),
+    ).toHaveLength(1);
+  });
+
+  it("ignores a generator constructed after Stop while the next run is preparing", async () => {
+    const id = useConversationStore.getState().createConversation();
+    const original = runtimeMocks.buildToolHandlers.getMockImplementation()!;
+    const buildGate = deferred<Awaited<ReturnType<typeof original>>>();
+    const nextPreparation = deferred<void>();
+    runtimeMocks.buildToolHandlers.mockImplementationOnce(
+      () => buildGate.promise,
+    );
+    const hook = renderGenerator();
+    let first!: Promise<void>;
+    await act(async () => {
+      first = hook.result.current.generate("Old");
+    });
+    await waitFor(() =>
+      expect(runtimeMocks.buildToolHandlers).toHaveBeenCalledOnce(),
+    );
+    act(() => hook.result.current.stop());
+    let second!: Promise<void>;
+    await act(async () => {
+      second = hook.result.current.generate("New", undefined, {
+        prepareRun: () => nextPreparation.promise,
+      });
+    });
+    await act(async () => {
+      buildGate.resolve(
+        await original(runtimeMocks.buildToolHandlers.mock.calls[0][0]),
+      );
+      await first;
+    });
+    const before = useConversationStore.getState().conversations[id];
+    act(() => {
+      records[0]?.events?.onText?.("stale construction");
+      records[0]?.events?.onFileChange?.({ "bad.ts": "bad" }, []);
+    });
+    expect(useConversationStore.getState().conversations[id]).toEqual(before);
+    await act(async () => {
+      nextPreparation.resolve();
+      await second;
+    });
+    expect(records).toHaveLength(2);
+  });
+
+  it("keeps the original run alive if a queued skill disappears before delivery", async () => {
+    const id = useConversationStore.getState().createConversation();
+    const gate = deferred<GenerateResult>();
+    const prepareForcedSkills = vi.fn(async () => [
+      { entry: ART_DIRECT_SKILL, content: "skill" },
+    ]);
+    runtimeMocks.isSkillsAvailable.mockReturnValue(true);
+    runtimeMocks.getSkillRegistry.mockResolvedValue({
+      getAutoEnabled: () => [],
+      prepareForcedSkills,
+    });
+    generateActionForNextBackend = () => gate.promise;
+    const hook = renderGenerator();
+    let running!: Promise<void>;
+    await act(async () => {
+      running = hook.result.current.generate("Build");
+    });
+    await waitFor(() => expect(records).toHaveLength(1));
+    await act(async () => {
+      expect(
+        await hook.result.current.enqueueInstruction("Review", undefined, {
+          forcedSkillIds: [ART_DIRECT_SKILL.id],
+        }),
+      ).toBe(true);
+    });
+    prepareForcedSkills.mockRejectedValueOnce(new Error("Skill removed"));
+    await act(async () => {
+      expect(
+        await records[0].extras.userInstructions!.prepare(
+          records[0].backend,
+          new AbortController().signal,
+        ),
+      ).toBeNull();
+    });
+    expect(hook.result.current.isGenerating).toBe(true);
+    expect(hook.result.current.lastError).toBeNull();
+    expect(
+      useConversationStore.getState().conversations[id]
+        .pendingUserInstructions?.[0].status,
+    ).toBe("failed");
+    await act(async () => {
+      gate.resolve(resultFor(records[0].backend));
+      await running;
+    });
   });
 });

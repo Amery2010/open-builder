@@ -20,17 +20,15 @@ use crate::local_agent_models::{CatalogAuthority, LaunchValidation, ModelStrateg
 use crate::local_agent_protocol::LocalCliRunState;
 use crate::local_agent_runtime::{
     infer_failure_phase, AdapterError, InstallationIdentity, LocalCliFailure, LocalCliFailureCode,
-    LocalCliFailurePhase, LocalCliRetryPolicy,
+    LocalCliFailurePhase, LocalCliRetryPolicy, RunCancellation,
 };
 
 const MAX_ACTIVE_RUNS: usize = 8;
 const MAX_START_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 const MAX_TOOL_COUNT: usize = 128;
-const MAX_TOOL_CALLS_PER_RUN: usize = 512;
 const MAX_TOOL_NAME_BYTES: usize = 256;
 const MAX_TOOL_DESCRIPTION_BYTES: usize = 128 * 1024;
 const MAX_PATH_BYTES: usize = 4 * 1024;
-const MAX_RUN_DURATION: Duration = Duration::from_secs(30 * 60);
 const RUN_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Hash)]
@@ -297,6 +295,8 @@ pub struct LocalAgentStartRequest {
     pub session_compatibility_key: Option<String>,
     pub scope: LocalAgentRunScope,
     pub tools: Vec<LocalToolSpec>,
+    /// Zero (also the omitted-field default) leaves the run without a call budget.
+    #[serde(default)]
     pub max_tool_calls: usize,
     pub native_search: bool,
     pub mode: String,
@@ -421,7 +421,7 @@ pub enum LocalAgentEvent {
 }
 
 struct ActiveRun {
-    cancellation: CancellationToken,
+    cancellation: RunCancellation,
     task: Option<tauri::async_runtime::JoinHandle<()>>,
     run_dir: PathBuf,
     provider: LocalAgentProvider,
@@ -591,7 +591,7 @@ impl LocalAgentState {
             .ok_or_else(|| "local agent run is not active".to_string())?;
         if run.provider != provider
             || run.scope.kind != LocalAgentRunScopeKind::Conversation
-            || run.cancellation.is_cancelled()
+            || run.cancellation.authority_token().is_cancelled()
         {
             return Err("local agent run does not authorize this image task".to_string());
         }
@@ -637,7 +637,7 @@ impl LocalAgentState {
             .map(|mut runs| runs.drain().collect::<Vec<_>>())
             .unwrap_or_default();
         for (run_id, run) in &active {
-            run.cancellation.cancel();
+            run.cancellation.request_stop();
             self.bridge.unregister(run_id, "application exiting");
         }
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -662,7 +662,7 @@ impl LocalAgentState {
         }
         if let Ok(mut runs) = self.runs.lock() {
             for (_, run) in runs.drain() {
-                run.cancellation.cancel();
+                run.cancellation.request_stop();
                 if let Some(task) = run.task {
                     task.abort();
                 }
@@ -1009,8 +1009,7 @@ async fn probe_path_bounded(
     force_refresh: bool,
 ) -> LocalAgentProbe {
     let timeout = adapter_identity(provider).probe_timeout;
-    match tokio::time::timeout(
-        timeout,
+    match crate::timeouts::wait_with_timeout_retries(
         probe_path(
             provider,
             path.clone(),
@@ -1019,6 +1018,7 @@ async fn probe_path_bounded(
             preference,
             force_refresh,
         ),
+        timeout,
     )
     .await
     {
@@ -1126,12 +1126,6 @@ fn validate_start_request(request: &LocalAgentStartRequest) -> Result<(), Adapte
     }
     if request.tools.len() > MAX_TOOL_COUNT {
         return Err(format!("too many local agent tools (max {MAX_TOOL_COUNT})").into());
-    }
-    if request.max_tool_calls == 0 || request.max_tool_calls > MAX_TOOL_CALLS_PER_RUN {
-        return Err(format!(
-            "invalid local agent tool-call budget (expected 1..={MAX_TOOL_CALLS_PER_RUN})"
-        )
-        .into());
     }
     for tool in &request.tools {
         if tool.name.is_empty()
@@ -1348,6 +1342,68 @@ pub async fn local_agent_clear_executable(
     Ok(probe(&app, &state.model_strategy, provider, preference, true).await)
 }
 
+fn classify_run_outcome(
+    provider: LocalAgentProvider,
+    resumed: bool,
+    cancellation: &RunCancellation,
+    outcome: Result<crate::local_agent_protocol::ProtocolOutcome, AdapterError>,
+    broker_failure: Option<AdapterError>,
+) -> Result<crate::local_agent_protocol::ProtocolOutcome, LocalCliFailure> {
+    // Broker failures close authority to stop further tools, but that must not
+    // erase the cause even when the Provider reports only an aborted outcome.
+    if let Some(error) = broker_failure {
+        return Err(LocalCliFailure::from_adapter(
+            provider,
+            LocalCliFailurePhase::Tool,
+            &error,
+            resumed,
+            false,
+        ));
+    }
+    outcome.map_err(|error| {
+        let phase = infer_failure_phase(&error.message, LocalCliFailurePhase::Stream);
+        LocalCliFailure::from_adapter(
+            provider,
+            phase,
+            &error,
+            resumed,
+            cancellation.stop_requested(),
+        )
+    })
+}
+
+async fn wait_for_run<F>(
+    cancellation: &RunCancellation,
+    work: F,
+    has_broker_failure: impl Fn() -> bool,
+) -> Option<F::Output>
+where
+    F: std::future::Future,
+{
+    tokio::pin!(work);
+    let authority = cancellation.authority_token();
+    tokio::select! {
+        biased;
+        result = &mut work => return Some(result),
+        _ = authority.cancelled() => {}
+    }
+    if !cancellation.stop_requested() && !has_broker_failure() {
+        // Supervisor terminal cleanup also closes authority. Let it preserve
+        // its result; its own process shutdown waits are already bounded.
+        tokio::select! {
+            biased;
+            result = &mut work => return Some(result),
+            _ = cancellation.stopped() => {}
+        }
+    }
+    // Stop and broker failures must still interrupt blocked stdin writes or
+    // adapters that fail to observe cancellation. Dropping work then drops the
+    // process-tree guard and closes any remaining descendants.
+    tokio::time::timeout(RUN_CLEANUP_TIMEOUT, &mut work)
+        .await
+        .ok()
+}
+
 #[tauri::command]
 pub async fn local_agent_start(
     app: AppHandle,
@@ -1400,7 +1456,7 @@ pub async fn local_agent_start(
         }
     };
     let run_id = uuid::Uuid::new_v4().to_string();
-    let cancellation = CancellationToken::new();
+    let cancellation = RunCancellation::new();
     let phase = Arc::new(RunPhaseTracker::default());
     let on_event = TrackedChannel::tracked(on_event, phase.clone());
     {
@@ -1482,7 +1538,7 @@ pub async fn local_agent_start(
             run_id.clone(),
             request.tools.clone(),
             request.max_tool_calls,
-            cancellation.clone(),
+            cancellation.authority_token(),
             on_event.clone(),
         )
         .await
@@ -1506,12 +1562,10 @@ pub async fn local_agent_start(
             state: LocalCliRunState::Preparing,
             message: None,
         });
-        let mut work = Box::pin(async {
+        let work = async {
             let preparation_result = tokio::select! {
-                _ = cancellation.cancelled() => Err(AdapterError::from("local agent run cancelled")),
-                result = tokio::time::timeout(
-                    adapter_identity(provider).probe_timeout,
-                    prepare_adapter_run(
+                _ = cancellation.stopped() => Err(AdapterError::from("local agent run cancelled")),
+                result = crate::timeouts::wait_with_timeout_retries(prepare_adapter_run(
                         executable,
                         request,
                         &model_strategy,
@@ -1521,11 +1575,10 @@ pub async fn local_agent_start(
                             workspace_dir,
                             bridge_url,
                             bridge_token,
-                            cancellation: cancellation.clone(),
+                            cancellation: cancellation.authority_token(),
                             channel: on_event.clone(),
                         },
-                    ),
-                ) => result
+                    ), adapter_identity(provider).probe_timeout) => result
                     .map_err(|_| AdapterError::from("local CLI start preflight timed out"))
                     .and_then(|result| result),
             };
@@ -1535,7 +1588,7 @@ pub async fn local_agent_start(
                     LocalCliFailurePhase::Prepare,
                     &error,
                     requested_resume,
-                    cancellation.is_cancelled(),
+                    cancellation.stop_requested(),
                 )
             })?;
             let cancelled_session = preparation.session_id();
@@ -1557,7 +1610,7 @@ pub async fn local_agent_start(
                     LocalCliRetryPolicy::None,
                 )
             })?;
-            if cancellation.is_cancelled() {
+            if cancellation.stop_requested() {
                 return Ok(crate::local_agent_protocol::ProtocolOutcome {
                     session_id: cancelled_session,
                     aborted: true,
@@ -1590,36 +1643,37 @@ pub async fn local_agent_start(
                         LocalCliRetryPolicy::None,
                     )
                 })?;
-            preparation.launch().await.map_err(|error| {
-                let phase = infer_failure_phase(&error.message, LocalCliFailurePhase::Stream);
-                LocalCliFailure::from_adapter(
-                    provider,
-                    phase,
-                    &error,
-                    resumed,
-                    cancellation.is_cancelled(),
-                )
-            })
-        });
-        let result = match tokio::time::timeout(MAX_RUN_DURATION, work.as_mut()).await {
-            Ok(result) => result,
-            Err(_) => {
-                cancellation.cancel();
-                let timeout_phase = phase.current();
-                phase.set(LocalCliFailurePhase::Shutdown);
-                let _ = tokio::time::timeout(RUN_CLEANUP_TIMEOUT, work.as_mut()).await;
-                Err(LocalCliFailure::new(
-                    provider,
-                    LocalCliFailureCode::Timeout,
-                    timeout_phase,
-                    "The local CLI did not complete within the allowed time.",
-                    LocalCliRetryPolicy::Manual,
-                ))
-            }
+            let outcome = preparation.launch().await;
+            classify_run_outcome(
+                provider,
+                resumed,
+                &cancellation,
+                outcome,
+                bridge.failure(&task_run_id),
+            )
         };
-        // If bounded cooperative cleanup also timed out, dropping this future
-        // drops the process-tree guard and kills the Unix PGID / Windows job.
-        drop(work);
+        let result = wait_for_run(&cancellation, work, || {
+            bridge.failure(&task_run_id).is_some()
+        })
+        .await
+        .unwrap_or_else(|| {
+            if let Some(error) = bridge.failure(&task_run_id) {
+                return Err(LocalCliFailure::from_adapter(
+                    provider,
+                    LocalCliFailurePhase::Tool,
+                    &error,
+                    requested_resume,
+                    false,
+                ));
+            }
+            Err(LocalCliFailure::new(
+                provider,
+                LocalCliFailureCode::Cancelled,
+                phase.current(),
+                "The local CLI run was cancelled.",
+                LocalCliRetryPolicy::None,
+            ))
+        });
         match result {
             Ok(outcome) => {
                 let _ = on_event.send(LocalAgentEvent::Done {
@@ -1635,7 +1689,7 @@ pub async fn local_agent_start(
                     failure,
                 });
                 let _ = on_event.send(LocalAgentEvent::Done {
-                    aborted: cancellation.is_cancelled(),
+                    aborted: cancellation.stop_requested(),
                     session_id: None,
                 });
             }
@@ -1683,7 +1737,7 @@ pub fn local_agent_cancel(
         return Ok(false);
     };
     run.phase.set(LocalCliFailurePhase::Shutdown);
-    run.cancellation.cancel();
+    run.cancellation.request_stop();
     state
         .bridge
         .unregister(&run_id, "local agent run cancelled");
@@ -1699,7 +1753,7 @@ pub fn local_agent_cancel_all(state: tauri::State<'_, LocalAgentState>) -> Resul
     let count = runs.len();
     for (run_id, run) in runs.iter() {
         run.phase.set(LocalCliFailurePhase::Shutdown);
-        run.cancellation.cancel();
+        run.cancellation.request_stop();
         state
             .bridge
             .unregister(run_id, "all local agent runs cancelled");
@@ -1710,6 +1764,151 @@ pub fn local_agent_cancel_all(state: tauri::State<'_, LocalAgentState>) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn active_run_has_no_total_deadline_and_stop_still_bounds_cleanup() {
+        struct DropProbe(Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+        let cancellation = RunCancellation::new();
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let guard = DropProbe(dropped.clone());
+        let running = {
+            let cancellation = cancellation.clone();
+            tokio::spawn(async move {
+                wait_for_run(
+                    &cancellation,
+                    async move {
+                        let _guard = guard;
+                        std::future::pending::<()>().await;
+                    },
+                    || false,
+                )
+                .await
+            })
+        };
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(31 * 60)).await;
+        assert!(!running.is_finished());
+        assert!(!dropped.load(Ordering::Acquire));
+        cancellation.request_stop();
+        tokio::task::yield_now().await;
+        tokio::time::advance(RUN_CLEANUP_TIMEOUT).await;
+        assert!(running.await.unwrap().is_none());
+        assert!(dropped.load(Ordering::Acquire));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn normal_authority_shutdown_preserves_the_supervisor_result() {
+        let cancellation = RunCancellation::new();
+        let authority = cancellation.authority_token();
+        let outcome = wait_for_run(
+            &cancellation,
+            async move {
+                authority.cancel();
+                tokio::time::sleep(Duration::from_secs(9)).await;
+                Err::<(), _>("original provider failure")
+            },
+            || false,
+        )
+        .await;
+        assert_eq!(outcome, Some(Err("original provider failure")));
+        assert!(!cancellation.stop_requested());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn broker_failure_bounds_cleanup_without_requesting_user_stop() {
+        let cancellation = RunCancellation::new();
+        let authority = cancellation.authority_token();
+        let started = tokio::time::Instant::now();
+        let outcome = wait_for_run(
+            &cancellation,
+            async move {
+                authority.cancel();
+                std::future::pending::<()>().await;
+            },
+            || true,
+        )
+        .await;
+        assert!(outcome.is_none());
+        assert_eq!(started.elapsed(), RUN_CLEANUP_TIMEOUT);
+        assert!(!cancellation.stop_requested());
+    }
+
+    #[test]
+    fn authority_shutdown_preserves_failures_but_explicit_stop_stays_cancelled() {
+        let cancellation = RunCancellation::new();
+        cancellation.authority_token().cancel();
+        for (error, expected) in [
+            (
+                AdapterError::from("Codex exec emitted malformed JSON"),
+                LocalCliFailureCode::ProtocolViolation,
+            ),
+            (
+                AdapterError::coded(
+                    LocalCliFailureCode::CredentialRejected,
+                    "credentials rejected",
+                ),
+                LocalCliFailureCode::CredentialRejected,
+            ),
+            (
+                AdapterError::coded(
+                    LocalCliFailureCode::ProcessExit,
+                    "CLI rate limit was reached",
+                ),
+                LocalCliFailureCode::ProcessExit,
+            ),
+        ] {
+            let failure = classify_run_outcome(
+                LocalAgentProvider::Codex,
+                false,
+                &cancellation,
+                Err(error),
+                None,
+            )
+            .unwrap_err();
+            assert_eq!(failure.code, expected);
+        }
+        cancellation.request_stop();
+        let failure = classify_run_outcome(
+            LocalAgentProvider::Codex,
+            false,
+            &cancellation,
+            Err(AdapterError::from("local agent run cancelled")),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(failure.code, LocalCliFailureCode::Cancelled);
+    }
+
+    #[test]
+    fn broker_failure_survives_an_aborted_provider_outcome() {
+        let cancellation = RunCancellation::new();
+        cancellation.authority_token().cancel();
+        let failure = classify_run_outcome(
+            LocalAgentProvider::Codex,
+            false,
+            &cancellation,
+            Ok(crate::local_agent_protocol::ProtocolOutcome {
+                session_id: None,
+                aborted: true,
+            }),
+            Some(AdapterError::coded(
+                LocalCliFailureCode::ToolBudgetExceeded,
+                "local agent tool-call budget exhausted",
+            )),
+        )
+        .unwrap_err();
+        assert_eq!(failure.code, LocalCliFailureCode::ToolBudgetExceeded);
+        assert_eq!(failure.phase, LocalCliFailurePhase::Tool);
+        assert_eq!(
+            failure.safe_message,
+            "The local CLI tool-call budget was exhausted."
+        );
+    }
 
     fn request() -> LocalAgentStartRequest {
         LocalAgentStartRequest {
@@ -1750,11 +1949,6 @@ mod tests {
         invalid.mode = "shell".to_string();
         assert!(validate_start_request(&invalid).is_err());
         let mut invalid = request();
-        invalid.max_tool_calls = 0;
-        assert!(validate_start_request(&invalid).is_err());
-        invalid.max_tool_calls = MAX_TOOL_CALLS_PER_RUN + 1;
-        assert!(validate_start_request(&invalid).is_err());
-        let mut invalid = request();
         invalid.mode = "auto_qa".to_string();
         invalid.native_search = true;
         assert!(validate_start_request(&invalid).is_err());
@@ -1777,6 +1971,20 @@ mod tests {
         let mut invalid = request();
         invalid.session_compatibility_key = Some("not-a-digest".to_string());
         assert!(validate_start_request(&invalid).is_err());
+    }
+
+    #[test]
+    fn accepts_unlimited_and_large_explicit_tool_budgets() {
+        for limit in [0, 600] {
+            let mut request = request();
+            request.max_tool_calls = limit;
+            assert!(validate_start_request(&request).is_ok());
+        }
+        let mut serialized = serde_json::to_value(request()).unwrap();
+        serialized.as_object_mut().unwrap().remove("maxToolCalls");
+        let default: LocalAgentStartRequest = serde_json::from_value(serialized).unwrap();
+        assert_eq!(default.max_tool_calls, 0);
+        assert!(validate_start_request(&default).is_ok());
     }
 
     #[test]

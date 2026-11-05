@@ -1,5 +1,7 @@
 import type { Message } from "./generator-types";
 
+export const CANCELLED_TOOL_OUTPUT_KIND = "open_builder_cancelled_tool_v1";
+
 export function isGenerationRunCurrent(
   runConversationId: string | null,
   activeConversationId: string | null,
@@ -99,4 +101,39 @@ export function findPendingToolCall(
     }
   }
   return null;
+}
+
+/** Complete abandoned groups before replay without discarding completed work. */
+export function cancelPendingToolCalls(
+  messages: readonly Message[],
+): Message[] {
+  const result: Message[] = [];
+  let pending = new Map<string, NonNullable<Message["tool_calls"]>[number]>();
+  function closeGroup(): void {
+    for (const call of pending.values()) {
+      const text = "Tool execution was cancelled before a result was received.";
+      result.push({
+        role: "tool",
+        tool_call_id: call.id,
+        content: text,
+        toolOutput: {
+          text,
+          isError: true,
+          structuredContent: { kind: CANCELLED_TOOL_OUTPUT_KIND },
+        },
+      });
+    }
+    pending = new Map();
+  }
+  for (const message of messages) {
+    if (message.role !== "tool") closeGroup();
+    result.push(message);
+    if (message.role === "assistant") {
+      for (const call of message.tool_calls ?? []) pending.set(call.id, call);
+    } else if (message.tool_call_id) {
+      pending.delete(message.tool_call_id);
+    }
+  }
+  closeGroup();
+  return result;
 }

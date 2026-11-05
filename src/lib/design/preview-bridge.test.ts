@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { createIsolatedPreviewSession } from "./prototype-preview-session";
 import {
   DESIGN_BRIDGE_CAPTURE_MAX_HEIGHT,
   DESIGN_BRIDGE_MARKER,
@@ -896,6 +897,219 @@ describe("Design preview bridge", () => {
       }),
     );
     iframe.remove();
+  });
+
+  it.each(["success", "timeout"])(
+    "waits three windows for one screenshot library download and one capture (%s)",
+    async (outcome) => {
+      vi.useFakeTimers();
+      const iframe = document.createElement("iframe");
+      document.body.appendChild(iframe);
+      const previewWindow = iframe.contentWindow as Window & typeof globalThis;
+      const previewDocument = iframe.contentDocument!;
+      previewDocument.open();
+      previewDocument.write("<!doctype html><body><main>Preview</main></body>");
+      previewDocument.close();
+      const messages: Record<string, unknown>[] = [];
+      Object.defineProperty(previewWindow, "parent", {
+        configurable: true,
+        value: previewWindow,
+      });
+      previewWindow.postMessage = ((message: Record<string, unknown>) => {
+        messages.push(message);
+      }) as typeof previewWindow.postMessage;
+      previewWindow.setTimeout = window.setTimeout.bind(window);
+      previewWindow.clearTimeout = window.clearTimeout.bind(window);
+      previewWindow.requestAnimationFrame = (callback) => {
+        callback(0);
+        return 0;
+      };
+      previewWindow.scrollTo = () => {};
+      const append = vi.spyOn(previewDocument.head, "appendChild");
+      try {
+        const result = injectDesignBridge(
+          { "index.html": "<!doctype html><body></body>" },
+          "static",
+          true,
+          undefined,
+          "generation-a",
+        );
+        previewWindow.eval(result.files[DESIGN_BRIDGE_VIRTUAL_PATH]);
+        const requestId = "abcdef0123456789abcdef0123456789";
+        previewWindow.dispatchEvent(
+          new previewWindow.MessageEvent("message", {
+            source: previewWindow,
+            origin: "https://builder.example.test",
+            data: {
+              type: "open-builder:design-bridge-capture",
+              version: 1,
+              generation: "generation-a",
+              nonce: "0123456789abcdef0123456789abcdef",
+              requestId,
+              viewport: { name: "desktop", width: 1024, height: 768 },
+            },
+          }),
+        );
+        expect(append).toHaveBeenCalledOnce();
+        await vi.advanceTimersByTimeAsync(8000);
+        expect(append).toHaveBeenCalledOnce();
+        expect(
+          messages.some(
+            (message) =>
+              message.type === "open-builder:design-bridge-capture-error",
+          ),
+        ).toBe(false);
+        if (outcome === "success") {
+          const toCanvas = vi.fn(async () => ({
+            toDataURL: () => webpDataUrl(1024, 768),
+          }));
+          Object.defineProperty(previewWindow, "htmlToImage", {
+            configurable: true,
+            value: { toCanvas },
+          });
+          previewDocument
+            .querySelector("script[data-ob-design-capture-runtime]")!
+            .dispatchEvent(new previewWindow.Event("load"));
+          await vi.advanceTimersByTimeAsync(0);
+          expect(toCanvas).toHaveBeenCalledOnce();
+          expect(
+            messages.filter(
+              (message) =>
+                message.type === "open-builder:design-bridge-capture-result",
+            ),
+          ).toEqual([
+            expect.objectContaining({ requestId, generation: "generation-a" }),
+          ]);
+        } else {
+          await vi.advanceTimersByTimeAsync(8000);
+          expect(
+            messages.some(
+              (message) =>
+                message.type === "open-builder:design-bridge-capture-error",
+            ),
+          ).toBe(false);
+          await vi.advanceTimersByTimeAsync(8000);
+          expect(append).toHaveBeenCalledOnce();
+          expect(
+            messages.filter(
+              (message) =>
+                message.type === "open-builder:design-bridge-capture-error",
+            ),
+          ).toEqual([
+            expect.objectContaining({
+              requestId,
+              error: expect.stringContaining("timed out"),
+            }),
+          ]);
+        }
+      } finally {
+        append.mockRestore();
+        iframe.remove();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("does not start another screenshot library download after the parent stops", async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const source = document.createElement("iframe");
+    source.src = "about:blank";
+    const session = createIsolatedPreviewSession(
+      source,
+      "generation-stop",
+      controller.signal,
+    );
+    void session.catch(() => {});
+    const iframe = document.querySelector<HTMLIFrameElement>(
+      'iframe[title="Temporary prototype review preview"]',
+    )!;
+    const previewWindow = iframe.contentWindow as Window & typeof globalThis;
+    const previewDocument = iframe.contentDocument!;
+    previewDocument.open();
+    previewDocument.write("<!doctype html><body><main>Preview</main></body>");
+    previewDocument.close();
+    Object.defineProperty(previewWindow, "parent", {
+      configurable: true,
+      value: window,
+    });
+    previewWindow.setTimeout = window.setTimeout.bind(window);
+    previewWindow.clearTimeout = window.clearTimeout.bind(window);
+    previewWindow.scrollTo = () => {};
+    const append = vi.spyOn(previewDocument.head, "appendChild");
+    const toHost = vi
+      .spyOn(window, "postMessage")
+      .mockImplementation((data) => {
+        window.dispatchEvent(
+          new MessageEvent("message", {
+            data,
+            origin: "null",
+            source: previewWindow,
+          }),
+        );
+      });
+    const toPreview = vi
+      .spyOn(previewWindow, "postMessage")
+      .mockImplementation((data) => {
+        previewWindow.dispatchEvent(
+          new previewWindow.MessageEvent("message", {
+            data,
+            origin: window.location.origin,
+            source: window,
+          }),
+        );
+      });
+    try {
+      const injected = injectDesignBridge(
+        { "index.html": "<!doctype html><body></body>" },
+        "static",
+        true,
+        "/* capture runtime */",
+        "generation-stop",
+      );
+      previewWindow.eval(injected.files[DESIGN_BRIDGE_VIRTUAL_PATH]);
+      expect(toHost.mock.calls).toEqual([
+        [
+          expect.objectContaining({
+            type: "open-builder:design-bridge-ready",
+            generation: "generation-stop",
+            captureRuntimeAvailable: true,
+          }),
+          "*",
+        ],
+      ]);
+      const active = await session;
+      const capture = active.capture(
+        { name: "desktop", width: 1024, height: 768 },
+        {
+          pageId: "dashboard",
+          route: "#/dashboard",
+          scenarioId: "default",
+        },
+      );
+      expect(append).toHaveBeenCalledOnce();
+      const stopped = expect(capture).rejects.toMatchObject({
+        name: "AbortError",
+      });
+      controller.abort();
+      await stopped;
+      await vi.advanceTimersByTimeAsync(24000);
+      expect(append).toHaveBeenCalledOnce();
+      expect(toPreview).toHaveBeenCalledOnce();
+      expect(
+        toHost.mock.calls.filter(
+          ([message]) =>
+            message.type === "open-builder:design-bridge-capture-result",
+        ),
+      ).toHaveLength(0);
+    } finally {
+      controller.abort();
+      append.mockRestore();
+      toHost.mockRestore();
+      toPreview.mockRestore();
+      iframe.remove();
+      vi.useRealTimers();
+    }
   });
 
   it("rejects decoded WebP dimensions above the six-megapixel limit", () => {

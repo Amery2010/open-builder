@@ -50,19 +50,33 @@ export const NPM_SEARCH_TOOLS = {
   }),
 };
 
-async function fetchWithCache<T>(url: string): Promise<T> {
+async function fetchWithCache<T>(
+  url: string,
+  signal?: AbortSignal,
+): Promise<T> {
+  signal?.throwIfAborted();
   const cached = cache.get(url);
   if (cached && cached.expiry > Date.now()) return cached.data as T;
-  const res = await fetchWithTimeout(url, {
-    headers: { Accept: "application/json" },
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
-  const data = (await res.json()) as T;
+  const data = await fetchWithTimeout(
+    url,
+    {
+      headers: { Accept: "application/json" },
+      signal,
+    },
+    undefined,
+    async (res) => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+      return (await res.json()) as T;
+    },
+  );
   cache.set(url, { data, expiry: Date.now() + CACHE_TTL });
   return data;
 }
 
-async function searchPackages(args: any): Promise<string> {
+async function searchPackages(
+  args: any,
+  signal?: AbortSignal,
+): Promise<string> {
   const { query, maxResults = 5 } = args;
   const checkedQuery = normalizeToolQuery(query);
   if (!checkedQuery.ok) {
@@ -74,7 +88,10 @@ async function searchPackages(args: any): Promise<string> {
     size: String(size),
   });
   try {
-    const data = await fetchWithCache<any>(`${NPMS_API}/search?${params}`);
+    const data = await fetchWithCache<any>(
+      `${NPMS_API}/search?${params}`,
+      signal,
+    );
     const packages = (data.results || []).map((item: any) => ({
       name: item.package.name,
       version: item.package.version,
@@ -101,11 +118,15 @@ async function searchPackages(args: any): Promise<string> {
       },
     });
   } catch (err: any) {
+    signal?.throwIfAborted();
     return JSON.stringify({ success: false, error: safeErrorMessage(err) });
   }
 }
 
-async function getPackageDetail(args: any): Promise<string> {
+async function getPackageDetail(
+  args: any,
+  signal?: AbortSignal,
+): Promise<string> {
   const { packageName } = args;
   const checkedName = normalizeNpmPackageName(packageName);
   if (!checkedName.ok) {
@@ -113,7 +134,10 @@ async function getPackageDetail(args: any): Promise<string> {
   }
   const encoded = encodeURIComponent(checkedName.name).replace("%40", "@");
   try {
-    const registry = await fetchWithCache<any>(`${NPM_REGISTRY}/${encoded}`);
+    const registry = await fetchWithCache<any>(
+      `${NPM_REGISTRY}/${encoded}`,
+      signal,
+    );
     const latest =
       registry["dist-tags"]?.latest || Object.keys(registry.versions).pop();
     const pkg = registry.versions[latest];
@@ -124,10 +148,7 @@ async function getPackageDetail(args: any): Promise<string> {
       pkg.typings ||
       pkg.dependencies?.["@types/" + checkedName.name.replace(/[@/]/g, "__")]
     );
-    const dependencies = limitRecord(
-      pkg.dependencies,
-      NPM_DEPENDENCY_MAX_KEYS,
-    );
+    const dependencies = limitRecord(pkg.dependencies, NPM_DEPENDENCY_MAX_KEYS);
     const peerDependencies = limitRecord(
       pkg.peerDependencies,
       NPM_DEPENDENCY_MAX_KEYS,
@@ -160,6 +181,7 @@ async function getPackageDetail(args: any): Promise<string> {
       },
     });
   } catch (err: any) {
+    signal?.throwIfAborted();
     return JSON.stringify({ success: false, error: safeErrorMessage(err) });
   }
 }
@@ -200,10 +222,17 @@ function extractRepo(repo?: string | { url?: string }): string | undefined {
 export function createNpmSearchToolHandler(): (
   name: string,
   args: unknown,
+  signal?: AbortSignal,
 ) => Promise<string> {
-  return async (name: string, args: unknown): Promise<string> => {
-    if (name === "search_npm_packages") return searchPackages(args);
-    if (name === "get_npm_package_detail") return getPackageDetail(args);
+  return async (
+    name: string,
+    args: unknown,
+    signal?: AbortSignal,
+  ): Promise<string> => {
+    signal?.throwIfAborted();
+    if (name === "search_npm_packages") return searchPackages(args, signal);
+    if (name === "get_npm_package_detail")
+      return getPackageDetail(args, signal);
     return `Error: unknown tool "${name}"`;
   };
 }

@@ -1,11 +1,92 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildToolHandlers } from "./handler-factory";
 import type { ProjectFiles } from "../../types";
+import { createSkillActiveContext } from "../skills/active-context";
+import type { ToolExecutionContext } from "../ai/generator-types";
+import { TOOL_FETCH_TIMEOUT_MS } from "./network-guard";
 
 vi.mock("../skills/fs", () => ({ isSkillsAvailable: () => false }));
 vi.mock("../skills/instance", () => ({ getSkillRegistry: vi.fn() }));
 
 describe("buildToolHandlers Design diagnostics", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it.each([
+    ["search_npm_packages", { query: "cancel factory npm" }],
+    ["get_npm_package_detail", { packageName: "cancel-factory-package" }],
+    ["web_search", { query: "cancel factory web" }],
+    ["web_reader", { urls: ["https://page.example.test"] }],
+    ["image_search", { query: "cancel factory image" }],
+  ])(
+    "cancels the real %s HTTP handler without issuing another attempt",
+    async (name, args) => {
+      const built = await buildToolHandlers({
+        features: { builtinSearch: false, webSearch: true, assetSearch: true },
+        effectiveWebSearchSettings: {
+          engine: "firecrawl",
+          tavilyApiKey: "",
+          firecrawlApiKey: "",
+          exaApiKey: "",
+        },
+        effectiveAssetSearchSettings: {
+          engine: "pixabay",
+          pixabayApiKey: "test",
+          unsplashApiKey: "",
+        },
+        apiConfig: {
+          apiType: "openai-compatible",
+          apiBaseUrl: "",
+          apiKey: "",
+          model: "",
+        },
+        getConsoleLogs: () => [],
+        memoryDeps: { getAll: () => [], processBatch: () => "ok" },
+        developerSkillScriptsEnabled: false,
+      });
+      vi.useFakeTimers();
+      const fetchMock = vi.fn<typeof fetch>().mockImplementation(
+        (_url, init) =>
+          new Promise((_resolve, reject) => {
+            init?.signal?.addEventListener(
+              "abort",
+              () => reject(init.signal?.reason),
+              { once: true },
+            );
+          }),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+      const controller = new AbortController();
+      const context: ToolExecutionContext = {
+        signal: controller.signal,
+        toolCallId: "cancelled-http",
+        run: {
+          runId: "http-test",
+          conversationId: "conversation",
+          mode: "chat",
+          platform: "web",
+          runtime: "api",
+          allowedMcpAliases: new Set(),
+          activeSkillIds: new Set(),
+          approvedSkillScriptHashes: new Set(),
+          policyVersion: "test",
+        },
+        skillContext: createSkillActiveContext(),
+      };
+      const request = built.combinedToolHandler(name as string, args, context);
+      expect(fetchMock).toHaveBeenCalledOnce();
+      controller.abort();
+      await Promise.all([
+        expect(request).rejects.toMatchObject({ name: "AbortError" }),
+        vi.advanceTimersByTimeAsync(TOOL_FETCH_TIMEOUT_MS * 3),
+      ]);
+      expect(fetchMock).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
   it("registers all diagnostics through one shared Host adapter", async () => {
     const designDiagnostics = vi.fn((name: string) =>
       JSON.stringify({ kind: name, ok: true }),

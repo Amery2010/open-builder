@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useInteractiveStore } from "../store/interactive";
@@ -8,6 +8,7 @@ import { useSettingsStore } from "../store/settings";
 import { useConversationStore } from "../store/conversation";
 import { useDesignSelectionStore } from "../store/design-selection";
 import { ChatInterface } from "./ChatInterface";
+import { TooltipProvider } from "./ui/tooltip";
 
 vi.mock("@tanstack/react-virtual", () => ({
   useVirtualizer: () => ({
@@ -72,6 +73,14 @@ const baseProps = {
 describe("ChatInterface forced Skills", () => {
   beforeEach(() => {
     Element.prototype.scrollIntoView = vi.fn();
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: vi.fn(() => ({
+        matches: false,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    });
     useInteractiveStore.setState({ pending: [] });
     useSettingsStore.setState((state) => ({
       system: { ...state.system, language: "en" },
@@ -83,6 +92,161 @@ describe("ChatInterface forced Skills", () => {
       legacyPlanModeMigrated: true,
     });
     useDesignSelectionStore.setState({ selections: {} });
+  });
+
+  it("submits updates and skills through the queue while the task continues", async () => {
+    const user = userEvent.setup();
+    const onGenerate = vi.fn(async () => undefined);
+    const onEnqueueInstruction = vi.fn(async () => true);
+    render(
+      <ChatInterface
+        {...baseProps}
+        isGenerating
+        onGenerate={onGenerate}
+        onEnqueueInstruction={onEnqueueInstruction}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "Prepare request" }));
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    expect(onEnqueueInstruction).toHaveBeenCalledWith("Build it", undefined, {
+      forcedSkillIds: ["review-code"],
+    });
+    expect(onGenerate).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("selected skills")).toBeEmptyDOMElement();
+  });
+
+  it("retains the draft and selected skills when queuing an update fails", async () => {
+    const user = userEvent.setup();
+    render(
+      <ChatInterface
+        {...baseProps}
+        isGenerating
+        onGenerate={vi.fn(async () => undefined)}
+        onEnqueueInstruction={vi.fn(async () => false)}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "Prepare request" }));
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    expect(screen.getByLabelText("selected skills")).toHaveTextContent(
+      "review-code",
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Could not send your message",
+    );
+  });
+
+  it("keeps cancelled updates visible until the user explicitly restores them", async () => {
+    const user = userEvent.setup();
+    const store = useConversationStore.getState();
+    const id = store.createConversation();
+    store.setPendingUserInstructions(id, [
+      {
+        id: "update-1",
+        conversationId: id,
+        runId: "stopped-run",
+        sequence: 1,
+        content: "Preserve the original layout",
+        attachments: [],
+        forcedSkillIds: ["review-code"],
+        status: "cancelled",
+      },
+    ]);
+    const onGenerate = vi.fn(async () => undefined);
+    const onEnqueueInstruction = vi.fn(async () => true);
+    render(
+      <TooltipProvider>
+        <ChatInterface
+          {...baseProps}
+          onGenerate={onGenerate}
+          onEnqueueInstruction={onEnqueueInstruction}
+        />
+      </TooltipProvider>,
+    );
+
+    expect(screen.getByText("Cancelled · not sent")).toBeInTheDocument();
+    expect(
+      await screen.findByText("Preserve the original layout"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("region", { name: "Task updates" }),
+    ).not.toBeInTheDocument();
+    expect(onGenerate).not.toHaveBeenCalled();
+    expect(onEnqueueInstruction).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Withdraw" }));
+    await waitFor(() =>
+      expect(
+        screen.queryByText("Cancelled · not sent"),
+      ).not.toBeInTheDocument(),
+    );
+    expect(screen.getByLabelText("selected skills")).toHaveTextContent(
+      "review-code",
+    );
+    expect(
+      useConversationStore.getState().conversations[id].messages,
+    ).toHaveLength(0);
+    expect(onGenerate).not.toHaveBeenCalled();
+  });
+
+  it("shows a submitted update as a normal message once before and after delivery", async () => {
+    const store = useConversationStore.getState();
+    const id = store.createConversation();
+    const instruction = {
+      id: "update-1",
+      conversationId: id,
+      runId: "current-run",
+      sequence: 1,
+      content: "Keep the existing layout",
+      attachments: [],
+      forcedSkillIds: [],
+      status: "queued" as const,
+    };
+    store.setPendingUserInstructions(id, [instruction]);
+    const props = {
+      ...baseProps,
+      isGenerating: true,
+      onGenerate: vi.fn(async () => undefined),
+    };
+    const { rerender } = render(
+      <TooltipProvider>
+        <ChatInterface {...props} />
+      </TooltipProvider>,
+    );
+    expect(await screen.findByText(instruction.content)).toBeVisible();
+    expect(
+      screen.queryByRole("region", { name: "Task updates" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Waiting to send")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Withdraw" }),
+    ).not.toBeInTheDocument();
+    expect(
+      useConversationStore.getState().conversations[id].messages,
+    ).toHaveLength(0);
+
+    const delivered = {
+      role: "user" as const,
+      content: instruction.content,
+      metadata: { instructionId: instruction.id },
+    };
+    await act(async () => {
+      store.setPendingUserInstructions(id, (items) =>
+        items.map((item) => ({ ...item, status: "delivering" })),
+      );
+      expect(
+        store.commitUserInstructions(
+          id,
+          instruction.runId,
+          [instruction.id],
+          [delivered],
+        ),
+      ).toBe(true);
+      rerender(
+        <TooltipProvider>
+          <ChatInterface {...props} messages={[delivered]} />
+        </TooltipProvider>,
+      );
+    });
+    expect(screen.getAllByText(instruction.content)).toHaveLength(1);
   });
 
   it("allows Local CLI submission while showing a non-blocking cached status", async () => {

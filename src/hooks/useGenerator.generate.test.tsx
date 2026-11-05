@@ -332,4 +332,36 @@ describe("useGenerator optimistic request lifecycle", () => {
       ).toBe("First request title"),
     );
   });
+  it("accepts supplements during preparation and retains them cancelled after Stop", async () => {
+    const conversationId = useConversationStore.getState().createConversation();
+    const preparation = deferred();
+    const hook = renderGenerator();
+    let generation!: Promise<void>;
+    await act(async () => {
+      generation = hook.result.current.generate("Build", undefined, {
+        prepareRun: () => preparation.promise,
+      });
+    });
+    await act(async () => {
+      expect(
+        await hook.result.current.enqueueInstruction("Keep the header"),
+      ).toBe(true);
+    });
+    expect(
+      useConversationStore.getState().conversations[conversationId].messages,
+    ).toHaveLength(1);
+    expect(
+      useConversationStore.getState().conversations[conversationId]
+        .pendingUserInstructions?.[0].status,
+    ).toBe("queued");
+    act(() => hook.result.current.stop());
+    expect(
+      useConversationStore.getState().conversations[conversationId]
+        .pendingUserInstructions?.[0].status,
+    ).toBe("cancelled");
+    await act(async () => {
+      preparation.resolve();
+      await generation;
+    });
+  });
 });

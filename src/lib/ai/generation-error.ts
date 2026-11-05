@@ -107,6 +107,7 @@ function localFailureKind(
     case "cliUnsupported":
       return "model";
     case "toolBridgeFailed":
+    case "toolBudgetExceeded":
     case "providerApprovalRejected":
     case "isolationViolation":
       return "tool";
@@ -259,11 +260,28 @@ export function formatGenerationErrorMessage(
   const retryHint = error.retryable
     ? `\n\n${t.message.generationError.retryable}`
     : "";
-  const detailMessage = error.localCliFailure
+  let detailMessage = error.localCliFailure
     ? t.message.generationError.localCli.failureCodes[
         error.localCliFailure.code
       ]
     : error.message;
+  // Legacy processExit records include different Host-authored summaries.
+  // Translate only these exact summaries; provider prose stays hidden.
+  if (error.localCliFailure?.code === "processExit") {
+    if (
+      error.localCliFailure.safeMessage ===
+      "The local CLI provider rate limit prevented this request from completing."
+    ) {
+      detailMessage =
+        t.message.generationError.localCli.failureDetails.rateLimited;
+    } else if (
+      error.localCliFailure.safeMessage ===
+      "The local CLI stopped before completing the request. Your changes have been kept. Retry to continue."
+    ) {
+      detailMessage =
+        t.message.generationError.localCli.failureDetails.unexpectedStop;
+    }
+  }
 
   const localDetails = error.localCliFailure
     ? [

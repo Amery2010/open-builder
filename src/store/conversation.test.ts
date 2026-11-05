@@ -1010,4 +1010,70 @@ describe("conversation store", () => {
       useConversationStore.getState().conversations[active].messages,
     ).toEqual([]);
   });
+  it("cancels pending instructions on switching and rejects late delivery", () => {
+    const first = useConversationStore.getState().createConversation();
+    const store = useConversationStore.getState();
+    store.setPendingUserInstructions(first, [
+      {
+        id: "instruction",
+        conversationId: first,
+        runId: "run",
+        sequence: 1,
+        content: "Update",
+        attachments: [],
+        forcedSkillIds: [],
+        status: "delivering",
+      },
+    ]);
+    const second = store.createConversation();
+    store.switchConversation(first);
+    store.switchConversation(second);
+    expect(
+      useConversationStore.getState().conversations[first]
+        .pendingUserInstructions?.[0].status,
+    ).toBe("cancelled");
+    expect(
+      store.commitUserInstructions(
+        first,
+        "run",
+        ["instruction"],
+        [
+          {
+            role: "user",
+            content: "Update",
+            metadata: { instructionId: "instruction" },
+          },
+        ],
+      ),
+    ).toBe(false);
+    expect(
+      useConversationStore.getState().conversations[first].messages,
+    ).toEqual([]);
+  });
+
+  it("reload retains cancelled draft content without automatically replaying it", async () => {
+    const id = useConversationStore.getState().createConversation();
+    useConversationStore
+      .getState()
+      .setPendingUserInstructions(id, [
+        {
+          id: "queued",
+          conversationId: id,
+          runId: "old",
+          sequence: 1,
+          content: "Later change",
+          attachments: [],
+          forcedSkillIds: [],
+          status: "queued",
+        },
+      ]);
+    await useConversationStore.persist.rehydrate();
+    expect(
+      useConversationStore.getState().conversations[id]
+        .pendingUserInstructions?.[0],
+    ).toMatchObject({ content: "Later change", status: "cancelled" });
+    expect(useConversationStore.getState().conversations[id].messages).toEqual(
+      [],
+    );
+  });
 });

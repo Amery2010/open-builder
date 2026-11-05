@@ -229,7 +229,7 @@ export async function runSubagent(
     model: apiConfig.model,
     systemPrompt: effectiveSystemPrompt,
     initialFiles: opts.files,
-    maxIterations: def.maxIterations ?? 10,
+    maxIterations: def.maxIterations,
     stream: true,
     tools: toolSet,
     customTools: {},
@@ -242,16 +242,17 @@ export async function runSubagent(
     thinking: false,
   };
 
-  const inner = opts.createGenerator
-    ? await opts.createGenerator(generatorOptions, events)
-    : new WebAppGenerator(generatorOptions, events);
-
-  const onAbort = () => inner.abort();
-  opts.signal.addEventListener("abort", onAbort, { once: true });
-
+  let inner: GenerationBackend | undefined;
+  const onAbort = () => inner?.abort();
   const maxResultLength = def.maxResultLength ?? 4000;
 
   try {
+    opts.signal.addEventListener("abort", onAbort, { once: true });
+    inner = opts.createGenerator
+      ? await opts.createGenerator(generatorOptions, events)
+      : new WebAppGenerator(generatorOptions, events);
+    if (opts.signal.aborted) inner.abort();
+    opts.signal.throwIfAborted();
     const innerResult = await inner.generate(checkedTask.task);
     const finalText = (innerResult.text || "").slice(0, maxResultLength);
     const eventsSnapshot = limitSubagentEvents(
@@ -273,15 +274,22 @@ export async function runSubagent(
       return { text: JSON.stringify(aborted) };
     }
 
-    useSubagentStore.getState().markStatus(opts.toolCallId, "done");
+    const budgetError = innerResult.maxIterationsReached
+      ? "The subagent reached its explicitly configured iteration limit before completing."
+      : undefined;
+    const status = budgetError ? "failed" : "done";
+    useSubagentStore
+      .getState()
+      .markStatus(opts.toolCallId, status, budgetError);
     const result: SubagentToolResult = {
-      ok: true,
+      ok: !budgetError,
       subagent: def.name,
       task: checkedTask.task,
-      status: "done",
+      status,
       text: finalText,
       events: eventsSnapshot,
       durationMs: Date.now() - startedAt,
+      ...(budgetError ? { error: budgetError } : {}),
     };
     return {
       text: JSON.stringify(result),

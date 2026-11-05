@@ -19,6 +19,7 @@ import { cn } from "@/lib/utils";
 import { useTheme } from "@/hooks/useTheme";
 import { useT } from "../i18n";
 import { SandpackListener } from "./code-viewer/SandpackListener";
+import type { ProjectFileChangeGuard } from "./code-viewer/sandpack-file-changes";
 import { ViewToolbar } from "./code-viewer/ViewToolbar";
 import { FileExplorer } from "./code-viewer/FileExplorer";
 import { ProjectAssetList } from "./code-viewer/ProjectAssetList";
@@ -48,6 +49,7 @@ import { useDesignSelectionStore } from "../store/design-selection";
 import {
   createDesignBridgeNonce,
   DESIGN_BRIDGE_CAPTURE_TIMEOUT_MS,
+  DESIGN_BRIDGE_TIMEOUT_ATTEMPTS,
   DESIGN_BRIDGE_MARKER,
   DESIGN_BRIDGE_PAYLOAD_MAX_BYTES,
   DESIGN_BRIDGE_PROTOCOL_VERSION,
@@ -71,11 +73,13 @@ import {
   DESIGN_REVIEW_VIEWPORTS,
   isDesignReviewViewportReady,
   loadDesignCaptureRuntimeSource,
+  waitForPreviewReadiness,
   type DesignReviewViewport,
 } from "../lib/design/preview-capture";
 import {
   computePreviewGeneration,
   registerPreviewRuntime,
+  PreviewRuntimeError,
   withPreviewCaptureLock,
   type PreviewCaptureCollection,
   type PreviewRuntimeAdapter,
@@ -149,6 +153,9 @@ interface PendingDesignNavigation {
 
 const EMPTY_DESIGN_REVIEW_RUNS: readonly DesignReviewRun[] = [];
 const EMPTY_PROJECT_ASSETS: ProjectAssets = {};
+// The iframe bundler avoids the static service-worker relay's stale responses
+// in desktop webviews. Keep this setup stable across file updates.
+const DESKTOP_STATIC_PREVIEW_SETUP = { environment: "parcel" } as const;
 
 function pageReviewStatus(
   pageId: string,
@@ -257,7 +264,12 @@ interface PreviewErrorFallbackProps extends PreviewErrorBoundaryFallbackProps {
   canonicalFiles: ProjectFiles;
   currentFile: string;
   onFileSelect: (path: string) => void;
-  onFileChange: (conversationId: string, path: string, content: string) => void;
+  onFileChange: (
+    conversationId: string,
+    path: string,
+    content: string,
+    guard?: ProjectFileChangeGuard,
+  ) => void;
   onDeleteFile: (path: string) => void;
   onRetry: () => void;
 }
@@ -387,7 +399,12 @@ interface CodeViewerProps {
   files: ProjectFiles;
   currentFile: string;
   onFileSelect: (path: string) => void;
-  onFileChange: (conversationId: string, path: string, content: string) => void;
+  onFileChange: (
+    conversationId: string,
+    path: string,
+    content: string,
+    guard?: ProjectFileChangeGuard,
+  ) => void;
   onRenameFile: (oldPath: string, newPath: string) => void;
   onDeleteFile: (path: string) => void;
   onMoveFile: (sourcePath: string, targetFolder: string) => void;
@@ -886,7 +903,9 @@ export function CodeViewer({
       const nextContent = getSandpackFileContentToCommit(canonical, content);
       if (nextContent === undefined) return;
       invalidateAutomaticReview();
-      onFileChange(targetConversationId, path, nextContent);
+      onFileChange(targetConversationId, path, nextContent, {
+        expectedContent: canonical,
+      });
     },
     [
       bridgeInjection,
@@ -938,46 +957,31 @@ export function CodeViewer({
   );
 
   const waitForDesignBridge = useCallback(
-    async (generation: string, signal: AbortSignal) => {
-      const deadline = performance.now() + 5_000;
-      while (
-        (!designBridgeReadyRef.current ||
-          bridgeGenerationRef.current !== generation) &&
-        performance.now() < deadline
-      ) {
-        signal.throwIfAborted();
-        await new Promise<void>((resolve) => window.setTimeout(resolve, 25));
-      }
-      if (
-        !designBridgeReadyRef.current ||
-        bridgeGenerationRef.current !== generation
-      ) {
-        throw new Error("The preview bridge is not ready for navigation.");
-      }
-    },
+    (generation: string, signal: AbortSignal) =>
+      waitForPreviewReadiness({
+        isReady: () =>
+          designBridgeReadyRef.current &&
+          bridgeGenerationRef.current === generation,
+        isCurrent: () => previewGenerationRef.current === generation,
+        signal,
+        timeoutMs: 5_000,
+        errorMessage: "The preview bridge is not ready for navigation.",
+      }),
     [],
   );
 
   const waitForDesignCaptureRuntime = useCallback(
-    async (generation: string, signal: AbortSignal) => {
-      const deadline = performance.now() + DESIGN_BRIDGE_CAPTURE_TIMEOUT_MS;
-      while (
-        (!designBridgeReadyRef.current ||
-          !captureRuntimeReadyRef.current ||
-          bridgeGenerationRef.current !== generation) &&
-        performance.now() < deadline
-      ) {
-        signal.throwIfAborted();
-        await new Promise<void>((resolve) => window.setTimeout(resolve, 25));
-      }
-      if (
-        !designBridgeReadyRef.current ||
-        !captureRuntimeReadyRef.current ||
-        bridgeGenerationRef.current !== generation
-      ) {
-        throw new Error("The preview capture runtime is not ready.");
-      }
-    },
+    (generation: string, signal: AbortSignal) =>
+      waitForPreviewReadiness({
+        isReady: () =>
+          designBridgeReadyRef.current &&
+          captureRuntimeReadyRef.current &&
+          bridgeGenerationRef.current === generation,
+        isCurrent: () => previewGenerationRef.current === generation,
+        signal,
+        timeoutMs: DESIGN_BRIDGE_CAPTURE_TIMEOUT_MS,
+        errorMessage: "The preview capture runtime is not ready.",
+      }),
     [],
   );
 
@@ -1024,7 +1028,7 @@ export function CodeViewer({
           if (!pending || pending.expectation !== expectation) return;
           clearPendingNavigation(pending);
           reject(new Error("Preview navigation timed out."));
-        }, DESIGN_BRIDGE_CAPTURE_TIMEOUT_MS);
+        }, DESIGN_BRIDGE_CAPTURE_TIMEOUT_MS * DESIGN_BRIDGE_TIMEOUT_ATTEMPTS);
         const pending: PendingDesignNavigation = {
           expectation,
           resolve,
@@ -1175,7 +1179,7 @@ export function CodeViewer({
           if (!pending || pending.expectation !== expectation) return;
           clearPendingCapture(pending);
           reject(new Error("Preview capture timed out."));
-        }, DESIGN_BRIDGE_CAPTURE_TIMEOUT_MS);
+        }, DESIGN_BRIDGE_CAPTURE_TIMEOUT_MS * DESIGN_BRIDGE_TIMEOUT_ATTEMPTS);
         const pending: PendingDesignCapture = {
           expectation,
           resolve,
@@ -1214,6 +1218,29 @@ export function CodeViewer({
     },
     [clearPendingCapture, getPreviewIframe],
   );
+
+  useEffect(() => {
+    const capture = pendingCaptureRef.current;
+    if (capture && capture.expectation.generation !== previewGeneration) {
+      clearPendingCapture(capture);
+      capture.reject(
+        new PreviewRuntimeError(
+          "stale_generation",
+          "Preview generation was replaced.",
+        ),
+      );
+    }
+    const navigation = pendingNavigationRef.current;
+    if (navigation && navigation.expectation.generation !== previewGeneration) {
+      clearPendingNavigation(navigation);
+      navigation.reject(
+        new PreviewRuntimeError(
+          "stale_generation",
+          "Preview generation was replaced.",
+        ),
+      );
+    }
+  }, [previewGeneration, clearPendingCapture, clearPendingNavigation]);
 
   useEffect(() => {
     const handleBridgeMessage = (event: MessageEvent) => {
@@ -1496,51 +1523,44 @@ export function CodeViewer({
       generation: string,
       signal: AbortSignal,
     ) => {
-      const deadline = performance.now() + 5_000;
-      while (performance.now() < deadline) {
-        signal.throwIfAborted();
-        const iframe = getPreviewIframe();
-        if (
-          iframe?.contentWindow &&
-          isDesignReviewViewportReady(
-            {
-              bridgeReady: designBridgeReadyRef.current,
-              captureRuntimeReady: captureRuntimeReadyRef.current,
-              width: iframe.clientWidth,
-              height: iframe.clientHeight,
-            },
-            viewport,
-          ) &&
-          bridgeGenerationRef.current === generation &&
-          previewGenerationRef.current === generation
-        ) {
-          await afterPreviewPaint();
-          return;
-        }
-        await new Promise<void>((resolve) => window.setTimeout(resolve, 50));
-      }
-      throw new Error(
-        `Preview did not become ready at ${viewport.width}px width.`,
-      );
+      await waitForPreviewReadiness({
+        isReady: () => {
+          const iframe = getPreviewIframe();
+          return Boolean(
+            iframe?.contentWindow &&
+            isDesignReviewViewportReady(
+              {
+                bridgeReady: designBridgeReadyRef.current,
+                captureRuntimeReady: captureRuntimeReadyRef.current,
+                width: iframe.clientWidth,
+                height: iframe.clientHeight,
+              },
+              viewport,
+            ) &&
+            bridgeGenerationRef.current === generation,
+          );
+        },
+        isCurrent: () => previewGenerationRef.current === generation,
+        signal,
+        timeoutMs: 5_000,
+        pollIntervalMs: 50,
+        errorMessage: `Preview did not become ready at ${viewport.width}px width.`,
+      });
+      await afterPreviewPaint();
+      signal.throwIfAborted();
     },
     [getPreviewIframe],
   );
 
   const preparePreviewRuntime = useCallback(
     async (generation: string, signal: AbortSignal) => {
-      const deadline = performance.now() + 5_000;
-      while (
-        previewGenerationRef.current !== generation &&
-        performance.now() < deadline
-      ) {
-        signal.throwIfAborted();
-        await new Promise<void>((resolve) => window.setTimeout(resolve, 25));
-      }
-      if (previewGenerationRef.current !== generation) {
-        throw new Error(
+      await waitForPreviewReadiness({
+        isReady: () => previewGenerationRef.current === generation,
+        signal,
+        timeoutMs: 5_000,
+        errorMessage:
           "The mounted preview did not reach the current project generation.",
-        );
-      }
+      });
       designBridgeReadyRef.current = false;
       captureRuntimeReadyRef.current = false;
       bridgeGenerationRef.current = undefined;
@@ -2440,6 +2460,11 @@ export function CodeViewer({
                   (previewEnabled
                     ? template
                     : "static") as SandpackPredefinedTemplate
+                }
+                customSetup={
+                  desktopMode && previewEnabled && template === "static"
+                    ? DESKTOP_STATIC_PREVIEW_SETUP
+                    : undefined
                 }
                 theme={isDark ? "dark" : "light"}
                 files={sandpackFiles}

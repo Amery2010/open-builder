@@ -328,3 +328,21 @@ describe("local-agent conversation context", () => {
     );
   });
 });
+
+it("keeps queue delivery state outside the resumable conversation fingerprint", async () => {
+  const base = conversation();
+  const queued = {
+    ...base,
+    pendingUserInstructions: [{ id: "u", status: "queued" }],
+  };
+  const delivering = {
+    ...base,
+    pendingUserInstructions: [{ id: "u", status: "delivering" }],
+  };
+  expect(await computeConversationFingerprint(queued)).toBe(
+    await computeConversationFingerprint(delivering),
+  );
+  expect(await computeConversationFingerprint(queued)).toBe(
+    await computeConversationFingerprint(base),
+  );
+});

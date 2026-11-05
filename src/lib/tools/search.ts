@@ -8,8 +8,9 @@ import {
   SEARCH_SNIPPET_MAX_CHARS,
   TOOL_FETCH_TIMEOUT_MS,
   TOOL_MAX_CONCURRENCY,
+  ToolTimeoutError,
   clampInt,
-  fetchWithTimeout,
+  fetchTextWithTimeout,
   formatHttpError,
   limitArray,
   mapWithConcurrency,
@@ -68,6 +69,7 @@ async function tavilySearch(
   settings: WebSearchSettings,
   query: string,
   maxResults: number = 5,
+  signal?: AbortSignal,
 ): Promise<string> {
   const checkedQuery = normalizeToolQuery(query);
   if (!checkedQuery.ok) {
@@ -75,24 +77,28 @@ async function tavilySearch(
   }
   const size = clampInt(maxResults, 5, 1, WEB_SEARCH_MAX_RESULTS);
   try {
-    const res = await fetchWithTimeout(`${TAVILY_API_URL}/search`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        api_key: settings.tavilyApiKey,
-        query: checkedQuery.query,
-        max_results: size,
-        include_answer: true,
-      }),
-    });
+    const { response: res, text: body } = await fetchTextWithTimeout(
+      `${TAVILY_API_URL}/search`,
+      {
+        signal,
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          api_key: settings.tavilyApiKey,
+          query: checkedQuery.query,
+          max_results: size,
+          include_answer: true,
+        }),
+      },
+    );
     if (!res.ok) {
-      const text = await res.text();
+      const text = body;
       return JSON.stringify({
         ok: false,
         error: formatHttpError("Tavily search failed", res.status, text),
       });
     }
-    const data = await res.json();
+    const data = JSON.parse(body);
     const limited = limitArray(data.results ?? [], size);
     return JSON.stringify({
       ok: true,
@@ -113,6 +119,7 @@ async function tavilySearch(
       },
     });
   } catch (err) {
+    signal?.throwIfAborted();
     return JSON.stringify({ ok: false, error: safeErrorMessage(err) });
   }
 }
@@ -120,26 +127,31 @@ async function tavilySearch(
 async function tavilyExtract(
   settings: WebSearchSettings,
   urls: string[],
+  signal?: AbortSignal,
 ): Promise<string> {
   const checkedUrls = normalizeHttpUrlList(urls, WEB_READER_MAX_URLS);
   if (!checkedUrls.ok) {
     return JSON.stringify({ ok: false, error: checkedUrls.error });
   }
   try {
-    const res = await fetchWithTimeout(`${TAVILY_API_URL}/extract`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        api_key: settings.tavilyApiKey,
-        urls: checkedUrls.urls,
-      }),
-    });
+    const { response: res, text: body } = await fetchTextWithTimeout(
+      `${TAVILY_API_URL}/extract`,
+      {
+        signal,
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          api_key: settings.tavilyApiKey,
+          urls: checkedUrls.urls,
+        }),
+      },
+    );
     if (!res.ok) {
       throw new Error(
-        formatHttpError("Tavily extract failed", res.status, await res.text()),
+        formatHttpError("Tavily extract failed", res.status, body),
       );
     }
-    const data = await res.json();
+    const data = JSON.parse(body);
     const results = (data.results ?? []) as {
       url: string;
       raw_content: string;
@@ -159,21 +171,32 @@ async function tavilyExtract(
       },
     });
   } catch (err: any) {
+    signal?.throwIfAborted();
+    if (err instanceof ToolTimeoutError) {
+      return JSON.stringify({ ok: false, error: safeErrorMessage(err) });
+    }
     console.warn("Tavily extract failed, falling back to Jina:", err.message);
-    return jinaFallback(urls);
+    return jinaFallback(urls, signal);
   }
 }
 
-async function fetchSinglePageViaJina(url: string): Promise<{
+async function fetchSinglePageViaJina(
+  url: string,
+  signal?: AbortSignal,
+): Promise<{
   url: string;
   ok: boolean;
   content?: string;
   error?: string;
 }> {
   try {
-    const res = await fetchWithTimeout(`https://r.jina.ai/${url}`, {
-      headers: { Accept: "text/plain" },
-    });
+    const { response: res, text: body } = await fetchTextWithTimeout(
+      `https://r.jina.ai/${url}`,
+      {
+        signal,
+        headers: { Accept: "text/plain" },
+      },
+    );
     if (!res.ok) {
       return {
         url,
@@ -181,8 +204,9 @@ async function fetchSinglePageViaJina(url: string): Promise<{
         error: `Jina fetch failed (${res.status})`,
       };
     }
-    return { url, ok: true, ...formatPageContent(await res.text()) };
+    return { url, ok: true, ...formatPageContent(body) };
   } catch (err: any) {
+    signal?.throwIfAborted();
     return {
       url,
       ok: false,
@@ -191,7 +215,10 @@ async function fetchSinglePageViaJina(url: string): Promise<{
   }
 }
 
-async function jinaFallback(urls: string[]): Promise<string> {
+async function jinaFallback(
+  urls: string[],
+  signal?: AbortSignal,
+): Promise<string> {
   const checkedUrls = normalizeHttpUrlList(urls, WEB_READER_MAX_URLS);
   if (!checkedUrls.ok) {
     return JSON.stringify({ ok: false, error: checkedUrls.error, pages: [] });
@@ -199,7 +226,7 @@ async function jinaFallback(urls: string[]): Promise<string> {
   const pages = await mapWithConcurrency(
     checkedUrls.urls,
     TOOL_MAX_CONCURRENCY,
-    fetchSinglePageViaJina,
+    (url) => fetchSinglePageViaJina(url, signal),
   );
   return JSON.stringify({
     ok: pages.some((p) => p.ok),
@@ -220,6 +247,7 @@ async function firecrawlSearch(
   settings: WebSearchSettings,
   query: string,
   maxResults: number = 5,
+  signal?: AbortSignal,
 ): Promise<string> {
   const checkedQuery = normalizeToolQuery(query);
   if (!checkedQuery.ok) {
@@ -227,25 +255,29 @@ async function firecrawlSearch(
   }
   const size = clampInt(maxResults, 5, 1, WEB_SEARCH_MAX_RESULTS);
   try {
-    const res = await fetchWithTimeout(`${FIRECRAWL_API_URL}/v2/search`, {
-      method: "POST",
-      headers: firecrawlHeaders(settings.firecrawlApiKey),
-      body: JSON.stringify({
-        query: checkedQuery.query,
-        limit: size,
-        sources: ["web"],
-      }),
-    });
+    const { response: res, text: body } = await fetchTextWithTimeout(
+      `${FIRECRAWL_API_URL}/v2/search`,
+      {
+        signal,
+        method: "POST",
+        headers: firecrawlHeaders(settings.firecrawlApiKey),
+        body: JSON.stringify({
+          query: checkedQuery.query,
+          limit: size,
+          sources: ["web"],
+        }),
+      },
+    );
 
     if (!res.ok) {
-      const text = await res.text();
+      const text = body;
       return JSON.stringify({
         ok: false,
         error: formatHttpError("Firecrawl search failed", res.status, text),
       });
     }
 
-    const data = await res.json();
+    const data = JSON.parse(body);
     const searchData = Array.isArray(data.data)
       ? data.data
       : Array.isArray(data.data?.web)
@@ -274,6 +306,7 @@ async function firecrawlSearch(
       },
     });
   } catch (err) {
+    signal?.throwIfAborted();
     return JSON.stringify({ ok: false, error: safeErrorMessage(err) });
   }
 }
@@ -281,6 +314,7 @@ async function firecrawlSearch(
 async function fetchSinglePageViaFirecrawl(
   settings: WebSearchSettings,
   url: string,
+  signal?: AbortSignal,
 ): Promise<{
   url: string;
   ok: boolean;
@@ -290,25 +324,25 @@ async function fetchSinglePageViaFirecrawl(
   error?: string;
 }> {
   try {
-    const res = await fetchWithTimeout(`${FIRECRAWL_API_URL}/v2/scrape`, {
-      method: "POST",
-      headers: firecrawlHeaders(settings.firecrawlApiKey),
-      body: JSON.stringify({
-        url,
-        formats: ["markdown"],
-        onlyMainContent: true,
-      }),
-    });
+    const { response: res, text: body } = await fetchTextWithTimeout(
+      `${FIRECRAWL_API_URL}/v2/scrape`,
+      {
+        signal,
+        method: "POST",
+        headers: firecrawlHeaders(settings.firecrawlApiKey),
+        body: JSON.stringify({
+          url,
+          formats: ["markdown"],
+          onlyMainContent: true,
+        }),
+      },
+    );
     if (!res.ok) {
       throw new Error(
-        formatHttpError(
-          "Firecrawl scrape failed",
-          res.status,
-          await res.text(),
-        ),
+        formatHttpError("Firecrawl scrape failed", res.status, body),
       );
     }
-    const payload = await res.json();
+    const payload = JSON.parse(body);
     const document = payload.data ?? payload;
     const content = document.markdown ?? document.content;
     if (typeof content !== "string" || !content.trim()) {
@@ -320,17 +354,22 @@ async function fetchSinglePageViaFirecrawl(
       ...formatPageContent(content),
     };
   } catch (err) {
+    signal?.throwIfAborted();
+    if (err instanceof ToolTimeoutError) {
+      return { url, ok: false, error: safeErrorMessage(err) };
+    }
     console.warn(
       "Firecrawl scrape failed, falling back to Jina:",
       safeErrorMessage(err),
     );
-    return fetchSinglePageViaJina(url);
+    return fetchSinglePageViaJina(url, signal);
   }
 }
 
 async function firecrawlScrape(
   settings: WebSearchSettings,
   urls: string[],
+  signal?: AbortSignal,
 ): Promise<string> {
   const checkedUrls = normalizeHttpUrlList(urls, WEB_READER_MAX_URLS);
   if (!checkedUrls.ok) {
@@ -339,7 +378,7 @@ async function firecrawlScrape(
   const pages = await mapWithConcurrency(
     checkedUrls.urls,
     TOOL_MAX_CONCURRENCY,
-    (url) => fetchSinglePageViaFirecrawl(settings, url),
+    (url) => fetchSinglePageViaFirecrawl(settings, url, signal),
   );
   return JSON.stringify({
     ok: pages.some((page) => page.ok),
@@ -360,6 +399,7 @@ async function exaSearch(
   settings: WebSearchSettings,
   query: string,
   maxResults: number = 5,
+  signal?: AbortSignal,
 ): Promise<string> {
   const checkedQuery = normalizeToolQuery(query);
   if (!checkedQuery.ok) {
@@ -367,32 +407,32 @@ async function exaSearch(
   }
   const size = clampInt(maxResults, 5, 1, WEB_SEARCH_MAX_RESULTS);
   try {
-    const res = await fetchWithTimeout(`${EXA_API_URL}/search`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": settings.exaApiKey.trim(),
-      },
-      body: JSON.stringify({
-        query: checkedQuery.query,
-        type: "auto",
-        numResults: size,
-        contents: {
-          text: { maxCharacters: SEARCH_SNIPPET_MAX_CHARS },
+    const { response: res, text: body } = await fetchTextWithTimeout(
+      `${EXA_API_URL}/search`,
+      {
+        signal,
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": settings.exaApiKey.trim(),
         },
-      }),
-    });
+        body: JSON.stringify({
+          query: checkedQuery.query,
+          type: "auto",
+          numResults: size,
+          contents: {
+            text: { maxCharacters: SEARCH_SNIPPET_MAX_CHARS },
+          },
+        }),
+      },
+    );
     if (!res.ok) {
       return JSON.stringify({
         ok: false,
-        error: formatHttpError(
-          "Exa search failed",
-          res.status,
-          await res.text(),
-        ),
+        error: formatHttpError("Exa search failed", res.status, body),
       });
     }
-    const data = await res.json();
+    const data = JSON.parse(body);
     const limited = limitArray(
       Array.isArray(data.results) ? data.results : [],
       size,
@@ -419,6 +459,7 @@ async function exaSearch(
       },
     });
   } catch (err) {
+    signal?.throwIfAborted();
     return JSON.stringify({ ok: false, error: safeErrorMessage(err) });
   }
 }
@@ -426,29 +467,32 @@ async function exaSearch(
 async function exaContents(
   settings: WebSearchSettings,
   urls: string[],
+  signal?: AbortSignal,
 ): Promise<string> {
   const checkedUrls = normalizeHttpUrlList(urls, WEB_READER_MAX_URLS);
   if (!checkedUrls.ok) {
     return JSON.stringify({ ok: false, error: checkedUrls.error });
   }
   try {
-    const res = await fetchWithTimeout(`${EXA_API_URL}/contents`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": settings.exaApiKey.trim(),
+    const { response: res, text: body } = await fetchTextWithTimeout(
+      `${EXA_API_URL}/contents`,
+      {
+        signal,
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": settings.exaApiKey.trim(),
+        },
+        body: JSON.stringify({
+          urls: checkedUrls.urls,
+          text: { maxCharacters: WEB_PAGE_MAX_CHARS },
+        }),
       },
-      body: JSON.stringify({
-        urls: checkedUrls.urls,
-        text: { maxCharacters: WEB_PAGE_MAX_CHARS },
-      }),
-    });
+    );
     if (!res.ok) {
-      throw new Error(
-        formatHttpError("Exa contents failed", res.status, await res.text()),
-      );
+      throw new Error(formatHttpError("Exa contents failed", res.status, body));
     }
-    const data = await res.json();
+    const data = JSON.parse(body);
     const results = Array.isArray(data.results) ? data.results : [];
     if (results.length === 0) throw new Error("Exa returned empty results");
     const pages = await mapWithConcurrency(
@@ -469,7 +513,7 @@ async function exaContents(
           "Exa contents did not return this page, falling back to Jina:",
           url,
         );
-        return fetchSinglePageViaJina(url);
+        return fetchSinglePageViaJina(url, signal);
       },
     );
     return JSON.stringify({
@@ -484,11 +528,15 @@ async function exaContents(
       },
     });
   } catch (err) {
+    signal?.throwIfAborted();
+    if (err instanceof ToolTimeoutError) {
+      return JSON.stringify({ ok: false, error: safeErrorMessage(err) });
+    }
     console.warn(
       "Exa contents failed, falling back to Jina:",
       safeErrorMessage(err),
     );
-    return jinaFallback(checkedUrls.urls);
+    return jinaFallback(checkedUrls.urls, signal);
   }
 }
 
@@ -496,8 +544,13 @@ async function exaContents(
 
 export function createSearchToolHandler(
   settings: WebSearchSettings,
-): (name: string, args: unknown) => Promise<string> {
-  return async (name: string, args: unknown): Promise<string> => {
+): (name: string, args: unknown, signal?: AbortSignal) => Promise<string> {
+  return async (
+    name: string,
+    args: unknown,
+    signal?: AbortSignal,
+  ): Promise<string> => {
+    signal?.throwIfAborted();
     const a = args as Record<string, any>;
     const engine = settings.engine;
     const query =
@@ -516,23 +569,23 @@ export function createSearchToolHandler(
     if (engine === "tavily") {
       switch (name) {
         case "web_search":
-          return tavilySearch(settings, query!.query, a.max_results);
+          return tavilySearch(settings, query!.query, a.max_results, signal);
         case "web_reader":
-          return tavilyExtract(settings, readerUrls!.urls);
+          return tavilyExtract(settings, readerUrls!.urls, signal);
       }
     } else if (engine === "firecrawl") {
       switch (name) {
         case "web_search":
-          return firecrawlSearch(settings, query!.query, a.max_results);
+          return firecrawlSearch(settings, query!.query, a.max_results, signal);
         case "web_reader":
-          return firecrawlScrape(settings, readerUrls!.urls);
+          return firecrawlScrape(settings, readerUrls!.urls, signal);
       }
     } else if (engine === "exa") {
       switch (name) {
         case "web_search":
-          return exaSearch(settings, query!.query, a.max_results);
+          return exaSearch(settings, query!.query, a.max_results, signal);
         case "web_reader":
-          return exaContents(settings, readerUrls!.urls);
+          return exaContents(settings, readerUrls!.urls, signal);
       }
     }
 
@@ -549,15 +602,21 @@ export function createSearchToolHandler(
 export function createJinaReaderHandler(): (
   name: string,
   args: unknown,
+  signal?: AbortSignal,
 ) => Promise<string> {
-  return async (name: string, args: unknown): Promise<string> => {
+  return async (
+    name: string,
+    args: unknown,
+    signal?: AbortSignal,
+  ): Promise<string> => {
+    signal?.throwIfAborted();
     if (name === "web_reader") {
       const a = args as { urls: string[] };
       const readerUrls = normalizeHttpUrlList(a?.urls, WEB_READER_MAX_URLS);
       if (!readerUrls.ok) {
         return JSON.stringify({ ok: false, error: readerUrls.error });
       }
-      return jinaFallback(readerUrls.urls);
+      return jinaFallback(readerUrls.urls, signal);
     }
     return `Error: unknown tool "${name}"`;
   };

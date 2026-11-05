@@ -131,3 +131,45 @@ describe("generation run guard", () => {
     expect(findPendingToolCall(messages)).toBeNull();
   });
 });
+
+describe("cancelPendingToolCalls", () => {
+  it("closes incomplete tool groups before a later user message without losing work", async () => {
+    const { cancelPendingToolCalls } = await import("./run-guard");
+    const messages: Message[] = [
+      { role: "user", content: "Build" },
+      {
+        role: "assistant",
+        content: "Saved one file",
+        tool_calls: [
+          {
+            id: "done",
+            type: "function",
+            function: { name: "write_file", arguments: "{}" },
+          },
+          {
+            id: "pending",
+            type: "function",
+            function: { name: "read_files", arguments: "" },
+          },
+        ],
+      },
+      { role: "tool", tool_call_id: "done", content: "Saved" },
+      { role: "user", content: "Continue" },
+    ];
+    const result = cancelPendingToolCalls(messages);
+    expect(result.map((m) => m.role)).toEqual([
+      "user",
+      "assistant",
+      "tool",
+      "tool",
+      "user",
+    ]);
+    expect(result[1].content).toBe("Saved one file");
+    expect(result[2]).toEqual(messages[2]);
+    expect(result[3]).toMatchObject({
+      tool_call_id: "pending",
+      toolOutput: { isError: true },
+    });
+    expect(cancelPendingToolCalls(result)).toEqual(result);
+  });
+});

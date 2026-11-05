@@ -61,6 +61,7 @@ export interface ResolvedAttachment extends AttachmentRef {
 }
 
 export interface MessageMetadata {
+  instructionId?: string;
   /** Safe lifecycle telemetry captured from one local CLI run. Provider stderr
    * and other diagnostics are deliberately excluded. */
   localCli?: {
@@ -306,7 +307,30 @@ export interface GeneratorEvent {
 }
 
 /** Constructor options */
+export interface PreparedUserInstruction {
+  id: string;
+  message: Message;
+  attachments: ResolvedAttachment[];
+  modelPrompt?: string;
+  skillPrompt?: string;
+}
+
+export interface PreparedUserInstructionBatch {
+  instructions: PreparedUserInstruction[];
+  /** Synchronous ownership check and canonical-history commit. */
+  commit(): boolean;
+  fail(reason: "failed" | "uncertain"): void;
+}
+
+export interface UserInstructionSource {
+  prepare(
+    backend: GenerationBackend,
+    signal: AbortSignal,
+  ): Promise<PreparedUserInstructionBatch | null>;
+}
+
 export interface GeneratorOptions {
+  userInstructions?: UserInstructionSource;
   /** Conversation that owns this generator and its permission activity. */
   conversationId?: string;
   apiType?: ApiType;
@@ -315,6 +339,7 @@ export interface GeneratorOptions {
   model: string;
   systemPrompt?: string;
   initialFiles?: ProjectFiles;
+  /** Optional caller-selected limit; normal runs have no iteration limit. */
   maxIterations?: number;
   stream?: boolean;
   customTools?: ToolSet;
@@ -351,7 +376,7 @@ export interface GeneratorOptions {
   initialSkillContext?: SkillActiveContext | null;
   thinking?: boolean;
   thinkingBudget?: number;
-  /** Max auto-retry attempts for failed API requests (default 3) */
+  /** Additional retries for failed API requests (default 2, 3 attempts total). */
   maxRetries?: number;
   /** Base delay in ms for exponential backoff (default 1000) */
   retryDelay?: number;

@@ -139,6 +139,8 @@ export interface MergedMessage {
   role: "user" | "assistant";
   blocks: Block[];
   id: string;
+  /** Stable rendering identity while a submitted update moves into model history. */
+  instructionId?: string;
   origin?: "auto_qa" | "design_review" | "design_auto_fix";
   reviewJobId?: string;
   reviewSummary?: NonNullable<_Message["metadata"]>["reviewSummary"];
@@ -296,10 +298,24 @@ export interface ConversationDesignState {
   autoSelectionError?: boolean;
 }
 
+export interface PendingUserInstruction {
+  id: string;
+  conversationId: string;
+  runId: string;
+  sequence: number;
+  /** Display boundary in canonical history when this message was submitted. */
+  afterMessageIndex?: number;
+  content: string;
+  attachments: _AttachmentRef[];
+  forcedSkillIds: string[];
+  status: "queued" | "delivering" | "cancelled" | "failed" | "uncertain";
+}
+
 export interface Conversation {
   id: string;
   title: string;
   messages: _Message[];
+  pendingUserInstructions?: PendingUserInstruction[];
   files: _ProjectFiles;
   /** Binary project assets keyed by their project-relative path. */
   assets?: ProjectAssets;

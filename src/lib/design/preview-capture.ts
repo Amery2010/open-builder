@@ -2,6 +2,54 @@ import type {
   DesignBridgeCaptureResult,
   DesignReviewViewportName,
 } from "./preview-bridge";
+import { DESIGN_BRIDGE_TIMEOUT_ATTEMPTS } from "./preview-bridge";
+import { PreviewRuntimeError } from "./preview-runtime";
+
+/** Keep waiting for the same preview operation across three timeout windows. */
+export async function waitForPreviewReadiness({
+  isReady,
+  isCurrent = () => true,
+  signal,
+  timeoutMs,
+  errorMessage,
+  pollIntervalMs = 25,
+}: {
+  isReady: () => boolean;
+  isCurrent?: () => boolean;
+  signal: AbortSignal;
+  timeoutMs: number;
+  errorMessage: string;
+  pollIntervalMs?: number;
+}): Promise<void> {
+  const deadline =
+    performance.now() + timeoutMs * DESIGN_BRIDGE_TIMEOUT_ATTEMPTS;
+  for (;;) {
+    signal.throwIfAborted();
+    if (!isCurrent()) {
+      throw new PreviewRuntimeError(
+        "stale_generation",
+        "Preview generation was replaced.",
+      );
+    }
+    if (isReady()) return;
+    const remaining = deadline - performance.now();
+    if (remaining <= 0) throw new Error(errorMessage);
+    await new Promise<void>((resolve, reject) => {
+      const abort = () => {
+        clearTimeout(timer);
+        reject(signal.reason);
+      };
+      const timer = setTimeout(
+        () => {
+          signal.removeEventListener("abort", abort);
+          resolve();
+        },
+        Math.min(pollIntervalMs, remaining),
+      );
+      signal.addEventListener("abort", abort, { once: true });
+    });
+  }
+}
 
 export interface DesignReviewViewport {
   name: DesignReviewViewportName;

@@ -137,7 +137,6 @@ export const en: typeof zh = {
           "The last check could not verify this CLI. You can still send or rescan in settings.",
         openSettings: "Open model settings",
       },
-      outputLimit: "Local CLI output exceeded the renderer limit.",
       utilityTimeout: "Local utility generation timed out after {timeoutMs}ms.",
     },
     webSearch: {
@@ -363,6 +362,16 @@ export const en: typeof zh = {
   },
   chat: {
     placeholder: "Describe the app you want...",
+    instructions: {
+      placeholder: "Add a requirement while the task continues…",
+      queued: "Waiting to send",
+      delivering: "Sending to AI",
+      cancelled: "Cancelled · not sent",
+      failed: "Could not send",
+      uncertain: "Delivery unconfirmed · review before resending",
+      submitFailed: "Could not send your message. Your draft has been kept.",
+      applySkills: "Apply the selected skills to the remaining work.",
+    },
     autoQaActivity: "Automatic QA activity",
     autoDesignFixActivity: "Automatic Design repair",
     automaticRetryUnavailable:
@@ -890,6 +899,10 @@ export const en: typeof zh = {
     copy: "Copy",
     copied: "Copied",
     runHealthCheck: "Health check",
+    toolBudgetReached:
+      'This turn reached its tool-call limit and paused. Project changes have been kept. Send "continue" to finish the remaining work.',
+    prototypeNoProgress:
+      "The AI returned from an automatic continuation without updating the project or completing its checkpoint. Repeated requests have stopped. Your changes are kept; address the unfinished work and continue.",
     generationError: {
       detail: "Error details:",
       status: "HTTP status: {status}",
@@ -946,6 +959,12 @@ export const en: typeof zh = {
           freshSessionSafe: "Retry with a fresh session",
           manual: "Retry manually",
         },
+        failureDetails: {
+          rateLimited:
+            "The local CLI provider's rate or quota limit prevented this request from completing.",
+          unexpectedStop:
+            "The local CLI stopped unexpectedly. This record does not retain the specific cause. Generated content and project changes have been kept; retry manually to continue.",
+        },
         failureCodes: {
           executableNotFound:
             "The selected local CLI executable was not found.",
@@ -972,13 +991,15 @@ export const en: typeof zh = {
             "The saved local CLI session is no longer available.",
           toolBridgeFailed:
             "The Host tool bridge could not complete the tool call.",
+          toolBudgetExceeded:
+            'This local CLI turn reached its tool-call limit. Send "continue" to finish the remaining work.',
           isolationViolation:
             "The local CLI attempted to use a capability outside the verified Host boundary.",
           protocolViolation:
             "The local CLI returned an unsupported or malformed protocol event.",
           outputLimit: "The local CLI exceeded the safe output limit.",
           timeout: "The local CLI did not complete within the allowed time.",
-          processExit: "The local CLI process exited before the run completed.",
+          processExit: "The local CLI did not complete this run.",
           cancelled: "The local CLI run was cancelled.",
           consumerGone: "The page stopped receiving this local CLI run.",
           internal:

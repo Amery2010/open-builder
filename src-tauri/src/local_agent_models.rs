@@ -478,7 +478,7 @@ impl ReqwestGatewayFetcher {
         let client = reqwest::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
-            .timeout(timeout)
+            .timeout(timeout * crate::timeouts::TIMEOUT_ATTEMPTS)
             .build()
             .ok();
         Self { client, timeout }
@@ -562,9 +562,12 @@ impl GatewayFetcher for ReqwestGatewayFetcher {
         let timeout = self.timeout;
         Box::pin(async move {
             let client = client.ok_or(GatewayFailure::Transport)?;
-            tokio::time::timeout(timeout, Self::fetch_catalog(client, gateway))
-                .await
-                .map_err(|_| GatewayFailure::TimedOut)?
+            crate::timeouts::wait_with_timeout_retries(
+                Self::fetch_catalog(client, gateway),
+                timeout,
+            )
+            .await
+            .map_err(|_| GatewayFailure::TimedOut)?
         })
     }
 }
@@ -2360,9 +2363,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reqwest_adapter_applies_one_timeout_to_the_whole_pagination_run() {
+    async fn reqwest_adapter_keeps_pagination_across_timeout_windows_without_replaying_pages() {
         let delayed = Duration::from_millis(20);
-        let (url, _) = scripted_http_server(vec![
+        let (url, requests) = scripted_http_server(vec![
             (
                 ok_response(r#"{"data":[],"has_more":true,"last_id":"cursor-1"}"#),
                 delayed,
@@ -2370,11 +2373,12 @@ mod tests {
             (ok_response(r#"{"data":[],"has_more":false}"#), delayed),
         ])
         .await;
-        let failure = ReqwestGatewayFetcher::new(Duration::from_millis(30))
+        let models = ReqwestGatewayFetcher::new(Duration::from_millis(30))
             .fetch(gateway(&url))
             .await
-            .unwrap_err();
-        assert!(matches!(failure, GatewayFailure::TimedOut));
+            .unwrap();
+        assert!(models.is_empty());
+        assert_eq!(requests.lock().unwrap().len(), 2);
     }
 
     #[tokio::test]
@@ -2427,10 +2431,12 @@ mod tests {
     #[tokio::test]
     async fn reqwest_adapter_bounds_timeout_response_size_models_and_pages() {
         let timeout_url = one_shot_server(b"", true).await;
+        let started = tokio::time::Instant::now();
         let timeout = ReqwestGatewayFetcher::new(Duration::from_millis(25))
             .fetch(gateway(&timeout_url))
             .await
             .unwrap_err();
+        assert!(started.elapsed() >= Duration::from_millis(75));
         assert_eq!(
             timeout.safe_message(),
             "Claude gateway model discovery timed out."

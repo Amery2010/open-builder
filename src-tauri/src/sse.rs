@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use futures_util::StreamExt;
 use serde::Serialize;
@@ -9,16 +9,15 @@ use tauri::{AppHandle, Emitter};
 use tokio::sync::Semaphore;
 
 use crate::proxy::build_validated_http_client;
+use crate::response_stream::forward_response_stream;
+use crate::timeouts::wait_with_timeout_retries;
 const MAX_ACTIVE_SSE_CONNECTIONS: usize = 8;
 const MAX_SSE_ID_CHARS: usize = 128;
 const MAX_SSE_HEADERS: usize = 80;
 const MAX_SSE_HEADER_CHARS: usize = 8 * 1024;
 const MAX_SSE_BODY_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SSE_EVENT_CHUNK_BYTES: usize = 256 * 1024;
-const MAX_SSE_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
-const MAX_SSE_BYTES_PER_SECOND: usize = 8 * 1024 * 1024;
 const SSE_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
-const SSE_TOTAL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const MAX_SSE_IN_FLIGHT_EVENTS: usize = 4;
 const SSE_ACK_TIMEOUT: Duration = Duration::from_secs(30);
 static NEXT_SSE_GENERATION: AtomicU64 = AtomicU64::new(1);
@@ -87,7 +86,7 @@ impl SseEventFlow {
     }
 
     async fn reserve(&self) -> Result<u64, String> {
-        let permit = tokio::time::timeout(SSE_ACK_TIMEOUT, self.permits.acquire())
+        let permit = wait_with_timeout_retries(self.permits.acquire(), SSE_ACK_TIMEOUT)
             .await
             .map_err(|_| "SSE consumer acknowledgement timeout".to_string())?
             .map_err(|_| "SSE consumer flow control closed".to_string())?;
@@ -222,44 +221,6 @@ async fn emit_chunked(
     Ok(())
 }
 
-struct SseStreamBudget {
-    total_bytes: usize,
-    started: Instant,
-    rate_window_started: Instant,
-    rate_window_bytes: usize,
-}
-
-impl SseStreamBudget {
-    fn new() -> Self {
-        let now = Instant::now();
-        Self {
-            total_bytes: 0,
-            started: now,
-            rate_window_started: now,
-            rate_window_bytes: 0,
-        }
-    }
-
-    fn record(&mut self, bytes: usize) -> Result<(), String> {
-        if self.started.elapsed() > SSE_TOTAL_TIMEOUT {
-            return Err("SSE stream exceeded its total duration".to_string());
-        }
-        self.total_bytes = self.total_bytes.saturating_add(bytes);
-        if self.total_bytes > MAX_SSE_RESPONSE_BYTES {
-            return Err("SSE stream exceeded its cumulative byte budget".to_string());
-        }
-        if self.rate_window_started.elapsed() >= Duration::from_secs(1) {
-            self.rate_window_started = Instant::now();
-            self.rate_window_bytes = 0;
-        }
-        self.rate_window_bytes = self.rate_window_bytes.saturating_add(bytes);
-        if self.rate_window_bytes > MAX_SSE_BYTES_PER_SECOND {
-            return Err("SSE stream exceeded its rate budget".to_string());
-        }
-        Ok(())
-    }
-}
-
 // ─── Commands ────────────────────────────────────────────────────────────────
 
 /// Start an SSE streaming connection.
@@ -355,57 +316,28 @@ pub async fn sse_connect(
                 );
 
                 // Stream body chunks
-                let mut stream = resp.bytes_stream();
-                let mut budget = SseStreamBudget::new();
-                let mut completed = true;
-                loop {
-                    let next = match tokio::time::timeout(SSE_IDLE_TIMEOUT, stream.next()).await {
-                        Ok(next) => next,
-                        Err(_) => {
-                            completed = false;
-                            let _ = app.emit(
-                                &event_name,
-                                SsePayload::Error {
-                                    message: "SSE stream idle timeout".to_string(),
-                                },
-                            );
-                            break;
-                        }
-                    };
-                    let Some(chunk_result) = next else {
-                        break;
-                    };
-                    match chunk_result {
-                        Ok(bytes) => {
-                            if let Err(message) = budget.record(bytes.len()) {
-                                completed = false;
-                                let _ = app.emit(&event_name, SsePayload::Error { message });
-                                break;
-                            }
-                            if let Err(message) =
-                                emit_chunked(&app, &event_name, &bytes, &task_flow).await
-                            {
-                                completed = false;
-                                let _ = app.emit(&event_name, SsePayload::Error { message });
-                                break;
-                            }
-                        }
-                        Err(_) => {
-                            completed = false;
-                            let _ = app.emit(
-                                &event_name,
-                                SsePayload::Error {
-                                    message: "SSE response stream failed".to_string(),
-                                },
-                            );
-                            break;
-                        }
+                let stream = resp
+                    .bytes_stream()
+                    .map(|chunk| chunk.map_err(|_| "SSE response stream failed".to_string()));
+                let result = forward_response_stream(
+                    stream,
+                    SSE_IDLE_TIMEOUT,
+                    "SSE stream idle timeout",
+                    |bytes| {
+                        let app = &app;
+                        let event_name = &event_name;
+                        let flow = &task_flow;
+                        async move { emit_chunked(app, event_name, &bytes, flow).await }
+                    },
+                )
+                .await;
+                match result {
+                    Ok(()) => {
+                        let _ = app.emit(&event_name, SsePayload::Done);
                     }
-                }
-
-                // Stream complete
-                if completed {
-                    let _ = app.emit(&event_name, SsePayload::Done);
+                    Err(message) => {
+                        let _ = app.emit(&event_name, SsePayload::Error { message });
+                    }
                 }
             }
             Err(_) => {
@@ -500,17 +432,6 @@ mod tests {
 
         let huge_body = "x".repeat(MAX_SSE_BODY_BYTES + 1);
         assert!(validate_sse_request("id-1", "POST", &headers, Some(&huge_body)).is_err());
-    }
-
-    #[test]
-    fn enforces_sse_rate_and_cumulative_budgets() {
-        let mut rate = SseStreamBudget::new();
-        assert!(rate.record(MAX_SSE_BYTES_PER_SECOND + 1).is_err());
-
-        let mut total = SseStreamBudget::new();
-        total.total_bytes = MAX_SSE_RESPONSE_BYTES;
-        total.rate_window_started = Instant::now() - Duration::from_secs(2);
-        assert!(total.record(1).is_err());
     }
 
     #[tokio::test]

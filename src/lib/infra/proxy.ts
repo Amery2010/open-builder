@@ -408,38 +408,9 @@ function readProxyAllowedHosts(): string {
  * - OpenAI / Anthropic / Compatible: JSON body contains "stream":true
  * - Google Gemini: URL path contains ":streamGenerateContent"
  */
-function isStreamingRequest(url: string, init?: RequestInit): boolean {
+function isStreamingRequest(url: string, body?: string): boolean {
   if (url.includes(":streamGenerateContent")) return true;
-
-  if (init?.body && typeof init.body === "string") {
-    if (/"stream"\s*:\s*true/.test(init.body)) return true;
-  }
-
-  return false;
-}
-
-/**
- * Extract headers from RequestInit into a plain Record for invoke.
- */
-function extractHeaders(init?: RequestInit): Record<string, string> {
-  const result: Record<string, string> = {};
-  if (!init?.headers) return result;
-
-  if (init.headers instanceof Headers) {
-    init.headers.forEach((value, key) => {
-      result[key] = value;
-    });
-  } else if (Array.isArray(init.headers)) {
-    for (const [key, value] of init.headers) {
-      result[key] = value;
-    }
-  } else {
-    for (const [key, value] of Object.entries(init.headers)) {
-      result[key] = value;
-    }
-  }
-
-  return result;
+  return body !== undefined && /"stream"\s*:\s*true/.test(body);
 }
 
 // ─── Fetch Hijack ────────────────────────────────────────────────────────────
@@ -447,7 +418,7 @@ function extractHeaders(init?: RequestInit): Record<string, string> {
 function hijackFetch(): void {
   const originalFetch = window.fetch;
 
-  window.fetch = function patchedFetch(
+  window.fetch = async function patchedFetch(
     input: RequestInfo | URL,
     init?: RequestInit,
   ): Promise<Response> {
@@ -457,40 +428,43 @@ function hijackFetch(): void {
       return originalFetch.call(window, input, init);
     }
 
+    // Normalize once using fetch's RequestInit precedence. Inspect a clone so
+    // Request-only streaming calls preserve their body and cancellation signal.
+    const request = new Request(
+      input instanceof Request
+        ? input.clone()
+        : new URL(rawUrl, window.location.href),
+      init,
+    );
+    request.signal.throwIfAborted();
+    const body = request.body ? await request.clone().text() : undefined;
+    request.signal.throwIfAborted();
+
     // Streaming requests → SSE bridge (Tauri invoke + Events)
-    if (isStreamingRequest(rawUrl, init)) {
-      const method =
-        init?.method ?? (input instanceof Request ? input.method : "POST");
+    if (isStreamingRequest(rawUrl, body)) {
+      const method = request.method;
       console.debug(
         `[proxy] ${method} ${redactProxyTargetForLog(rawUrl)} [sse]`,
       );
       recordProxyRequest("sse", method, rawUrl);
       return createSseResponse({
         url: rawUrl,
-        method:
-          init?.method ?? (input instanceof Request ? input.method : "POST"),
-        headers: extractHeaders(init),
-        body: typeof init?.body === "string" ? init.body : undefined,
-        signal: init?.signal ?? undefined,
+        method,
+        headers: Object.fromEntries(request.headers),
+        body,
+        signal: request.signal,
       });
     }
 
     // Non-streaming requests → proxy:// custom protocol
     const proxiedUrl = toProxyUrl(rawUrl);
-    const method =
-      init?.method ?? (input instanceof Request ? input.method : "GET");
+    const method = request.method;
     console.debug(
       `[proxy] ${method} ${redactProxyTargetForLog(rawUrl)} [fetch]`,
     );
     recordProxyRequest("fetch", method, rawUrl);
 
-    // Preserve Request properties (method, headers, body, signal, etc.)
-    if (input instanceof Request) {
-      const newRequest = new Request(proxiedUrl, input);
-      return originalFetch.call(window, newRequest, init);
-    }
-
-    return originalFetch.call(window, proxiedUrl, init);
+    return originalFetch.call(window, new Request(proxiedUrl, request));
   };
 }
 

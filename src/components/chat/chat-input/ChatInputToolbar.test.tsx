@@ -119,6 +119,53 @@ describe("ChatInputToolbar project upload", () => {
     expect(screen.getByRole("button", { name: "Mode" })).toBeDisabled();
   });
 
+  it("switches the single runtime action between Stop and Send", async () => {
+    const onStop = vi.fn();
+    const user = userEvent.setup();
+    const { rerender } = render(
+      <TooltipProvider>
+        <ChatInputToolbar {...baseProps} isGenerating onStop={onStop} />
+      </TooltipProvider>,
+    );
+    expect(screen.getByRole("button", { name: "Stop" })).toBeEnabled();
+    expect(
+      screen.queryByRole("button", { name: "Send" }),
+    ).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Stop" }));
+    expect(onStop).toHaveBeenCalledOnce();
+
+    rerender(
+      <TooltipProvider>
+        <ChatInputToolbar
+          {...baseProps}
+          isGenerating
+          hasContent
+          onStop={onStop}
+        />
+      </TooltipProvider>,
+    );
+    expect(screen.getByRole("button", { name: "Send" })).toBeEnabled();
+    expect(
+      screen.queryByRole("button", { name: "Stop" }),
+    ).not.toBeInTheDocument();
+
+    rerender(
+      <TooltipProvider>
+        <ChatInputToolbar
+          {...baseProps}
+          isGenerating
+          hasContent
+          isProcessingImages
+          onStop={onStop}
+        />
+      </TooltipProvider>,
+    );
+    expect(screen.getByRole("button", { name: "Stop" })).toBeEnabled();
+    expect(
+      screen.queryByRole("button", { name: "Send" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("shows tooltips for every toolbar button and keeps icon buttons square", async () => {
     const user = userEvent.setup();
     render(

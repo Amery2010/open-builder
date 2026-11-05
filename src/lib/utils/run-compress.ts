@@ -10,6 +10,7 @@ export async function runCompress(
     instructions: string,
     prompt: string,
   ) => Promise<string>,
+  isCurrent: () => boolean = () => true,
 ): Promise<CompressResult | null> {
   const result = await compressContext(
     conv.messages,
@@ -18,6 +19,7 @@ export async function runCompress(
     conv.files,
     generateTextOverride,
   );
+  if (!isCurrent()) return null;
   if (result) {
     useConversationStore
       .getState()

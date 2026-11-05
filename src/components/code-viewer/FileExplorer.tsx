@@ -298,7 +298,7 @@ export function FileExplorer({
   };
 
   return (
-    <div className="h-full flex flex-col bg-background">
+    <div className="h-full flex flex-col bg-background text-foreground">
       <div className="px-2 py-2 border-b flex items-center justify-between">
         <span className="text-xs font-medium text-muted-foreground uppercase">
           {t.explorer.files}

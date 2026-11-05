@@ -23,8 +23,7 @@ use crate::local_agent_models::CatalogAuthority;
 use crate::local_agent_protocol::{
     apply_minimal_environment, command_output_capped, command_output_capped_with_env,
     contains_capability_semantics, read_capped_line, turn_prompt, write_json, FrozenProcessSpec,
-    LocalCliRunState, PreparedPrivateFile, ProtocolContext, ProtocolOutcome, ProtocolOutputBudget,
-    RunSupervisor,
+    LocalCliRunState, PreparedPrivateFile, ProtocolContext, ProtocolOutcome, RunSupervisor,
 };
 use crate::local_agent_runtime::{AdapterError, LocalCliFailureCode};
 
@@ -39,7 +38,8 @@ const GEMINI_BASE_URL_ENV: &str = "GOOGLE_GEMINI_BASE_URL";
 const AGENT_NAME: &str = "open-builder";
 const MCP_SERVER_NAME: &str = "open_builder";
 const DEFAULT_EFFORTS: &[&str] = &["low", "medium", "high"];
-const PRINT_TIMEOUT: &str = "30m";
+// Explicit zero avoids older CLI versions' finite default print timeout.
+const PRINT_TIMEOUT: &str = "0s";
 const NATIVE_SEARCH_TOOL: &str = "search_web";
 const NATIVE_URL_TOOL: &str = "read_url_content";
 const LEGACY_NATIVE_URL_TOOL: &str = "read_url";
@@ -1610,7 +1610,6 @@ fn validate_result_status(status: &str) -> Result<(), String> {
 
 async fn read_value(
     reader: &mut BufReader<tokio::process::ChildStdout>,
-    budget: &mut ProtocolOutputBudget,
     cancellation: &tokio_util::sync::CancellationToken,
 ) -> Result<Value, String> {
     let line = tokio::select! {
@@ -1618,11 +1617,10 @@ async fn read_value(
         line = read_capped_line(reader) => line?,
     }
     .ok_or_else(|| "Antigravity protocol closed unexpectedly".to_string())?;
-    parse_stream_line(&line, budget)
+    parse_stream_line(&line)
 }
 
-fn parse_stream_line(line: &str, budget: &mut ProtocolOutputBudget) -> Result<Value, String> {
-    budget.record(line)?;
+fn parse_stream_line(line: &str) -> Result<Value, String> {
     let value: Value = serde_json::from_str(line)
         .map_err(|_| "Antigravity emitted malformed stream JSON".to_string())?;
     if !value.is_object() {
@@ -1712,19 +1710,21 @@ async fn run_protocol(
     stdin: &mut tokio::process::ChildStdin,
     reader: &mut BufReader<tokio::process::ChildStdout>,
 ) -> Result<ProtocolOutcome, AdapterError> {
-    let mut budget = ProtocolOutputBudget::default();
-    let init = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
-        loop {
-            let value = read_value(reader, &mut budget, &context.cancellation).await?;
-            if let Some(init) = pre_init_event(
-                value,
-                uses_gemini_api_key,
-                context.request.session_id.is_some(),
-            )? {
-                return Ok::<Value, AdapterError>(init);
+    let init = crate::timeouts::wait_with_timeout_retries(
+        async {
+            loop {
+                let value = read_value(reader, &context.cancellation).await?;
+                if let Some(init) = pre_init_event(
+                    value,
+                    uses_gemini_api_key,
+                    context.request.session_id.is_some(),
+                )? {
+                    return Ok::<Value, AdapterError>(init);
+                }
             }
-        }
-    })
+        },
+        HANDSHAKE_TIMEOUT,
+    )
     .await
     .map_err(|_| "Antigravity init timed out before user content was sent".to_string())??;
     let attestation = attest_init(&init, files, &context.request)?;
@@ -1759,7 +1759,7 @@ async fn run_protocol(
 
     let mut saw_text = false;
     loop {
-        let value = match read_value(reader, &mut budget, &context.cancellation).await {
+        let value = match read_value(reader, &context.cancellation).await {
             Ok(value) => value,
             Err(_) if context.cancellation.is_cancelled() => {
                 return Ok(ProtocolOutcome {
@@ -2330,38 +2330,40 @@ async fn run_image_protocol(
     uses_gemini_api_key: bool,
     reader: &mut BufReader<tokio::process::ChildStdout>,
 ) -> Result<GeneratedImageBytes, AdapterError> {
-    let mut budget = ProtocolOutputBudget::default();
-    let conversation_id = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
-        loop {
-            let value = read_value(reader, &mut budget, &request.cancellation).await?;
-            if let Some(event) = value.get("event").and_then(Value::as_str) {
-                if event == "init" {
-                    return attest_image_init(&value, expected_cwd, request);
+    let conversation_id = crate::timeouts::wait_with_timeout_retries(
+        async {
+            loop {
+                let value = read_value(reader, &request.cancellation).await?;
+                if let Some(event) = value.get("event").and_then(Value::as_str) {
+                    if event == "init" {
+                        return attest_image_init(&value, expected_cwd, request);
+                    }
+                    if is_allowlisted_stream_metadata_event(event)
+                        && !contains_capability_semantics(&value)
+                    {
+                        continue;
+                    }
                 }
-                if is_allowlisted_stream_metadata_event(event)
-                    && !contains_capability_semantics(&value)
-                {
-                    continue;
+                if value.get("event").and_then(Value::as_str) == Some("result") {
+                    let result = value
+                        .get("result")
+                        .filter(|result| result.is_object())
+                        .ok_or_else(|| {
+                            "Antigravity image result before init was malformed".to_string()
+                        })?;
+                    return Err(image_result_error(result, uses_gemini_api_key));
                 }
+                return Err("Antigravity image task emitted capability data before init".into());
             }
-            if value.get("event").and_then(Value::as_str) == Some("result") {
-                let result = value
-                    .get("result")
-                    .filter(|result| result.is_object())
-                    .ok_or_else(|| {
-                        "Antigravity image result before init was malformed".to_string()
-                    })?;
-                return Err(image_result_error(result, uses_gemini_api_key));
-            }
-            return Err("Antigravity image task emitted capability data before init".into());
-        }
-    })
+        },
+        HANDSHAKE_TIMEOUT,
+    )
     .await
     .map_err(|_| "Antigravity image init timed out".to_string())??;
 
     let mut generated = None;
     loop {
-        let value = read_value(reader, &mut budget, &request.cancellation).await?;
+        let value = read_value(reader, &request.cancellation).await?;
         match value.get("event").and_then(Value::as_str) {
             Some("step_update") => {
                 let step = value
@@ -3037,7 +3039,7 @@ mod tests {
             .any(|pair| pair == ["--agent", "open-builder"]));
         assert!(args
             .windows(2)
-            .any(|pair| pair == ["--print-timeout", "30m"]));
+            .any(|pair| pair == ["--print-timeout", "0s"]));
         assert!(args
             .windows(2)
             .any(|pair| pair == ["--model", "gemini-3.5-flash-medium"]));
@@ -3129,6 +3131,9 @@ mod tests {
         ));
         let request = image_request(&root);
         let args = image_process_args(&request).unwrap();
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--print-timeout", "0s"]));
         assert!(args
             .windows(2)
             .any(|pair| pair == ["--output-format", "stream-json"]));
@@ -3932,14 +3937,10 @@ mod tests {
     }
 
     #[test]
-    fn rejects_malformed_and_over_budget_stream_records() {
-        let mut budget = ProtocolOutputBudget::default();
-        assert!(parse_stream_line("not-json", &mut budget).is_err());
-
-        let mut budget = ProtocolOutputBudget::exhausted_for_test();
-        assert!(parse_stream_line("{}", &mut budget)
-            .expect_err("cumulative protocol output must be capped")
-            .contains("byte limit"));
+    fn rejects_malformed_stream_records() {
+        assert!(parse_stream_line("not-json").is_err());
+        assert!(parse_stream_line("[]").is_err());
+        assert!(parse_stream_line("{}").is_ok());
     }
 
     #[test]

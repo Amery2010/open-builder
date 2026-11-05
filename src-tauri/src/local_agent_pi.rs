@@ -19,7 +19,7 @@ use crate::local_agent_models::CatalogAuthority;
 use crate::local_agent_protocol::{
     apply_minimal_environment, command_output_capped, finish_process, provider_error,
     spawn_stderr_drain, spawn_wrapped, turn_prompt, write_json, FrozenProcessSpec,
-    LocalCliRunState, PreparedPrivateFile, ProtocolContext, ProtocolOutcome, ProtocolOutputBudget,
+    LocalCliRunState, PreparedPrivateFile, ProbeOutputBudget, ProtocolContext, ProtocolOutcome,
     RunSupervisor,
 };
 use crate::local_agent_runtime::{AdapterError, LocalCliFailureCode};
@@ -281,7 +281,7 @@ struct PiIo {
     reader: Box<dyn AsyncBufRead + Send + Unpin>,
     next_id: u64,
     cancellation: CancellationToken,
-    output_budget: ProtocolOutputBudget,
+    probe_output_budget: Option<ProbeOutputBudget>,
     pending: VecDeque<Value>,
     completed_ids: HashSet<String>,
 }
@@ -300,7 +300,9 @@ impl PiIo {
                 read_pi_line(&mut self.reader).await?
             }
             .ok_or_else(|| "Pi RPC closed unexpectedly".to_string())?;
-            self.output_budget.record(&line)?;
+            if let Some(budget) = &mut self.probe_output_budget {
+                budget.record(&line)?;
+            }
             let value: Value = serde_json::from_str(&line)
                 .map_err(|_| "Pi RPC emitted malformed JSON".to_string())?;
             if !value.is_object() {
@@ -743,38 +745,43 @@ async fn probe_provider_auth_source(
     model: &PiModelRef,
     nonce: &str,
 ) -> Result<PiProviderAuthStatus, String> {
-    tokio::time::timeout(PI_COMMAND_TIMEOUT, async {
-        io.request(
-            "set_model",
-            json!({"provider":model.provider,"modelId":model.id}),
-        )
-        .await?;
-        io.request(
-            "prompt",
-            json!({"message":format!("/{PI_AUTH_PROBE_COMMAND} {nonce}")}),
-        )
-        .await?;
-        loop {
-            let event = io.next_value().await?;
-            if let Some(status) = parse_provider_auth_probe_event(&event, nonce, &model.provider)? {
-                return Ok(status);
-            }
-            match event.get("type").and_then(Value::as_str).unwrap_or("") {
-                event_type if is_pre_attestation_selection_event(event_type) => {}
-                "response" => {
-                    return Err(
-                        "Pi emitted an unmatched response during its authentication probe"
-                            .to_string(),
-                    )
+    crate::timeouts::wait_with_timeout_retries(
+        async {
+            io.request(
+                "set_model",
+                json!({"provider":model.provider,"modelId":model.id}),
+            )
+            .await?;
+            io.request(
+                "prompt",
+                json!({"message":format!("/{PI_AUTH_PROBE_COMMAND} {nonce}")}),
+            )
+            .await?;
+            loop {
+                let event = io.next_value().await?;
+                if let Some(status) =
+                    parse_provider_auth_probe_event(&event, nonce, &model.provider)?
+                {
+                    return Ok(status);
                 }
-                _ => {
-                    return Err(
-                        "Pi emitted model activity during its authentication probe".to_string()
-                    )
+                match event.get("type").and_then(Value::as_str).unwrap_or("") {
+                    event_type if is_pre_attestation_selection_event(event_type) => {}
+                    "response" => {
+                        return Err(
+                            "Pi emitted an unmatched response during its authentication probe"
+                                .to_string(),
+                        )
+                    }
+                    _ => {
+                        return Err(
+                            "Pi emitted model activity during its authentication probe".to_string()
+                        )
+                    }
                 }
             }
-        }
-    })
+        },
+        PI_COMMAND_TIMEOUT,
+    )
     .await
     .map_err(|_| "Pi authentication-source probe timed out".to_string())?
 }
@@ -811,7 +818,7 @@ async fn probe_runtime(executable: &Path) -> Result<PiProbeResult, String> {
         reader: Box::new(BufReader::new(process.stdout)),
         next_id: 1,
         cancellation: CancellationToken::new(),
-        output_budget: ProtocolOutputBudget::default(),
+        probe_output_budget: Some(ProbeOutputBudget::default()),
         pending: VecDeque::new(),
         completed_ids: HashSet::new(),
     };
@@ -1612,21 +1619,26 @@ async fn wait_for_attestation(
     expected_model: &PiModelRef,
     expected_thinking: &str,
 ) -> Result<(), String> {
-    tokio::time::timeout(PI_HANDSHAKE_TIMEOUT, async {
-        loop {
-            let event = io.next_value().await?;
-            if validate_attestation_event(&event, files, expected_model, expected_thinking)? {
-                return Ok(());
-            }
-            match event.get("type").and_then(Value::as_str).unwrap_or("") {
-                event_type if is_pre_attestation_selection_event(event_type) => {}
-                "response" => {
-                    return Err("Pi emitted an unmatched response before attestation".to_string())
+    crate::timeouts::wait_with_timeout_retries(
+        async {
+            loop {
+                let event = io.next_value().await?;
+                if validate_attestation_event(&event, files, expected_model, expected_thinking)? {
+                    return Ok(());
                 }
-                _ => return Err("Pi emitted activity before isolation attestation".to_string()),
+                match event.get("type").and_then(Value::as_str).unwrap_or("") {
+                    event_type if is_pre_attestation_selection_event(event_type) => {}
+                    "response" => {
+                        return Err(
+                            "Pi emitted an unmatched response before attestation".to_string()
+                        )
+                    }
+                    _ => return Err("Pi emitted activity before isolation attestation".to_string()),
+                }
             }
-        }
-    })
+        },
+        PI_HANDSHAKE_TIMEOUT,
+    )
     .await
     .map_err(|_| "Pi isolation attestation timed out".to_string())?
 }
@@ -2389,7 +2401,7 @@ pub(crate) async fn launch_prepared(
         reader: Box::new(BufReader::new(process.stdout)),
         next_id: 1,
         cancellation: context.cancellation.clone(),
-        output_budget: ProtocolOutputBudget::default(),
+        probe_output_budget: None,
         pending: VecDeque::new(),
         completed_ids: HashSet::new(),
     };
@@ -2535,17 +2547,13 @@ mod tests {
         }
     }
 
-    fn test_io(
-        stdin: DuplexStream,
-        stdout: DuplexStream,
-        output_budget: ProtocolOutputBudget,
-    ) -> PiIo {
+    fn test_io(stdin: DuplexStream, stdout: DuplexStream) -> PiIo {
         PiIo {
             stdin: Box::new(stdin),
             reader: Box::new(BufReader::new(stdout)),
             next_id: 1,
             cancellation: CancellationToken::new(),
-            output_budget,
+            probe_output_budget: None,
             pending: VecDeque::new(),
             completed_ids: HashSet::new(),
         }
@@ -2901,7 +2909,7 @@ mod tests {
             stdout_peer.write_all(transcript.as_bytes()).await.unwrap();
             stdout_peer.shutdown().await.unwrap();
         });
-        let mut io = test_io(pi_stdin, pi_stdout, ProtocolOutputBudget::default());
+        let mut io = test_io(pi_stdin, pi_stdout);
         let data = io.request("get_available_models", json!({})).await.unwrap();
         let models = parse_available_models(&data).unwrap();
         assert_eq!(models.len(), 1);
@@ -2912,11 +2920,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rpc_io_rejects_malformed_eof_and_exhausted_output() {
+    async fn rpc_reads_beyond_previous_total_output_and_event_limits() {
+        let (stdin, _stdin_peer) = tokio::io::duplex(64);
+        let (mut writer, stdout) = tokio::io::duplex(64 * 1024);
+        let count = 250_001;
+        let line = format!("{{\"padding\":\"{}\"}}\n", "x".repeat(140));
+        assert!(line.len() * count > 32 * 1024 * 1024);
+        let producer = tokio::spawn(async move {
+            for _ in 0..count {
+                writer.write_all(line.as_bytes()).await.unwrap();
+            }
+        });
+        let mut io = test_io(stdin, stdout);
+        for _ in 0..count {
+            assert_eq!(
+                io.next_value().await.unwrap()["padding"]
+                    .as_str()
+                    .unwrap()
+                    .len(),
+                140
+            );
+        }
+        producer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rpc_io_rejects_malformed_json_and_eof() {
         let (stdin, _stdin_peer) = tokio::io::duplex(64);
         let (mut output, stdout) = tokio::io::duplex(64);
         output.write_all(b"not-json\n").await.unwrap();
-        let mut io = test_io(stdin, stdout, ProtocolOutputBudget::default());
+        let mut io = test_io(stdin, stdout);
         assert!(io
             .next_value()
             .await
@@ -2926,22 +2959,12 @@ mod tests {
         let (stdin, _stdin_peer) = tokio::io::duplex(64);
         let (output, stdout) = tokio::io::duplex(64);
         drop(output);
-        let mut io = test_io(stdin, stdout, ProtocolOutputBudget::default());
+        let mut io = test_io(stdin, stdout);
         assert!(io
             .next_value()
             .await
             .unwrap_err()
             .contains("closed unexpectedly"));
-
-        let (stdin, _stdin_peer) = tokio::io::duplex(64);
-        let (mut output, stdout) = tokio::io::duplex(64);
-        output.write_all(b"{}\n").await.unwrap();
-        let mut io = test_io(stdin, stdout, ProtocolOutputBudget::exhausted_for_test());
-        assert!(io
-            .next_value()
-            .await
-            .unwrap_err()
-            .contains("cumulative byte limit"));
     }
 
     #[tokio::test]
@@ -2965,7 +2988,7 @@ mod tests {
             }
             commands
         });
-        let mut io = test_io(pi_stdin, pi_stdout, ProtocolOutputBudget::default());
+        let mut io = test_io(pi_stdin, pi_stdout);
         io.cancel_gracefully().await;
         assert_eq!(responder.await.unwrap(), ["clear_queue", "abort"]);
     }
@@ -3440,6 +3463,53 @@ mod tests {
         let mut leaked_label = valid_attestation();
         leaked_label["providerAuth"]["label"] = json!("must not be attested");
         assert!(validate_attestation(&leaked_label, &files, &model, "high").is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn handshake_keeps_partial_input_across_timeout_windows() {
+        let (stdin, _stdin_peer) = tokio::io::duplex(64);
+        let (mut writer, stdout) = tokio::io::duplex(4096);
+        let mut io = test_io(stdin, stdout);
+        let event = json!({
+            "type": "extension_ui_request",
+            "method": "notify",
+            "notifyType": "info",
+            "message": valid_attestation().to_string(),
+        });
+        let line = format!("{event}\n");
+        let sender = tokio::spawn(async move {
+            let split = line.len() / 2;
+            writer.write_all(&line.as_bytes()[..split]).await.unwrap();
+            tokio::time::sleep(PI_HANDSHAKE_TIMEOUT + Duration::from_secs(1)).await;
+            writer.write_all(&line.as_bytes()[split..]).await.unwrap();
+        });
+        let files = attestation_files();
+        let model = PiModelRef {
+            provider: "openai".to_string(),
+            id: "gpt-test".to_string(),
+        };
+        wait_for_attestation(&mut io, &files, &model, "high")
+            .await
+            .unwrap();
+        sender.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn handshake_times_out_only_after_three_wait_windows() {
+        let (stdin, _stdin_peer) = tokio::io::duplex(64);
+        let (_writer, stdout) = tokio::io::duplex(64);
+        let mut io = test_io(stdin, stdout);
+        let files = attestation_files();
+        let model = PiModelRef {
+            provider: "openai".to_string(),
+            id: "gpt-test".to_string(),
+        };
+        let started = tokio::time::Instant::now();
+        assert!(wait_for_attestation(&mut io, &files, &model, "high")
+            .await
+            .unwrap_err()
+            .contains("timed out"));
+        assert_eq!(started.elapsed(), PI_HANDSHAKE_TIMEOUT * 3);
     }
 
     #[tokio::test]

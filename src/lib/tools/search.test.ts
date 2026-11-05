@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { webSearchDefaults } from "../../store/settings/web-search";
 import { createSearchToolHandler } from "./search";
+import { TOOL_FETCH_TIMEOUT_MS } from "./network-guard";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -12,9 +13,38 @@ function jsonResponse(body: unknown, status = 200): Response {
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 
 describe("search tool providers", () => {
+  it.each(["firecrawl", "tavily", "exa"] as const)(
+    "does not multiply three timed-out %s attempts with a fallback provider",
+    async (engine) => {
+      vi.useFakeTimers();
+      const fetchMock = vi.fn<typeof fetch>().mockImplementation(
+        (_url, init) =>
+          new Promise((_resolve, reject) => {
+            init?.signal?.addEventListener(
+              "abort",
+              () => reject(init.signal?.reason),
+              { once: true },
+            );
+          }),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+      const handler = createSearchToolHandler({ ...webSearchDefaults, engine });
+      const pending = handler("web_reader", {
+        urls: ["https://example.test/article"],
+      });
+      await vi.advanceTimersByTimeAsync(TOOL_FETCH_TIMEOUT_MS * 3);
+      expect(JSON.parse(await pending)).toMatchObject({ ok: false });
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      expect(
+        fetchMock.mock.calls.some(([url]) => String(url).includes("r.jina.ai")),
+      ).toBe(false);
+    },
+  );
+
   it("uses keyless Firecrawl without an empty Authorization header", async () => {
     const fetchMock = vi.fn(
       async (_input: RequestInfo | URL, _init?: RequestInit) =>

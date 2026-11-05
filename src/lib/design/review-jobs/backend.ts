@@ -147,7 +147,6 @@ export function createIsolatedDesignReviewSession(
     conversationId: options.conversationId,
     allowedMcpAliases: new Set<string>(),
     initialSkillContext: null,
-    maxIterations: 20,
   };
   const backend: GenerationBackend =
     options.provider.runtime === "local"

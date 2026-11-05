@@ -29,6 +29,7 @@ export function createOpenAIGenerator(
   extras?: Pick<
     GeneratorOptions,
     | "tools"
+    | "userInstructions"
     | "askUserQuestion"
     | "requestPlanApproval"
     | "onPlanApproved"

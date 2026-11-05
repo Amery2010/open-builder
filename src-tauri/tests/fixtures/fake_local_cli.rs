@@ -314,9 +314,7 @@ fn emit_contract_failure(mode: &str, stdout: &mut impl Write) -> bool {
         return true;
     }
     if mode.contains("oversized") {
-        stdout
-            .write_all(&vec![b'x'; 4 * 1024 * 1024 + 1])
-            .unwrap();
+        stdout.write_all(&vec![b'x'; 4 * 1024 * 1024 + 1]).unwrap();
         stdout.flush().unwrap();
         return true;
     }
@@ -370,6 +368,14 @@ fn run_codex(mode: &str, args: &[String]) {
             .unwrap();
         stdout.flush().unwrap();
         return;
+    }
+    if mode.contains("resource-discovery") {
+        for (tool, key) in [("list_mcp_resources", "resources"), ("list_mcp_resource_templates", "resourceTemplates")] {
+            let payload = json_escape(&format!("{{\"{key}\":[]}}"));
+            writeln!(stdout, "{{\"type\":\"item.started\",\"item\":{{\"id\":\"{tool}\",\"type\":\"mcp_tool_call\",\"server\":\"codex\",\"tool\":\"{tool}\",\"arguments\":{{}},\"result\":null,\"error\":null,\"status\":\"in_progress\"}}}}").unwrap();
+            writeln!(stdout, "{{\"type\":\"item.completed\",\"item\":{{\"id\":\"{tool}\",\"type\":\"mcp_tool_call\",\"server\":\"codex\",\"tool\":\"{tool}\",\"arguments\":{{}},\"result\":{{\"content\":[{{\"type\":\"text\",\"text\":\"{payload}\"}}],\"structured_content\":null}},\"error\":null,\"status\":\"completed\"}}}}").unwrap();
+        }
+        stdout.flush().unwrap();
     }
     if args.iter().any(|arg| arg.contains(HOST_TOOL)) {
         let mcp_config = args
@@ -849,10 +855,71 @@ fn run_legacy() {
     }
 }
 
+fn run_codex_probe(args: &[String]) {
+    let root = env::current_exe().unwrap().parent().unwrap().to_path_buf();
+    let kind = if args == ["--version"] {
+        "version"
+    } else if args == ["exec", "--help"] {
+        "exec-help"
+    } else if args == ["exec", "resume", "--help"] {
+        "resume-help"
+    } else if args
+        .windows(3)
+        .any(|args| args == ["mcp", "get", "open_builder"])
+    {
+        "mcp"
+    } else if args == ["login", "status"] {
+        "login"
+    } else if args == ["debug", "models", "--bundled"] {
+        "models"
+    } else {
+        panic!("unexpected Codex probe arguments: {args:?}");
+    };
+    writeln!(
+        fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(root.join("probe-commands"))
+            .unwrap(),
+        "{kind}"
+    )
+    .unwrap();
+    if fs::read_to_string(root.join("probe-fail")).ok().as_deref() == Some(kind) {
+        std::process::exit(1);
+    }
+    match kind {
+        "version" => println!(
+            "{}",
+            fs::read_to_string(root.join("probe-version"))
+                .unwrap_or_else(|_| "codex 0.151.0-test".to_string())
+        ),
+        "exec-help" => println!("--json --ignore-user-config --ignore-rules --sandbox --cd"),
+        "resume-help" => println!("--json --ignore-user-config --ignore-rules"),
+        "mcp" => println!(
+            "default_tools_approval_mode: approve\nenabled_tools: open_builder_capability_probe"
+        ),
+        "login" if root.join("probe-logged-out").exists() => {
+            println!("Not logged in");
+            std::process::exit(1);
+        }
+        "login" => println!("Logged in using ChatGPT"),
+        "models" => println!(
+            "{}",
+            fs::read_to_string(root.join("probe-models")).unwrap_or_else(|_| {
+                r#"{"models":[{"slug":"gpt-test","supported_reasoning_levels":["high"]}]}"#
+                    .to_string()
+            })
+        ),
+        _ => unreachable!(),
+    }
+}
+
 fn main() {
     let mode = executable_mode();
     let args = env::args().skip(1).collect::<Vec<_>>();
-    if mode.contains("codex-contract") {
+    if mode.contains("codex-contract-probe") {
+        run_codex_probe(&args);
+    } else if mode.contains("codex-contract") {
         run_codex(&mode, &args);
     } else if mode.contains("claude-contract") {
         run_claude(&mode, &args);

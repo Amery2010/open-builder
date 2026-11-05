@@ -28,6 +28,7 @@ export const DESIGN_BRIDGE_CAPTURE_MESSAGE_MAX_BYTES =
 export const DESIGN_BRIDGE_CAPTURE_MAX_HEIGHT = 4_096;
 export const DESIGN_BRIDGE_CAPTURE_MAX_PIXELS = 6_000_000;
 export const DESIGN_BRIDGE_CAPTURE_TIMEOUT_MS = 20_000;
+export const DESIGN_BRIDGE_TIMEOUT_ATTEMPTS = 3;
 export const DESIGN_BRIDGE_VIRTUAL_PATH = "__open_builder_design_bridge__.js";
 export const DESIGN_CAPTURE_RUNTIME_VIRTUAL_PATH =
   "__open_builder_html_to_image__.js";
@@ -482,15 +483,23 @@ function previewBridgeClientSource(
     if (captureLibraryPromise) return captureLibraryPromise;
     captureLibraryPromise = new Promise(function (resolve, reject) {
       var script = document.createElement("script");
+      function clearHandlers() {
+        clearTimeout(timer);
+        script.onload = null;
+        script.onerror = null;
+      }
+      // Keep the same download alive across all three waiting windows. The
+      // host may stop waiting without unloading this preview iframe.
       var timer = setTimeout(function () {
+        clearHandlers();
         script.remove();
         reject(new Error("Screenshot runtime timed out."));
-      }, 8000);
+      }, 8000 * ${DESIGN_BRIDGE_TIMEOUT_ATTEMPTS});
       script.src = "/" + CAPTURE_PATH + "?request=" + encodeURIComponent(requestId);
       script.async = true;
       script.setAttribute("data-ob-design-capture-runtime", "");
       script.onload = function () {
-        clearTimeout(timer);
+        clearHandlers();
         if (window.htmlToImage && typeof window.htmlToImage.toCanvas === "function") {
           resolve(window.htmlToImage);
         } else {
@@ -499,7 +508,7 @@ function previewBridgeClientSource(
         }
       };
       script.onerror = function () {
-        clearTimeout(timer);
+        clearHandlers();
         script.remove();
         reject(new Error("Screenshot runtime could not be loaded."));
       };

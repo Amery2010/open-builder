@@ -55,6 +55,7 @@ interface ChatInputToolbarProps {
   setWorkspaceMode: (mode: WorkspaceMode) => void;
   isGenerating: boolean;
   isProcessingImages?: boolean;
+  isSubmitting?: boolean;
   hasContent: boolean;
   isHoveringStop: boolean;
   onHoveringStopChange: (v: boolean) => void;
@@ -122,12 +123,14 @@ export function ChatInputToolbar({
   setWorkspaceMode,
   isGenerating,
   isProcessingImages = false,
+  isSubmitting = false,
   hasContent,
   isHoveringStop,
   onHoveringStopChange,
   onStop,
 }: ChatInputToolbarProps) {
   const t = useT();
+  const canSend = hasContent && !isProcessingImages && !isSubmitting;
 
   return (
     <div className="flex items-center justify-between gap-1 px-1.5 py-1 border-t border-border/40">
@@ -294,7 +297,7 @@ export function ChatInputToolbar({
           </DropdownMenuContent>
         </DropdownMenu>
 
-        {isGenerating ? (
+        {isGenerating && !canSend ? (
           <TooltipIconButton
             label={t.chat.stopGeneration}
             type="button"
@@ -321,7 +324,7 @@ export function ChatInputToolbar({
             label={t.chat.send}
             type="submit"
             size="icon"
-            disabled={!hasContent || isProcessingImages}
+            disabled={!canSend}
             className="size-7"
           >
             <SendHorizonal size={16} />

@@ -111,6 +111,7 @@ describe("isolated Design Review backend", () => {
     await expect(session.run()).resolves.toEqual(firstReport);
 
     const extras = mocks.api.mock.calls[0][5];
+    expect(extras.maxIterations).toBeUndefined();
     expect(Object.keys(extras.tools).sort()).toEqual([
       "list_files",
       "read_files",
@@ -154,6 +155,7 @@ describe("isolated Design Review backend", () => {
     });
     expect(mocks.local.mock.calls[0][0]).not.toHaveProperty("getConversation");
     expect(mocks.local.mock.calls[0][0]).not.toHaveProperty("saveSession");
+    expect(mocks.local.mock.calls[0][5].maxIterations).toBeUndefined();
   });
 
   it("accepts a schema-valid tagged JSON report when a compatible model skips the submit tool", async () => {

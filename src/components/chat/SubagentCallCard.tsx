@@ -20,6 +20,7 @@ import type {
 } from "../../lib/ai/subagents/types";
 import type { ToolBlock } from "../../types";
 import { agnesToolNameFromAlias } from "../../lib/mcp/agnes/aliases";
+import { CANCELLED_TOOL_OUTPUT_KIND } from "../../lib/ai/run-guard";
 
 type SubagentCardData = {
   subagent: string;
@@ -120,6 +121,13 @@ export const SubagentCallCard = memo(function SubagentCallCard({
 
   const live = useSubagentStore((s) => s.progress[toolCallId]);
   const persisted = useMemo(() => parsePersisted(result), [result]);
+  const structured = toolOutput?.structuredContent;
+  const cancelled = Boolean(
+    structured &&
+    typeof structured === "object" &&
+    "kind" in structured &&
+    structured.kind === CANCELLED_TOOL_OUTPUT_KIND,
+  );
   const persistedError = useMemo(() => {
     const resultText = result.trim();
     if (toolOutput?.isError) {
@@ -166,10 +174,11 @@ export const SubagentCallCard = memo(function SubagentCallCard({
         events: [],
       };
     }
+    if (cancelled) return { ...base, status: "aborted", error: undefined };
     return persistedError
       ? { ...base, status: "failed", error: persistedError }
       : base;
-  }, [live, persisted, persistedError, rawArgs, result]);
+  }, [cancelled, live, persisted, persistedError, rawArgs, result]);
 
   const displayName =
     t.subagent.names[data.subagent as keyof typeof t.subagent.names] ??
