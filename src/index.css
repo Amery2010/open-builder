@@ -48,6 +48,16 @@
 }
 
 :root {
+  --scrollbar-thumb: color-mix(
+    in oklch,
+    var(--muted-foreground) 40%,
+    transparent
+  );
+  --scrollbar-thumb-hover: color-mix(
+    in oklch,
+    var(--muted-foreground) 65%,
+    transparent
+  );
   --radius: 0.625rem;
   --background: oklch(1 0 0);
   --foreground: oklch(0.145 0 0);
@@ -121,38 +131,36 @@
 @layer base {
   * {
     @apply border-border outline-ring/50;
-    /* iOS-style scrollbar: thin, overlay, auto-hide */
     scrollbar-width: thin;
-    scrollbar-color: oklch(0 0 0 / 20%) transparent;
+    scrollbar-color: var(--scrollbar-thumb) transparent;
   }
 
-  /* Webkit scrollbar — thin overlay style matching iOS Safari */
-  *::-webkit-scrollbar {
-    width: 4px;
-    height: 4px;
-  }
-  *::-webkit-scrollbar-track {
-    background: transparent;
-  }
-  *::-webkit-scrollbar-thumb {
-    background: oklch(0 0 0 / 20%);
-    border-radius: 100px;
-  }
-  *::-webkit-scrollbar-thumb:hover {
-    background: oklch(0 0 0 / 35%);
-  }
-  *::-webkit-scrollbar-corner {
-    background: transparent;
-  }
-
-  .dark *::-webkit-scrollbar-thumb {
-    background: oklch(1 0 0 / 20%);
-  }
-  .dark *::-webkit-scrollbar-thumb:hover {
-    background: oklch(1 0 0 / 35%);
-  }
-  .dark * {
-    scrollbar-color: oklch(1 0 0 / 20%) transparent;
+  /* Keep standard properties from overriding the detailed WebKit treatment. */
+  @supports selector(::-webkit-scrollbar) {
+    * {
+      scrollbar-width: auto;
+      scrollbar-color: auto;
+    }
+    *::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+    *::-webkit-scrollbar-track,
+    *::-webkit-scrollbar-corner {
+      background: transparent;
+    }
+    *::-webkit-scrollbar-thumb {
+      background: var(--scrollbar-thumb);
+      border: 2px solid transparent;
+      background-clip: padding-box;
+      border-radius: 9999px;
+    }
+    *::-webkit-scrollbar-thumb:hover {
+      background-color: var(--scrollbar-thumb-hover);
+    }
+    *::-webkit-scrollbar-button {
+      display: none;
+    }
   }
 
   body {
@@ -185,6 +193,40 @@ body {
     padding-left: env(safe-area-inset-left);
     padding-right: constant(safe-area-inset-right);
     padding-right: env(safe-area-inset-right);
+  }
+}
+
+.chat-collapsible-content {
+  overflow: hidden;
+}
+
+.chat-collapsible-content[data-state="open"] {
+  animation: chat-expand 300ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.chat-collapsible-content[data-state="closed"] {
+  animation: chat-collapse 300ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@keyframes chat-expand {
+  from {
+    height: 0;
+    opacity: 0;
+  }
+  to {
+    height: var(--radix-collapsible-content-height);
+    opacity: 1;
+  }
+}
+
+@keyframes chat-collapse {
+  from {
+    height: var(--radix-collapsible-content-height);
+    opacity: 1;
+  }
+  to {
+    height: 0;
+    opacity: 0;
   }
 }
 
@@ -257,6 +299,21 @@ body {
 .preview-content-scaled .sp-preview-iframe {
   transform: scale(var(--ob-preview-scale));
   transform-origin: var(--ob-preview-transform-origin);
+}
+
+.editor .sp-console {
+  color: var(--sp-syntax-color-plain, var(--foreground));
+  background-color: var(--sp-colors-surface1, var(--background));
+  color-scheme: light;
+}
+
+.dark .editor .sp-console {
+  color-scheme: dark;
+}
+
+.editor .sp-console :is(pre, code, .cm-editor, .cm-content) {
+  color: inherit;
+  -webkit-text-fill-color: currentColor;
 }
 
 .editor .sp-console-list code {

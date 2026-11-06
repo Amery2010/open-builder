@@ -1,3 +1,4 @@
+import { conversationBranchStates } from "../lib/conversation/branches";
 import {
   lazy,
   Suspense,
@@ -11,6 +12,14 @@ import { ChatHeader } from "./chat/ChatHeader";
 import { ChatInput } from "./chat/ChatInput";
 import { EmptyState } from "./chat/EmptyState";
 import { MessageBubble } from "./chat/MessageBubble";
+import {
+  BranchHistoryDialog,
+  branchesAtMessage,
+} from "./chat/BranchHistoryDialog";
+import {
+  ProjectArchiveAction,
+  ProjectArchiveCard,
+} from "./chat/ProjectArchiveCard";
 import { AskUserQuestionCard } from "./chat/AskUserQuestionCard";
 import { GeneratingIndicator } from "./chat/GeneratingIndicator";
 import { SettingsWarning } from "./chat/SettingsWarning";
@@ -26,15 +35,12 @@ import {
 } from "./chat/RollbackConfirmBanner";
 import { useMergedMessages } from "../hooks/useMergedMessages";
 import { useRollback } from "../hooks/useRollback";
-import {
-  findAssistantGroupEnd,
-  getMergedMessageStartIndex,
-} from "../lib/utils/message-navigation";
+import { getMergedMessageStartIndex } from "../lib/utils/message-navigation";
 import { findWithdrawableUserMessageIndex } from "../lib/utils/merge-messages";
 import { useConversationStore } from "../store/conversation";
 import { useInteractiveStore } from "../store/interactive";
 import { useProjectPermissionStore } from "../store/project-permission";
-import { useSnapshotStore } from "../store/snapshot";
+import { useSnapshotStore, selectVisibleSnapshots } from "../store/snapshot";
 import { discardPendingSandpackFileChanges } from "./code-viewer/sandpack-file-changes";
 import {
   deleteAttachment,
@@ -93,6 +99,7 @@ interface ChatInterfaceProps {
   messages: Message[];
   isGenerating: boolean;
   isThinkingStreaming?: boolean;
+  runtimeWaitMessage?: string | null;
   hasConfiguredModelRuntime: boolean;
   localCliStatusNotice?: LocalCliStatusNoticeValue | null;
   onGenerate: (
@@ -180,6 +187,7 @@ export function ChatInterface({
   messages,
   isGenerating,
   isThinkingStreaming = false,
+  runtimeWaitMessage,
   hasConfiguredModelRuntime,
   localCliStatusNotice = null,
   onGenerate,
@@ -221,6 +229,11 @@ export function ChatInterface({
   const virtualListRef = useRef<HTMLDivElement>(null);
   const shouldAutoScrollRef = useRef(true);
   const activeId = useConversationStore((s) => s.activeId);
+  const activeConversation = useConversationStore((state) =>
+    state.activeId ? state.conversations[state.activeId] : undefined,
+  );
+  const [branchMessageId, setBranchMessageId] = useState<string | null>(null);
+  const [branchError, setBranchError] = useState<string | null>(null);
   const pendingInstructions = useConversationStore((state) =>
     state.activeId
       ? state.conversations[state.activeId]?.pendingUserInstructions
@@ -280,14 +293,18 @@ export function ChatInterface({
     setInstructionSubmitError(null);
     instructionSubmissionRef.current = null;
     setIsSubmittingInstruction(false);
-  }, [activeId]);
+  }, [activeId, activeConversation?.checkoutEpoch]);
   const compressFromIndex = useConversationStore((s) =>
     s.activeId
       ? (s.conversations[s.activeId]?.compressedContext?.fromIndex ?? -1)
       : -1,
   );
-  const snapshots = useSnapshotStore((s) =>
+  const snapshotChain = useSnapshotStore((s) =>
     activeId ? (s.snapshots[activeId] ?? EMPTY_SNAPSHOTS) : EMPTY_SNAPSHOTS,
+  );
+  const snapshots = useMemo(
+    () => selectVisibleSnapshots(activeConversation, snapshotChain),
+    [activeConversation, snapshotChain],
   );
   const snapshotMessageIds = useMemo(
     () => new Set(snapshots.map((s) => s.messageId)),
@@ -324,6 +341,7 @@ export function ChatInterface({
     rollbackConfirmId,
     setRollbackConfirmId,
     rollbackInfo,
+    rollbackError,
     setRollbackInfo,
     handleRollback,
     flushSnapshotUpdate,
@@ -332,6 +350,9 @@ export function ChatInterface({
     messages,
     snapshotsLength: snapshots.length,
     onSetFiles,
+    onBeforeCheckout: () => {
+      if (isGenerating) onStop();
+    },
   });
 
   const handleSlashCommand = useCallback(
@@ -348,9 +369,20 @@ export function ChatInterface({
         case "clear":
           try {
             const state = useConversationStore.getState();
-            const retainedMessages = Object.values(state.conversations)
-              .filter((conversation) => conversation.id !== state.activeId)
-              .flatMap((conversation) => conversation.messages);
+            const retainedMessages = Object.values(state.conversations).flatMap(
+              (conversation) =>
+                conversation.id === state.activeId
+                  ? Object.values(conversation.branches ?? {})
+                      .filter(
+                        (branch) =>
+                          conversation.checkout ||
+                          branch.id !== conversation.activeBranchId,
+                      )
+                      .flatMap((branch) => branch.state.messages)
+                  : conversationBranchStates(conversation).flatMap(
+                      (branch) => branch.messages,
+                    ),
+            );
             await Promise.all([
               deleteAttachmentsForMessages(messages, retainedMessages),
               ...attachments.map((attachment) =>
@@ -417,7 +449,11 @@ export function ChatInterface({
       const state = useConversationStore.getState();
       const retainedMessages = Object.values(state.conversations)
         .filter((conversation) => conversation.id !== state.activeId)
-        .flatMap((conversation) => conversation.messages);
+        .flatMap((conversation) =>
+          conversationBranchStates(conversation).flatMap(
+            (branch) => branch.messages,
+          ),
+        );
       await Promise.all([
         deleteAttachmentsForMessages(messages, retainedMessages),
         ...attachments.map((attachment) => deleteAttachment(attachment.id)),
@@ -622,11 +658,9 @@ export function ChatInterface({
 
     flushSnapshotUpdate();
 
-    if (rollbackInfo) {
-      const endIdx = findAssistantGroupEnd(messages, rollbackInfo.messageId);
-      useConversationStore.getState().setMessages(messages.slice(0, endIdx));
-      setRollbackInfo(null);
-    }
+    if (activeId)
+      useConversationStore.getState().ensureWritableBranch(activeId);
+    setRollbackInfo(null);
 
     const activeConversation = activeId
       ? useConversationStore.getState().conversations[activeId]
@@ -681,10 +715,10 @@ export function ChatInterface({
     msg: (typeof mergedMessages)[number],
     index: number,
   ) => {
-    const messageIndex = getMergedMessageStartIndex(msg.id);
+    const messageIndex = getMergedMessageStartIndex(msg.id, messages);
     const previousIndex =
       index > 0
-        ? getMergedMessageStartIndex(mergedMessages[index - 1].id)
+        ? getMergedMessageStartIndex(mergedMessages[index - 1].id, messages)
         : null;
     const showDivider =
       compressFromIndex >= 0 &&
@@ -720,6 +754,9 @@ export function ChatInterface({
         onWithdraw = handleWithdrawLastMessage;
       }
     }
+    const messageSnapshots = activeId
+      ? snapshots.filter((snapshot) => snapshot.messageId === msg.id)
+      : [];
     return (
       <div>
         <MessageBubble
@@ -728,12 +765,30 @@ export function ChatInterface({
           isThinkingStreaming={isLast && isThinkingStreaming}
           isLastAssistant={isLast}
           snapshotExists={snapshotMessageIds.has(msg.id)}
+          branchCount={
+            activeConversation
+              ? branchesAtMessage(activeConversation, msg.id).length
+              : 0
+          }
+          onOpenBranches={(id) => {
+            setBranchMessageId(id);
+            setBranchError(null);
+          }}
           onShowDiff={handleShowDiff}
           onRollback={handleRollbackConfirm}
           onRetry={onRetry}
           onOpenSettings={onOpenSettings}
           onCompressContext={onCompressContext}
           onHealthCheck={onHealthCheck}
+          sourceAction={
+            messageSnapshots.length > 0 ? (
+              <ProjectArchiveAction
+                conversationId={activeId!}
+                snapshotIds={messageSnapshots.map((snapshot) => snapshot.id)}
+                labels={t.projectArchives}
+              />
+            ) : undefined
+          }
           canWithdraw={canWithdraw}
           onWithdraw={onWithdraw}
           withdrawLabel={withdrawLabel}
@@ -843,6 +898,7 @@ export function ChatInterface({
                 }
               >
                 <MobilePreview
+                  key={`${activeConversation?.activeBranchId}:${activeConversation?.checkoutEpoch}`}
                   files={files}
                   template={template}
                   sandpackKey={sandpackKey}
@@ -851,8 +907,34 @@ export function ChatInterface({
               </Suspense>
             )}
 
+          {activeId &&
+            snapshots
+              .filter(
+                (snapshot) =>
+                  !mergedMessages.some(
+                    (message) => message.id === snapshot.messageId,
+                  ),
+              )
+              .map((snapshot) => (
+                <ProjectArchiveCard
+                  key={snapshot.id}
+                  conversationId={activeId}
+                  snapshotId={snapshot.id}
+                  labels={t.projectArchives}
+                />
+              ))}
+          {isGenerating && runtimeWaitMessage && (
+            <p role="status" className="text-xs text-muted-foreground">
+              {runtimeWaitMessage}
+            </p>
+          )}
           {isGenerating && !hasPendingInteraction && <GeneratingIndicator />}
 
+          {rollbackError && (
+            <p role="alert" className="text-sm text-destructive">
+              {rollbackError}
+            </p>
+          )}
           {rollbackInfo && !isGenerating && (
             <RollbackHint
               label={rollbackInfo.label}
@@ -919,6 +1001,32 @@ export function ChatInterface({
               onClose={() => setDiffMessageId(null)}
             />
           </Suspense>
+        )}
+
+        {branchMessageId && activeId && (
+          <BranchHistoryDialog
+            conversationId={activeId}
+            messageId={branchMessageId}
+            error={branchError}
+            onClose={() => setBranchMessageId(null)}
+            onSwitch={(branchId) => {
+              try {
+                if (isGenerating) onStop();
+                flushSnapshotUpdate();
+                useConversationStore
+                  .getState()
+                  .switchBranch(activeId, branchId);
+                setBranchMessageId(null);
+                setBranchError(null);
+                setRollbackInfo(null);
+                onReloadPreview();
+              } catch (error) {
+                setBranchError(
+                  error instanceof Error ? error.message : t.branches.error,
+                );
+              }
+            }}
+          />
         )}
 
         {showSnapshotHistory && activeId && (

@@ -25,7 +25,7 @@ The digest of the exact project files, template, and Preview Mode that a mounted
 _Avoid_: Build number, Conversation timestamp
 
 **Preview Evidence**:
-A run-scoped WebP capture plus a bounded semantic snapshot for one explicit viewport. Conversation history retains only dimensions, digests, overflow/font/element counts, errors, and placeholder text.
+A run-scoped capture and bounded semantic snapshot for one explicit device category at its actual viewport dimensions, using WebP where supported and PNG or JPEG otherwise. Conversation history retains only dimensions, formats, digests, overflow/font/element counts, errors, and placeholder text.
 _Avoid_: Design Review report, persisted screenshot
 
 **Preview Comparison**:

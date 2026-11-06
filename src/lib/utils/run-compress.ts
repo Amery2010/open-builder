@@ -1,3 +1,7 @@
+import {
+  captureConversationIdentity,
+  isConversationIdentityCurrent,
+} from "../conversation/branches";
 import type { ProviderConfig } from "../ai/provider";
 import type { Conversation } from "../../types";
 import { compressContext, type CompressResult } from "./compress-context";
@@ -12,6 +16,7 @@ export async function runCompress(
   ) => Promise<string>,
   isCurrent: () => boolean = () => true,
 ): Promise<CompressResult | null> {
+  const identity = captureConversationIdentity(conv);
   const result = await compressContext(
     conv.messages,
     cfg,
@@ -19,7 +24,14 @@ export async function runCompress(
     conv.files,
     generateTextOverride,
   );
-  if (!isCurrent()) return null;
+  if (
+    !isCurrent() ||
+    !isConversationIdentityCurrent(
+      identity,
+      useConversationStore.getState().conversations[conv.id],
+    )
+  )
+    return null;
   if (result) {
     useConversationStore
       .getState()

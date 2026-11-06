@@ -136,6 +136,7 @@ test("keeps affected dialogs usable in a short desktop viewport", async ({
   await expectSingleScrollableBody(dialog, { footer: true });
   await closeDialog(dialog);
 
+  await page.getByRole("button", { name: "Code", exact: true }).click();
   await page.getByRole("button", { name: "Edit design tokens" }).click();
   dialog = page.getByRole("dialog");
   await expect(
@@ -264,7 +265,7 @@ test("shows mode-aware composer focus and creates from the mobile starter librar
       };
     });
   const autoStyle = await readFocusStyle();
-  expect(autoStyle.outlineWidth).toBe("2px");
+  expect(autoStyle.outlineWidth).toBe("1px");
   expect(autoStyle.outlineStyle).toBe("solid");
   expect(autoStyle.boxShadow).not.toBe("none");
 
@@ -305,6 +306,6 @@ test("shows mode-aware composer focus and creates from the mobile starter librar
       boxShadow: style.boxShadow,
     };
   });
-  expect(designStyle.outlineWidth).toBe("2px");
+  expect(designStyle.outlineWidth).toBe("1px");
   expect(designStyle.boxShadow).not.toBe("none");
 });

@@ -1,3 +1,8 @@
+import {
+  inspectImageBytes,
+  type CompressibleImageMimeType,
+} from "../images/formats";
+import { readScreenshotImage } from "../images/screenshot";
 import type { DesignSelectionContext, ProjectFiles } from "../../types";
 import { EDITABLE_DESIGN_TOKENS } from "./tokens";
 import {
@@ -32,6 +37,8 @@ export const DESIGN_BRIDGE_TIMEOUT_ATTEMPTS = 3;
 export const DESIGN_BRIDGE_VIRTUAL_PATH = "__open_builder_design_bridge__.js";
 export const DESIGN_CAPTURE_RUNTIME_VIRTUAL_PATH =
   "__open_builder_html_to_image__.js";
+export const DESIGN_CAPTURE_RUNTIME_GLOBAL =
+  "__OPEN_BUILDER_CAPTURE_RUNTIME_V1__";
 export const DESIGN_BRIDGE_MARKER = "open-builder-design-bridge";
 export const DESIGN_RUNTIME_TOKEN_NAMES = EDITABLE_DESIGN_TOKENS.map(
   (token) => token.property,
@@ -44,7 +51,12 @@ export const SUPPORTED_DESIGN_BRIDGE_TEMPLATES = new Set([
   "vite-react-ts",
 ]);
 
-const BRIDGE_TAG = `<!-- ${DESIGN_BRIDGE_MARKER}:start -->\n<script src="/${DESIGN_BRIDGE_VIRTUAL_PATH}" data-ob-design-bridge></script>\n<!-- ${DESIGN_BRIDGE_MARKER}:end -->`;
+function bridgeTags(includeCaptureRuntime: boolean): string {
+  const runtime = includeCaptureRuntime
+    ? `<script src="/${DESIGN_CAPTURE_RUNTIME_VIRTUAL_PATH}" data-ob-design-capture-runtime></script>\n`
+    : "";
+  return `<!-- ${DESIGN_BRIDGE_MARKER}:start -->\n${runtime}<script src="/${DESIGN_BRIDGE_VIRTUAL_PATH}" data-ob-design-bridge></script>\n<!-- ${DESIGN_BRIDGE_MARKER}:end -->`;
+}
 const BRIDGE_TAG_PATTERN = new RegExp(
   `\\s*<!-- ${DESIGN_BRIDGE_MARKER}:start -->[\\s\\S]*?<!-- ${DESIGN_BRIDGE_MARKER}:end -->\\s*`,
   "g",
@@ -59,6 +71,32 @@ export interface DesignBridgeInjectionResult {
 }
 
 export type DesignReviewViewportName = "desktop" | "tablet" | "mobile";
+
+export function isPreviewViewportSize(
+  name: DesignReviewViewportName,
+  width: number,
+  height: number,
+): boolean {
+  if (
+    !Number.isInteger(width) ||
+    !Number.isInteger(height) ||
+    width < 240 ||
+    width > 2000 ||
+    height < 240 ||
+    height > 2000
+  )
+    return false;
+  if (name === "mobile") return width < 768;
+  if (name === "tablet") return width >= 768 && width < 1024;
+  return name === "desktop" && width >= 1024;
+}
+
+export function designBridgeRuntimeRevision(
+  generation: string,
+  captureRuntimeAvailable: boolean,
+): string {
+  return `${generation}:7:${captureRuntimeAvailable ? "capture" : "selection"}`;
+}
 
 export interface DesignPreviewSemanticElement {
   tagName: string;
@@ -116,7 +154,7 @@ export interface DesignPreviewSemanticSnapshot {
 export interface DesignBridgeCaptureResult {
   generation: string;
   dataUrl: string;
-  mimeType: "image/webp";
+  mimeType: CompressibleImageMimeType;
   viewport: {
     name: DesignReviewViewportName;
     width: number;
@@ -181,6 +219,8 @@ export type DesignBridgeParentMessage =
       version: number;
       generation: string;
       captureRuntimeAvailable: boolean;
+      runtimeRevision: string;
+      nonce?: string;
       route: string;
     }
   | {
@@ -242,24 +282,28 @@ function previewBridgeClientSource(
   var VERSION = ${DESIGN_BRIDGE_PROTOCOL_VERSION};
   var GENERATION = ${JSON.stringify(generation)};
   var CAPTURE_RUNTIME_AVAILABLE = ${JSON.stringify(captureRuntimeAvailable)};
+  var RUNTIME_REVISION = ${JSON.stringify(designBridgeRuntimeRevision(generation, captureRuntimeAvailable))};
+  var viewportSizeMatches = ${isPreviewViewportSize.toString()};
   var MAX_BYTES = ${DESIGN_BRIDGE_PAYLOAD_MAX_BYTES};
   var SEMANTIC_MAX_BYTES = ${DESIGN_BRIDGE_SEMANTIC_MAX_BYTES};
   var IMAGE_MAX_BYTES = ${DESIGN_BRIDGE_CAPTURE_MAX_BYTES};
   var CAPTURE_MAX_HEIGHT = ${DESIGN_BRIDGE_CAPTURE_MAX_HEIGHT};
   var CAPTURE_MAX_PIXELS = ${DESIGN_BRIDGE_CAPTURE_MAX_PIXELS};
-  var CAPTURE_PATH = ${JSON.stringify(DESIGN_CAPTURE_RUNTIME_VIRTUAL_PATH)};
+  var CAPTURE_RUNTIME_KEY = ${JSON.stringify(DESIGN_CAPTURE_RUNTIME_GLOBAL)};
   var DESIGN_TOKEN_NAMES = ${JSON.stringify(DESIGN_RUNTIME_TOKEN_NAMES)};
   var PROTOTYPE_ROUTE_MAX_LENGTH = ${PROTOTYPE_PREVIEW_ROUTE_MAX_LENGTH};
   var CAPTURE_MESSAGE_MAX_BYTES = Math.ceil(IMAGE_MAX_BYTES * 4 / 3) + SEMANTIC_MAX_BYTES + 4096;
   var installedKey = "__OPEN_BUILDER_DESIGN_BRIDGE_V1__";
-  if (window[installedKey]) return;
-  window[installedKey] = true;
+  var previous = window[installedKey];
+  if (previous && previous.revision === RUNTIME_REVISION) { previous.announce(); return; }
+  if (previous && typeof previous.dispose === "function") previous.dispose();
+  var disposed = false;
   var nonce = null;
   var active = false;
   var parentOrigin = "*";
   var captureInFlight = false;
+  var activeCapture = null;
   var navigationInFlight = false;
-  var captureLibraryPromise = null;
   var runtimeIds = new WeakMap();
   var runtimeIdCounter = 0;
   var MAX_LOCATOR_DEPTH = 12;
@@ -311,12 +355,35 @@ function previewBridgeClientSource(
     var padding = encoded.endsWith("==") ? 2 : encoded.endsWith("=") ? 1 : 0;
     return Math.floor(encoded.length * 3 / 4) - padding;
   }
-  function isWebp(dataUrl) {
-    if (typeof dataUrl !== "string" || dataUrl.indexOf("data:image/webp;base64,") !== 0) return false;
+  function imageType(dataUrl) {
+    if (typeof dataUrl !== "string") return null;
+    var match = new RegExp("^data:[^;,]*;base64,", "i").exec(dataUrl);
+    if (!match) return null;
     try {
-      var header = atob(dataUrl.slice(dataUrl.indexOf(",") + 1, dataUrl.indexOf(",") + 33));
-      return header.slice(0, 4) === "RIFF" && header.slice(8, 12) === "WEBP";
-    } catch (_) { return false; }
+      var header = atob(dataUrl.slice(match[0].length, match[0].length + 32));
+      if (header.slice(0, 4) === "RIFF" && header.slice(8, 12) === "WEBP") return "image/webp";
+      if (header.charCodeAt(0) === 137 && header.slice(1, 4) === "PNG") return "image/png";
+      if (header.charCodeAt(0) === 255 && header.charCodeAt(1) === 216) return "image/jpeg";
+    } catch (_) {}
+    return null;
+  }
+  function encodeCapture(canvas) {
+    var qualities = [0.82, 0.68, 0.52];
+    var candidate = "";
+    var png = "";
+    for (var index = 0; index < qualities.length; index += 1) {
+      candidate = canvas.toDataURL("image/webp", qualities[index]);
+      var type = imageType(candidate);
+      if (type !== "image/webp") { if (type === "image/png") png = candidate; break; }
+      if (imageBytes(candidate) > 0 && imageBytes(candidate) <= IMAGE_MAX_BYTES) return { dataUrl: candidate, mimeType: type };
+    }
+    png = png || canvas.toDataURL("image/png");
+    if (imageType(png) === "image/png" && imageBytes(png) > 0 && imageBytes(png) <= IMAGE_MAX_BYTES) return { dataUrl: png, mimeType: "image/png" };
+    for (var index = 0; index < qualities.length; index += 1) {
+      candidate = canvas.toDataURL("image/jpeg", qualities[index]);
+      if (imageType(candidate) === "image/jpeg" && imageBytes(candidate) > 0 && imageBytes(candidate) <= IMAGE_MAX_BYTES) return { dataUrl: candidate, mimeType: "image/jpeg" };
+    }
+    throw new Error("Preview screenshot could not be encoded within its size limit.");
   }
   function explicitId(element) {
     var value = element && element.getAttribute ? element.getAttribute("data-ob-id") : null;
@@ -392,10 +459,10 @@ function previewBridgeClientSource(
   function send(type, payload) {
     var message = { type: type, version: VERSION, nonce: nonce };
     if (payload !== undefined) message.payload = payload;
-    if (byteLength(message) <= MAX_BYTES) window.parent.postMessage(message, parentOrigin);
+    if (!disposed && byteLength(message) <= MAX_BYTES) window.parent.postMessage(message, parentOrigin);
   }
   function sendCapture(message, origin) {
-    if (byteLength(message) <= CAPTURE_MESSAGE_MAX_BYTES) {
+    if (!disposed && byteLength(message) <= CAPTURE_MESSAGE_MAX_BYTES) {
       window.parent.postMessage(message, origin);
       return true;
     }
@@ -469,6 +536,33 @@ function previewBridgeClientSource(
       requestAnimationFrame(function () { requestAnimationFrame(resolve); });
     });
   }
+  function stableViewport(name, signal) {
+    return new Promise(function (resolve, reject) {
+      var previous = null;
+      var frameId = 0;
+      var timer = setTimeout(function () { finish(new Error("Preview viewport did not stabilize: " + window.innerWidth + "x" + window.innerHeight + ".")); }, 5000);
+      function finish(error, size) {
+        clearTimeout(timer);
+        cancelAnimationFrame(frameId);
+        signal.removeEventListener("abort", abort);
+        if (error) reject(error); else resolve(size);
+      }
+      function abort() { finish(signal.reason); }
+      function check() {
+        if (signal.aborted) { abort(); return; }
+        var size = { width: window.innerWidth, height: window.innerHeight };
+        if (viewportSizeMatches(name, size.width, size.height) && previous && previous.width === size.width && previous.height === size.height) {
+          finish(null, size);
+          return;
+        }
+        previous = size;
+        frameId = requestAnimationFrame(check);
+      }
+      signal.addEventListener("abort", abort, { once: true });
+      if (signal.aborted) { abort(); return; }
+      frameId = requestAnimationFrame(check);
+    });
+  }
   function waitForFonts() {
     if (!document.fonts || !document.fonts.ready) return Promise.resolve();
     return Promise.race([
@@ -476,48 +570,13 @@ function previewBridgeClientSource(
       new Promise(function (resolve) { setTimeout(resolve, 3000); })
     ]).then(function () {});
   }
-  function loadCaptureLibrary(requestId) {
-    if (window.htmlToImage && typeof window.htmlToImage.toCanvas === "function") {
-      return Promise.resolve(window.htmlToImage);
-    }
-    if (captureLibraryPromise) return captureLibraryPromise;
-    captureLibraryPromise = new Promise(function (resolve, reject) {
-      var script = document.createElement("script");
-      function clearHandlers() {
-        clearTimeout(timer);
-        script.onload = null;
-        script.onerror = null;
-      }
-      // Keep the same download alive across all three waiting windows. The
-      // host may stop waiting without unloading this preview iframe.
-      var timer = setTimeout(function () {
-        clearHandlers();
-        script.remove();
-        reject(new Error("Screenshot runtime timed out."));
-      }, 8000 * ${DESIGN_BRIDGE_TIMEOUT_ATTEMPTS});
-      script.src = "/" + CAPTURE_PATH + "?request=" + encodeURIComponent(requestId);
-      script.async = true;
-      script.setAttribute("data-ob-design-capture-runtime", "");
-      script.onload = function () {
-        clearHandlers();
-        if (window.htmlToImage && typeof window.htmlToImage.toCanvas === "function") {
-          resolve(window.htmlToImage);
-        } else {
-          script.remove();
-          reject(new Error("Screenshot runtime did not initialize."));
-        }
-      };
-      script.onerror = function () {
-        clearHandlers();
-        script.remove();
-        reject(new Error("Screenshot runtime could not be loaded."));
-      };
-      document.head.appendChild(script);
-    }).catch(function (error) {
-      captureLibraryPromise = null;
-      throw error;
-    });
-    return captureLibraryPromise;
+  function captureRuntime() {
+    var runtime = window[CAPTURE_RUNTIME_KEY];
+    return CAPTURE_RUNTIME_AVAILABLE && runtime && typeof runtime.toCanvas === "function" ? runtime : null;
+  }
+  function loadCaptureLibrary() {
+    var runtime = captureRuntime();
+    return runtime ? Promise.resolve(runtime) : Promise.reject(new Error("Screenshot runtime is unavailable in this preview."));
   }
   function accessibleNameInfo(element) {
     var labelledBy = clean(element.getAttribute("aria-labelledby"), 160);
@@ -606,7 +665,7 @@ function previewBridgeClientSource(
     value.accessibility = accessibilityInfo(element);
     return value;
   }
-  function semanticSnapshot(prototypeIdentity) {
+  function semanticSnapshot(prototypeIdentity, actualWidth, actualHeight) {
     var root = document.documentElement;
     var rootStyle = getComputedStyle(root);
     var designTokens = { computed: {}, inline: {} };
@@ -623,14 +682,14 @@ function previewBridgeClientSource(
       route: previewRoute(),
       title: clean(document.title || "", 200) || undefined,
       viewport: {
-        width: Math.max(1, Math.round(window.innerWidth)),
-        height: Math.max(1, Math.round(window.innerHeight)),
+        width: actualWidth,
+        height: actualHeight,
         devicePixelRatio: round(window.devicePixelRatio || 1)
       },
       document: {
         scrollWidth: Math.max(1, Math.round(root.scrollWidth)),
         scrollHeight: Math.max(1, Math.round(root.scrollHeight)),
-        horizontalOverflow: root.scrollWidth > window.innerWidth + 1,
+        horizontalOverflow: root.scrollWidth > actualWidth + 1,
         fonts: document.fonts ? document.fonts.status === "loaded" ? "ready" : "loading" : "unsupported",
         language: clean(root.getAttribute("lang"), 35) || undefined
       },
@@ -662,7 +721,7 @@ function previewBridgeClientSource(
         route: route
       }
     };
-    if (byteLength(message) <= MAX_BYTES) window.parent.postMessage(message, origin);
+    if (!disposed && byteLength(message) <= MAX_BYTES) window.parent.postMessage(message, origin);
   }
   function sendNavigationError(data, origin, error) {
     var message = {
@@ -673,7 +732,7 @@ function previewBridgeClientSource(
       requestId: data.requestId,
       error: clean(error && error.message ? error.message : String(error), 400) || "Preview navigation failed."
     };
-    if (byteLength(message) <= MAX_BYTES) window.parent.postMessage(message, origin);
+    if (!disposed && byteLength(message) <= MAX_BYTES) window.parent.postMessage(message, origin);
   }
   function navigate(data, origin) {
     if (navigationInFlight) {
@@ -684,6 +743,7 @@ function previewBridgeClientSource(
     var targetRoute = data.target.route;
     var finish = function () {
       navigationInFlight = false;
+      if (disposed) return;
       var actualRoute = previewRoute();
       if (actualRoute !== targetRoute) {
         sendNavigationError(data, origin, new Error("Preview router did not reach the requested route."));
@@ -703,6 +763,7 @@ function previewBridgeClientSource(
     }
   }
   function announceRoute() {
+    if (disposed) return;
     var route = previewRoute();
     if (!safeHashRoute(route)) return;
     var message = {
@@ -711,7 +772,7 @@ function previewBridgeClientSource(
       generation: GENERATION,
       route: route
     };
-    if (byteLength(message) <= MAX_BYTES) window.parent.postMessage(message, "*");
+    if (!disposed && byteLength(message) <= MAX_BYTES) window.parent.postMessage(message, "*");
   }
   async function capture(data, origin) {
     var captureNonce = data.nonce;
@@ -725,37 +786,39 @@ function previewBridgeClientSource(
     };
     if (captureInFlight) throw new Error("A preview capture is already running.");
     captureInFlight = true;
+    var controller = new AbortController();
+    activeCapture = { nonce: captureNonce, requestId: requestId, controller: controller };
     var scrollX = window.scrollX;
     var scrollY = window.scrollY;
     try {
-      if (
-        Math.abs(window.innerWidth - viewport.width) > 4 ||
-        Math.abs(window.innerHeight - viewport.height) > 4
-      ) {
-        throw new Error("Preview viewport did not reach the requested size.");
-      }
-      var htmlToImage = await loadCaptureLibrary(requestId);
+      var htmlToImage = await loadCaptureLibrary();
+      if (disposed || controller.signal.aborted) throw controller.signal.reason || new Error("Preview runtime was replaced.");
       await waitForFonts();
+      if (disposed || controller.signal.aborted) throw controller.signal.reason || new Error("Preview runtime was replaced.");
       window.scrollTo(0, 0);
-      await nextPaint();
+      var size = await stableViewport(viewport.name, controller.signal);
+      if (disposed || controller.signal.aborted) throw controller.signal.reason || new Error("Preview runtime was replaced.");
+      var actualWidth = size.width;
+      var actualHeight = size.height;
       var root = document.documentElement;
-      var fullHeight = Math.max(root.scrollHeight, document.body ? document.body.scrollHeight : 0, window.innerHeight);
+      var fullHeight = Math.max(root.scrollHeight, document.body ? document.body.scrollHeight : 0, actualHeight);
       var captureHeight = Math.max(1, Math.min(
         fullHeight,
         CAPTURE_MAX_HEIGHT,
-        Math.floor(CAPTURE_MAX_PIXELS / Math.max(1, window.innerWidth))
+        Math.floor(CAPTURE_MAX_PIXELS / Math.max(1, actualWidth))
       ));
-      var snapshot = semanticSnapshot(data.target);
+      var snapshot = semanticSnapshot(data.target, actualWidth, actualHeight);
       var canvas = await htmlToImage.toCanvas(root, {
+        signal: controller.signal,
         cacheBust: true,
         pixelRatio: 1,
         skipAutoScale: true,
-        width: window.innerWidth,
+        width: actualWidth,
         height: captureHeight,
-        canvasWidth: window.innerWidth,
+        canvasWidth: actualWidth,
         canvasHeight: captureHeight,
         style: {
-          width: window.innerWidth + "px",
+          width: actualWidth + "px",
           height: captureHeight + "px",
           margin: "0",
           overflow: "hidden"
@@ -764,16 +827,11 @@ function previewBridgeClientSource(
           return !(node && node.getAttribute && node.hasAttribute("data-ob-design-overlay"));
         }
       });
-      var qualities = [0.82, 0.68, 0.52];
-      var dataUrl = "";
-      for (var index = 0; index < qualities.length; index += 1) {
-        dataUrl = canvas.toDataURL("image/webp", qualities[index]);
-        if (isWebp(dataUrl) && imageBytes(dataUrl) <= IMAGE_MAX_BYTES) break;
+      if (disposed || controller.signal.aborted) throw controller.signal.reason || new Error("Preview runtime was replaced.");
+      if (actualWidth !== window.innerWidth || actualHeight !== window.innerHeight) {
+        throw new Error("Preview viewport changed during capture from " + actualWidth + "x" + actualHeight + " to " + window.innerWidth + "x" + window.innerHeight + ". Please retry.");
       }
-      if (!isWebp(dataUrl)) throw new Error("This preview cannot encode WebP screenshots.");
-      if (imageBytes(dataUrl) <= 0 || imageBytes(dataUrl) > IMAGE_MAX_BYTES) {
-        throw new Error("Preview screenshot exceeded its size limit.");
-      }
+      var encoded = encodeCapture(canvas);
       var resultMessage = {
         type: "open-builder:design-bridge-capture-result",
         version: base.version,
@@ -781,12 +839,12 @@ function previewBridgeClientSource(
         nonce: base.nonce,
         requestId: base.requestId,
         payload: {
-          dataUrl: dataUrl,
-          mimeType: "image/webp",
+          dataUrl: encoded.dataUrl,
+          mimeType: encoded.mimeType,
           viewport: {
             name: viewport.name,
-            width: window.innerWidth,
-            height: window.innerHeight,
+            width: actualWidth,
+            height: actualHeight,
             capturedHeight: captureHeight,
             fullHeight: fullHeight,
             truncated: captureHeight < fullHeight
@@ -796,8 +854,9 @@ function previewBridgeClientSource(
       };
       if (!sendCapture(resultMessage, origin)) throw new Error("Preview capture response exceeded its size limit.");
     } finally {
-      window.scrollTo(scrollX, scrollY);
+      if (!disposed) window.scrollTo(scrollX, scrollY);
       captureInFlight = false;
+      activeCapture = null;
     }
   }
   function captureError(data, origin, error) {
@@ -813,14 +872,23 @@ function previewBridgeClientSource(
   document.addEventListener("pointermove", onMove, true);
   document.addEventListener("click", onClick, true);
   document.addEventListener("keydown", onKey, true);
-  window.addEventListener("hashchange", function () {
-    nextPaint().then(announceRoute);
-  });
-  window.addEventListener("message", function (event) {
+  function onHashChange() { nextPaint().then(announceRoute); }
+  window.addEventListener("hashchange", onHashChange);
+  function onMessage(event) {
     if (event.source !== window.parent) return;
     var data = event.data;
     if (!data || data.version !== VERSION || byteLength(data) > MAX_BYTES || !validId(data.nonce)) return;
     var eventOrigin = event.origin && event.origin !== "null" ? event.origin : "*";
+    if (data.type === "open-builder:design-bridge-readiness") {
+      if (data.generation === GENERATION && data.runtimeRevision === RUNTIME_REVISION) announceReady(data.nonce, eventOrigin);
+      return;
+    }
+    if (data.type === "open-builder:design-bridge-cancel-capture") {
+      if (data.generation === GENERATION && activeCapture && data.nonce === activeCapture.nonce && data.requestId === activeCapture.requestId) {
+        activeCapture.controller.abort(new DOMException("Screenshot capture was cancelled.", "AbortError"));
+      }
+      return;
+    }
     if (data.type === "open-builder:design-bridge-reset-data") {
       if (data.generation !== GENERATION) return;
       window.dispatchEvent(new Event("open-builder:prototype-reset-data"));
@@ -846,14 +914,39 @@ function previewBridgeClientSource(
     parentOrigin = eventOrigin;
     active = data.active === true;
     if (!active) show(null);
-  });
-  window.parent.postMessage({
-    type: "open-builder:design-bridge-ready",
-    version: VERSION,
-    generation: GENERATION,
-    captureRuntimeAvailable: CAPTURE_RUNTIME_AVAILABLE,
-    route: previewRoute()
-  }, "*");
+  }
+  window.addEventListener("message", onMessage);
+  function announceReady(requestNonce, origin) {
+    if (disposed) return;
+    window.parent.postMessage({
+      type: "open-builder:design-bridge-ready",
+      version: VERSION,
+      generation: GENERATION,
+      runtimeRevision: RUNTIME_REVISION,
+      nonce: requestNonce,
+      captureRuntimeAvailable: Boolean(captureRuntime()),
+      route: previewRoute()
+    }, origin || "*");
+  }
+  function onCaptureRuntimeReady() { announceReady(); }
+  window.addEventListener("open-builder:capture-runtime-ready", onCaptureRuntimeReady);
+  window[installedKey] = {
+    revision: RUNTIME_REVISION,
+    announce: announceReady,
+    dispose: function () {
+      disposed = true;
+      active = false;
+      if (activeCapture) activeCapture.controller.abort(new DOMException("Preview runtime was replaced.", "AbortError"));
+      document.removeEventListener("pointermove", onMove, true);
+      document.removeEventListener("click", onClick, true);
+      document.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("hashchange", onHashChange);
+      window.removeEventListener("message", onMessage);
+      window.removeEventListener("open-builder:capture-runtime-ready", onCaptureRuntimeReady);
+      overlay.remove();
+    }
+  };
+  announceReady();
 })();\n`;
 }
 
@@ -887,7 +980,7 @@ export function injectDesignBridge(
   }
   const index = stripDesignBridge(files[indexPath]).replace(
     /<\/body\s*>/i,
-    `${BRIDGE_TAG}\n</body>`,
+    `${bridgeTags(Boolean(captureRuntimeSource))}\n</body>`,
   );
   const injectedFiles: ProjectFiles = {
     ...files,
@@ -1382,53 +1475,74 @@ function sanitizeSemanticSnapshot(
     : null;
 }
 
-function webpMetadata(
-  dataUrl: string,
-): { bytes: number; width: number; height: number } | null {
-  const match = /^data:image\/webp;base64,([A-Za-z0-9+/]*={0,2})$/.exec(
-    dataUrl,
-  );
-  if (!match) return null;
-  let header: string;
+function captureImageMetadata(dataUrl: string): {
+  mimeType: CompressibleImageMimeType;
+  bytes: number;
+  width: number;
+  height: number;
+} | null {
+  let bytes: Uint8Array;
   try {
-    header = atob(match[1].slice(0, 64));
+    bytes = readScreenshotImage(dataUrl).bytes;
   } catch {
     return null;
   }
-  if (
-    header.length < 30 ||
-    header.slice(0, 4) !== "RIFF" ||
-    header.slice(8, 12) !== "WEBP"
-  ) {
-    return null;
-  }
-  const byte = (index: number) => header.charCodeAt(index);
-  const chunk = header.slice(12, 16);
-  let width: number;
-  let height: number;
-  if (chunk === "VP8X") {
-    width = 1 + byte(24) + byte(25) * 256 + byte(26) * 65_536;
-    height = 1 + byte(27) + byte(28) * 256 + byte(29) * 65_536;
-  } else if (chunk === "VP8L" && byte(20) === 0x2f) {
-    width = 1 + byte(21) + ((byte(22) & 0x3f) << 8);
-    height = 1 + (byte(22) >> 6) + (byte(23) << 2) + ((byte(24) & 0x0f) << 10);
-  } else if (
-    chunk === "VP8 " &&
-    byte(23) === 0x9d &&
-    byte(24) === 0x01 &&
-    byte(25) === 0x2a
-  ) {
-    width = (byte(26) + byte(27) * 256) & 0x3fff;
-    height = (byte(28) + byte(29) * 256) & 0x3fff;
+  const inspection = inspectImageBytes(bytes);
+  if (!inspection || inspection.animated) return null;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let width = 0;
+  let height = 0;
+  if (inspection.mimeType === "image/png") {
+    if (bytes.length < 33) return null;
+    width = view.getUint32(16, false);
+    height = view.getUint32(20, false);
+  } else if (inspection.mimeType === "image/jpeg") {
+    let offset = 2;
+    while (offset + 3 < bytes.length) {
+      if (bytes[offset++] !== 0xff) return null;
+      while (bytes[offset] === 0xff) offset += 1;
+      const marker = bytes[offset++];
+      if (marker === 0xda || marker === 0xd9) break;
+      if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue;
+      if (offset + 2 > bytes.length) return null;
+      const length = view.getUint16(offset, false);
+      if (length < 2 || offset + length > bytes.length) return null;
+      if (
+        [
+          0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd,
+          0xce, 0xcf,
+        ].includes(marker)
+      ) {
+        if (length < 8) return null;
+        height = view.getUint16(offset + 3, false);
+        width = view.getUint16(offset + 5, false);
+        break;
+      }
+      offset += length;
+    }
   } else {
-    return null;
+    if (bytes.length < 30) return null;
+    const chunk = String.fromCharCode(...bytes.subarray(12, 16));
+    if (chunk === "VP8X") {
+      width = 1 + bytes[24] + bytes[25] * 256 + bytes[26] * 65536;
+      height = 1 + bytes[27] + bytes[28] * 256 + bytes[29] * 65536;
+    } else if (chunk === "VP8L" && bytes[20] === 0x2f) {
+      width = 1 + bytes[21] + ((bytes[22] & 0x3f) << 8);
+      height =
+        1 + (bytes[22] >> 6) + (bytes[23] << 2) + ((bytes[24] & 0x0f) << 10);
+    } else if (
+      chunk === "VP8 " &&
+      bytes[23] === 0x9d &&
+      bytes[24] === 0x01 &&
+      bytes[25] === 0x2a
+    ) {
+      width = view.getUint16(26, true) & 0x3fff;
+      height = view.getUint16(28, true) & 0x3fff;
+    }
   }
-  const padding = match[1].endsWith("==") ? 2 : match[1].endsWith("=") ? 1 : 0;
-  return {
-    bytes: Math.floor((match[1].length * 3) / 4) - padding,
-    width,
-    height,
-  };
+  return width > 0 && height > 0
+    ? { mimeType: inspection.mimeType, bytes: bytes.length, width, height }
+    : null;
 }
 
 export function parseDesignBridgeCaptureResponse(
@@ -1472,14 +1586,13 @@ export function parseDesignBridgeCaptureResponse(
   const payload = raw.payload as Record<string, unknown>;
   if (
     typeof payload.dataUrl !== "string" ||
-    payload.mimeType !== "image/webp" ||
     !payload.viewport ||
     typeof payload.viewport !== "object" ||
     Array.isArray(payload.viewport)
   ) {
     return null;
   }
-  const image = webpMetadata(payload.dataUrl);
+  const image = captureImageMetadata(payload.dataUrl);
   const viewport = payload.viewport as Record<string, unknown>;
   const width = safeFiniteNumber(viewport.width, 1, 10_000, true);
   const height = safeFiniteNumber(viewport.height, 1, 10_000, true);
@@ -1512,15 +1625,15 @@ export function parseDesignBridgeCaptureResponse(
     image.width * image.height > DESIGN_BRIDGE_CAPTURE_MAX_PIXELS ||
     viewport.name !== expected.viewportName ||
     width === null ||
-    Math.abs(width - expected.viewportWidth) > 4 ||
     height === null ||
-    Math.abs(height - expected.viewportHeight) > 4 ||
+    !isPreviewViewportSize(expected.viewportName, width, height) ||
     capturedHeight === null ||
     fullHeight === null ||
     typeof viewport.truncated !== "boolean" ||
-    Math.abs(image.width - expected.viewportWidth) > 4 ||
     image.width !== width ||
     image.height !== capturedHeight ||
+    capturedHeight > fullHeight ||
+    viewport.truncated !== capturedHeight < fullHeight ||
     semanticSnapshot.viewport.width !== width ||
     semanticSnapshot.viewport.height !== height
   ) {
@@ -1530,8 +1643,8 @@ export function parseDesignBridgeCaptureResponse(
     ok: true,
     result: {
       generation: expected.generation,
-      dataUrl: payload.dataUrl,
-      mimeType: "image/webp",
+      dataUrl: readScreenshotImage(payload.dataUrl).dataUrl,
+      mimeType: image.mimeType,
       viewport: {
         name: expected.viewportName,
         width,

@@ -1,3 +1,5 @@
+import { isCompressibleImageMimeType } from "../images/formats";
+import { prepareScreenshot, readScreenshotImage } from "../images/screenshot";
 import type {
   ProjectFiles,
   ProjectPreviewMode,
@@ -19,12 +21,14 @@ import type {
 } from "./preview-bridge";
 import type { PrototypePreviewTarget } from "./preview-runtime";
 
+import { isPreviewViewportSize } from "./preview-bridge";
+
 export const PREVIEW_EVIDENCE_KIND = "preview_evidence_v1" as const;
 
 export interface PreviewEvidenceSummaryItem {
   view: PreviewView;
   image: {
-    mimeType: "image/webp";
+    mimeType: DesignBridgeCaptureResult["mimeType"];
     bytes: number;
     digest: string;
   };
@@ -123,11 +127,6 @@ export function isPreviewEvidenceSummary(
   ) {
     return false;
   }
-  const viewportDimensions = {
-    desktop: { width: 1_440, height: 900 },
-    tablet: { width: 768, height: 1_024 },
-    mobile: { width: 375, height: 667 },
-  } as const;
   return candidate.evidence.every((entry) => {
     if (
       !entry ||
@@ -137,19 +136,22 @@ export function isPreviewEvidenceSummary(
     ) {
       return false;
     }
-    const expected = viewportDimensions[entry.view];
     return (
-      entry.image?.mimeType === "image/webp" &&
+      typeof entry.image?.mimeType === "string" &&
+      isCompressibleImageMimeType(entry.image.mimeType) &&
       Number.isInteger(entry.image.bytes) &&
       entry.image.bytes > 0 &&
       entry.image.bytes <= 1_500 * 1024 &&
       typeof entry.image.digest === "string" &&
       /^[a-f0-9]{64}$/.test(entry.image.digest) &&
       entry.viewport?.name === entry.view &&
-      entry.viewport.width === expected.width &&
-      entry.viewport.height === expected.height &&
+      isPreviewViewportSize(
+        entry.view,
+        entry.viewport.width,
+        entry.viewport.height,
+      ) &&
       Number.isInteger(entry.viewport.capturedHeight) &&
-      entry.viewport.capturedHeight >= expected.height &&
+      entry.viewport.capturedHeight >= 1 &&
       entry.viewport.capturedHeight <= 4_096 &&
       Number.isInteger(entry.viewport.fullHeight) &&
       entry.viewport.fullHeight >= entry.viewport.capturedHeight &&
@@ -221,12 +223,7 @@ function checkedViewports(values: readonly PreviewView[]): PreviewView[] {
 }
 
 function imageBase64(dataUrl: string): string {
-  const match = /^data:image\/webp;base64,([A-Za-z0-9+/]*={0,2})$/.exec(
-    dataUrl,
-  );
-  if (!match)
-    throw new Error("Preview evidence did not contain valid WebP data.");
-  return match[1];
+  return readScreenshotImage(dataUrl).base64;
 }
 
 function decodedByteLength(base64: string): number {
@@ -339,9 +336,14 @@ export async function capturePreviewEvidence(
       target,
       signal: input.signal,
     });
-    const evidence = await Promise.all(
-      collection.captures.map(summarizeCapture),
-    );
+    const captures: DesignBridgeCaptureResult[] = [];
+    for (const capture of collection.captures) {
+      captures.push({
+        ...capture,
+        ...(await prepareScreenshot(capture.dataUrl, undefined, input.signal)),
+      });
+    }
+    const evidence = await Promise.all(captures.map(summarizeCapture));
     if (evidence.length === 0) {
       return errorOutput(
         generation,
@@ -360,7 +362,7 @@ export async function capturePreviewEvidence(
       errors: [...collection.errors],
       placeholder: PLACEHOLDER,
     };
-    const fullSemanticEvidence = collection.captures.map((capture) => ({
+    const fullSemanticEvidence = captures.map((capture) => ({
       view: capture.viewport.name,
       viewport: capture.viewport,
       semanticSnapshot: capture.semanticSnapshot,
@@ -373,7 +375,7 @@ export async function capturePreviewEvidence(
           type: "text",
           text: JSON.stringify({ generation, evidence: fullSemanticEvidence }),
         },
-        ...collection.captures.map((capture) => ({
+        ...captures.map((capture) => ({
           type: "image" as const,
           data: imageBase64(capture.dataUrl),
           mimeType: capture.mimeType,

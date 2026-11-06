@@ -1,3 +1,8 @@
+import {
+  captureConversationIdentity,
+  isConversationIdentityCurrent,
+  reconcileConversation,
+} from "./lib/conversation/branches";
 import { lazy, Suspense, useCallback, useEffect, useRef } from "react";
 import { ExternalLink, Globe2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -185,6 +190,7 @@ export default function App() {
     sandpackKey,
     restartSandpack,
     isProjectInitialized,
+    projectIdentity,
   } = useAppState();
 
   const {
@@ -206,6 +212,7 @@ export default function App() {
     withdrawLastUserMessage,
     invalidateGenerator,
     isThinkingStreaming,
+    runtimeWaitMessage,
     generateUtilityText,
   } = useGenerator({
     settings,
@@ -229,6 +236,8 @@ export default function App() {
       const conversation = state.conversations[conversationId];
       if (
         !conversation ||
+        (projectIdentity &&
+          !isConversationIdentityCurrent(projectIdentity, conversation)) ||
         (guard && conversation.files[path] !== guard.expectedContent)
       ) {
         return;
@@ -242,7 +251,7 @@ export default function App() {
         [path]: content,
       }));
     },
-    [setFilesForConversation, updateFiles],
+    [setFilesForConversation, updateFiles, projectIdentity],
   );
 
   const handleImportProject = useCallback(
@@ -255,11 +264,20 @@ export default function App() {
           error: "Stop generation before importing a project.",
         };
       }
+      const importConversation =
+        useConversationStore.getState().conversations[activeId];
+      const importIdentity = captureConversationIdentity(importConversation);
       const materialized = await materializeStagedProjectAssets(
         project.assets ?? [],
         project.files,
       );
-      if (useConversationStore.getState().activeId !== activeId) {
+      if (
+        useConversationStore.getState().activeId !== activeId ||
+        !isConversationIdentityCurrent(
+          importIdentity,
+          useConversationStore.getState().conversations[activeId],
+        )
+      ) {
         await releaseMaterializedProjectAssets(materialized.assets);
         return {
           ok: false as const,
@@ -324,6 +342,10 @@ export default function App() {
       recommendation?: DesignRecommendation;
       requireSelected?: boolean;
     }): Promise<{ changed: boolean; reference: DesignSystemRef }> => {
+      const initial =
+        useConversationStore.getState().conversations[input.conversationId];
+      if (!initial) throw new Error("The project is unavailable.");
+      const identity = captureConversationIdentity(initial);
       const { applyDesignSystemToConversation } =
         await import("./lib/design-systems/application");
       const snapshot = (conversationId: string) => {
@@ -333,7 +355,9 @@ export default function App() {
         return {
           conversationId,
           revision: conversation,
-          isCurrent: state.activeId === conversationId,
+          isCurrent:
+            state.activeId === conversationId &&
+            isConversationIdentityCurrent(identity, conversation),
           files: conversation.files,
           designState: conversation.designState,
         };
@@ -352,13 +376,16 @@ export default function App() {
               ) {
                 return state;
               }
-              const next = {
-                ...current,
-                files: { ...mutation.files },
-                designState: mutation.designState,
-                isProjectInitialized: Object.keys(mutation.files).length > 0,
-                updatedAt: Math.max(Date.now(), current.updatedAt + 1),
-              };
+              const next = reconcileConversation(
+                {
+                  ...current,
+                  files: { ...mutation.files },
+                  designState: mutation.designState,
+                  isProjectInitialized: Object.keys(mutation.files).length > 0,
+                  updatedAt: Math.max(Date.now(), current.updatedAt + 1),
+                },
+                current,
+              );
               committed = {
                 conversationId: mutation.conversationId,
                 revision: next,
@@ -391,13 +418,16 @@ export default function App() {
               ) {
                 return state;
               }
-              const next = {
-                ...current,
-                files: { ...mutation.files },
-                designState: mutation.designState,
-                isProjectInitialized: Object.keys(mutation.files).length > 0,
-                updatedAt: Math.max(Date.now(), current.updatedAt + 1),
-              };
+              const next = reconcileConversation(
+                {
+                  ...current,
+                  files: { ...mutation.files },
+                  designState: mutation.designState,
+                  isProjectInitialized: Object.keys(mutation.files).length > 0,
+                  updatedAt: Math.max(Date.now(), current.updatedAt + 1),
+                },
+                current,
+              );
               restored = {
                 conversationId: mutation.conversationId,
                 revision: next,
@@ -443,6 +473,18 @@ export default function App() {
         ? state.conversations[state.activeId]
         : undefined;
       const conversationId = conversation?.id;
+      const requestIdentity = conversation
+        ? captureConversationIdentity(conversation)
+        : null;
+      const requestIsCurrent = () =>
+        !!requestIdentity &&
+        useConversationStore.getState().activeId === conversationId &&
+        isConversationIdentityCurrent(
+          requestIdentity,
+          conversationId
+            ? useConversationStore.getState().conversations[conversationId]
+            : undefined,
+        );
       const explicitReplacementIntent =
         hasExplicitDesignSystemReplacementIntent(prompt);
       const shouldResolveDesignSystem =
@@ -483,10 +525,7 @@ export default function App() {
                   },
                   generateUtilityText,
                 );
-                if (
-                  !conversationId ||
-                  useConversationStore.getState().activeId !== conversationId
-                ) {
+                if (!conversationId || !requestIsCurrent()) {
                   return;
                 }
                 const latest =
@@ -550,10 +589,7 @@ export default function App() {
                   "Unable to resolve an automatic Design system:",
                   error,
                 );
-                if (
-                  conversationId &&
-                  useConversationStore.getState().activeId === conversationId
-                ) {
+                if (conversationId && requestIsCurrent()) {
                   useConversationStore
                     .getState()
                     .setDesignStateForConversation(
@@ -620,6 +656,9 @@ export default function App() {
       });
       if (!application.changed) return;
       if (useConversationStore.getState().activeId !== conversationId) return;
+      const current =
+        useConversationStore.getState().conversations[conversationId];
+      if (current?.designState?.appliedSystem?.id !== systemId) return;
       invalidateGenerator();
       void generate(
         `The explicitly selected Design system "${systemId}" is already applied to the current project. Read the root DESIGN.md and tokens.css, then reshape the existing UI to follow that contract. Preserve working behavior and report any shared or responsive elements changed beyond the selected system application.`,
@@ -675,6 +714,7 @@ export default function App() {
       messages={messages}
       isGenerating={isGenerating}
       isThinkingStreaming={isThinkingStreaming}
+      runtimeWaitMessage={runtimeWaitMessage}
       hasConfiguredModelRuntime={hasConfiguredModelRuntime}
       localCliStatusNotice={localCliStatusNotice}
       onGenerate={handleGenerate}
@@ -712,6 +752,11 @@ export default function App() {
       }
     >
       <CodeViewer
+        key={
+          projectIdentity
+            ? `${projectIdentity.conversationId}:${projectIdentity.branchId}:${projectIdentity.checkoutEpoch}`
+            : activeId
+        }
         conversationId={activeId!}
         files={files}
         currentFile={currentFile}

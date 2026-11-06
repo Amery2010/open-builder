@@ -43,3 +43,34 @@ it("does not commit compression from a superseded run", async () => {
     useConversationStore.getState().conversations[id].compressedContext,
   ).toBeUndefined();
 });
+
+it("does not publish an old branch summary after a same-project checkout", async () => {
+  const store = useConversationStore.getState();
+  const id = store.createConversation();
+  const conversation = useConversationStore.getState().conversations[id];
+  let release!: (value: unknown) => void;
+  compressContext.mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+  );
+  const pending = runCompress(
+    { apiType: "openai-compatible", apiKey: "", apiBaseUrl: "", model: "test" },
+    conversation,
+  );
+  useConversationStore.setState((state) => ({
+    conversations: {
+      ...state.conversations,
+      [id]: {
+        ...state.conversations[id],
+        checkoutEpoch: (conversation.checkoutEpoch ?? 0) + 1,
+      },
+    },
+  }));
+  release({ summary: "old branch", fromIndex: 1 });
+  expect(await pending).toBeNull();
+  expect(
+    useConversationStore.getState().conversations[id].compressedContext,
+  ).toBeUndefined();
+});

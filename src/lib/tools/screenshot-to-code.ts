@@ -2,13 +2,17 @@ import { tool, generateText } from "ai";
 import { z } from "zod";
 import { getProviderModel } from "../ai/provider";
 import type { ApiType } from "../ai/provider";
-import type { ProjectFiles, FileChange } from "../ai/generator-types";
-import {
-  normalizeProjectPath,
-  validateProjectFileContent,
-} from "./fs-tools";
+import type {
+  ProjectFiles,
+  FileChange,
+  ToolExecutionContext,
+} from "../ai/generator-types";
+import { prepareScreenshot } from "../images/screenshot";
+import { normalizeProjectPath, validateProjectFileContent } from "./fs-tools";
 import {
   normalizeHttpUrl,
+  fetchWithTimeout,
+  readResponseBytesWithLimit,
   safeErrorMessage,
 } from "./network-guard";
 
@@ -64,7 +68,10 @@ interface ScreenshotArgs {
   output_path?: string;
 }
 
-const DEFAULT_OUTPUT: Record<NonNullable<ScreenshotArgs["framework"]>, string> = {
+const DEFAULT_OUTPUT: Record<
+  NonNullable<ScreenshotArgs["framework"]>,
+  string
+> = {
   react: "src/components/GeneratedComponent.tsx",
   vue: "src/components/GeneratedComponent.vue",
   svelte: "src/components/GeneratedComponent.svelte",
@@ -81,7 +88,7 @@ function normalizeScreenshotImageUrl(
     return { ok: false, error: "image_url must be a string" };
   }
   const imageUrl = value.trim();
-  if (/^data:image\/[a-z0-9.+-]+;base64,/i.test(imageUrl)) {
+  if (/^data:[^;,]*;base64,/i.test(imageUrl)) {
     if (imageUrl.length > SCREENSHOT_TO_CODE_LIMITS.maxDataUrlChars) {
       return {
         ok: false,
@@ -126,7 +133,11 @@ function extractCodeBlock(text: string): string | null {
 }
 
 export function createScreenshotToCodeHandler(deps: ScreenshotToCodeDeps) {
-  return async (_name: string, args: unknown): Promise<string> => {
+  return async (
+    _name: string,
+    args: unknown,
+    context?: ToolExecutionContext,
+  ): Promise<string> => {
     const parsed = args as ScreenshotArgs;
     const checkedImageUrl = normalizeScreenshotImageUrl(parsed?.image_url);
     if (!checkedImageUrl.ok) {
@@ -166,14 +177,54 @@ export function createScreenshotToCodeHandler(deps: ScreenshotToCodeDeps) {
 
     let text: string;
     try {
+      let dataUrl = checkedImageUrl.imageUrl;
+      if (!dataUrl.startsWith("data:")) {
+        const bytes = await fetchWithTimeout(
+          dataUrl,
+          { credentials: "omit", signal: context?.signal },
+          undefined,
+          async (response) => {
+            if (!response.ok)
+              throw new Error(
+                `Screenshot request failed (${response.status}).`,
+              );
+            return readResponseBytesWithLimit(
+              response,
+              Math.floor((SCREENSHOT_TO_CODE_LIMITS.maxDataUrlChars * 3) / 4),
+              "Screenshot",
+            );
+          },
+        );
+        const chunks: string[] = [];
+        for (let offset = 0; offset < bytes.length; offset += 32768) {
+          chunks.push(
+            String.fromCharCode(...bytes.subarray(offset, offset + 32768)),
+          );
+        }
+        dataUrl = `data:;base64,${btoa(chunks.join(""))}`;
+      }
+      const image = await prepareScreenshot(
+        dataUrl,
+        undefined,
+        context?.signal,
+      );
+      context?.signal.throwIfAborted();
       const result = await generateText({
         model,
+        abortSignal: context?.signal,
         messages: [
           {
             role: "user",
             content: [
-              { type: "text", text: buildPrompt(framework, parsed.style_hints) },
-              { type: "image", image: checkedImageUrl.imageUrl },
+              {
+                type: "text",
+                text: buildPrompt(framework, parsed.style_hints),
+              },
+              {
+                type: "image",
+                image: image.dataUrl,
+                mediaType: image.mimeType,
+              },
             ],
           },
         ],
@@ -181,6 +232,7 @@ export function createScreenshotToCodeHandler(deps: ScreenshotToCodeDeps) {
       });
       text = result.text || "";
     } catch (err: any) {
+      context?.signal.throwIfAborted();
       return JSON.stringify({
         ok: false,
         error: `vision request failed: ${safeErrorMessage(err)}`,
@@ -200,8 +252,12 @@ export function createScreenshotToCodeHandler(deps: ScreenshotToCodeDeps) {
     }
 
     const files = deps.getFiles();
-    const action: FileChange["action"] = checkedPath.path in files ? "modified" : "created";
-    const newFiles: ProjectFiles = { ...files, [checkedPath.path]: checkedContent.content };
+    const action: FileChange["action"] =
+      checkedPath.path in files ? "modified" : "created";
+    const newFiles: ProjectFiles = {
+      ...files,
+      [checkedPath.path]: checkedContent.content,
+    };
     deps.onFilesChanged(newFiles, [{ path: checkedPath.path, action }]);
 
     return JSON.stringify({

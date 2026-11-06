@@ -5,6 +5,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_TITLE, useConversationStore } from "../store/conversation";
 import type { Conversation, Message } from "../types";
 import { useTitleAndCompression } from "./useTitleAndCompression";
+import { runCompress } from "../lib/utils/run-compress";
+
+vi.mock("../lib/utils/run-compress", () => ({ runCompress: vi.fn() }));
 
 const config = {
   apiType: "openai" as const,
@@ -42,6 +45,7 @@ function deferred<T>() {
 
 describe("useTitleAndCompression smart titles", () => {
   beforeEach(() => {
+    vi.clearAllMocks();
     useConversationStore.setState({
       conversations: {
         target: conversation("target"),
@@ -50,6 +54,36 @@ describe("useTitleAndCompression smart titles", () => {
       activeId: "active",
       _hasHydrated: true,
     });
+  });
+
+  it("uses the title-specific runner without changing context compression", async () => {
+    const generateTextOverride = vi.fn(async () => "Compressed context");
+    const generateTitleOverride = vi.fn(async () => "Smart title");
+    const { result } = renderHook(() =>
+      useTitleAndCompression({
+        resolveConfig: vi.fn(async () => config),
+        setIsGenerating: vi.fn(),
+        setMessages: vi.fn(),
+        generateTextOverride,
+        generateTitleOverride,
+      }),
+    );
+    await act(async () => {
+      await result.current.triggerSmartTitle({
+        conversationId: "target",
+        firstRequest,
+        config,
+      });
+      await result.current.compressContext();
+    });
+    expect(generateTitleOverride).toHaveBeenCalledOnce();
+    expect(generateTextOverride).not.toHaveBeenCalled();
+    expect(runCompress).toHaveBeenCalledWith(
+      config,
+      expect.objectContaining({ id: "active" }),
+      generateTextOverride,
+      expect.any(Function),
+    );
   });
 
   it("targets the completed conversation and deduplicates concurrent work", async () => {

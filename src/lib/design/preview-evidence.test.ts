@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PreviewView } from "../../types";
 import {
   capturePreviewEvidence,
@@ -10,6 +10,17 @@ import type {
   DesignBridgeCaptureResult,
   PrototypePreviewTarget,
 } from "./preview-bridge";
+
+const compression = vi.hoisted(() => ({ run: vi.fn(), dataUrl: vi.fn() }));
+vi.mock("browser-image-compression", () => ({
+  default: Object.assign(compression.run, {
+    getDataUrlFromFile: compression.dataUrl,
+  }),
+}));
+beforeEach(() => {
+  compression.run.mockReset().mockImplementation(async (file: File) => file);
+  compression.dataUrl.mockReset();
+});
 
 const unregisters: Array<() => void> = [];
 afterEach(() => {
@@ -124,6 +135,48 @@ describe("preview evidence tool output", () => {
     });
     expect(output.text).not.toContain("private semantic text");
     expect(output.text).not.toContain("data:image");
+    expect(compression.run).toHaveBeenCalledTimes(2);
+  });
+
+  it("summarizes and sends the compressed bytes using their actual MIME", async () => {
+    const bytes = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10]);
+    const base64 = Buffer.from(bytes).toString("base64");
+    compression.run.mockResolvedValue(
+      new File([bytes], "compressed", { type: "image/webp" }),
+    );
+    compression.dataUrl.mockResolvedValue(`data:image/webp;base64,${base64}`);
+    let generation: string | undefined;
+    unregisters.push(
+      registerPreviewRuntime("compressed", {
+        getGeneration: () => generation,
+        prepare: async (value) => {
+          generation = value;
+        },
+        capture: async (_views, value) => ({
+          generation: value,
+          captures: [{ ...capture("desktop"), generation: value }],
+          errors: [],
+        }),
+      }),
+    );
+    const output = await capturePreviewEvidence({
+      conversationId: "compressed",
+      ...project,
+      viewports: ["desktop"],
+    });
+    expect(output.content?.[1]).toEqual({
+      type: "image",
+      data: base64,
+      mimeType: "image/png",
+    });
+    const digest = Buffer.from(
+      await crypto.subtle.digest("SHA-256", bytes),
+    ).toString("hex");
+    expect(output.structuredContent).toMatchObject({
+      evidence: [
+        { image: { mimeType: "image/png", bytes: bytes.length, digest } },
+      ],
+    });
   });
 
   it("returns explicit unavailable and validation errors", async () => {
@@ -263,13 +316,43 @@ describe("preview evidence tool output", () => {
       placeholder: "run only",
     };
     expect(isPreviewEvidenceSummary(base)).toBe(true);
+    for (const mimeType of ["image/png", "image/jpeg"]) {
+      expect(
+        isPreviewEvidenceSummary({
+          ...base,
+          evidence: [
+            {
+              ...base.evidence[0],
+              image: { ...base.evidence[0].image, mimeType },
+            },
+          ],
+        }),
+      ).toBe(true);
+    }
     expect(
       isPreviewEvidenceSummary({
         ...base,
         evidence: [
           {
             ...base.evidence[0],
-            viewport: { ...base.evidence[0].viewport, width: 390 },
+            viewport: {
+              ...base.evidence[0].viewport,
+              width: 390,
+              height: 844,
+              capturedHeight: 844,
+              fullHeight: 844,
+            },
+          },
+        ],
+      }),
+    ).toBe(true);
+    expect(
+      isPreviewEvidenceSummary({
+        ...base,
+        evidence: [
+          {
+            ...base.evidence[0],
+            viewport: { ...base.evidence[0].viewport, width: 1440 },
           },
         ],
       }),

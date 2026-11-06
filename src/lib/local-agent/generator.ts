@@ -30,8 +30,11 @@ import { normalizeToolExecutionOutput } from "../utils/tool-result";
 import { PLAN_APPROVED_PREFIX } from "../ai/plan-mode";
 import { getT } from "../../i18n";
 import { supportsLocalAgents } from "./tauri";
+import * as localAgentHost from "./tauri";
+import { captureConversationIdentity } from "../conversation/branches";
 import {
   isLocalCliRuntimeError,
+  LOCAL_CLI_MESSAGE_OUTPUT_NOTICE,
   localCliRuntime,
   type LocalCliRunResult,
   type LocalCliHostToolRequest,
@@ -54,6 +57,9 @@ import type {
   LocalToolContent,
   LocalToolResolution,
   LocalToolSpec,
+  LocalRecoverableRun,
+  LocalRecoveryContext,
+  LocalRecoveryLease,
 } from "./types";
 import {
   localAgentImageCapabilities,
@@ -87,6 +93,7 @@ export interface LocalAgentClientConfig {
   provider: LocalAgentProvider;
   model?: string;
   effort?: string;
+  utilityEffortPolicy?: LocalAgentStartRequest["utilityEffortPolicy"];
   nativeSearch: boolean;
   /** Capabilities the desktop runtime observed for the provider; the declared
    * catalog is the fallback until something has been observed. */
@@ -99,6 +106,11 @@ export interface LocalAgentClientConfig {
   saveSession?: (session: LocalAgentSessionRef | undefined) => void;
   /** Explicit caller budget; omitted or zero allows unlimited tools. */
   maxToolCalls?: number;
+  getRecoveryAppState?: () => Record<string, unknown>;
+  restoreRecoveryContext?: (context: LocalRecoveryContext) => Promise<void>;
+  restoreUserInstructions?: (ids: string[]) => Message[];
+  getRecoveredToolOutput?: (callId: string) => ToolExecutionOutput | undefined;
+  flushRecoveryState?: () => Promise<void>;
 }
 
 class LocalRunFailure extends Error {
@@ -465,6 +477,10 @@ export class LocalAgentGenerator implements GenerationBackend {
   private lastFailureHadActivity = false;
   private lastBaseline: Conversation | null = null;
   private activeSignal: AbortSignal | null = null;
+  private recoveryTerminal: {
+    runId: string;
+    lease: LocalRecoveryLease;
+  } | null = null;
   private readonly utilityScopeId: string;
   private localToolAnnotations: ReadonlyMap<string, LocalToolAnnotations>;
   private readonly authorizeToolCall?: GeneratorOptions["authorizeToolCall"];
@@ -657,6 +673,89 @@ export class LocalAgentGenerator implements GenerationBackend {
     }
   }
 
+  /** Attach to the existing native process. Never submits a new model prompt. */
+  async recover(run: LocalRecoverableRun): Promise<GenerateResult> {
+    if (
+      run.context.version !== 1 ||
+      run.request.provider !== this.config.provider
+    ) {
+      throw new Error("The local CLI recovery context is incompatible.");
+    }
+    this.abortRequested = false;
+    this.host.syncMessages(run.context.messages);
+    this.activeSignal = this.host.beginExternalRun();
+    try {
+      const attachmentIndex = collectAttachmentIndex(
+        this.host.getMessages(),
+        [],
+      );
+      const budget = createTurnBudget(run.request.maxToolCalls);
+      let outcome = await this.runOnce({
+        prompt: run.request.prompt,
+        attachmentIndex,
+        budget,
+        recovering: run,
+      });
+      const continued = await this.continueNativeTurn(
+        outcome,
+        budget,
+        attachmentIndex,
+        run.request.mode === "chat" || run.request.mode === "plan",
+        this.activeSignal,
+      );
+      outcome = continued.outcome;
+      this.host.finishExternalRun();
+      const result: GenerateResult = {
+        files: this.host.getFiles(),
+        messages: this.host.getMessages(),
+        text: continued.fullText,
+        aborted: outcome.aborted,
+        maxIterationsReached: budget.exhausted,
+      };
+      this.events.onComplete?.(result);
+      await this.acknowledgeRecovery();
+      if (
+        !outcome.aborted &&
+        outcome.sessionId &&
+        outcome.prepared?.compatibilityKey &&
+        this.config.saveSession
+      ) {
+        this.config.saveSession({
+          provider: this.config.provider,
+          sessionId: outcome.sessionId,
+          transcriptFingerprint: await computeConversationFingerprint(
+            this.conversationSnapshot(),
+          ),
+          model: this.config.model,
+          compatibilityKey: outcome.prepared.compatibilityKey,
+          installationFingerprint: outcome.prepared.installationFingerprint,
+          actualModel: outcome.prepared.actualModel,
+          actualEffort: outcome.prepared.actualEffort,
+          cliVersion: outcome.prepared.cliVersion,
+          updatedAt: Date.now(),
+        });
+      }
+      return result;
+    } catch (error) {
+      this.host.finishExternalRun();
+      this.events.onError?.(
+        error instanceof Error ? error : new Error(String(error)),
+      );
+      throw error;
+    }
+  }
+
+  async acknowledgeRecovery(): Promise<void> {
+    if (!this.recoveryTerminal) return;
+    await this.config.flushRecoveryState?.();
+    const terminal = this.recoveryTerminal;
+    await localAgentHost.acknowledgeLocalAgentTerminal(
+      terminal.runId,
+      terminal.lease,
+    );
+    this.recoveryTerminal = null;
+  }
+
   private assertSearchCompatibility(): void {
     const mode = this.host.getRunContext().mode;
     if (
@@ -785,6 +884,63 @@ export class LocalAgentGenerator implements GenerationBackend {
       }
     }
 
+    const continued = await this.continueNativeTurn(
+      outcome,
+      budget,
+      attachmentIndex,
+      persistentConversationRun,
+      signal,
+    );
+    outcome = continued.outcome;
+    const fullText = continued.fullText;
+
+    this.host.finishExternalRun();
+    const result: GenerateResult = {
+      files: this.host.getFiles(),
+      messages: this.host.getMessages(),
+      text: fullText,
+      aborted: outcome.aborted && !budget.exhausted,
+      maxIterationsReached: budget.exhausted,
+    };
+    this.events.onComplete?.(result);
+    await this.acknowledgeRecovery();
+
+    if (
+      !outcome.aborted &&
+      !budget.exhausted &&
+      outcome.sessionId &&
+      outcome.prepared?.compatibilityKey &&
+      outcome.prepared.installationFingerprint &&
+      this.config.saveSession &&
+      persistentConversationRun
+    ) {
+      const current = this.conversationSnapshot();
+      const transcriptFingerprint =
+        await computeConversationFingerprint(current);
+      this.config.saveSession({
+        provider: this.config.provider,
+        sessionId: outcome.sessionId,
+        transcriptFingerprint,
+        model: this.config.model || undefined,
+        compatibilityKey: outcome.prepared?.compatibilityKey,
+        installationFingerprint: outcome.prepared?.installationFingerprint,
+        actualModel: outcome.prepared?.actualModel,
+        actualEffort: outcome.prepared?.actualEffort,
+        cliVersion:
+          outcome.prepared?.cliVersion ?? outcome.cliVersion ?? "unknown",
+        updatedAt: Date.now(),
+      });
+    }
+    return result;
+  }
+
+  private async continueNativeTurn(
+    outcome: RunOutcome,
+    budget: LocalTurnBudget,
+    attachmentIndex: Map<string, AttachmentIndexEntry>,
+    persistentConversationRun: boolean,
+    signal: AbortSignal,
+  ): Promise<{ outcome: RunOutcome; fullText: string }> {
     let fullText = outcome.text;
     while (!outcome.aborted && !budget.exhausted && !signal.aborted) {
       const beforeInstructions = {
@@ -835,43 +991,7 @@ export class LocalAgentGenerator implements GenerationBackend {
       fullText += outcome.text;
     }
 
-    this.host.finishExternalRun();
-    const result: GenerateResult = {
-      files: this.host.getFiles(),
-      messages: this.host.getMessages(),
-      text: fullText,
-      aborted: outcome.aborted && !budget.exhausted,
-      maxIterationsReached: budget.exhausted,
-    };
-    this.events.onComplete?.(result);
-
-    if (
-      !outcome.aborted &&
-      !budget.exhausted &&
-      outcome.sessionId &&
-      outcome.prepared?.compatibilityKey &&
-      outcome.prepared.installationFingerprint &&
-      this.config.saveSession &&
-      persistentConversationRun
-    ) {
-      const current = this.conversationSnapshot();
-      const transcriptFingerprint =
-        await computeConversationFingerprint(current);
-      this.config.saveSession({
-        provider: this.config.provider,
-        sessionId: outcome.sessionId,
-        transcriptFingerprint,
-        model: this.config.model || undefined,
-        compatibilityKey: outcome.prepared?.compatibilityKey,
-        installationFingerprint: outcome.prepared?.installationFingerprint,
-        actualModel: outcome.prepared?.actualModel,
-        actualEffort: outcome.prepared?.actualEffort,
-        cliVersion:
-          outcome.prepared?.cliVersion ?? outcome.cliVersion ?? "unknown",
-        updatedAt: Date.now(),
-      });
-    }
-    return result;
+    return { outcome, fullText };
   }
 
   private async runOnce({
@@ -881,6 +1001,7 @@ export class LocalAgentGenerator implements GenerationBackend {
     bootstrapContext,
     attachmentIndex,
     budget,
+    recovering,
   }: {
     prompt: string;
     sessionId?: string;
@@ -888,7 +1009,11 @@ export class LocalAgentGenerator implements GenerationBackend {
     bootstrapContext?: string;
     attachmentIndex: Map<string, AttachmentIndexEntry>;
     budget: LocalTurnBudget;
+    recovering?: LocalRecoverableRun;
   }): Promise<RunOutcome> {
+    // A previous native sub-turn is already durably represented before the
+    // next one begins; it must not remain as an older recoverable terminal.
+    await this.acknowledgeRecovery();
     const hostRun = this.host.getHostToolRun();
     const tools = hostRun.modelTools;
     const runContext = this.host.getRunContext();
@@ -973,10 +1098,35 @@ export class LocalAgentGenerator implements GenerationBackend {
     const untrustedReference = formatUntrustedReferenceContext(
       this.host.getUntrustedReferenceContext(),
     );
-    const request: LocalAgentStartRequest = {
+    const recoveryMessages =
+      recovering?.context.messages ?? structuredClone(this.host.getMessages());
+    const recoveryAppBase =
+      recovering?.context.app ?? this.config.getRecoveryAppState?.() ?? {};
+    const recoveryContext = (): LocalRecoveryContext => ({
+      version: 1,
+      identity:
+        recovering?.context.identity ??
+        captureConversationIdentity(this.conversationSnapshot()),
+      messages: recoveryMessages,
+      skillIds:
+        this.host
+          .getSkillContext()
+          .snapshot()
+          ?.skills.map((skill) => skill.skillId) ?? [],
+      skillContext: this.host.getSkillContext().snapshot(),
+      app: {
+        ...recoveryAppBase,
+        ...this.config.getRecoveryAppState?.(),
+        uiBaselineIds: recoveryAppBase.uiBaselineIds,
+      },
+    });
+    const request: LocalAgentStartRequest = recovering?.request ?? {
       provider: this.config.provider,
       model: this.config.model || undefined,
       effort: this.config.effort || undefined,
+      ...(this.config.utilityEffortPolicy
+        ? { utilityEffortPolicy: this.config.utilityEffortPolicy }
+        : {}),
       systemPrompt: `${this.host.getSystemContent()}${LOCAL_RUNTIME_INSTRUCTIONS}`,
       prompt: untrustedReference
         ? `${untrustedReference}\n\n[Current user request]\n${promptWithAttachments}`
@@ -1001,6 +1151,15 @@ export class LocalAgentGenerator implements GenerationBackend {
           ? 0
           : Math.max(1, budget.maxToolCalls - budget.toolCalls),
       mode: runContext.mode,
+      ...(this.config.getRecoveryAppState &&
+      (runContext.mode === "chat" || runContext.mode === "plan")
+        ? {
+            recovery: {
+              owner: localAgentHost.localAgentPageOwner,
+              context: recoveryContext(),
+            },
+          }
+        : {}),
     };
 
     let text = "";
@@ -1028,6 +1187,122 @@ export class LocalAgentGenerator implements GenerationBackend {
     const executeTool = async (
       event: LocalCliHostToolRequest,
     ): Promise<LocalCliHostToolOutcome> => {
+      if (event.recoveredResolution) {
+        let resolution = event.recoveredResolution;
+        let updateIds: string[] = [];
+        try {
+          const wrapped = JSON.parse(resolution.text);
+          if (
+            wrapped?.kind === "open_builder_user_updates" &&
+            wrapped.version === 1 &&
+            wrapped.toolResult
+          ) {
+            resolution = wrapped.toolResult;
+            updateIds = Array.isArray(wrapped.openBuilderUserUpdates)
+              ? wrapped.openBuilderUserUpdates
+                  .filter(
+                    (item: { id?: unknown }) => typeof item?.id === "string",
+                  )
+                  .map((item: { id: string }) => item.id)
+              : [];
+          }
+        } catch {
+          /* Ordinary text tool result. */
+        }
+        const output =
+          this.config.getRecoveredToolOutput?.(event.callId) ??
+          normalizeToolExecutionOutput({
+            text: resolution.text,
+            isError: resolution.isError,
+            structuredContent: resolution.structuredContent,
+            content: event.recoveredResolution.content,
+          });
+        const image = output.structuredContent as
+          | {
+              kind?: string;
+              imageId?: string;
+              name?: string;
+              mimeType?: string;
+              size?: number;
+            }
+          | undefined;
+        if (
+          image?.kind === "local_generated_image_v1" &&
+          image.imageId &&
+          image.name &&
+          image.mimeType &&
+          typeof image.size === "number"
+        ) {
+          const reference: AttachmentRef = {
+            id: image.imageId,
+            type: "image",
+            name: image.name,
+            mimeType: image.mimeType,
+            size: image.size,
+          };
+          attachmentIndex.set(reference.id, reference);
+          generatedIds.add(reference.id);
+          if (!output.content?.some((part) => part.type === "local_image"))
+            output.content = [
+              ...(output.content ?? []),
+              {
+                type: "local_image",
+                id: reference.id,
+                name: reference.name,
+                mimeType: reference.mimeType,
+                size: reference.size,
+              },
+            ];
+        }
+        appendAssistant({
+          id: event.callId,
+          type: "function",
+          function: {
+            name: event.name,
+            arguments: JSON.stringify(event.arguments ?? {}),
+          },
+        });
+        this.events.onToolCall?.(event.name, event.callId);
+        this.events.onToolResult?.(
+          event.name,
+          event.arguments,
+          output.text,
+          event.callId,
+          output,
+        );
+        this.host.appendMessage({
+          role: "tool",
+          tool_call_id: event.callId,
+          content: output.text,
+          toolOutput: output,
+        });
+        const restoredInstructions =
+          this.config.restoreUserInstructions?.(updateIds) ?? [];
+        if (updateIds.length) this.instructionEpoch += 1;
+        if (
+          event.name === "exit_plan_mode" &&
+          output.text.startsWith(PLAN_APPROVED_PREFIX)
+        ) {
+          this.planApproved = true;
+          this.host.setReadOnlyMode(false);
+          this.host.setExecutionMode("chat");
+        }
+        for (const message of restoredInstructions) {
+          if (
+            !this.host
+              .getMessages()
+              .some(
+                (existing) =>
+                  existing.metadata?.instructionId ===
+                  message.metadata?.instructionId,
+              )
+          )
+            this.host.appendMessage(message);
+          for (const ref of message.metadata?.attachments ?? [])
+            attachmentIndex.set(ref.id, ref);
+        }
+        return { resolution: event.recoveredResolution, hadSideEffect: false };
+      }
       const currentRunContext = this.host.getRunContext();
       if (
         !runSignal ||
@@ -1483,14 +1758,22 @@ export class LocalAgentGenerator implements GenerationBackend {
           break;
         case "prepared":
           cliVersion = event.cliVersion;
+          if (event.outputCapabilities?.transport === "codexExec") {
+            this.events.onLocalCliStatus?.({
+              state: "handshaking",
+              message: LOCAL_CLI_MESSAGE_OUTPUT_NOTICE,
+            });
+          }
           break;
         case "textDelta":
+          if (!event.delta) break;
           hadActivity = true;
           text += event.delta;
           assistantText += event.delta;
           this.events.onText?.(event.delta);
           break;
         case "reasoningDelta":
+          if (!event.delta) break;
           hadActivity = true;
           assistantThinking += event.delta;
           this.events.onThinking?.(event.delta);
@@ -1530,8 +1813,16 @@ export class LocalAgentGenerator implements GenerationBackend {
             }
             nativeStarted.delete(event.callId);
             nativeCompleted.add(event.callId);
-            const resultText = event.result
-              ? JSON.stringify(event.result)
+            // Codex exposes search results as an array, while Host search
+            // tools use an envelope. Keep the same persisted result contract;
+            // null means the provider supplied no details, not zero matches.
+            const result =
+              event.name === "web_search" &&
+              (event.result == null || Array.isArray(event.result))
+                ? { ok: true, results: event.result ?? null }
+                : event.result;
+            const resultText = result
+              ? JSON.stringify(result)
               : `${event.name} completed without structured results.`;
             this.events.onToolResult?.(
               event.name,
@@ -1578,16 +1869,39 @@ export class LocalAgentGenerator implements GenerationBackend {
         request,
         {
           onEvent,
+          ...(request.recovery || recovering
+            ? {
+                recoveryContext,
+                beforeToolDelivery: this.config.flushRecoveryState,
+                onRecoverySnapshot: async (
+                  snapshot: import("./types").LocalRecoverySnapshot,
+                ) => {
+                  this.host.syncMessages(snapshot.context.messages);
+                  await this.config.restoreRecoveryContext?.(snapshot.context);
+                },
+              }
+            : {}),
           executeHostTool: async (event) => executeTool(event),
           getToolAuthorityEpoch: this.host.hasUserInstructionSource()
             ? () => this.instructionEpoch
             : undefined,
         },
         this.activeSignal ?? undefined,
+        recovering,
       );
+      if (runtimeResult.recoveryLease)
+        this.recoveryTerminal = {
+          runId: runtimeResult.runId,
+          lease: runtimeResult.recoveryLease,
+        };
     } catch (cause) {
       appendAssistant();
       if (isLocalCliRuntimeError(cause)) {
+        if (cause.runId && cause.recoveryLease)
+          this.recoveryTerminal = {
+            runId: cause.runId,
+            lease: cause.recoveryLease,
+          };
         const failure = cause.failure;
         if (failure.code === "toolBudgetExceeded") {
           budget.exhausted = true;
@@ -1733,6 +2047,7 @@ export async function runLocalUtilityText(
     timeoutMs?: number;
     signal?: AbortSignal;
     onPrepared?: NonNullable<GeneratorEvents["onLocalCliPrepared"]>;
+    utilityEffortPolicy?: LocalAgentStartRequest["utilityEffortPolicy"];
   } = {},
 ): Promise<string> {
   if (options.signal?.aborted) {
@@ -1742,7 +2057,11 @@ export async function runLocalUtilityText(
   }
   let text = "";
   const generator = createLocalAgentGenerator(
-    { ...config, nativeSearch: false },
+    {
+      ...config,
+      nativeSearch: false,
+      utilityEffortPolicy: options.utilityEffortPolicy,
+    },
     {
       onText: (delta) => (text += delta),
       onLocalCliPrepared: options.onPrepared,
@@ -1804,4 +2123,17 @@ export async function runLocalUtilityText(
     }
   }
   return text.trim();
+}
+
+export function runLocalTitleText(
+  config: Pick<LocalAgentClientConfig, "provider" | "model" | "effort">,
+  instructions: string,
+  prompt: string,
+  options: Parameters<typeof runLocalUtilityText>[3] = {},
+): Promise<string> {
+  return runLocalUtilityText(config, instructions, prompt, {
+    ...options,
+    timeoutMs: 60_000,
+    utilityEffortPolicy: "lowestSupported",
+  });
 }

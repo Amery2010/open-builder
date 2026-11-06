@@ -6,6 +6,7 @@ import {
 import { redactSecrets } from "../security/redact";
 import type {
   LocalAgentEvent,
+  LocalAgentOutputCapabilities,
   LocalAgentPreference,
   LocalAgentProbe,
   LocalAgentProvider,
@@ -23,8 +24,19 @@ import type {
   LocalCliRunStatus,
   LocalCliHostToolOutcome,
   LocalToolResolution,
+  LocalRecoveryLease,
+  LocalRecoverableRun,
+  LocalRecoveryEnvelope,
+  LocalRecoverySnapshot,
+  LocalRecoveryContext,
+  LocalToolClaim,
 } from "./types";
 import { isLocalAgentProvider } from "./providers";
+
+export const LOCAL_CLI_IDLE_MESSAGE =
+  "Waiting for the local CLI to respond. You can stop this task.";
+export const LOCAL_CLI_MESSAGE_OUTPUT_NOTICE =
+  "This CLI version delivers output in message-sized chunks.";
 
 const EVENT_TYPE_ALIASES: Record<string, LocalAgentEvent["type"]> = {
   status: "status",
@@ -67,6 +79,7 @@ const LOCAL_CLI_FAILURE_CODES: readonly LocalCliFailureCode[] = [
   "processExit",
   "cancelled",
   "consumerGone",
+  "recoveryUncertain",
   "internal",
 ];
 
@@ -332,9 +345,14 @@ export interface LocalCliHostToolRequest {
   name: string;
   arguments: unknown;
   authorityEpoch?: number;
+  /** A replayed outcome reconstructs history only; it must not execute a tool. */
+  recoveredResolution?: LocalToolResolution;
 }
 
 export interface LocalCliRuntimeHooks {
+  recoveryContext?: () => LocalRecoveryContext;
+  onRecoverySnapshot?: (snapshot: LocalRecoverySnapshot) => Promise<void>;
+  beforeToolDelivery?: () => Promise<void>;
   getToolAuthorityEpoch?: () => number;
   onEvent?: (event: LocalAgentEvent) => void;
   executeHostTool?: (
@@ -345,6 +363,7 @@ export interface LocalCliRuntimeHooks {
 
 export interface LocalCliRunResult {
   runId: string;
+  recoveryLease?: LocalRecoveryLease;
   aborted: boolean;
   sessionId?: string;
   cliVersion?: string;
@@ -359,6 +378,7 @@ export interface LocalCliRunResult {
 export class LocalCliRuntimeError extends Error {
   readonly failure: LocalCliFailure;
   readonly runId?: string;
+  recoveryLease?: LocalRecoveryLease;
 
   constructor(failure: LocalCliFailure, runId?: string, cause?: unknown) {
     super(failure.safeMessage, cause === undefined ? undefined : { cause });
@@ -384,10 +404,21 @@ export interface LocalCliRuntimeDependencies {
     forceRefresh?: boolean,
   ) => Promise<LocalAgentProbe>;
   start: LocalCliRuntimeStart;
+  attach: (
+    runId: string,
+    onEvent: (event: LocalRecoveryEnvelope) => void,
+  ) => Promise<LocalRecoverySnapshot>;
+  claimTool: (
+    runId: string,
+    callId: string,
+    lease: LocalRecoveryLease,
+  ) => Promise<LocalToolClaim>;
   resolveTool: (
     runId: string,
     callId: string,
     result: LocalToolResolution,
+    lease?: LocalRecoveryLease,
+    recoveryContext?: LocalRecoveryContext,
   ) => Promise<void>;
   cancel: (runId: string) => Promise<boolean>;
 }
@@ -402,10 +433,55 @@ const defaultDependencies: LocalCliRuntimeDependencies = {
   inspect: (provider, preference, forceRefresh) =>
     tauri.probeLocalAgent(provider, preference, forceRefresh),
   start: (request, onEvent) => tauri.startLocalAgent(request, onEvent),
-  resolveTool: (runId, callId, result) =>
-    tauri.resolveLocalAgentTool(runId, callId, result),
+  attach: (runId, onEvent) => tauri.attachLocalAgent(runId, onEvent),
+  claimTool: (runId, callId, lease) =>
+    tauri.claimLocalAgentTool(runId, callId, lease),
+  resolveTool: (runId, callId, result, lease, context) =>
+    lease
+      ? tauri.resolveLocalAgentTool(runId, callId, result, lease, context)
+      : tauri.resolveLocalAgentTool(runId, callId, result),
   cancel: (runId) => tauri.cancelLocalAgent(runId),
 };
+
+function normalizeOutputCapabilities(
+  value: unknown,
+): LocalAgentOutputCapabilities | undefined {
+  if (!isRecord(value)) return undefined;
+  const transport = value.transport;
+  if (
+    !isOneOf(transport, [
+      "codexAppServer",
+      "codexExec",
+      "claudeStreamJson",
+      "piRpc",
+      "antigravityStreamJson",
+    ] as const)
+  )
+    return undefined;
+  const granularity = valueWithAliases(
+    value,
+    "textGranularity",
+    "text_granularity",
+  );
+  const reasoning = valueWithAliases(value, "reasoningText", "reasoning_text");
+  return {
+    transport,
+    textGranularity: isOneOf(granularity, [
+      "delta",
+      "message",
+      "unknown",
+    ] as const)
+      ? granularity
+      : "unknown",
+    reasoningText: isOneOf(reasoning, [
+      "supported",
+      "unsupported",
+      "unknown",
+    ] as const)
+      ? reasoning
+      : "unknown",
+  };
+}
 
 function normalizeEvent(
   value: unknown,
@@ -460,6 +536,9 @@ function normalizeEvent(
         valueWithAliases(value, "cliVersion", "cli_version"),
       );
       const resumed = booleanValue(value.resumed);
+      const outputCapabilities = normalizeOutputCapabilities(
+        valueWithAliases(value, "outputCapabilities", "output_capabilities"),
+      );
       if (
         !compatibilityKey ||
         !installationFingerprint ||
@@ -484,6 +563,7 @@ function normalizeEvent(
               valueWithAliases(value, "actualEffort", "actual_effort"),
             ) ?? null,
           resumed,
+          ...(outputCapabilities ? { outputCapabilities } : {}),
         },
       };
     }
@@ -619,6 +699,39 @@ function isAbortError(cause: unknown): boolean {
   );
 }
 
+/** Stop must settle even when a third-party Host operation ignores its signal.
+ * Keep observing the original promise so late failures and cleanup are handled. */
+function awaitHostOperation<T>(
+  operation: Promise<T>,
+  signal: AbortSignal,
+  onLate?: (value: T) => void,
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    let cancelled = false;
+    const abort = () => {
+      cancelled = true;
+      reject(
+        new DOMException("The Host operation was cancelled.", "AbortError"),
+      );
+    };
+    signal.addEventListener("abort", abort, { once: true });
+    if (signal.aborted) abort();
+    void operation
+      .then(
+        (value) => {
+          signal.removeEventListener("abort", abort);
+          if (cancelled) onLate?.(value);
+          else resolve(value);
+        },
+        (error) => {
+          signal.removeEventListener("abort", abort);
+          if (!cancelled) reject(error);
+        },
+      )
+      .catch(() => undefined);
+  });
+}
+
 export class LocalCliRuntime {
   private readonly dependencies: LocalCliRuntimeDependencies;
 
@@ -694,6 +807,7 @@ export class LocalCliRuntime {
     request: LocalAgentStartRequest,
     hooks: LocalCliRuntimeHooks = {},
     signal?: AbortSignal,
+    recovering?: LocalRecoverableRun,
   ): Promise<LocalCliRunResult> {
     if (signal?.aborted) throw createAbortError(request.provider);
 
@@ -701,7 +815,16 @@ export class LocalCliRuntime {
     let preparedAt: number | undefined;
     let sessionAt: number | undefined;
     let firstActivityAt: number | undefined;
-    let runId: string | undefined;
+    let firstTextAt: number | undefined;
+    let firstReasoningAt: number | undefined;
+    let reasoningReceived = false;
+    let runId: string | undefined = recovering?.runId;
+    let recoveryLease: LocalRecoveryLease | undefined = request.recovery
+      ? { owner: request.recovery.owner, epoch: 1 }
+      : undefined;
+    let replayResolutions: Record<string, LocalToolResolution> = {};
+    let uncertainRecovery = false;
+    let replayStaleCalls = new Set<string>();
     let settled = false;
     let abortRequested = false;
     let externallyAborted = false;
@@ -718,7 +841,14 @@ export class LocalCliRuntime {
     let failure: LocalCliFailure | undefined;
     let doneEvent: Extract<LocalAgentEvent, { type: "done" }> | undefined;
     let toolQueue = Promise.resolve();
+    const hostController = new AbortController();
+    let pendingHostTools = 0;
+    let idleTimer: ReturnType<typeof setTimeout> | undefined;
+    let idleNoticeShown = false;
     let deliveryBarrier = false;
+    let barrierStartedAt: number | undefined;
+    let deliveryBarrierMs = 0;
+    let barrierBufferedEvents = 0;
     let barrierAuthorityEpoch: number | undefined;
     const bufferedEvents: LocalAgentEvent[] = [];
     const receivedAuthorityEpochs = new Map<string, number | undefined>();
@@ -731,6 +861,53 @@ export class LocalCliRuntime {
       resolveRun = resolve;
       rejectRun = reject;
     });
+
+    const clearIdleTimer = () => {
+      if (idleTimer !== undefined) clearTimeout(idleTimer);
+      idleTimer = undefined;
+    };
+    const armIdleTimer = () => {
+      clearIdleTimer();
+      if (
+        !startResolved ||
+        settled ||
+        doneEvent ||
+        abortRequested ||
+        pendingHostTools > 0 ||
+        idleNoticeShown
+      )
+        return;
+      idleTimer = setTimeout(() => {
+        if (settled || doneEvent || abortRequested || pendingHostTools > 0)
+          return;
+        onEvent({
+          type: "status",
+          state: "streaming",
+          message: LOCAL_CLI_IDLE_MESSAGE,
+        });
+        idleNoticeShown = true;
+        clearIdleTimer();
+      }, 120_000);
+    };
+    const logToolPhase = (
+      phase: "started" | "executed" | "delivered" | "cancelled" | "failed",
+      callId: string,
+      result?: LocalToolResolution,
+    ) => {
+      console.debug("[local-cli] host tool", {
+        runId: runId ?? "unknown",
+        provider: request.provider,
+        callId,
+        phase,
+        elapsedMs: performance.now() - startedAt,
+        ...(result
+          ? {
+              resultChars: result.text.length,
+              isError: result.isError === true,
+            }
+          : {}),
+      });
+    };
 
     const logTiming = (
       outcome: "completed" | "aborted" | "failed",
@@ -746,6 +923,24 @@ export class LocalCliRuntime {
             : sessionAt - preparedAt,
         firstActivityMs:
           firstActivityAt === undefined ? null : firstActivityAt - startedAt,
+        firstTextMs: firstTextAt === undefined ? null : firstTextAt - startedAt,
+        firstReasoningMs:
+          firstReasoningAt === undefined ? null : firstReasoningAt - startedAt,
+        transport: prepared?.outputCapabilities?.transport ?? "unknown",
+        textGranularity:
+          prepared?.outputCapabilities?.textGranularity ?? "unknown",
+        reasoningTextSupport:
+          prepared?.outputCapabilities?.reasoningText ?? "unknown",
+        protocolFallback: prepared?.outputCapabilities
+          ? prepared.outputCapabilities.transport === "codexExec"
+          : null,
+        reasoningReceived,
+        deliveryBarrierMs:
+          deliveryBarrierMs +
+          (barrierStartedAt === undefined
+            ? 0
+            : performance.now() - barrierStartedAt),
+        barrierBufferedEvents,
         totalMs: performance.now() - startedAt,
         outcome,
         resumed: prepared?.resumed ?? null,
@@ -771,10 +966,12 @@ export class LocalCliRuntime {
     ) => {
       if (settled || !startResolved) return;
       settled = true;
+      clearIdleTimer();
       removeAbortListener?.();
       logTiming(done.aborted || abortRequested ? "aborted" : "completed");
       resolveRun({
         runId: runId ?? "unknown",
+        ...(recoveryLease ? { recoveryLease } : {}),
         aborted: done.aborted || abortRequested,
         sessionId: done.sessionId ?? sessionId,
         cliVersion,
@@ -793,9 +990,12 @@ export class LocalCliRuntime {
     ) => {
       if (settled) return;
       settled = true;
+      clearIdleTimer();
       removeAbortListener?.();
       logTiming("failed", nextFailure);
-      rejectRun(new LocalCliRuntimeError(nextFailure, runId, cause));
+      const error = new LocalCliRuntimeError(nextFailure, runId, cause);
+      error.recoveryLease = recoveryLease;
+      rejectRun(error);
     };
 
     const finish = (done: Extract<LocalAgentEvent, { type: "done" }>) => {
@@ -860,6 +1060,8 @@ export class LocalCliRuntime {
 
     const abort = () => {
       abortRequested = true;
+      clearIdleTimer();
+      hostController.abort();
       if (runId) {
         void this.dependencies.cancel(runId).catch(() => undefined);
       }
@@ -886,6 +1088,28 @@ export class LocalCliRuntime {
       }
 
       const event = normalized.event;
+      if (abortRequested && event.type !== "done" && event.type !== "error")
+        return;
+      // Measure receipt independently of Host delivery and the intentional UI
+      // typewriter. Replayed events retain the original first-receipt times.
+      if (event.type === "textDelta" || event.type === "reasoningDelta") {
+        if (!event.delta) return;
+        if (event.type === "textDelta") firstTextAt ??= performance.now();
+        else {
+          firstReasoningAt ??= performance.now();
+          reasoningReceived ||= event.delta.trim().length > 0;
+        }
+      }
+      if (idleNoticeShown) {
+        idleNoticeShown = false;
+        status = { state: "streaming" };
+        try {
+          hooks.onEvent?.({ type: "status", state: "streaming" });
+        } catch {
+          abort();
+        }
+      }
+      armIdleTimer();
       if (
         event.type === "toolRequest" &&
         !receivedAuthorityEpochs.has(event.callId)
@@ -898,6 +1122,7 @@ export class LocalCliRuntime {
         );
       }
       if (deliveryBarrier && event.type !== "error") {
+        barrierBufferedEvents += 1;
         bufferedEvents.push(event);
         return;
       }
@@ -935,6 +1160,9 @@ export class LocalCliRuntime {
             actualModel: event.actualModel ?? undefined,
             actualEffort: event.actualEffort ?? undefined,
             resumed: event.resumed,
+            ...(event.outputCapabilities
+              ? { outputCapabilities: event.outputCapabilities }
+              : {}),
           };
           cliVersion = event.cliVersion;
           break;
@@ -954,6 +1182,9 @@ export class LocalCliRuntime {
           hadActivity = true;
           if (resolvedToolCalls.has(event.callId)) break;
           resolvedToolCalls.add(event.callId);
+          pendingHostTools += 1;
+          clearIdleTimer();
+          logToolPhase("started", event.callId);
           if (!hooks.executeHostTool) {
             toolQueue = toolQueue.then(async () => {
               const nextFailure = normalizeFailure(
@@ -972,12 +1203,13 @@ export class LocalCliRuntime {
                 code: "toolBridgeFailed",
                 retryPolicy: "none",
               };
-              await this.dependencies
-                .resolveTool(event.runId, event.callId, {
+              await awaitHostOperation(
+                this.dependencies.resolveTool(event.runId, event.callId, {
                   text: failure.safeMessage,
                   isError: true,
-                })
-                .catch(() => undefined);
+                }),
+                hostController.signal,
+              ).catch(() => undefined);
               abort();
             });
             break;
@@ -989,28 +1221,76 @@ export class LocalCliRuntime {
             try {
               barrierAuthorityEpoch = hooks.getToolAuthorityEpoch?.();
               deliveryBarrier = hooks.getToolAuthorityEpoch !== undefined;
-              outcome = await hooks.executeHostTool!(
-                {
-                  type: "toolRequest",
-                  runId: event.runId,
-                  callId: event.callId,
-                  name: event.name,
-                  arguments: event.arguments,
-                  authorityEpoch: receivedAuthorityEpochs.get(event.callId),
+              if (deliveryBarrier) barrierStartedAt = performance.now();
+              let recoveredResolution = replayResolutions[event.callId];
+              if (uncertainRecovery && !recoveredResolution)
+                recoveredResolution = {
+                  text: "Error: this call may have executed before the page disconnected. Its outcome is unknown; it was not repeated.",
+                  isError: true,
+                };
+              if (recoveryLease && !recoveredResolution) {
+                const claim = await this.dependencies.claimTool(
+                  event.runId,
+                  event.callId,
+                  recoveryLease,
+                );
+                if (claim.status === "resolved")
+                  recoveredResolution = claim.resolution;
+              }
+              outcome = await awaitHostOperation(
+                hooks.executeHostTool!(
+                  {
+                    type: "toolRequest",
+                    runId: event.runId,
+                    callId: event.callId,
+                    name: event.name,
+                    arguments: event.arguments,
+                    authorityEpoch: replayStaleCalls.has(event.callId)
+                      ? -1
+                      : receivedAuthorityEpochs.get(event.callId),
+                    ...(recoveredResolution ? { recoveredResolution } : {}),
+                  },
+                  hostController.signal,
+                ),
+                hostController.signal,
+                (late) => {
+                  hadHostSideEffect ||= late.hadSideEffect;
+                  late.onDeliveryFailed?.();
                 },
-                signal ?? new AbortController().signal,
               );
               resultReady = true;
               hadHostSideEffect ||= outcome.hadSideEffect;
-              await this.dependencies.resolveTool(
-                event.runId,
-                event.callId,
-                outcome.resolution,
-              );
+              logToolPhase("executed", event.callId, outcome.resolution);
+              if (!recoveredResolution) {
+                await hooks.beforeToolDelivery?.();
+                await awaitHostOperation(
+                  recoveryLease
+                    ? this.dependencies.resolveTool(
+                        event.runId,
+                        event.callId,
+                        outcome.resolution,
+                        recoveryLease,
+                        hooks.recoveryContext?.(),
+                      )
+                    : this.dependencies.resolveTool(
+                        event.runId,
+                        event.callId,
+                        outcome.resolution,
+                      ),
+                  hostController.signal,
+                );
+              }
+              logToolPhase("delivered", event.callId, outcome.resolution);
               if (!abortRequested && !signal?.aborted) outcome.onDelivered?.();
               else outcome.onDeliveryFailed?.();
             } catch (cause) {
               outcome?.onDeliveryFailed?.();
+              logToolPhase(
+                hostController.signal.aborted || isAbortError(cause)
+                  ? "cancelled"
+                  : "failed",
+                event.callId,
+              );
               // A Stop request unregisters the backend bridge immediately, so a
               // host tool that finishes afterwards cannot deliver its result.
               // That is the expected aborted outcome, not a bridge failure.
@@ -1034,16 +1314,23 @@ export class LocalCliRuntime {
                 retryPolicy: "manual",
               };
               if (!resultReady) {
-                await this.dependencies
-                  .resolveTool(event.runId, event.callId, {
+                await awaitHostOperation(
+                  this.dependencies.resolveTool(event.runId, event.callId, {
                     text: failure.safeMessage,
                     isError: true,
-                  })
-                  .catch(() => undefined);
+                  }),
+                  hostController.signal,
+                ).catch(() => undefined);
               }
               abort();
               throw new LocalCliRuntimeError(failure, event.runId, cause);
             } finally {
+              pendingHostTools -= 1;
+              armIdleTimer();
+              if (barrierStartedAt !== undefined) {
+                deliveryBarrierMs += performance.now() - barrierStartedAt;
+                barrierStartedAt = undefined;
+              }
               deliveryBarrier = false;
               const pending = bufferedEvents.splice(0);
               if (!abortRequested && !signal?.aborted) {
@@ -1083,16 +1370,18 @@ export class LocalCliRuntime {
           warnings = [...warnings, event.message];
           break;
         case "error":
-          failure = normalizeFailure(event.failure, request.provider, {
-            message: event.message,
-            retryable: event.retryable,
-            phase: event.failure?.phase ?? "stream",
-            hadActivity,
-            hadHostSideEffect,
-          });
+          if (failure?.code !== "recoveryUncertain")
+            failure = normalizeFailure(event.failure, request.provider, {
+              message: event.message,
+              retryable: event.retryable,
+              phase: event.failure?.phase ?? "stream",
+              hadActivity,
+              hadHostSideEffect,
+            });
           abort();
           break;
         case "done":
+          clearIdleTimer();
           finish(event);
           break;
       }
@@ -1108,7 +1397,57 @@ export class LocalCliRuntime {
     }
 
     try {
-      const started = await this.dependencies.start(request, onEvent);
+      let started: string;
+      if (recovering) {
+        const live: LocalRecoveryEnvelope[] = [];
+        let replaying = true;
+        let lastSequence = 0;
+        const receive = (envelope: LocalRecoveryEnvelope) => {
+          if (
+            envelope.runId !== recovering.runId ||
+            envelope.sequence <= lastSequence
+          )
+            return;
+          lastSequence = envelope.sequence;
+          onEvent(envelope.event);
+        };
+        const snapshot = await this.dependencies.attach(
+          recovering.runId,
+          (envelope) => {
+            if (replaying) live.push(envelope);
+            else receive(envelope);
+          },
+        );
+        recoveryLease = snapshot.lease;
+        await hooks.onRecoverySnapshot?.(snapshot);
+        replayResolutions = snapshot.resolutions;
+        replayStaleCalls = new Set(snapshot.staleCallIds ?? []);
+        uncertainRecovery = snapshot.uncertain;
+        if (uncertainRecovery)
+          failure = {
+            code: "recoveryUncertain",
+            phase: "tool",
+            provider: request.provider,
+            safeMessage:
+              "The page disconnected during a Host operation. Its outcome is unknown; the operation was not repeated.",
+            diagnosticId: diagnosticId(),
+            hadActivity: true,
+            hadHostSideEffect: true,
+            retryPolicy: "manual",
+          };
+        for (const envelope of snapshot.events) {
+          receive(envelope);
+          await toolQueue;
+        }
+        while (live.length) {
+          receive(live.shift()!);
+          await toolQueue;
+        }
+        replaying = false;
+        started = recovering.runId;
+      } else {
+        started = await this.dependencies.start(request, onEvent);
+      }
       if (typeof started !== "string" || !started) {
         rejectWithFailure(
           normalizeFailure(undefined, request.provider, {
@@ -1124,6 +1463,7 @@ export class LocalCliRuntime {
         startResolved = true;
         if (abortRequested || signal?.aborted) abort();
         if (doneEvent && !settled) finish(doneEvent);
+        armIdleTimer();
       }
     } catch (cause) {
       const nextFailure = normalizeFailure(cause, request.provider, {

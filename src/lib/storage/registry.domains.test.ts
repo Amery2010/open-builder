@@ -121,10 +121,15 @@ describe("storage domain registry", () => {
         id: "projectAssets",
         reason: "owner domain(s) did not clear: conversations",
       },
+      {
+        id: "projectArchives",
+        reason: "owner domain(s) did not clear: conversations",
+      },
     ]);
     expect(clears.snapshots).toHaveBeenCalledOnce();
     expect(clears.templates).toHaveBeenCalledOnce();
     expect(clears.attachments).not.toHaveBeenCalled();
     expect(clears.projectAssets).not.toHaveBeenCalled();
+    expect(clears.projectArchives).not.toHaveBeenCalled();
   });
 });

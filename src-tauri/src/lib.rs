@@ -13,6 +13,10 @@ mod local_agent_claude;
 #[cfg(desktop)]
 mod local_agent_codex;
 #[cfg(desktop)]
+mod local_agent_content;
+#[cfg(all(test, desktop))]
+mod local_agent_manual_tests;
+#[cfg(desktop)]
 mod local_agent_media;
 #[cfg(desktop)]
 mod local_agent_models;
@@ -20,6 +24,8 @@ mod local_agent_models;
 mod local_agent_pi;
 #[cfg(desktop)]
 mod local_agent_protocol;
+#[cfg(desktop)]
+mod local_agent_recovery;
 #[cfg(desktop)]
 mod local_agent_runtime;
 #[cfg(desktop)]
@@ -135,6 +141,10 @@ pub fn run() {
             local_agent::local_agent_resolve_tool,
             local_agent::local_agent_cancel,
             local_agent::local_agent_cancel_all,
+            local_agent_recovery::local_agent_list_recoverable,
+            local_agent_recovery::local_agent_attach,
+            local_agent_recovery::local_agent_claim_tool,
+            local_agent_recovery::local_agent_acknowledge_terminal,
             local_agent_media::local_agent_generate_image,
             local_agent_media::local_agent_cancel_image,
         ]);

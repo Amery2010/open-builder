@@ -1,3 +1,5 @@
+import { isCompressibleImageMimeType } from "../images/formats";
+import { isPreviewViewportSize } from "../design/preview-bridge";
 import type { ToolExecutionOutput } from "../ai/generator-types";
 import {
   ASK_USER_ANSWERS_KIND,
@@ -258,7 +260,8 @@ function sanitizePreviewEvidenceStructuredContent(
     const fullHeight = boundedNumber(viewport?.fullHeight, 1, 1_000_000);
     const elementCount = boundedNumber(semantic?.elementCount, 0, 120);
     if (
-      image?.mimeType !== "image/webp" ||
+      typeof image?.mimeType !== "string" ||
+      !isCompressibleImageMimeType(image.mimeType) ||
       typeof image.digest !== "string" ||
       !/^[a-f0-9]{64}$/.test(image.digest) ||
       !bytes ||
@@ -267,6 +270,9 @@ function sanitizePreviewEvidenceStructuredContent(
       !height ||
       !capturedHeight ||
       !fullHeight ||
+      !isPreviewViewportSize(item.view, width, height) ||
+      capturedHeight > fullHeight ||
+      viewport.truncated !== capturedHeight < fullHeight ||
       typeof viewport.truncated !== "boolean" ||
       typeof semantic?.route !== "string" ||
       typeof semantic.horizontalOverflow !== "boolean" ||
@@ -280,7 +286,7 @@ function sanitizePreviewEvidenceStructuredContent(
     return [
       {
         view: item.view,
-        image: { mimeType: "image/webp", bytes, digest: image.digest },
+        image: { mimeType: image.mimeType, bytes, digest: image.digest },
         viewport: {
           name: item.view,
           width,

@@ -220,8 +220,8 @@ describe("ChatInputToolbar project upload", () => {
     const stop = screen.getByRole("button", { name: "Stop" });
     expect(stop).toHaveClass("size-7");
     const square = stop.querySelector(".lucide-square");
-    expect(square).toHaveAttribute("width", "8");
-    expect(square).toHaveAttribute("height", "8");
+    expect(square).toHaveAttribute("width", "10");
+    expect(square).toHaveAttribute("height", "10");
     expect(
       stop.closest<HTMLElement>('[data-slot="tooltip-trigger"]'),
     ).not.toBeNull();

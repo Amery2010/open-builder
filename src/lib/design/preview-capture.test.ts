@@ -1,11 +1,25 @@
+import {
+  createSourceFile,
+  forEachChild,
+  ScriptKind,
+  ScriptTarget,
+  SyntaxKind,
+  type Node,
+} from "typescript";
+import captureCanvasAdapterSource from "./capture-canvas-adapter.js?raw";
+import { runInNewContext } from "node:vm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   collectDesignReviewCaptures,
+  loadDesignCaptureRuntimeSource,
   DESIGN_REVIEW_VIEWPORTS,
   isDesignReviewViewportReady,
   waitForPreviewReadiness,
 } from "./preview-capture";
-import type { DesignBridgeCaptureResult } from "./preview-bridge";
+import {
+  DESIGN_CAPTURE_RUNTIME_GLOBAL,
+  type DesignBridgeCaptureResult,
+} from "./preview-bridge";
 
 function capture(name: "desktop" | "tablet" | "mobile") {
   return {
@@ -105,10 +119,35 @@ describe("Design preview capture sequence", () => {
     ).toBe(true);
     expect(
       isDesignReviewViewportReady(
-        { ...readiness, captureRuntimeReady: true, width: desktop.width - 5 },
+        { ...readiness, captureRuntimeReady: true, width: 390 },
         desktop,
       ),
     ).toBe(false);
+  });
+
+  it("accepts actual sizes within the requested category", () => {
+    expect(
+      isDesignReviewViewportReady(
+        {
+          bridgeReady: true,
+          captureRuntimeReady: true,
+          width: 1280,
+          height: 720,
+        },
+        DESIGN_REVIEW_VIEWPORTS[0],
+      ),
+    ).toBe(true);
+    expect(
+      isDesignReviewViewportReady(
+        {
+          bridgeReady: true,
+          captureRuntimeReady: true,
+          width: 390,
+          height: 844,
+        },
+        DESIGN_REVIEW_VIEWPORTS[2],
+      ),
+    ).toBe(true);
   });
 
   it("captures the fixed viewports sequentially and always restores", async () => {
@@ -194,5 +233,245 @@ describe("Design preview capture sequence", () => {
       }),
     ).rejects.toMatchObject({ name: "AbortError" });
     expect(restore).toHaveBeenCalledOnce();
+  });
+});
+
+describe("capture runtime script entry", () => {
+  it.each(["browser", "bundler"])(
+    "publishes the actual UMD exports through the host-owned handle in %s",
+    async (environment) => {
+      const source = await loadDesignCaptureRuntimeSource();
+      expect(captureCanvasAdapterSource).not.toMatch(/\?\.|\?\?/);
+      const unsupported: string[] = [];
+      function inspect(node: Node): void {
+        if (
+          node.kind === SyntaxKind.QuestionDotToken ||
+          node.kind === SyntaxKind.QuestionQuestionToken
+        )
+          unsupported.push(node.getText());
+        forEachChild(node, inspect);
+      }
+      inspect(
+        createSourceFile(
+          "capture-runtime.js",
+          source,
+          ScriptTarget.ES2017,
+          true,
+          ScriptKind.JS,
+        ),
+      );
+      expect(unsupported).toEqual([]);
+      expect(source).toContain(
+        captureCanvasAdapterSource.replace(/^export default /m, ""),
+      );
+      const outerExports = {};
+      const define = Object.assign(vi.fn(), { amd: true });
+      const context: Record<string, unknown> =
+        environment === "bundler"
+          ? { exports: outerExports, module: { exports: outerExports }, define }
+          : {};
+      runInNewContext(source, context);
+      expect(context[DESIGN_CAPTURE_RUNTIME_GLOBAL]).toHaveProperty(
+        "toCanvas",
+        expect.any(Function),
+      );
+      expect(context.htmlToImage).toBeUndefined();
+      expect(outerExports).toEqual({});
+      expect(define).not.toHaveBeenCalled();
+    },
+  );
+});
+
+type ImageBehavior =
+  "success" | "load-error" | "decode-error" | "load-timeout" | "decode-timeout";
+function canvasRuntime(behaviors: ImageBehavior[]) {
+  const events: string[] = [];
+  const images: FakeImage[] = [];
+  let active = 0;
+  let maxActive = 0;
+  class FakeImage {
+    onload: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    complete = true;
+    naturalWidth = 100;
+    naturalHeight = 50;
+    crossOrigin = null;
+    value = "";
+    readonly index = images.length;
+    readonly behavior: ImageBehavior;
+    constructor() {
+      this.behavior = behaviors[this.index] ?? "success";
+      images.push(this);
+    }
+    set src(value: string) {
+      this.value = value;
+      if (!value) return;
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      events.push(`start:${this.index}`);
+      queueMicrotask(() => {
+        if (!this.value || this.behavior === "load-timeout") return;
+        if (this.behavior === "load-error") this.onerror?.();
+        else this.onload?.();
+      });
+    }
+    get src() {
+      return this.value;
+    }
+    decode() {
+      if (this.behavior === "decode-error")
+        return Promise.reject(new Error("decode rejected"));
+      if (this.behavior === "decode-timeout")
+        return new Promise<void>(() => {});
+      return Promise.resolve();
+    }
+    removeAttribute(name: string) {
+      if (name === "src" && this.value) {
+        this.value = "";
+        active -= 1;
+        events.push(`clear:${this.index}`);
+      }
+    }
+  }
+  const drawImage = vi.fn((image: FakeImage) => {
+    expect(image.src).toContain("data:image/svg+xml");
+  });
+  const canvas = {
+    width: 0,
+    height: 0,
+    getContext: () => ({ drawImage, fillRect: vi.fn() }),
+  };
+  vi.stubGlobal("Image", FakeImage);
+  vi.stubGlobal("document", { createElement: () => canvas });
+  const runtime = {
+    toSvg: vi.fn(async () => "data:image/svg+xml,<svg></svg>"),
+    toCanvas: vi.fn(
+      async (
+        _node: HTMLElement,
+        _options: {
+          canvasWidth: number;
+          canvasHeight: number;
+          pixelRatio: number;
+          signal?: AbortSignal;
+        },
+      ) => canvas as unknown as HTMLCanvasElement,
+    ),
+  };
+  runInNewContext(
+    `${captureCanvasAdapterSource.replace(/^export default /m, "")}\ninstallCaptureCanvasAdapter(runtime);`,
+    {
+      runtime,
+      Image: FakeImage,
+      document: { createElement: () => canvas },
+      setTimeout,
+      clearTimeout,
+      DOMException,
+      Error,
+      Promise,
+    },
+  );
+  return {
+    runtime,
+    canvas,
+    images,
+    events,
+    drawImage,
+    maxActive: () => maxActive,
+    active: () => active,
+  };
+}
+const captureOptions = { canvasWidth: 100, canvasHeight: 50, pixelRatio: 1 };
+
+describe("controlled SVG image loading", () => {
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+  it.each(["load-error", "decode-error"] as const)(
+    "settles %s and clears each failed image before retrying once",
+    async (behavior) => {
+      const fixture = canvasRuntime([behavior, behavior]);
+      await expect(
+        fixture.runtime.toCanvas({} as HTMLElement, captureOptions),
+      ).rejects.toThrow(
+        behavior === "load-error" ? "failed to load" : "decode rejected",
+      );
+      expect(fixture.events).toEqual([
+        "start:0",
+        "clear:0",
+        "start:1",
+        "clear:1",
+      ]);
+      expect(fixture.maxActive()).toBe(1);
+      expect(fixture.drawImage).not.toHaveBeenCalled();
+    },
+  );
+  it("draws only the second successfully decoded image and releases it", async () => {
+    const fixture = canvasRuntime(["decode-error", "success"]);
+    expect(
+      await fixture.runtime.toCanvas({} as HTMLElement, captureOptions),
+    ).toBe(fixture.canvas);
+    expect(fixture.drawImage).toHaveBeenCalledWith(
+      fixture.images[1],
+      0,
+      0,
+      100,
+      50,
+    );
+    expect(fixture.canvas.width).toBe(100);
+    expect(fixture.canvas.height).toBe(50);
+    expect(fixture.events).toEqual([
+      "start:0",
+      "clear:0",
+      "start:1",
+      "clear:1",
+    ]);
+    expect(fixture.maxActive()).toBe(1);
+    expect(fixture.active()).toBe(0);
+    expect(
+      fixture.images.every(
+        (image) =>
+          image.onload === null &&
+          image.onerror === null &&
+          image.crossOrigin === null,
+      ),
+    ).toBe(true);
+  });
+  it.each(["load-timeout", "decode-timeout"] as const)(
+    "settles %s within two bounded attempts",
+    async (behavior) => {
+      vi.useFakeTimers();
+      const fixture = canvasRuntime([behavior, behavior]);
+      const result = fixture.runtime
+        .toCanvas({} as HTMLElement, captureOptions)
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(await result).toMatchObject({
+        message: "Screenshot image load/decode timed out.",
+      });
+      expect(fixture.images).toHaveLength(2);
+      expect(fixture.maxActive()).toBe(1);
+      expect(fixture.active()).toBe(0);
+      expect(vi.getTimerCount()).toBe(0);
+      expect(fixture.drawImage).not.toHaveBeenCalled();
+    },
+  );
+  it("aborts an in-flight decode immediately without a retry", async () => {
+    vi.useFakeTimers();
+    const fixture = canvasRuntime(["decode-timeout"]);
+    const controller = new AbortController();
+    const result = fixture.runtime
+      .toCanvas({} as HTMLElement, {
+        ...captureOptions,
+        signal: controller.signal,
+      })
+      .catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(0);
+    controller.abort();
+    expect(await result).toMatchObject({ name: "AbortError" });
+    expect(fixture.images).toHaveLength(1);
+    expect(fixture.active()).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

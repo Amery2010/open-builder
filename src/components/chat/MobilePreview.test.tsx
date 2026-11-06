@@ -12,10 +12,23 @@ const refresh = vi.fn();
 const projectFilesForSandpack = vi.hoisted(() =>
   vi.fn(async (files: Record<string, string>) => files),
 );
-const sandpackMock = vi.hoisted(() => ({ error: null as Error | null }));
+const sandpackMock = vi.hoisted(() => ({
+  error: null as Error | null,
+  files: {} as Record<string, { code: string }>,
+}));
 
-vi.mock("@codesandbox/sandpack-react", () => ({
-  SandpackProvider: ({ children }: { children: ReactNode }) => {
+vi.mock("@codesandbox/sandpack-react", async (importOriginal) => ({
+  SANDBOX_TEMPLATES: (
+    await importOriginal<typeof import("@codesandbox/sandpack-react")>()
+  ).SANDBOX_TEMPLATES,
+  SandpackProvider: ({
+    children,
+    files,
+  }: {
+    children: ReactNode;
+    files: Record<string, { code: string }>;
+  }) => {
+    sandpackMock.files = files;
     if (sandpackMock.error) throw sandpackMock.error;
     return <div>{children}</div>;
   },
@@ -38,6 +51,10 @@ vi.mock("@codesandbox/sandpack-react", () => ({
   useSandpackNavigation: () => ({ refresh }),
 }));
 
+vi.mock("../code-viewer/SandpackRuntimeSync", () => ({
+  SandpackRuntimeSync: () => null,
+}));
+
 vi.mock("../../hooks/useTheme", () => ({ useTheme: () => false }));
 
 vi.mock("../../lib/project-assets/core", () => ({
@@ -53,7 +70,27 @@ describe("MobilePreview", () => {
     useConversationStore.setState({ activeId: null, conversations: {} });
   });
 
-  it("uses navigation refresh and disables shell restart", async () => {
+  it("uses the Vite clear-screen workaround for mobile previews too", () => {
+    const files = {
+      "package.json": JSON.stringify({ scripts: { dev: "vite" } }),
+    };
+    render(
+      <TooltipProvider>
+        <MobilePreview
+          files={files}
+          template="vite-react"
+          sandpackKey={0}
+          onReloadPreview={vi.fn()}
+        />
+      </TooltipProvider>,
+    );
+    expect(
+      JSON.parse(sandpackMock.files["/package.json"].code).scripts.dev,
+    ).toBe("vite --clearScreen false");
+    expect(JSON.parse(files["package.json"]).scripts.dev).toBe("vite");
+  });
+
+  it("rebuilds the preview through its owner", async () => {
     const user = userEvent.setup();
     const onReloadPreview = vi.fn();
     refresh.mockClear();
@@ -69,8 +106,8 @@ describe("MobilePreview", () => {
     );
 
     await user.click(screen.getByRole("button", { name: "Reload preview" }));
-    expect(refresh).toHaveBeenCalledOnce();
-    expect(onReloadPreview).not.toHaveBeenCalled();
+    expect(refresh).not.toHaveBeenCalled();
+    expect(onReloadPreview).toHaveBeenCalledOnce();
     expect(document.querySelector("[data-refresh='false']")).not.toBeNull();
     expect(document.querySelector("[data-restart='false']")).not.toBeNull();
   });

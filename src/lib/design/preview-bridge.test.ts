@@ -4,10 +4,12 @@ import { describe, expect, it, vi } from "vitest";
 import { createIsolatedPreviewSession } from "./prototype-preview-session";
 import {
   DESIGN_BRIDGE_CAPTURE_MAX_HEIGHT,
+  designBridgeRuntimeRevision,
   DESIGN_BRIDGE_MARKER,
   DESIGN_BRIDGE_PAYLOAD_MAX_BYTES,
   DESIGN_BRIDGE_VIRTUAL_PATH,
   DESIGN_CAPTURE_RUNTIME_VIRTUAL_PATH,
+  DESIGN_CAPTURE_RUNTIME_GLOBAL,
   DESIGN_RUNTIME_TOKEN_NAMES,
   formatDesignSelectionForModel,
   getDesignPreviewRoute,
@@ -312,14 +314,22 @@ describe("Design preview bridge", () => {
     expect(result.files[DESIGN_CAPTURE_RUNTIME_VIRTUAL_PATH]).toBe(
       "window.htmlToImage = {};",
     );
-    expect(result.files[DESIGN_BRIDGE_VIRTUAL_PATH]).toContain(
-      DESIGN_CAPTURE_RUNTIME_VIRTUAL_PATH,
+    expect(result.files["index.html"]).toContain(
+      `src="/${DESIGN_CAPTURE_RUNTIME_VIRTUAL_PATH}"`,
+    );
+    expect(
+      result.files["index.html"].indexOf(DESIGN_CAPTURE_RUNTIME_VIRTUAL_PATH),
+    ).toBeLessThan(
+      result.files["index.html"].indexOf(DESIGN_BRIDGE_VIRTUAL_PATH),
+    );
+    expect(stripDesignBridge(result.files["index.html"])).toBe(
+      "<!doctype html><body><main></main>\n</body>",
     );
     expect(result.files[DESIGN_BRIDGE_VIRTUAL_PATH]).toContain(
       "var CAPTURE_RUNTIME_AVAILABLE = true;",
     );
     expect(result.files[DESIGN_BRIDGE_VIRTUAL_PATH]).toContain(
-      "captureRuntimeAvailable: CAPTURE_RUNTIME_AVAILABLE",
+      "captureRuntimeAvailable: Boolean(captureRuntime())",
     );
     expect(result.files[DESIGN_BRIDGE_VIRTUAL_PATH]).toContain(
       'var GENERATION = "generation-a";',
@@ -533,7 +543,7 @@ describe("Design preview bridge", () => {
     );
   });
 
-  it("validates capture identity, MIME, signature, decoded dimensions, and semantics", () => {
+  it("validates capture identity, image bytes, decoded dimensions, and semantics", () => {
     const expectation = {
       generation: "generation-a",
       nonce: "0123456789abcdef0123456789abcdef",
@@ -599,6 +609,27 @@ describe("Design preview bridge", () => {
     };
 
     expect(
+      parseDesignBridgeCaptureResponse(
+        {
+          ...message,
+          payload: {
+            ...message.payload,
+            dataUrl: webpDataUrl(1280, DESIGN_BRIDGE_CAPTURE_MAX_HEIGHT),
+            viewport: { ...message.payload.viewport, width: 1280, height: 720 },
+            semanticSnapshot: {
+              ...message.payload.semanticSnapshot,
+              viewport: { width: 1280, height: 720, devicePixelRatio: 2 },
+            },
+          },
+        },
+        expectation,
+      ),
+    ).toMatchObject({
+      ok: true,
+      result: { viewport: { width: 1280, height: 720 } },
+    });
+
+    expect(
       parseDesignBridgeCaptureResponse(message, expectation),
     ).toMatchObject({
       ok: true,
@@ -651,7 +682,7 @@ describe("Design preview bridge", () => {
         },
         expectation,
       ),
-    ).toBeNull();
+    ).toMatchObject({ ok: true, result: { mimeType: "image/webp" } });
     expect(
       parseDesignBridgeCaptureResponse(
         {
@@ -899,118 +930,95 @@ describe("Design preview bridge", () => {
     iframe.remove();
   });
 
-  it.each(["success", "timeout"])(
-    "waits three windows for one screenshot library download and one capture (%s)",
-    async (outcome) => {
+  it.each([true, false])(
+    "captures only with a genuinely available static runtime (%s)",
+    async (available) => {
       vi.useFakeTimers();
       const iframe = document.createElement("iframe");
       document.body.appendChild(iframe);
-      const previewWindow = iframe.contentWindow as Window & typeof globalThis;
-      const previewDocument = iframe.contentDocument!;
-      previewDocument.open();
-      previewDocument.write("<!doctype html><body><main>Preview</main></body>");
-      previewDocument.close();
+      const frame = iframe.contentWindow as Window & typeof globalThis;
       const messages: Record<string, unknown>[] = [];
-      Object.defineProperty(previewWindow, "parent", {
+      Object.defineProperty(frame, "parent", {
         configurable: true,
-        value: previewWindow,
+        value: frame,
       });
-      previewWindow.postMessage = ((message: Record<string, unknown>) => {
+      frame.postMessage = ((message: Record<string, unknown>) => {
         messages.push(message);
-      }) as typeof previewWindow.postMessage;
-      previewWindow.setTimeout = window.setTimeout.bind(window);
-      previewWindow.clearTimeout = window.clearTimeout.bind(window);
-      previewWindow.requestAnimationFrame = (callback) => {
+      }) as typeof frame.postMessage;
+      frame.requestAnimationFrame = (callback) => {
         callback(0);
         return 0;
       };
-      previewWindow.scrollTo = () => {};
-      const append = vi.spyOn(previewDocument.head, "appendChild");
+      frame.scrollTo = () => {};
+      const toCanvas = vi.fn(async () => ({
+        toDataURL: () => webpDataUrl(1024, 768),
+      }));
+      if (available)
+        Object.defineProperty(frame, DESIGN_CAPTURE_RUNTIME_GLOBAL, {
+          value: { toCanvas },
+        });
+      const append = vi.spyOn(frame.document.head, "appendChild");
       try {
         const result = injectDesignBridge(
           { "index.html": "<!doctype html><body></body>" },
           "static",
           true,
-          undefined,
+          "capture runtime",
           "generation-a",
         );
-        previewWindow.eval(result.files[DESIGN_BRIDGE_VIRTUAL_PATH]);
-        const requestId = "abcdef0123456789abcdef0123456789";
-        previewWindow.dispatchEvent(
-          new previewWindow.MessageEvent("message", {
-            source: previewWindow,
-            origin: "https://builder.example.test",
+        frame.eval(result.files[DESIGN_BRIDGE_VIRTUAL_PATH]);
+        expect(messages.at(-1)).toMatchObject({
+          captureRuntimeAvailable: available,
+        });
+        frame.dispatchEvent(
+          new frame.MessageEvent("message", {
+            source: frame,
+            origin: "https://builder.test",
             data: {
               type: "open-builder:design-bridge-capture",
               version: 1,
               generation: "generation-a",
-              nonce: "0123456789abcdef0123456789abcdef",
-              requestId,
+              nonce: "capture-1",
+              requestId: "request-1",
               viewport: { name: "desktop", width: 1024, height: 768 },
             },
           }),
         );
-        expect(append).toHaveBeenCalledOnce();
-        await vi.advanceTimersByTimeAsync(8000);
-        expect(append).toHaveBeenCalledOnce();
-        expect(
-          messages.some(
-            (message) =>
-              message.type === "open-builder:design-bridge-capture-error",
-          ),
-        ).toBe(false);
-        if (outcome === "success") {
-          const toCanvas = vi.fn(async () => ({
-            toDataURL: () => webpDataUrl(1024, 768),
-          }));
-          Object.defineProperty(previewWindow, "htmlToImage", {
-            configurable: true,
+        await vi.advanceTimersByTimeAsync(0);
+        expect(append).not.toHaveBeenCalled();
+        if (available) {
+          expect(toCanvas).toHaveBeenCalledOnce();
+          expect(messages.at(-1)).toMatchObject({
+            type: "open-builder:design-bridge-capture-result",
+            requestId: "request-1",
+          });
+        } else {
+          expect(toCanvas).not.toHaveBeenCalled();
+          expect(messages.at(-1)).toMatchObject({
+            type: "open-builder:design-bridge-capture-error",
+            error: expect.stringContaining("unavailable"),
+          });
+          Object.defineProperty(frame, DESIGN_CAPTURE_RUNTIME_GLOBAL, {
             value: { toCanvas },
           });
-          previewDocument
-            .querySelector("script[data-ob-design-capture-runtime]")!
-            .dispatchEvent(new previewWindow.Event("load"));
-          await vi.advanceTimersByTimeAsync(0);
-          expect(toCanvas).toHaveBeenCalledOnce();
-          expect(
-            messages.filter(
-              (message) =>
-                message.type === "open-builder:design-bridge-capture-result",
-            ),
-          ).toEqual([
-            expect.objectContaining({ requestId, generation: "generation-a" }),
-          ]);
-        } else {
-          await vi.advanceTimersByTimeAsync(8000);
-          expect(
-            messages.some(
-              (message) =>
-                message.type === "open-builder:design-bridge-capture-error",
-            ),
-          ).toBe(false);
-          await vi.advanceTimersByTimeAsync(8000);
-          expect(append).toHaveBeenCalledOnce();
-          expect(
-            messages.filter(
-              (message) =>
-                message.type === "open-builder:design-bridge-capture-error",
-            ),
-          ).toEqual([
-            expect.objectContaining({
-              requestId,
-              error: expect.stringContaining("timed out"),
-            }),
-          ]);
+          frame.dispatchEvent(
+            new frame.Event("open-builder:capture-runtime-ready"),
+          );
+          expect(messages.at(-1)).toMatchObject({
+            type: "open-builder:design-bridge-ready",
+            captureRuntimeAvailable: true,
+          });
         }
       } finally {
         append.mockRestore();
         iframe.remove();
+        vi.clearAllTimers();
         vi.useRealTimers();
       }
     },
   );
 
-  it("does not start another screenshot library download after the parent stops", async () => {
+  it("does not start a runtime download or return a capture after the parent stops", async () => {
     vi.useFakeTimers();
     const controller = new AbortController();
     const source = document.createElement("iframe");
@@ -1036,6 +1044,9 @@ describe("Design preview bridge", () => {
     previewWindow.setTimeout = window.setTimeout.bind(window);
     previewWindow.clearTimeout = window.clearTimeout.bind(window);
     previewWindow.scrollTo = () => {};
+    Object.defineProperty(previewWindow, DESIGN_CAPTURE_RUNTIME_GLOBAL, {
+      value: { toCanvas: () => new Promise(() => {}) },
+    });
     const append = vi.spyOn(previewDocument.head, "appendChild");
     const toHost = vi
       .spyOn(window, "postMessage")
@@ -1087,14 +1098,14 @@ describe("Design preview bridge", () => {
           scenarioId: "default",
         },
       );
-      expect(append).toHaveBeenCalledOnce();
+      expect(append).not.toHaveBeenCalled();
       const stopped = expect(capture).rejects.toMatchObject({
         name: "AbortError",
       });
       controller.abort();
       await stopped;
       await vi.advanceTimersByTimeAsync(24000);
-      expect(append).toHaveBeenCalledOnce();
+      expect(append).not.toHaveBeenCalled();
       expect(toPreview).toHaveBeenCalledOnce();
       expect(
         toHost.mock.calls.filter(
@@ -1186,4 +1197,452 @@ describe("Design preview bridge", () => {
       ),
     ).toBe("*");
   });
+});
+
+describe("preview bridge runtime upgrades", () => {
+  it("does not scroll or reply from a capture replaced while fonts are loading", async () => {
+    vi.useFakeTimers();
+    const iframe = document.createElement("iframe");
+    document.body.appendChild(iframe);
+    try {
+      const frame = iframe.contentWindow as Window & typeof globalThis;
+      const messages: Record<string, unknown>[] = [];
+      Object.defineProperty(frame, "parent", {
+        configurable: true,
+        value: frame,
+      });
+      frame.postMessage = ((message: Record<string, unknown>) => {
+        messages.push(message);
+      }) as typeof frame.postMessage;
+      const scroll = vi.fn();
+      frame.scrollTo = scroll;
+      frame.requestAnimationFrame = (callback) => {
+        callback(0);
+        return 1;
+      };
+      const toCanvas = vi.fn();
+      Object.defineProperty(frame, DESIGN_CAPTURE_RUNTIME_GLOBAL, {
+        value: { toCanvas },
+      });
+      let resolveFonts!: () => void;
+      let waitingForFonts = false;
+      const fontsReady = new Promise<void>((resolve) => {
+        resolveFonts = resolve;
+      });
+      Object.defineProperty(frame.document, "fonts", {
+        configurable: true,
+        value: {
+          get ready() {
+            waitingForFonts = true;
+            return fontsReady;
+          },
+          status: "loading",
+        },
+      });
+      const files = { "index.html": "<!doctype html><body></body>" };
+      const generation = "a".repeat(64);
+      frame.eval(
+        injectDesignBridge(files, "static", true, "capture library", generation)
+          .files[DESIGN_BRIDGE_VIRTUAL_PATH],
+      );
+      frame.dispatchEvent(
+        new frame.MessageEvent("message", {
+          source: frame,
+          origin: "https://builder.test",
+          data: {
+            type: "open-builder:design-bridge-capture",
+            version: 1,
+            generation,
+            nonce: "capture-1",
+            requestId: "request-1",
+            viewport: { name: "desktop", width: 1440, height: 900 },
+          },
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(waitingForFonts).toBe(true);
+      expect(scroll).not.toHaveBeenCalled();
+      frame.eval(
+        injectDesignBridge(
+          files,
+          "static",
+          true,
+          "capture library",
+          "b".repeat(64),
+        ).files[DESIGN_BRIDGE_VIRTUAL_PATH],
+      );
+      resolveFonts();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(scroll).not.toHaveBeenCalled();
+      expect(toCanvas).not.toHaveBeenCalled();
+      expect(
+        messages.filter((message) =>
+          String(message.type).startsWith(
+            "open-builder:design-bridge-capture-",
+          ),
+        ),
+      ).toEqual([]);
+    } finally {
+      iframe.remove();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("replaces an old capture capability and only acknowledges the current revision", () => {
+    const iframe = document.createElement("iframe");
+    document.body.appendChild(iframe);
+    const frame = iframe.contentWindow as Window & typeof globalThis;
+    const messages: Record<string, unknown>[] = [];
+    Object.defineProperty(frame, "parent", {
+      configurable: true,
+      value: frame,
+    });
+    frame.postMessage = ((message: Record<string, unknown>) => {
+      messages.push(message);
+    }) as typeof frame.postMessage;
+    const files = { "index.html": "<!doctype html><body></body>" };
+    const generation = "a".repeat(64);
+    const initial = injectDesignBridge(
+      files,
+      "static",
+      true,
+      undefined,
+      generation,
+    );
+    const upgraded = injectDesignBridge(
+      files,
+      "static",
+      true,
+      "capture library",
+      generation,
+    );
+    frame.eval(initial.files[DESIGN_BRIDGE_VIRTUAL_PATH]);
+    expect(messages.at(-1)?.captureRuntimeAvailable).toBe(false);
+    Object.defineProperty(frame, DESIGN_CAPTURE_RUNTIME_GLOBAL, {
+      value: { toCanvas: vi.fn() },
+    });
+    frame.eval(upgraded.files[DESIGN_BRIDGE_VIRTUAL_PATH]);
+    frame.eval(upgraded.files[DESIGN_BRIDGE_VIRTUAL_PATH]);
+    expect(messages.at(-1)?.captureRuntimeAvailable).toBe(true);
+    expect(
+      frame.document.querySelectorAll("[data-ob-design-overlay]"),
+    ).toHaveLength(1);
+    messages.length = 0;
+    function request(runtimeRevision: string) {
+      frame.dispatchEvent(
+        new frame.MessageEvent("message", {
+          source: frame,
+          origin: "https://builder.test",
+          data: {
+            type: "open-builder:design-bridge-readiness",
+            version: 1,
+            generation,
+            runtimeRevision,
+            nonce: "capture-request-1",
+          },
+        }),
+      );
+    }
+    request(designBridgeRuntimeRevision(generation, false));
+    expect(messages).toHaveLength(0);
+    request(designBridgeRuntimeRevision(generation, true));
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      generation,
+      nonce: "capture-request-1",
+      captureRuntimeAvailable: true,
+    });
+    iframe.remove();
+  });
+});
+
+function fallbackImageDataUrl(
+  mimeType: "image/png" | "image/jpeg",
+  width: number,
+  height: number,
+): string {
+  let bytes: Uint8Array;
+  if (mimeType === "image/png") {
+    bytes = new Uint8Array(45);
+    bytes.set([137, 80, 78, 71, 13, 10, 26, 10]);
+    bytes.set([0, 0, 0, 13, 73, 72, 68, 82], 8);
+    const view = new DataView(bytes.buffer);
+    view.setUint32(16, width);
+    view.setUint32(20, height);
+    bytes.set([8, 6], 24);
+    bytes.set([73, 69, 78, 68], 37);
+  } else {
+    bytes = Uint8Array.from([
+      255,
+      216,
+      255,
+      192,
+      0,
+      11,
+      8,
+      height >> 8,
+      height & 255,
+      width >> 8,
+      width & 255,
+      1,
+      1,
+      17,
+      0,
+      255,
+      217,
+    ]);
+  }
+  return `data:${mimeType};base64,${btoa(Array.from(bytes, (byte) => String.fromCharCode(byte)).join(""))}`;
+}
+
+describe("preview screenshot format fallback", () => {
+  it.each(["image/png", "image/jpeg"] as const)(
+    "returns and validates actual %s bytes when WebP is unavailable",
+    async (mimeType) => {
+      vi.useFakeTimers();
+      const iframe = document.createElement("iframe");
+      document.body.appendChild(iframe);
+      try {
+        const frame = iframe.contentWindow as Window & typeof globalThis;
+        const messages: Record<string, unknown>[] = [];
+        Object.defineProperty(frame, "parent", {
+          configurable: true,
+          value: frame,
+        });
+        frame.postMessage = ((message: Record<string, unknown>) => {
+          messages.push(message);
+        }) as typeof frame.postMessage;
+        frame.scrollTo = () => {};
+        frame.requestAnimationFrame = (callback) => {
+          callback(0);
+          return 0;
+        };
+        const png = fallbackImageDataUrl("image/png", 1024, 768);
+        const jpeg = fallbackImageDataUrl("image/jpeg", 1024, 768);
+        const oversizedPng = png.slice(0, -4) + "A".repeat(2_100_000);
+        const toDataURL = vi.fn((requested: string) => {
+          if (mimeType === "image/png") return png;
+          return requested === "image/jpeg" ? jpeg : oversizedPng;
+        });
+        Object.defineProperty(frame, DESIGN_CAPTURE_RUNTIME_GLOBAL, {
+          value: { toCanvas: async () => ({ toDataURL }) },
+        });
+        const generation = "generation-formats";
+        frame.eval(
+          injectDesignBridge(
+            { "index.html": "<!doctype html><body></body>" },
+            "static",
+            true,
+            "runtime",
+            generation,
+          ).files[DESIGN_BRIDGE_VIRTUAL_PATH],
+        );
+        const expectation = {
+          generation,
+          nonce: "nonce-formats",
+          requestId: "request-formats",
+          viewportName: "desktop" as const,
+          viewportWidth: 1440,
+          viewportHeight: 900,
+        };
+        frame.dispatchEvent(
+          new frame.MessageEvent("message", {
+            source: frame,
+            origin: "https://builder.test",
+            data: {
+              type: "open-builder:design-bridge-capture",
+              version: 1,
+              ...expectation,
+              viewport: { name: "desktop", width: 1440, height: 900 },
+            },
+          }),
+        );
+        await vi.advanceTimersByTimeAsync(0);
+        const result = messages.find(
+          (message) =>
+            message.type === "open-builder:design-bridge-capture-result",
+        )!;
+        expect(result).toBeDefined();
+        expect(
+          parseDesignBridgeCaptureResponse(result, expectation),
+        ).toMatchObject({
+          ok: true,
+          result: { mimeType, viewport: { width: 1024, height: 768 } },
+        });
+        expect(toDataURL.mock.calls[0][0]).toBe("image/webp");
+        if (mimeType === "image/jpeg")
+          expect(toDataURL.mock.calls.at(-1)?.[0]).toBe("image/jpeg");
+        const payload = result.payload as Record<string, unknown>;
+        expect(
+          parseDesignBridgeCaptureResponse(
+            { ...result, payload: { ...payload, mimeType: "image/webp" } },
+            expectation,
+          ),
+        ).toMatchObject({ ok: true, result: { mimeType } });
+        expect(
+          parseDesignBridgeCaptureResponse(
+            {
+              ...result,
+              payload: {
+                ...payload,
+                mimeType: undefined,
+                dataUrl: String(payload.dataUrl).replace(
+                  mimeType,
+                  "image/webp",
+                ),
+              },
+            },
+            expectation,
+          ),
+        ).toMatchObject({
+          ok: true,
+          result: { mimeType, dataUrl: payload.dataUrl },
+        });
+        expect(
+          parseDesignBridgeCaptureResponse(
+            {
+              ...result,
+              payload: {
+                ...payload,
+                dataUrl: fallbackImageDataUrl(mimeType, 1200, 768),
+              },
+            },
+            expectation,
+          ),
+        ).toBeNull();
+        expect(
+          parseDesignBridgeCaptureResponse(
+            {
+              ...result,
+              payload: {
+                ...payload,
+                dataUrl: `data:${mimeType};base64,${btoa("not an image")}`,
+              },
+            },
+            expectation,
+          ),
+        ).toBeNull();
+      } finally {
+        iframe.remove();
+        vi.clearAllTimers();
+        vi.useRealTimers();
+      }
+    },
+  );
+});
+
+describe("capture viewport and cancellation identity", () => {
+  it.each(["resize", "cancel"])(
+    "explicitly terminates an in-flight capture on %s",
+    async (mode) => {
+      vi.useFakeTimers();
+      const iframe = document.createElement("iframe");
+      document.body.appendChild(iframe);
+      try {
+        const frame = iframe.contentWindow as Window & typeof globalThis;
+        const messages: Record<string, unknown>[] = [];
+        Object.defineProperty(frame, "parent", {
+          configurable: true,
+          value: frame,
+        });
+        frame.postMessage = ((message: Record<string, unknown>) => {
+          messages.push(message);
+        }) as typeof frame.postMessage;
+        frame.scrollTo = () => {};
+        frame.requestAnimationFrame = (callback) => {
+          callback(0);
+          return 0;
+        };
+        let loaderSignal: AbortSignal | undefined;
+        let finish!: () => void;
+        const toCanvas = vi.fn(
+          (
+            _node: unknown,
+            options: {
+              width: number;
+              canvasWidth: number;
+              signal: AbortSignal;
+            },
+          ) => {
+            expect(options.width).toBe(1024);
+            expect(options.canvasWidth).toBe(1024);
+            loaderSignal = options.signal;
+            return new Promise((resolve, reject) => {
+              finish = () =>
+                resolve({ toDataURL: () => webpDataUrl(1024, 768) });
+              options.signal.addEventListener(
+                "abort",
+                () => reject(options.signal.reason),
+                { once: true },
+              );
+            });
+          },
+        );
+        Object.defineProperty(frame, DESIGN_CAPTURE_RUNTIME_GLOBAL, {
+          value: { toCanvas },
+        });
+        const generation = "generation-viewport";
+        frame.eval(
+          injectDesignBridge(
+            { "index.html": "<!doctype html><body></body>" },
+            "static",
+            true,
+            "runtime",
+            generation,
+          ).files[DESIGN_BRIDGE_VIRTUAL_PATH],
+        );
+        function send(type: string, nonce = "nonce-current") {
+          frame.dispatchEvent(
+            new frame.MessageEvent("message", {
+              source: frame,
+              origin: "https://builder.test",
+              data: {
+                type,
+                version: 1,
+                generation,
+                nonce,
+                requestId: "request-current",
+                viewport: { name: "desktop", width: 1440, height: 900 },
+              },
+            }),
+          );
+        }
+        send("open-builder:design-bridge-capture");
+        await vi.advanceTimersByTimeAsync(0);
+        expect(toCanvas).toHaveBeenCalledOnce();
+        if (mode === "resize") {
+          Object.defineProperty(frame, "innerWidth", {
+            configurable: true,
+            value: 1200,
+          });
+          finish();
+        } else {
+          send("open-builder:design-bridge-cancel-capture", "nonce-stale");
+          expect(loaderSignal!.aborted).toBe(false);
+          send("open-builder:design-bridge-cancel-capture");
+          expect(loaderSignal!.aborted).toBe(true);
+        }
+        await vi.advanceTimersByTimeAsync(0);
+        expect(
+          messages.filter(
+            (message) =>
+              message.type === "open-builder:design-bridge-capture-result",
+          ),
+        ).toEqual([]);
+        expect(messages.at(-1)).toMatchObject({
+          type: "open-builder:design-bridge-capture-error",
+          error: expect.stringContaining(
+            mode === "resize"
+              ? "changed during capture from 1024x768 to 1200x768"
+              : "cancelled",
+          ),
+        });
+      } finally {
+        iframe.remove();
+        vi.clearAllTimers();
+        vi.useRealTimers();
+      }
+    },
+  );
 });

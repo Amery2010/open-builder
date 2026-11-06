@@ -1,4 +1,4 @@
-import { tool, type ToolSet } from "ai";
+import { asSchema, tool, type ToolSet } from "ai";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import {
@@ -29,6 +29,87 @@ const tools: ToolSet = {
 };
 
 describe("local Host Tool Authority", () => {
+  it("exposes and enforces complete blueprint pages for API and Local CLI tools", async () => {
+    const apiSchema = asSchema(
+      DESIGN_HOST_TOOLS.update_project_design.inputSchema,
+    );
+    const local = await createLocalToolAuthoritySnapshot({
+      tools: { update_project_design: DESIGN_HOST_TOOLS.update_project_design },
+      mode: "chat",
+      platform: "desktop",
+    });
+    const jsonSchema = await apiSchema.jsonSchema;
+    expect(jsonSchema).toMatchObject({
+      properties: {
+        document: {
+          properties: {
+            pages: {
+              items: {
+                properties: {
+                  responsibility: { type: "string", minLength: 1 },
+                },
+                required: expect.arrayContaining(["responsibility"]),
+              },
+            },
+          },
+        },
+      },
+    });
+    expect(local.get("update_project_design")?.spec.inputSchema).toEqual(
+      jsonSchema,
+    );
+
+    const page = {
+      id: "home",
+      route: "/",
+      kind: "home",
+      defaultScenario: "default",
+    };
+    const document = {
+      schemaVersion: 1,
+      productGoal: "Introduce the product",
+      audience: "New customers",
+      revision: 1,
+      pages: [page],
+      layouts: [],
+      sharedUiRefs: [],
+      flows: [],
+      scenarios: [{ id: "default", name: "Default", kind: "default" }],
+      buildProgress: { status: "planned", percent: 0 },
+    };
+    for (const responsibility of [undefined, ""]) {
+      const input = {
+        document: { ...document, pages: [{ ...page, responsibility }] },
+      };
+      expect(await apiSchema.validate?.(input)).toMatchObject({
+        success: false,
+      });
+      expect(
+        await local.validate("update_project_design", input),
+      ).toMatchObject({ success: false });
+    }
+    const valid = {
+      document: {
+        ...document,
+        pages: [
+          { ...page, responsibility: "Explain the product and next step" },
+        ],
+      },
+    };
+    expect(await apiSchema.validate?.(valid)).toMatchObject({
+      success: true,
+      value: {
+        document: {
+          schemaVersion: "open-builder-design-project/v1",
+          buildProgress: { status: "not-started" },
+        },
+      },
+    });
+    expect(await local.validate("update_project_design", valid)).toMatchObject({
+      success: true,
+    });
+  });
+
   it("serializes the exact Web Host run authority", async () => {
     const context = {
       runId: "parity-run",

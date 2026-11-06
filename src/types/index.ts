@@ -165,6 +165,24 @@ export interface MergedMessage {
  *      CHECKPOINT_INTERVAL patches.
  */
 export interface ProjectSnapshot {
+  branchId?: string;
+  /** Explicit ancestry for new snapshots; undefined identifies a legacy linear chain. */
+  parentSnapshotId?: string | null;
+  /** Diagnostic count only; message filtering can invalidate positional offsets. */
+  messageCount?: number;
+  /** Stable last retained message at publication, before later turns can append. */
+  endMessageId?: string;
+  /** Legacy positional links have been resolved once (including unlinked records). */
+  messageLinkVersion?: 1;
+  hidden?: boolean;
+  projectState?: Pick<
+    Conversation,
+    | "template"
+    | "previewMode"
+    | "designState"
+    | "activeFile"
+    | "isProjectInitialized"
+  >;
   id: string;
   /** The conversation this snapshot belongs to */
   conversationId: string;
@@ -311,7 +329,41 @@ export interface PendingUserInstruction {
   status: "queued" | "delivering" | "cancelled" | "failed" | "uncertain";
 }
 
+export interface ConversationBranchState {
+  messages: _Message[];
+  files: _ProjectFiles;
+  assets?: ProjectAssets;
+  template: string;
+  previewMode?: ProjectPreviewMode;
+  isProjectInitialized: boolean;
+  designState?: ConversationDesignState;
+  activeFile?: string;
+  compressedContext?: CompressedContext;
+}
+
+export interface ConversationBranch {
+  id: string;
+  name: string;
+  parentBranchId?: string;
+  forkMessageId?: string;
+  forkSnapshotId?: string;
+  headSnapshotId?: string;
+  createdAt: number;
+  updatedAt: number;
+  state: ConversationBranchState;
+}
+
+export interface ConversationCheckout {
+  branchId: string;
+  snapshotId: string;
+  messageId: string;
+}
+
 export interface Conversation {
+  activeBranchId?: string;
+  checkoutEpoch?: number;
+  branches?: Record<string, ConversationBranch>;
+  checkout?: ConversationCheckout;
   id: string;
   title: string;
   messages: _Message[];

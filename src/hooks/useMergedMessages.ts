@@ -24,7 +24,7 @@ export function useMergedMessages(
       );
       let position = 0;
       merged.forEach((message, index) => {
-        const start = getMergedMessageStartIndex(message.id);
+        const start = getMergedMessageStartIndex(message.id, messages);
         if (start !== null && start < boundary) position = index + 1;
       });
       const projected = mergeMessages(

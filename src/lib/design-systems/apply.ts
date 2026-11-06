@@ -1,6 +1,7 @@
 import type { FileChange, ProjectFiles } from "../../types";
 import type { DesignSystemPackage } from "./validation";
 import { getDesignSystemRegistry } from "./registry";
+import { stripDesignReferenceHeader } from "./reference-header";
 
 export interface AppliedDesignSystemPackage {
   files: ProjectFiles;
@@ -34,9 +35,7 @@ export function applyDesignSystemPackage(
   }
   const designPath = findRootPath(files, "DESIGN.md");
   const tokensPath = findRootPath(files, "tokens.css");
-  const design =
-    `<!-- Untrusted visual reference. ${sourceLabel(pkg)}. ` +
-    `Unofficial reference; no trademark endorsement is implied. -->\n\n${pkg.design}`;
+  const design = stripDesignReferenceHeader(pkg.design);
   const tokens =
     `/* Untrusted visual reference. ${sourceLabel(pkg)}. ` +
     `Unofficial reference; no trademark endorsement is implied. */\n\n${pkg.tokens}`;

@@ -138,6 +138,14 @@ export const en: typeof zh = {
         openSettings: "Open model settings",
       },
       utilityTimeout: "Local utility generation timed out after {timeoutMs}ms.",
+      recoveryChecking: "Checking for an existing local CLI task…",
+      recoveryConnecting: "Reconnecting to the local CLI task…",
+      recoveryUnavailable:
+        "The background task state could not be checked. Reload the page; if this persists, restart the desktop application.",
+      recoveryIncompatible:
+        "The previous local CLI task cannot safely reconnect because its conversation or configuration has changed. Existing project changes have been kept.",
+      recoveryUncertain:
+        "A tool was running when the page disconnected, and its result is unknown. The task has stopped without repeating that operation. Check the project and any external effects before continuing.",
     },
     webSearch: {
       desc: "After configuration, AI will be able to search and read web pages",
@@ -241,6 +249,7 @@ export const en: typeof zh = {
       attachments: "Attachments",
       designSystems: "Imported Design systems",
       projectAssets: "Project images",
+      projectArchives: "Project archives",
       estimateUnavailable: "Estimate unavailable",
       messages: "messages",
       memories: "memories",
@@ -1002,6 +1011,8 @@ export const en: typeof zh = {
           processExit: "The local CLI did not complete this run.",
           cancelled: "The local CLI run was cancelled.",
           consumerGone: "The page stopped receiving this local CLI run.",
+          recoveryUncertain:
+            "A tool may have run before the page disconnected, but its result was not confirmed. The task has stopped without repeating it. Check the project and any external effects before continuing.",
           internal:
             "Open Builder encountered an internal local CLI runtime error.",
         },
@@ -1042,7 +1053,7 @@ export const en: typeof zh = {
     initialState: "Initial state",
     confirm: "Confirm Rollback",
     confirmDesc:
-      "Rollback will restore project files to the state at the time of this operation. This action cannot be undone. Are you sure?",
+      "Rollback will restore project files to the state at the time of this operation. Your current branch is preserved. New messages or edits will create a new branch.",
     cancel: "Cancel",
   },
   resetProject: {
@@ -1051,6 +1062,29 @@ export const en: typeof zh = {
       "This permanently deletes the current conversation history, project files, template state, and snapshots. This action cannot be undone.",
     cancel: "Cancel",
     confirm: "Reset Project",
+  },
+  branches: {
+    name: "Branch {n}",
+    title: "Conversation branches",
+    count: "{count} branches",
+    current: "Current branch",
+    switch: "Switch branch",
+    summary: "No new messages",
+    created: "Created",
+    updated: "Updated",
+    error: "The branch could not be restored.",
+  },
+  projectArchives: {
+    title: "Project source",
+    source: "Source",
+    pending: "Preparing project ZIP",
+    preparing: "Preparing project ZIP",
+    ready: "Project ZIP ready",
+    failed: "Project ZIP could not be saved",
+    download: "Download project ZIP",
+    retry: "Retry packaging",
+    saved: "Project ZIP saved",
+    stageSaved: "Checkpoint saved",
   },
   snapshots: {
     title: "Snapshot History",
@@ -1423,6 +1457,7 @@ export const en: typeof zh = {
     show: "Show Console",
   },
   tool: {
+    emptyResult: "Completed with no text output",
     results: "results",
     images: "images",
     packages: "packages",
@@ -1447,6 +1482,7 @@ export const en: typeof zh = {
     status: {
       running: "Running",
       completed: "Completed",
+      aborted: "Stopped",
       failed: "Failed",
       attention: "Needs attention",
     },
@@ -1455,6 +1491,8 @@ export const en: typeof zh = {
     failed: "Failed: ",
     found: "Found ",
     searchResults: "search results",
+    searchResultsUnavailable:
+      "Search completed. No displayable source details were returned.",
     imageResults: "image assets",
     npmPackages: "npm packages",
     names: {
@@ -1522,6 +1560,14 @@ export const en: typeof zh = {
     output: "Subagent Output",
     toolCalls: "Tool Calls",
     noOutput: "No output produced",
+    latestActivity: "Latest activity",
+    updatedAgo: "{n}s ago",
+    waitingForUpdate: "Waiting for new activity",
+    retrying: "Retrying request ({attempt}/{maxAttempts}): {message}",
+    waitingForResponse:
+      "Waiting for the local CLI to respond. You can stop this task.",
+    messageOutputNotice:
+      "This CLI version delivers output in message-sized chunks.",
     duration: "{n}s",
     policyReadonly: "Read-only",
     policyFullWrite: "Can write files",

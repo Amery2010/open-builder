@@ -18,6 +18,9 @@ use crate::local_agent_bridge::ToolBridge;
 use crate::local_agent_media::ActiveImageTask;
 use crate::local_agent_models::{CatalogAuthority, LaunchValidation, ModelStrategy};
 use crate::local_agent_protocol::LocalCliRunState;
+use crate::local_agent_recovery::{
+    RecoverableRun, RecoveryLease, RecoveryRegistration, RecoveryRun,
+};
 use crate::local_agent_runtime::{
     infer_failure_phase, AdapterError, InstallationIdentity, LocalCliFailure, LocalCliFailureCode,
     LocalCliFailurePhase, LocalCliRetryPolicy, RunCancellation,
@@ -288,6 +291,8 @@ pub struct LocalAgentStartRequest {
     pub provider: LocalAgentProvider,
     pub model: Option<String>,
     pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub utility_effort_policy: Option<UtilityEffortPolicy>,
     pub system_prompt: String,
     pub prompt: String,
     pub bootstrap_context: Option<String>,
@@ -300,6 +305,12 @@ pub struct LocalAgentStartRequest {
     pub max_tool_calls: usize,
     pub native_search: bool,
     pub mode: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum UtilityEffortPolicy {
+    LowestSupported,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -359,6 +370,42 @@ pub struct LocalToolResolution {
     pub content: Option<Vec<LocalToolContent>>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum LocalAgentTransport {
+    CodexAppServer,
+    CodexExec,
+    ClaudeStreamJson,
+    PiRpc,
+    AntigravityStreamJson,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum LocalAgentTextGranularity {
+    Delta,
+    Message,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum LocalAgentReasoningTextSupport {
+    Supported,
+    Unsupported,
+    Unknown,
+}
+
+/// Protocol-level output support, not a promise that this model/turn emits
+/// readable reasoning. Per-run observations are recorded separately.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalAgentOutputCapabilities {
+    pub transport: LocalAgentTransport,
+    pub text_granularity: LocalAgentTextGranularity,
+    pub reasoning_text: LocalAgentReasoningTextSupport,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(
     tag = "type",
@@ -381,6 +428,8 @@ pub enum LocalAgentEvent {
         actual_model: Option<String>,
         actual_effort: Option<String>,
         resumed: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_capabilities: Option<LocalAgentOutputCapabilities>,
     },
     TextDelta {
         delta: String,
@@ -426,6 +475,7 @@ struct ActiveRun {
     run_dir: PathBuf,
     provider: LocalAgentProvider,
     scope: LocalAgentRunScope,
+    pub(crate) page_owner: Option<String>,
     session_id: Option<String>,
     phase: Arc<RunPhaseTracker>,
 }
@@ -526,13 +576,20 @@ impl RunPhaseTracker {
 /// is serialized once instead of being deserialized and re-sent.
 #[derive(Clone)]
 pub struct TrackedChannel {
+    recovery: Option<RecoveryRun>,
     target: tauri::ipc::Channel<LocalAgentEvent>,
     phase: Option<Arc<RunPhaseTracker>>,
 }
 
 impl TrackedChannel {
+    #[cfg(test)]
+    pub(crate) fn with_recovery(mut self, recovery: RecoveryRun) -> Self {
+        self.recovery = Some(recovery);
+        self
+    }
     fn tracked(target: tauri::ipc::Channel<LocalAgentEvent>, phase: Arc<RunPhaseTracker>) -> Self {
         Self {
+            recovery: None,
             target,
             phase: Some(phase),
         }
@@ -542,13 +599,24 @@ impl TrackedChannel {
         if let Some(phase) = &self.phase {
             phase.observe(&event);
         }
-        self.target.send(event)
+        if let Some(recovery) = &self.recovery {
+            recovery
+                .lock()
+                .map_err(|_| {
+                    tauri::Error::Io(std::io::Error::other("Recovery journal unavailable"))
+                })?
+                .send(event);
+            Ok(())
+        } else {
+            self.target.send(event)
+        }
     }
 }
 
 impl From<tauri::ipc::Channel<LocalAgentEvent>> for TrackedChannel {
     fn from(target: tauri::ipc::Channel<LocalAgentEvent>) -> Self {
         Self {
+            recovery: None,
             target,
             phase: None,
         }
@@ -556,6 +624,7 @@ impl From<tauri::ipc::Channel<LocalAgentEvent>> for TrackedChannel {
 }
 
 pub struct LocalAgentState {
+    pub(crate) recovery: Mutex<HashMap<String, RecoveryRun>>,
     runs: Arc<Mutex<HashMap<String, ActiveRun>>>,
     bridge: Arc<ToolBridge>,
     pub(crate) model_strategy: Arc<ModelStrategy>,
@@ -566,6 +635,7 @@ pub struct LocalAgentState {
 impl Default for LocalAgentState {
     fn default() -> Self {
         Self {
+            recovery: Mutex::new(HashMap::new()),
             runs: Arc::new(Mutex::new(HashMap::new())),
             bridge: Arc::new(ToolBridge::default()),
             model_strategy: Arc::new(ModelStrategy::default()),
@@ -576,6 +646,18 @@ impl Default for LocalAgentState {
 }
 
 impl LocalAgentState {
+    pub(crate) fn cancel_stale_page_utilities(&self, owner: &str) {
+        if let Ok(runs) = self.runs.lock() {
+            for (id, run) in runs.iter() {
+                if run.scope.kind == LocalAgentRunScopeKind::Utility
+                    && run.page_owner.as_deref().is_some_and(|old| old != owner)
+                {
+                    run.cancellation.request_stop();
+                    self.bridge.unregister(id, "the owning page was replaced");
+                }
+            }
+        }
+    }
     pub(crate) fn claim_image_task_authority(
         &self,
         run_id: &str,
@@ -1101,6 +1183,11 @@ fn validate_start_request(request: &LocalAgentStartRequest) -> Result<(), Adapte
     if request.scope.kind != expected_scope {
         return Err("local agent run scope does not match its execution mode".into());
     }
+    if request.utility_effort_policy.is_some()
+        && request.scope.kind != LocalAgentRunScopeKind::Utility
+    {
+        return Err("utility effort policy is only allowed for isolated utility runs".into());
+    }
     if request.scope.kind == LocalAgentRunScopeKind::Utility
         && (request.session_id.is_some() || request.session_compatibility_key.is_some())
     {
@@ -1410,6 +1497,8 @@ pub async fn local_agent_start(
     state: tauri::State<'_, LocalAgentState>,
     request: LocalAgentStartRequest,
     on_event: tauri::ipc::Channel<LocalAgentEvent>,
+    recovery: Option<RecoveryRegistration>,
+    page_owner: Option<String>,
 ) -> Result<String, LocalCliFailure> {
     let provider = request.provider;
     let requested_resume = request.session_id.is_some();
@@ -1458,7 +1547,19 @@ pub async fn local_agent_start(
     let run_id = uuid::Uuid::new_v4().to_string();
     let cancellation = RunCancellation::new();
     let phase = Arc::new(RunPhaseTracker::default());
-    let on_event = TrackedChannel::tracked(on_event, phase.clone());
+    let recovery_run = recovery
+        .filter(|_| request.scope.kind == LocalAgentRunScopeKind::Conversation)
+        .map(|registration| {
+            RecoverableRun::new(
+                run_id.clone(),
+                request.clone(),
+                registration,
+                on_event.clone(),
+                cancellation.clone(),
+            )
+        });
+    let mut on_event = TrackedChannel::tracked(on_event, phase.clone());
+    on_event.recovery = recovery_run.clone();
     {
         let mut runs = state.runs.lock().map_err(|_| {
             LocalCliFailure::new(
@@ -1527,10 +1628,23 @@ pub async fn local_agent_start(
                 run_dir: run_dir.clone(),
                 provider,
                 scope: request.scope.clone(),
+                page_owner,
                 session_id: request.session_id.clone(),
                 phase: phase.clone(),
             },
         );
+    }
+    if let Some(recovery) = recovery_run {
+        state
+            .recovery
+            .lock()
+            .map_err(|_| {
+                failure(
+                    LocalCliFailurePhase::Prepare,
+                    "Recovery registry unavailable.".into(),
+                )
+            })?
+            .insert(run_id.clone(), recovery);
     }
     let (bridge_url, bridge_token) = match state
         .bridge
@@ -1547,6 +1661,9 @@ pub async fn local_agent_start(
         Err(error) => {
             if let Ok(mut runs) = state.runs.lock() {
                 runs.remove(&run_id);
+            }
+            if let Ok(mut recovery) = state.recovery.lock() {
+                recovery.remove(&run_id);
             }
             let _ = std::fs::remove_dir_all(&run_dir);
             return Err(failure(LocalCliFailurePhase::Tool, error));
@@ -1600,6 +1717,7 @@ pub async fn local_agent_start(
                 actual_model: preparation.actual_model().map(str::to_string),
                 actual_effort: preparation.actual_effort().map(str::to_string),
                 resumed,
+                output_capabilities: Some(preparation.output_capabilities()),
             };
             on_event.send(prepared_event).map_err(|_| {
                 LocalCliFailure::new(
@@ -1674,6 +1792,11 @@ pub async fn local_agent_start(
                 LocalCliRetryPolicy::None,
             ))
         });
+        bridge.unregister(&task_run_id, "local agent run completed");
+        let _ = std::fs::remove_dir_all(&run_dir);
+        if let Ok(mut runs) = runs.lock() {
+            runs.remove(&task_run_id);
+        }
         match result {
             Ok(outcome) => {
                 let _ = on_event.send(LocalAgentEvent::Done {
@@ -1694,11 +1817,6 @@ pub async fn local_agent_start(
                 });
             }
         }
-        bridge.unregister(&task_run_id, "local agent run completed");
-        let _ = std::fs::remove_dir_all(&run_dir);
-        if let Ok(mut runs) = runs.lock() {
-            runs.remove(&task_run_id);
-        }
     });
     if let Ok(mut runs) = state.runs.lock() {
         if let Some(active) = runs.get_mut(&run_id) {
@@ -1714,8 +1832,28 @@ pub fn local_agent_resolve_tool(
     run_id: String,
     call_id: String,
     result: LocalToolResolution,
+    lease: Option<RecoveryLease>,
+    recovery_context: Option<serde_json::Value>,
 ) -> Result<(), String> {
-    state.bridge.resolve(&run_id, &call_id, result)?;
+    let recovery = state
+        .recovery
+        .lock()
+        .map_err(|_| "Recovery registry unavailable.")?
+        .get(&run_id)
+        .cloned();
+    if let Some(recovery) = recovery {
+        let delivered = recovery
+            .lock()
+            .map_err(|_| "Recovery journal unavailable.")?
+            .resolve(&call_id, &result, lease.as_ref(), recovery_context, || {
+                state.bridge.resolve(&run_id, &call_id, result.clone())
+            })?;
+        if !delivered {
+            return Ok(());
+        }
+    } else {
+        state.bridge.resolve(&run_id, &call_id, result)?;
+    }
     if let Ok(runs) = state.runs.lock() {
         if let Some(run) = runs.get(&run_id) {
             run.phase.tool_resolved();
@@ -1725,23 +1863,41 @@ pub fn local_agent_resolve_tool(
 }
 
 #[tauri::command]
-pub fn local_agent_cancel(
+pub async fn local_agent_cancel(
     state: tauri::State<'_, LocalAgentState>,
     run_id: String,
 ) -> Result<bool, String> {
-    let runs = state
-        .runs
-        .lock()
-        .map_err(|_| "local agent run lock poisoned".to_string())?;
-    let Some(run) = runs.get(&run_id) else {
-        return Ok(false);
-    };
-    run.phase.set(LocalCliFailurePhase::Shutdown);
-    run.cancellation.request_stop();
-    state
-        .bridge
-        .unregister(&run_id, "local agent run cancelled");
-    Ok(true)
+    {
+        let runs = state
+            .runs
+            .lock()
+            .map_err(|_| "local agent run lock poisoned".to_string())?;
+        let Some(run) = runs.get(&run_id) else {
+            return Ok(false);
+        };
+        run.phase.set(LocalCliFailurePhase::Shutdown);
+        run.cancellation.request_stop();
+        state
+            .bridge
+            .unregister(&run_id, "local agent run cancelled");
+    }
+    // The reply is a cleanup acknowledgement, not merely a queued stop request.
+    // A following recovery/new turn can therefore rely on the scope being free.
+    tokio::time::timeout(RUN_CLEANUP_TIMEOUT + Duration::from_secs(1), async {
+        loop {
+            if !state
+                .runs
+                .lock()
+                .map_err(|_| "local agent run lock poisoned".to_string())?
+                .contains_key(&run_id)
+            {
+                return Ok(true);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .map_err(|_| "The local CLI run has not finished stopping.".to_string())?
 }
 
 #[tauri::command]
@@ -1912,6 +2068,7 @@ mod tests {
 
     fn request() -> LocalAgentStartRequest {
         LocalAgentStartRequest {
+            utility_effort_policy: None,
             provider: LocalAgentProvider::Codex,
             model: None,
             effort: None,
@@ -1971,6 +2128,30 @@ mod tests {
         let mut invalid = request();
         invalid.session_compatibility_key = Some("not-a-digest".to_string());
         assert!(validate_start_request(&invalid).is_err());
+    }
+
+    #[test]
+    fn restricts_utility_effort_policy_and_accepts_legacy_requests() {
+        let mut title = request();
+        title.utility_effort_policy = Some(UtilityEffortPolicy::LowestSupported);
+        assert!(validate_start_request(&title).is_err());
+        title.mode = "subagent".to_string();
+        title.scope.kind = LocalAgentRunScopeKind::Utility;
+        assert!(validate_start_request(&title).is_ok());
+        title.session_id = Some("persistent-session".to_string());
+        assert!(validate_start_request(&title).is_err());
+
+        let mut legacy = serde_json::to_value(request()).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("utilityEffortPolicy");
+        let legacy: LocalAgentStartRequest = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy.utility_effort_policy, None);
+        assert!(validate_start_request(&legacy).is_ok());
+        let mut unknown = serde_json::to_value(title).unwrap();
+        unknown["utilityEffortPolicy"] = serde_json::json!("unknown");
+        assert!(serde_json::from_value::<LocalAgentStartRequest>(unknown).is_err());
     }
 
     #[test]
@@ -2116,11 +2297,22 @@ mod tests {
             actual_model: Some("gpt-test".to_string()),
             actual_effort: Some("high".to_string()),
             resumed: true,
+            output_capabilities: Some(LocalAgentOutputCapabilities {
+                transport: LocalAgentTransport::CodexAppServer,
+                text_granularity: LocalAgentTextGranularity::Delta,
+                reasoning_text: LocalAgentReasoningTextSupport::Supported,
+            }),
         })
         .unwrap();
         assert_eq!(prepared["type"], "prepared");
         assert_eq!(prepared["actualModel"], "gpt-test");
         assert_eq!(prepared["resumed"], true);
+        assert_eq!(
+            prepared["outputCapabilities"]["transport"],
+            "codexAppServer"
+        );
+        assert_eq!(prepared["outputCapabilities"]["textGranularity"], "delta");
+        assert_eq!(prepared["outputCapabilities"]["reasoningText"], "supported");
 
         let failure = LocalCliFailure::new(
             LocalAgentProvider::Codex,

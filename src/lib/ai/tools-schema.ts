@@ -19,6 +19,7 @@ import { APPLY_DESIGN_STYLE_TOOL } from "../tools/design-styles";
 import { PROJECT_HEALTH_CHECK_TOOL } from "../tools/project-health-tool";
 import { SUBMIT_DESIGN_REVIEW_TOOL } from "../design/review-tool";
 import { SUBMIT_DESIGN_CONTRACT_TOOL } from "../design/run-contract-tool";
+import { projectDesignSchema } from "../design/project-design";
 import { BASE_SKILL_TOOLS, SCRIPT_SKILL_TOOL } from "../skills/tools";
 import { HostToolCatalog, type HostToolRecord } from "./host-tool-catalog";
 import { HOST_TOOL_DESCRIPTORS } from "./host-tool-catalog-data";
@@ -438,10 +439,10 @@ export const DESIGN_HOST_TOOLS = {
   }),
   update_project_design: tool({
     description:
-      "Validate and atomically write the root design-project.json blueprint. Provide expected_revision when updating an existing blueprint so stale writes fail closed.",
+      "Validate and atomically write the root design-project.json blueprint. Provide the complete blueprint document, including a non-empty responsibility for every page. Provide expected_revision when updating an existing blueprint so stale writes fail closed.",
     inputSchema: z
       .object({
-        document: z.record(z.string(), z.unknown()),
+        document: projectDesignSchema,
         expected_revision: z
           .union([
             z.number().int().nonnegative(),

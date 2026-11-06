@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -13,6 +13,7 @@ use crate::local_agent::{
     LocalAgentStartRequest,
 };
 use crate::local_agent_adapter::{AdapterIdentity, AdapterProbe};
+use crate::local_agent_content::{emit_content, snapshot_suffix, ContentBlocks, ContentKind};
 use crate::local_agent_models::{
     CatalogAuthority, ClaudeGatewayCatalog, EffortKnowledge, ModelCandidate, ModelPreference,
 };
@@ -614,7 +615,7 @@ fn load_provider_environment() -> Result<ClaudeProviderEnvironment, String> {
 
 fn configuration_fingerprint_for(environment: &ClaudeProviderEnvironment) -> String {
     let mut material = vec![
-        "claude-provider-config-v1".to_string(),
+        "claude-provider-config-v2-summary-when-supported".to_string(),
         environment.configuration_source.to_string(),
         format!("gateway={}", environment.is_gateway),
         format!(
@@ -1355,6 +1356,244 @@ enum ClaudeEvent {
     Ignore,
 }
 
+#[derive(Default)]
+struct ClaudeContent {
+    messages: HashMap<String, ContentBlocks>,
+    current: Option<String>,
+    last_message: Option<String>,
+    last_anonymous_snapshot: Option<Value>,
+    sequence: u64,
+    stream_blocks: HashMap<String, BTreeMap<u64, ContentKind>>,
+    closed_blocks: HashMap<String, VecDeque<u64>>,
+    envelope_ids: HashMap<String, Value>,
+}
+
+impl ClaudeContent {
+    fn anonymous(&mut self) -> String {
+        self.sequence += 1;
+        format!("anonymous:{}", self.sequence)
+    }
+
+    fn process(
+        &mut self,
+        value: &Value,
+        channel: &crate::local_agent::TrackedChannel,
+    ) -> Result<(), String> {
+        match value.get("type").and_then(Value::as_str) {
+            Some("stream_event") => {
+                let event = &value["event"];
+                match event.get("type").and_then(Value::as_str) {
+                    Some("message_start") => {
+                        let id = event
+                            .pointer("/message/id")
+                            .and_then(Value::as_str)
+                            .map(|id| format!("id:{id}"))
+                            .unwrap_or_else(|| self.anonymous());
+                        self.current = Some(id);
+                    }
+                    Some("content_block_start" | "content_block_delta") => {
+                        let start = event["type"] == "content_block_start";
+                        let block = &event[if start { "content_block" } else { "delta" }];
+                        let kind = match block.get("type").and_then(Value::as_str) {
+                            Some("text" | "text_delta") => ContentKind::Text,
+                            Some("thinking" | "thinking_delta") => ContentKind::Thinking,
+                            _ => return Ok(()),
+                        };
+                        let field = if kind == ContentKind::Text {
+                            "text"
+                        } else {
+                            "thinking"
+                        };
+                        let text = block.get(field).and_then(Value::as_str).unwrap_or("");
+                        let index = event.get("index").and_then(Value::as_u64).unwrap_or(0);
+                        let id = self.current.clone().unwrap_or_else(|| self.anonymous());
+                        self.current = Some(id.clone());
+                        self.last_message = Some(id.clone());
+                        let known = self.stream_blocks.entry(id.clone()).or_default();
+                        if known
+                            .insert(index, kind)
+                            .is_some_and(|previous| previous != kind)
+                        {
+                            return Err("Claude protocol changed a content block type".to_string());
+                        }
+                        let blocks = self.messages.entry(id).or_default();
+                        let delta = if start {
+                            blocks.snapshot(index, kind, text)?
+                        } else {
+                            blocks.append(index, kind, text)?
+                        };
+                        emit_content(channel, kind, delta)?;
+                    }
+                    Some("content_block_stop") => {
+                        if let (Some(id), Some(index)) =
+                            (&self.current, event.get("index").and_then(Value::as_u64))
+                        {
+                            if self
+                                .stream_blocks
+                                .get(id)
+                                .is_some_and(|blocks| blocks.contains_key(&index))
+                            {
+                                let closed = self.closed_blocks.entry(id.clone()).or_default();
+                                if !closed.contains(&index) {
+                                    closed.push_back(index);
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Some("assistant" | "message") => {
+                let message = &value["message"];
+                if let Some(uuid) = value.get("uuid").and_then(Value::as_str) {
+                    if let Some(previous) = self.envelope_ids.get(uuid) {
+                        return if previous == message {
+                            Ok(())
+                        } else {
+                            Err("Claude protocol changed a repeated message envelope".to_string())
+                        };
+                    }
+                }
+
+                let explicit = message
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(|id| format!("id:{id}"));
+                if explicit.is_none()
+                    && self.current.is_none()
+                    && self.last_anonymous_snapshot.as_ref() == Some(message)
+                {
+                    return Ok(());
+                }
+                let id = explicit
+                    .unwrap_or_else(|| self.current.clone().unwrap_or_else(|| self.anonymous()));
+                let historical = self.messages.contains_key(&id)
+                    && (self.current.as_ref().is_some_and(|current| current != &id)
+                        || self.last_message.as_ref().is_some_and(|last| last != &id));
+                if let Some(current) = self.current.clone() {
+                    if current.starts_with("anonymous:") && current != id {
+                        if let Some(blocks) = self.messages.remove(&current) {
+                            self.messages.entry(id.clone()).or_insert(blocks);
+                        }
+                        if let Some(known) = self.stream_blocks.remove(&current) {
+                            self.stream_blocks.insert(id.clone(), known);
+                        }
+                        if let Some(closed) = self.closed_blocks.remove(&current) {
+                            self.closed_blocks.insert(id.clone(), closed);
+                        }
+                    }
+                }
+                let incoming = message
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| "Claude assistant message omitted content".to_string())?;
+                for (index, block) in incoming.iter().enumerate() {
+                    let (kind, field) = match block.get("type").and_then(Value::as_str) {
+                        Some("text") => (ContentKind::Text, "text"),
+                        Some("thinking") => (ContentKind::Thinking, "thinking"),
+                        _ => continue,
+                    };
+                    if let Some(text) = block.get(field).and_then(Value::as_str) {
+                        if text.is_empty() && kind == ContentKind::Thinking {
+                            continue;
+                        }
+                        let actual_index =
+                            self.snapshot_index(&id, index as u64, incoming.len(), kind, text)?;
+                        let blocks = self.messages.entry(id.clone()).or_default();
+                        let delta = blocks.snapshot(actual_index, kind, text)?;
+                        if historical && !delta.is_empty() {
+                            return Err(
+                                "Claude protocol added content to an earlier message".to_string()
+                            );
+                        }
+                        emit_content(channel, kind, delta)?;
+                        if let Some(closed) = self.closed_blocks.get_mut(&id) {
+                            closed.retain(|index| *index != actual_index);
+                        }
+                    }
+                }
+                if let Some(uuid) = value.get("uuid").and_then(Value::as_str) {
+                    self.envelope_ids.insert(uuid.to_string(), message.clone());
+                }
+                if !historical {
+                    self.current = self.stream_blocks.contains_key(&id).then(|| id.clone());
+                    self.last_message = Some(id);
+                }
+                self.last_anonymous_snapshot = message.get("id").is_none().then(|| message.clone());
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn snapshot_index(
+        &self,
+        id: &str,
+        index: u64,
+        count: usize,
+        kind: ContentKind,
+        text: &str,
+    ) -> Result<u64, String> {
+        let Some(known) = self
+            .stream_blocks
+            .get(id)
+            .filter(|blocks| !blocks.is_empty())
+        else {
+            return Ok(index);
+        };
+        if count > 1 {
+            if known.get(&index).is_some_and(|previous| *previous != kind) {
+                return Err("Claude protocol snapshot changed a content block type".to_string());
+            }
+            return Ok(index);
+        }
+        let matches = |index: u64| {
+            known.get(&index) == Some(&kind)
+                && self
+                    .messages
+                    .get(id)
+                    .is_some_and(|blocks| blocks.matches_snapshot(index, kind, text))
+        };
+        let pending: Vec<u64> = self
+            .closed_blocks
+            .get(id)
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(|index| matches(*index))
+            .collect();
+        if pending.len() == 1 {
+            return Ok(pending[0]);
+        }
+        if pending.len() > 1 {
+            return Err("Claude protocol returned an ambiguous content block snapshot".to_string());
+        }
+        let candidates: Vec<u64> = known
+            .keys()
+            .copied()
+            .filter(|index| matches(*index))
+            .collect();
+        match candidates.as_slice() {
+            [index] => Ok(*index),
+            [] if !known.contains_key(&index) => Ok(index),
+            _ => Err(
+                "Claude protocol returned a conflicting or ambiguous content block snapshot"
+                    .to_string(),
+            ),
+        }
+    }
+
+    fn final_text(&self, text: &str) -> Result<String, String> {
+        let previous = self
+            .last_message
+            .as_ref()
+            .and_then(|id| self.messages.get(id))
+            .map(|blocks| blocks.text(ContentKind::Text))
+            .unwrap_or_default();
+        snapshot_suffix(&previous, text)
+    }
+}
+
 fn block_index(value: &Value) -> String {
     value
         .get("index")
@@ -1426,7 +1665,7 @@ fn decode_content_block_delta(value: &Value) -> Result<ClaudeEvent, String> {
                 .ok_or_else(|| "Claude text delta omitted its text".to_string())?
                 .to_string(),
         )),
-        "thinking_delta" | "redacted_thinking_delta" => Ok(ClaudeEvent::Thinking(
+        "thinking_delta" => Ok(ClaudeEvent::Thinking(
             delta
                 .get("thinking")
                 .or_else(|| delta.get("text"))
@@ -1447,7 +1686,9 @@ fn decode_content_block_delta(value: &Value) -> Result<ClaudeEvent, String> {
                 delta: partial.to_string(),
             })
         }
-        "signature_delta" | "citations_delta" => Ok(ClaudeEvent::Ignore),
+        "signature_delta" | "citations_delta" | "redacted_thinking_delta" => {
+            Ok(ClaudeEvent::Ignore)
+        }
         "" => Err("Claude content block delta omitted its type".to_string()),
         _ => Err("Claude emitted an unsupported content delta type".to_string()),
     }
@@ -1813,7 +2054,7 @@ fn assistant_content_events(message: &Value) -> Result<Vec<ClaudeEvent>, String>
                     events.push(ClaudeEvent::Text(text.to_string()));
                 }
             }
-            "thinking" | "redacted_thinking" => {
+            "thinking" => {
                 if let Some(text) = block
                     .get("thinking")
                     .or_else(|| block.get("text"))
@@ -1856,10 +2097,57 @@ fn assistant_content_events(message: &Value) -> Result<Vec<ClaudeEvent>, String>
                 });
             }
             "" => return Err("Claude assistant message contained a malformed block".to_string()),
-            "document" | "image" => {}
+            "document" | "image" | "redacted_thinking" => {}
             _ => return Err("Claude assistant message contained an unsupported block".to_string()),
         }
     }
+    Ok(events)
+}
+
+fn process_claude_output(
+    value: &Value,
+    session_id: &str,
+    request: &LocalAgentStartRequest,
+    expected_mcp: &HashSet<String>,
+    content: &mut ClaudeContent,
+    channel: &crate::local_agent::TrackedChannel,
+) -> Result<Vec<ClaudeEvent>, AdapterError> {
+    let events = decode_claude_event(value)?;
+    // Validate authority for the whole envelope before any readable content
+    // crosses the host boundary, including tools in complete message snapshots.
+    let validate_tool = |name: &str| -> Result<(), AdapterError> {
+        if native_tool_name(name).is_some() {
+            if !request.native_search {
+                return Err(AdapterError::coded(
+                    LocalCliFailureCode::IsolationViolation,
+                    "Claude attempted to use disabled native web search",
+                ));
+            }
+        } else if !expected_mcp.contains(name) {
+            return Err(AdapterError::coded(
+                LocalCliFailureCode::IsolationViolation,
+                "Claude attempted to use an unauthorized native or MCP tool",
+            ));
+        }
+        Ok(())
+    };
+    for event in &events {
+        match event {
+            ClaudeEvent::Session(received) if received != session_id => {
+                return Err("Claude protocol changed sessions during a run".into())
+            }
+            ClaudeEvent::ToolStart { name, .. } => validate_tool(name)?,
+            ClaudeEvent::AssistantMessage(message) => {
+                for nested in assistant_content_events(message)? {
+                    if let ClaudeEvent::ToolStart { name, .. } = nested {
+                        validate_tool(&name)?;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    content.process(value, channel)?;
     Ok(events)
 }
 
@@ -1905,8 +2193,7 @@ async fn run_claude_protocol(
     let mut tool_input_deltas: HashMap<String, String> = HashMap::new();
     let mut last_usage = None;
     let mut retry_was_rate_limited = false;
-    let mut saw_text = false;
-    let mut saw_thinking = false;
+    let mut content = ClaudeContent::default();
     loop {
         let value = io.read_value().await?;
         if event_type(&value)? == "error" {
@@ -1917,31 +2204,22 @@ async fn run_claude_protocol(
                 context.request.session_id.is_some(),
             ));
         }
-        for event in decode_claude_event(&value)? {
+        let events = process_claude_output(
+            &value,
+            &session_id,
+            &context.request,
+            &expected_mcp,
+            &mut content,
+            &context.channel,
+        )?;
+        for event in events {
             match event {
                 ClaudeEvent::Session(received) => {
                     if received != session_id {
                         return Err("Claude changed sessions during a run".into());
                     }
                 }
-                ClaudeEvent::Text(text) => {
-                    if !text.is_empty() {
-                        saw_text = true;
-                        context
-                            .channel
-                            .send(LocalAgentEvent::TextDelta { delta: text })
-                            .map_err(|_| "local agent event consumer is unavailable".to_string())?;
-                    }
-                }
-                ClaudeEvent::Thinking(text) => {
-                    if !text.is_empty() {
-                        saw_thinking = true;
-                        context
-                            .channel
-                            .send(LocalAgentEvent::ReasoningDelta { delta: text })
-                            .map_err(|_| "local agent event consumer is unavailable".to_string())?;
-                    }
-                }
+                ClaudeEvent::Text(_) | ClaudeEvent::Thinking(_) => {}
                 ClaudeEvent::ToolStart {
                     id,
                     name,
@@ -1996,24 +2274,6 @@ async fn run_claude_protocol(
                     }
                     for nested in assistant_content_events(&message)? {
                         match nested {
-                            ClaudeEvent::Text(text) if !saw_text => {
-                                saw_text = true;
-                                context
-                                    .channel
-                                    .send(LocalAgentEvent::TextDelta { delta: text })
-                                    .map_err(|_| {
-                                        "local agent event consumer is unavailable".to_string()
-                                    })?;
-                            }
-                            ClaudeEvent::Thinking(text) if !saw_thinking => {
-                                saw_thinking = true;
-                                context
-                                    .channel
-                                    .send(LocalAgentEvent::ReasoningDelta { delta: text })
-                                    .map_err(|_| {
-                                        "local agent event consumer is unavailable".to_string()
-                                    })?;
-                            }
                             ClaudeEvent::ToolStart {
                                 id,
                                 name,
@@ -2066,15 +2326,12 @@ async fn run_claude_protocol(
                         emit_native_end(context, &id, &name, None)?;
                     }
                     if success {
-                        if !saw_text {
-                            if let Some(text) = text.filter(|text| !text.is_empty()) {
-                                context
-                                    .channel
-                                    .send(LocalAgentEvent::TextDelta { delta: text })
-                                    .map_err(|_| {
-                                        "local agent event consumer is unavailable".to_string()
-                                    })?;
-                            }
+                        if let Some(text) = text.filter(|text| !text.is_empty()) {
+                            emit_content(
+                                &context.channel,
+                                ContentKind::Text,
+                                content.final_text(&text)?,
+                            )?;
                         }
                         return Ok(ProtocolOutcome {
                             session_id: Some(session_id.clone()),
@@ -2213,12 +2470,57 @@ fn safe_error_text(
     }
 }
 
+fn summary_probe_result(output: &std::process::Output, valid: bool) -> Result<bool, String> {
+    let text = String::from_utf8_lossy(&output.stderr).to_string()
+        + &String::from_utf8_lossy(&output.stdout);
+    if !output.status.success() && text.trim() == "error: unknown option '--thinking-display'" {
+        return Ok(false);
+    }
+    if valid && output.status.success() && text.contains("Usage:") {
+        return Ok(true);
+    }
+    if !valid
+        && !output.status.success()
+        && text.contains("--thinking-display")
+        && text.contains("Allowed choices")
+        && text.contains("summarized")
+        && text.contains("omitted")
+    {
+        return Ok(true);
+    }
+    Err("Claude thinking-display capability probe failed".to_string())
+}
+
+async fn supports_summary_display(executable: &Path) -> Result<bool, String> {
+    // The invalid-value check also proves that this CLI understands the flag,
+    // rather than silently ignoring unknown options. Neither command submits input.
+    let invalid = command_output_capped(
+        executable,
+        &["--thinking-display", "open-builder-invalid", "--help"],
+        PROBE_TIMEOUT,
+        MAX_PROBE_OUTPUT_BYTES,
+    )
+    .await?;
+    if !summary_probe_result(&invalid, false)? {
+        return Ok(false);
+    }
+    let valid = command_output_capped(
+        executable,
+        &["--thinking-display", "summarized", "--help"],
+        PROBE_TIMEOUT,
+        MAX_PROBE_OUTPUT_BYTES,
+    )
+    .await?;
+    summary_probe_result(&valid, true)
+}
+
 pub(crate) struct PreparedClaudeRun {
     context: ProtocolContext,
     provider_environment: ClaudeProviderEnvironment,
     files: ClaudeRunFiles,
     process_spec: FrozenProcessSpec,
     configuration_fingerprint: String,
+    summary_display: bool,
 }
 
 impl PreparedClaudeRun {
@@ -2246,18 +2548,22 @@ fn frozen_process_spec(
 fn prepare_with_environment(
     context: ProtocolContext,
     provider_environment: ClaudeProviderEnvironment,
+    summary_display: bool,
 ) -> Result<PreparedClaudeRun, String> {
     let files = prepare_run_files(&context)?;
     let configured_model = provider_environment
         .value("ANTHROPIC_MODEL")
         .or(provider_environment.configured_model.as_deref());
-    let args = claude_args(
+    let mut args = claude_args(
         &context.request,
         &files.system_prompt,
         &files.mcp_config,
         configured_model,
         provider_environment.configured_effort.as_deref(),
     )?;
+    if summary_display {
+        args.extend(["--thinking-display".to_string(), "summarized".to_string()]);
+    }
     let process_spec = frozen_process_spec(&context, &provider_environment, &args)?;
     let configuration_fingerprint = configuration_fingerprint_for(&provider_environment);
     Ok(PreparedClaudeRun {
@@ -2266,12 +2572,20 @@ fn prepare_with_environment(
         files,
         process_spec,
         configuration_fingerprint,
+        summary_display,
     })
 }
 
-pub(crate) fn prepare_run(context: ProtocolContext) -> Result<PreparedClaudeRun, AdapterError> {
+pub(crate) async fn prepare_run(
+    context: ProtocolContext,
+) -> Result<PreparedClaudeRun, AdapterError> {
     let provider_environment = load_provider_environment()?;
-    Ok(prepare_with_environment(context, provider_environment)?)
+    let summary_display = supports_summary_display(&context.executable).await?;
+    Ok(prepare_with_environment(
+        context,
+        provider_environment,
+        summary_display,
+    )?)
 }
 
 pub(crate) async fn launch_prepared(
@@ -2282,6 +2596,7 @@ pub(crate) async fn launch_prepared(
         provider_environment,
         files,
         process_spec,
+        summary_display,
         ..
     } = prepared;
     // Keep private files alive for the entire child-process lifetime. The
@@ -2290,6 +2605,11 @@ pub(crate) async fn launch_prepared(
     for file in [&files.system_prompt_file, &files.mcp_config_file] {
         file.verify_unchanged()
             .map_err(|_| PREPARED_PRIVATE_FILES_CHANGED_ERROR.to_string())?;
+    }
+    if !summary_display {
+        context.channel.send(LocalAgentEvent::Warning {
+            message: "This Claude CLI version cannot request readable thinking summaries; available output will still be shown.".to_string(),
+        }).map_err(|_| "local agent event consumer is unavailable".to_string())?;
     }
     let _files = files;
     let gateway_configured = provider_environment.is_gateway;
@@ -2430,6 +2750,7 @@ mod tests {
 
     fn request(native_search: bool) -> LocalAgentStartRequest {
         LocalAgentStartRequest {
+            utility_effort_policy: None,
             provider: crate::local_agent::LocalAgentProvider::Claude,
             model: None,
             effort: None,
@@ -2465,7 +2786,7 @@ mod tests {
             &BTreeMap::new(),
         )
         .unwrap();
-        let prepared = prepare_with_environment(context, initial_environment).unwrap();
+        let prepared = prepare_with_environment(context, initial_environment, false).unwrap();
         let initial_fingerprint = prepared.configuration_fingerprint().to_string();
 
         let changed_environment = provider_environment_from_sources(
@@ -2487,7 +2808,7 @@ mod tests {
         let (channel, _events) = event_channel();
         let context = protocol_context(&root, executable, request(false), channel);
         let environment = provider_environment_from_sources(None, &BTreeMap::new()).unwrap();
-        let prepared = prepare_with_environment(context, environment).unwrap();
+        let prepared = prepare_with_environment(context, environment, false).unwrap();
         std::fs::write(&prepared.files.system_prompt, b"tampered").unwrap();
 
         let error = launch_prepared(prepared).await.unwrap_err();
@@ -3303,5 +3624,206 @@ mod tests {
             }
             std::fs::remove_dir_all(root).unwrap();
         }
+    }
+    #[test]
+    fn content_reconciles_messages_blocks_and_final_snapshots() {
+        let (channel, mut receiver) = event_channel();
+        let channel = channel.into();
+        let mut state = ClaudeContent::default();
+        let start = |id: &str| json!({"type":"stream_event","event":{"type":"message_start","message":{"id":id}}});
+        let delta = |index: u64, kind: &str, field: &str, text: &str| json!({"type":"stream_event","event":{"type":"content_block_delta","index":index,"delta":{"type":kind,field:text}}});
+        state.process(&start("one"), &channel).unwrap();
+        state.process(&json!({"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"先"}}}), &channel).unwrap();
+        state
+            .process(&delta(0, "thinking_delta", "thinking", "想"), &channel)
+            .unwrap();
+        let first = json!({"type":"assistant","message":{"id":"one","content":[{"type":"thinking","thinking":"先想好"},{"type":"text","text":"回答一"},{"type":"text","text":"。"}]}});
+        state.process(&first, &channel).unwrap();
+        state.process(&first, &channel).unwrap();
+        state.process(&start("two"), &channel).unwrap();
+        state
+            .process(&delta(0, "text_delta", "text", "答"), &channel)
+            .unwrap();
+        state.process(&json!({"type":"assistant","message":{"id":"two","content":[{"type":"text","text":"答案二🦀"},{"type":"thinking","thinking":"另想"}]}}), &channel).unwrap();
+        assert_eq!(state.final_text("答案二🦀!").unwrap(), "!");
+        assert!(state.final_text("改写").is_err());
+        let mut got = Vec::new();
+        while let Ok(value) = receiver.try_recv() {
+            got.push((
+                value["type"].as_str().unwrap().to_string(),
+                value["delta"].as_str().unwrap().to_string(),
+            ));
+        }
+        assert_eq!(
+            got,
+            vec![
+                ("reasoningDelta".into(), "先".into()),
+                ("reasoningDelta".into(), "想".into()),
+                ("reasoningDelta".into(), "好".into()),
+                ("textDelta".into(), "回答一".into()),
+                ("textDelta".into(), "。".into()),
+                ("textDelta".into(), "答".into()),
+                ("textDelta".into(), "案二🦀".into()),
+                ("reasoningDelta".into(), "另想".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn content_ignores_empty_encrypted_and_redacted_thinking() {
+        let (channel, mut receiver) = event_channel();
+        let channel = channel.into();
+        let mut state = ClaudeContent::default();
+        for event in [
+            json!({"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":""}}}),
+            json!({"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"opaque"}}}),
+            json!({"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"redacted_thinking_delta","text":"opaque"}}}),
+            json!({"type":"assistant","message":{"content":[{"type":"redacted_thinking","thinking":"opaque","data":"encrypted"}]}}),
+        ] {
+            decode_claude_event(&event).unwrap();
+            state.process(&event, &channel).unwrap();
+        }
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn summary_flag_probe_accepts_only_validated_capability_without_inference() {
+        let directory = private_directory("open-builder-claude-summary-test").unwrap();
+        let binary = directory.0.join(if cfg!(windows) {
+            "summary-supported.exe"
+        } else {
+            "summary-supported"
+        });
+        let source =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake_claude_summary.rs");
+        assert!(std::process::Command::new("rustc")
+            .arg("--edition=2021")
+            .arg(source)
+            .arg("-o")
+            .arg(&binary)
+            .status()
+            .unwrap()
+            .success());
+        assert!(supports_summary_display(&binary).await.unwrap());
+        for (name, expected) in [
+            ("unsupported", Some(false)),
+            ("broken", None),
+            ("ignores", None),
+        ] {
+            let path = directory.0.join(if cfg!(windows) {
+                format!("summary-{name}.exe")
+            } else {
+                format!("summary-{name}")
+            });
+            std::fs::copy(&binary, &path).unwrap();
+            let result = supports_summary_display(&path).await;
+            match expected {
+                Some(supported) => assert_eq!(result.unwrap(), supported),
+                None => assert!(result.is_err()),
+            }
+        }
+    }
+    #[test]
+    fn single_block_envelopes_keep_stream_indices_and_uuid_identity() {
+        let (channel, mut events) = event_channel();
+        let channel = channel.into();
+        let mut state = ClaudeContent::default();
+        state.process(&json!({"type":"stream_event","event":{"type":"message_start","message":{"id":"same-message"}}}), &channel).unwrap();
+        let mut first = None;
+        for (index, kind, field, text) in [
+            (0, "thinking", "thinking", "考"),
+            (2, "text", "text", "答"),
+            (4, "text", "text", "答"),
+        ] {
+            state.process(&json!({"type":"stream_event","event":{"type":"content_block_delta","index":index,"delta":{"type":format!("{kind}_delta"),field:text}}}), &channel).unwrap();
+            // The delta is visible before the completed envelope arrives.
+            assert_eq!(events.try_recv().unwrap()["delta"], text);
+            state.process(&json!({"type":"stream_event","event":{"type":"content_block_stop","index":index}}), &channel).unwrap();
+            let envelope = json!({"type":"assistant","uuid":format!("envelope-{index}"),"message":{"id":"same-message","content":[{"type":kind,field:format!("{text}好")}]}});
+            state.process(&envelope, &channel).unwrap();
+            assert_eq!(events.try_recv().unwrap()["delta"], "好");
+            state.process(&envelope, &channel).unwrap();
+            if let Some(previous) = &first {
+                state.process(previous, &channel).unwrap();
+            }
+            assert!(events.try_recv().is_err());
+            first.get_or_insert(envelope);
+        }
+        assert_eq!(state.final_text("答好答好").unwrap(), "");
+        // Without a completed-block association, two equal prior text blocks
+        // cannot be assigned by their content alone.
+        let ambiguous = json!({"type":"assistant","message":{"id":"same-message","content":[{"type":"text","text":"答好"}]}});
+        assert!(state.process(&ambiguous, &channel).is_err());
+    }
+    #[test]
+    fn foreign_session_and_unauthorized_tools_never_forward_content() {
+        let (channel, mut events) = event_channel();
+        let channel = channel.into();
+        let mut state = ClaudeContent::default();
+        let request = request(false);
+        for envelope in [
+            json!({"type":"assistant","session_id":"foreign","message":{"id":"one","content":[{"type":"text","text":"private"}]}}),
+            json!({"type":"stream_event","session_id":"foreign","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"private"}}}),
+            json!({"type":"assistant","session_id":"expected","message":{"content":[{"type":"text","text":"private"},{"type":"tool_use","id":"bad","name":"Bash","input":{}}]}}),
+        ] {
+            assert!(process_claude_output(
+                &envelope,
+                "expected",
+                &request,
+                &HashSet::new(),
+                &mut state,
+                &channel
+            )
+            .is_err());
+            assert!(events.try_recv().is_err());
+        }
+    }
+
+    #[test]
+    fn multiple_omitted_thinking_blocks_do_not_require_text_attribution() {
+        let (channel, mut events) = event_channel();
+        let channel = channel.into();
+        let mut state = ClaudeContent::default();
+        state.process(&json!({"type":"stream_event","event":{"type":"message_start","message":{"id":"omitted"}}}),&channel).unwrap();
+        for index in [0, 1] {
+            state.process(&json!({"type":"stream_event","event":{"type":"content_block_start","index":index,"content_block":{"type":"thinking","thinking":""}}}),&channel).unwrap();
+            state.process(&json!({"type":"stream_event","event":{"type":"content_block_stop","index":index}}),&channel).unwrap();
+        }
+        state.process(&json!({"type":"assistant","message":{"id":"omitted","content":[{"type":"thinking","thinking":"","signature":"opaque"}]}}),&channel).unwrap();
+        assert!(events.try_recv().is_err());
+    }
+    #[test]
+    fn late_prior_message_snapshot_does_not_steal_active_delta_identity() {
+        let (channel, mut events) = event_channel();
+        let channel = channel.into();
+        let mut state = ClaudeContent::default();
+        let prior = json!({"type":"assistant","message":{"id":"prior","content":[{"type":"text","text":"prior"}]}});
+        state.process(&prior, &channel).unwrap();
+        state.process(&json!({"type":"stream_event","event":{"type":"message_start","message":{"id":"active"}}}),&channel).unwrap();
+        state.process(&json!({"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"new"}}}),&channel).unwrap();
+        state.process(&prior, &channel).unwrap();
+        state.process(&json!({"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" tail"}}}),&channel).unwrap();
+        assert_eq!(state.final_text("new tail").unwrap(), "");
+        assert_eq!(events.try_recv().unwrap()["delta"], "prior");
+        assert_eq!(events.try_recv().unwrap()["delta"], "new");
+        assert_eq!(events.try_recv().unwrap()["delta"], " tail");
+        assert!(events.try_recv().is_err());
+    }
+
+    #[test]
+    fn complete_only_historical_snapshots_cannot_reorder_output() {
+        let (channel, mut events) = event_channel();
+        let channel = channel.into();
+        let mut state = ClaudeContent::default();
+        let message = |id: &str, text: &str| json!({"type":"assistant","message":{"id":id,"content":[{"type":"text","text":text}]}});
+        state.process(&message("a", "A"), &channel).unwrap();
+        state.process(&message("b", "B"), &channel).unwrap();
+        state.process(&message("a", "A"), &channel).unwrap();
+        assert_eq!(state.final_text("B!").unwrap(), "!");
+        assert_eq!(events.try_recv().unwrap()["delta"], "A");
+        assert_eq!(events.try_recv().unwrap()["delta"], "B");
+        assert!(events.try_recv().is_err());
+        assert!(state.process(&message("a", "Ax"), &channel).is_err());
+        assert!(events.try_recv().is_err());
     }
 }

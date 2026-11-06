@@ -162,6 +162,17 @@ describe("structured Design Review", () => {
     ).toEqual([10, 10, 10]);
   });
 
+  it("accepts actual screenshot bytes regardless of MIME metadata", () => {
+    expect(() =>
+      validateDesignReviewScreenshots([
+        {
+          dataUrl: pngDataUrl.replace("image/png", "image/webp"),
+          mimeType: "image/jpeg",
+        },
+      ]),
+    ).not.toThrow();
+  });
+
   it("builds bounded text-only requirement context without attachment parts", () => {
     const context = buildDesignReviewRequirementsContext([
       {

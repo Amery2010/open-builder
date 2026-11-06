@@ -248,18 +248,15 @@ function inspectStateAndPackage(
       code: "digest_mismatch",
       message: "The applied Design-system reference has no package digest.",
     });
-  } else {
-    for (const path of [designPath, tokensPath]) {
-      if (!files[path].includes(`sha256 ${applied.digest}`)) {
-        issues.push({
-          severity: "error",
-          category: "design_system",
-          code: "digest_mismatch",
-          path,
-          message: `The root contract file does not match applied package digest ${applied.digest}.`,
-        });
-      }
-    }
+  } else if (!files[tokensPath].includes(`sha256 ${applied.digest}`)) {
+    // DESIGN.md is reference prose; the package marker remains in tokens.css.
+    issues.push({
+      severity: "error",
+      category: "design_system",
+      code: "digest_mismatch",
+      path: tokensPath,
+      message: `The root contract file does not match applied package digest ${applied.digest}.`,
+    });
   }
   const inspection = inspectDesignTokenContract(files, designState);
   if (inspection.status === "invalid") {

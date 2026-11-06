@@ -12,7 +12,24 @@ import type {
   PreparedUserInstructionBatch,
   ResolvedAttachment,
 } from "../lib/ai/generator-types";
-import { DEFAULT_TITLE, useConversationStore } from "../store/conversation";
+import {
+  captureConversationIdentity,
+  isConversationIdentityCurrent,
+  type ConversationIdentity,
+} from "../lib/conversation/branches";
+import {
+  LOCAL_CLI_IDLE_MESSAGE,
+  LOCAL_CLI_MESSAGE_OUTPUT_NOTICE,
+} from "../lib/local-agent/runtime";
+import {
+  DEFAULT_TITLE,
+  useConversationStore,
+  flushConversationPersistence,
+} from "../store/conversation";
+import type {
+  LocalRecoverableRun,
+  LocalRecoveryContext,
+} from "../lib/local-agent/types";
 import { useSettingsStore } from "../store/settings";
 import { useInteractiveStore } from "../store/interactive";
 import { useSubagentStore } from "../store/subagent";
@@ -143,6 +160,12 @@ import {
   registerProjectPermissionSession,
   useProjectPermissionStore,
 } from "../store/project-permission";
+
+function checkoutKey(conversation: Conversation | undefined): string | null {
+  if (!conversation) return null;
+  const identity = captureConversationIdentity(conversation);
+  return `${identity.conversationId}:${identity.branchId}:${identity.checkoutEpoch}`;
+}
 
 interface GeneratorConfigSnapshot {
   runtime: AISettings["runtime"];
@@ -571,6 +594,10 @@ type DesignReviewSummary = NonNullable<
   NonNullable<Message["metadata"]>["reviewSummary"]
 >;
 
+const reviewBranchIdentities = new Map<string, ConversationIdentity>();
+const reviewIdentityKey = (conversationId: string, reviewId: string) =>
+  `${conversationId}/${reviewId}`;
+
 function appendAutomaticReviewActivity(
   conversationId: string,
   reviewJobId: string,
@@ -579,6 +606,10 @@ function appendAutomaticReviewActivity(
   const state = useConversationStore.getState();
   const conversation = state.conversations[conversationId];
   if (!conversation) return;
+  reviewBranchIdentities.set(
+    reviewIdentityKey(conversationId, reviewJobId),
+    captureConversationIdentity(conversation),
+  );
   const existing = conversation.messages.some(
     (message) => message.metadata?.reviewJobId === reviewJobId,
   );
@@ -608,6 +639,16 @@ function updateAutomaticReviewActivity(
 ): void {
   const state = useConversationStore.getState();
   const conversation = state.conversations[conversationId];
+  const identity = reviewBranchIdentities.get(
+    reviewIdentityKey(conversationId, currentReviewJobId),
+  );
+  if (identity && !isConversationIdentityCurrent(identity, conversation))
+    return;
+  if (identity && nextReviewJobId !== currentReviewJobId)
+    reviewBranchIdentities.set(
+      reviewIdentityKey(conversationId, nextReviewJobId),
+      identity,
+    );
   if (
     !conversation?.messages.some(
       (message) => message.metadata?.reviewJobId === currentReviewJobId,
@@ -817,6 +858,24 @@ function localAgentClientConfig(
   };
 }
 
+/** Explicit Stop may happen before a generator exists. Retire that cancelled
+ * journal only after Native confirms cleanup and the existing UI state saves. */
+async function retireStoppedLocalRun(
+  native: typeof import("../lib/local-agent/tauri"),
+  runId: string,
+): Promise<void> {
+  await native.cancelLocalAgent(runId);
+  await flushConversationPersistence();
+  const remaining = (await native.listRecoverableLocalAgents()).find(
+    (run) => run.runId === runId,
+  );
+  if (!remaining) return;
+  if (!remaining.terminal)
+    throw new Error(getT().settings.localCli.recoveryUnavailable);
+  const terminal = await native.attachLocalAgent(runId, () => {});
+  await native.acknowledgeLocalAgentTerminal(runId, terminal.lease);
+}
+
 export function useGenerator({
   settings,
   webSearchSettings,
@@ -833,6 +892,9 @@ export function useGenerator({
     null,
   );
   const [isThinkingStreaming, setIsThinkingStreaming] = useState(false);
+  const [runtimeWaitMessage, setRuntimeWaitMessage] = useState<string | null>(
+    null,
+  );
   const generatorConfigRef = useRef<GeneratorConfigSnapshot | null>(null);
   const generatorConstructionEpochRef = useRef(0);
   const permissionBrokerBypassEnabled = useSettingsStore(
@@ -840,6 +902,21 @@ export function useGenerator({
   );
   const previousPermissionBypassRef = useRef(permissionBrokerBypassEnabled);
   const activeId = useConversationStore((s) => s.activeId);
+  const conversationHydrated = useConversationStore((s) => s._hasHydrated);
+  const recoveryCheckedRef = useRef<string | null>(null);
+  const recoveryCheckingRef = useRef(false);
+  const recoveryAttemptRef = useRef(0);
+  const recoveryStopEpochRef = useRef(0);
+  const recoveringRunRef = useRef<LocalRecoverableRun | null>(null);
+  const recoveryInstructionMessagesRef = useRef(new Map<string, Message>());
+  const recoveryToolOutputsRef = useRef(
+    new Map<string, import("../lib/ai/generator-types").ToolExecutionOutput>(),
+  );
+  const activeCheckoutKey = useConversationStore((state) =>
+    checkoutKey(
+      state.activeId ? state.conversations[state.activeId] : undefined,
+    ),
+  );
   const activeReviewFiles = useConversationStore((state) =>
     state.activeId ? state.conversations[state.activeId]?.files : undefined,
   );
@@ -861,7 +938,7 @@ export function useGenerator({
   const designReviewRunsHydrated = useDesignReviewStore(
     (state) => state._hasHydratedRuns,
   );
-  const prevActiveIdRef = useRef(activeId);
+  const prevActiveIdRef = useRef(activeCheckoutKey);
   const textBufferRef = useRef("");
   const thinkingBufferRef = useRef("");
   const typewriterTimerRef = useRef<number | null>(null);
@@ -869,6 +946,7 @@ export function useGenerator({
   const lastCharTimeRef = useRef(0);
   const lastThinkingTimeRef = useRef(0);
   const runConversationIdRef = useRef<string | null>(null);
+  const runIdentityRef = useRef<ConversationIdentity | null>(null);
   const generationRunEpochRef = useRef(0);
   const forcedSkillsPromptRef = useRef("");
   const forcedSkillIdsRef = useRef<string[]>([]);
@@ -956,6 +1034,13 @@ export function useGenerator({
         runConversationId,
         useConversationStore.getState().activeId,
         runConversationIdRef.current,
+      ) &&
+      !!runIdentityRef.current &&
+      isConversationIdentityCurrent(
+        runIdentityRef.current,
+        runConversationId
+          ? useConversationStore.getState().conversations[runConversationId]
+          : undefined,
       ),
     [],
   );
@@ -1036,7 +1121,7 @@ export function useGenerator({
   }, [permissionBrokerBypassEnabled]);
 
   useEffect(() => {
-    if (prevActiveIdRef.current === activeId) return;
+    if (prevActiveIdRef.current === activeCheckoutKey) return;
     if (runConversationIdRef.current)
       useConversationStore
         .getState()
@@ -1060,14 +1145,18 @@ export function useGenerator({
     designRunInitialFilesRef.current = {};
     designRunExpectedChangeModesRef.current = undefined;
     clearOutputBuffers();
-    prevActiveIdRef.current = activeId;
+    prevActiveIdRef.current = activeCheckoutKey;
     useInteractiveStore.getState().rejectAllPending("conversation switched");
+    useProjectPermissionStore
+      .getState()
+      .cancelPending("conversation branch switched");
     useSubagentStore.setState({ progress: {} });
     useDesignReviewStore.getState().reset();
     setIsGenerating(false);
     setIsThinkingStreaming(false);
+    setRuntimeWaitMessage(null);
     setRunState("idle");
-  }, [activeId, clearOutputBuffers, setIsGenerating]);
+  }, [activeId, activeCheckoutKey, clearOutputBuffers, setIsGenerating]);
 
   useEffect(() => {
     if (!activeId || !activeReviewFiles) return;
@@ -1202,11 +1291,14 @@ export function useGenerator({
       instructions: string,
       prompt: string,
       options?: { timeoutMs?: number; signal?: AbortSignal },
+      purpose?: "title",
     ) => {
-      const { runLocalUtilityText } =
+      const { runLocalUtilityText, runLocalTitleText } =
         await import("../lib/local-agent/generator");
       try {
-        return await runLocalUtilityText(
+        const runText =
+          purpose === "title" ? runLocalTitleText : runLocalUtilityText;
+        return await runText(
           localAgentClientConfig(settings.localAgent, { nativeSearch: false }),
           instructions,
           prompt,
@@ -1228,6 +1320,15 @@ export function useGenerator({
       }
     },
     [settings.localAgent],
+  );
+
+  const generateLocalTitleText = useCallback(
+    (
+      instructions: string,
+      prompt: string,
+      options?: { timeoutMs?: number; signal?: AbortSignal },
+    ) => generateLocalUtilityText(instructions, prompt, options, "title"),
+    [generateLocalUtilityText],
   );
 
   const generateUtilityText = useCallback(
@@ -1262,6 +1363,8 @@ export function useGenerator({
     setMessages,
     generateTextOverride:
       settings.runtime === "localCli" ? generateLocalUtilityText : undefined,
+    generateTitleOverride:
+      settings.runtime === "localCli" ? generateLocalTitleText : undefined,
   });
 
   /** Flush all remaining thinking buffer content at once */
@@ -1606,11 +1709,15 @@ export function useGenerator({
 
     if (requestedRunEpoch !== generationRunEpochRef.current) return null;
     const currentActiveId = useConversationStore.getState().activeId;
-    if (!currentActiveId) return null;
+    if (!currentActiveId || !isCurrentGeneratorRun(currentActiveId))
+      return null;
+    const currentConversation =
+      useConversationStore.getState().conversations[currentActiveId];
+    const currentCheckoutKey = checkoutKey(currentConversation);
 
     // Invalidate on conversation switch, including a store update that arrived
     // before React committed the matching render.
-    if (prevActiveIdRef.current !== currentActiveId) {
+    if (prevActiveIdRef.current !== currentCheckoutKey) {
       generatorConstructionEpochRef.current += 1;
       generatorRef.current?.abort();
       generatorRef.current = null;
@@ -1622,7 +1729,7 @@ export function useGenerator({
       activeToolProfileRef.current = "default";
       clearOutputBuffers();
       setIsThinkingStreaming(false);
-      prevActiveIdRef.current = currentActiveId;
+      prevActiveIdRef.current = currentCheckoutKey;
       useInteractiveStore.getState().rejectAllPending("conversation switched");
       useSubagentStore.setState({ progress: {} });
     }
@@ -1654,11 +1761,19 @@ export function useGenerator({
       const constructionRunEpoch = requestedRunEpoch;
       const runtime = await loadGeneratorRuntime();
       const generatorConversationId = currentActiveId;
+      const candidateIdentity =
+        captureConversationIdentity(currentConversation);
       let candidate: GenerationBackend | null = null;
       const isCurrentCandidate = () =>
         candidate !== null &&
         generatorRef.current === candidate &&
-        isCurrentGeneratorRun(generatorConversationId);
+        isCurrentGeneratorRun(generatorConversationId) &&
+        isConversationIdentityCurrent(
+          candidateIdentity,
+          useConversationStore.getState().conversations[
+            generatorConversationId
+          ],
+        );
 
       const isBuiltinSearch =
         !isLocalRuntime && webSearchSettings.engine === "builtin";
@@ -2090,6 +2205,7 @@ export function useGenerator({
       const generatorEvents = {
         onText: (delta) => {
           if (!isCurrentCandidate()) return;
+          setRuntimeWaitMessage(null);
           setRunState("streaming");
           setIsThinkingStreaming(false);
           flushThinkingBuffer();
@@ -2133,6 +2249,7 @@ export function useGenerator({
         },
         onThinking: (delta) => {
           if (!isCurrentCandidate()) return;
+          setRuntimeWaitMessage(null);
           setRunState("streaming");
           setIsThinkingStreaming(true);
           thinkingBufferRef.current += delta;
@@ -2173,6 +2290,7 @@ export function useGenerator({
         },
         onToolCall: (name, id) => {
           if (!isCurrentCandidate()) return;
+          setRuntimeWaitMessage(null);
           setIsThinkingStreaming(false);
           setRunState(
             name === "ask_user_question"
@@ -2290,6 +2408,7 @@ export function useGenerator({
             )
           ) {
             flushOutputBuffers();
+            setRuntimeWaitMessage(null);
             setRunState("preparing");
             return;
           }
@@ -2324,6 +2443,16 @@ export function useGenerator({
         },
         onLocalCliStatus: (status) => {
           if (!isCurrentCandidate()) return;
+          const fallbackNotice = getT().subagent.messageOutputNotice;
+          setRuntimeWaitMessage((previous) =>
+            status.message === LOCAL_CLI_IDLE_MESSAGE
+              ? getT().subagent.waitingForResponse
+              : status.message === LOCAL_CLI_MESSAGE_OUTPUT_NOTICE
+                ? fallbackNotice
+                : previous === fallbackNotice
+                  ? previous
+                  : null,
+          );
           setRunState(runStateForLocalCliStatus(status.state));
         },
         onRetry: (attempt, maxAttempts, error) => {
@@ -2574,12 +2703,165 @@ export function useGenerator({
           await import("../lib/local-agent/generator");
         candidate = createLocalAgentGenerator(
           localAgentClientConfig(settings.localAgent, {
-            nativeSearch: webSearchSettings.engine === "builtin",
+            nativeSearch:
+              recoveringRunRef.current?.request.nativeSearch ??
+              webSearchSettings.engine === "builtin",
+            ...(recoveringRunRef.current
+              ? {
+                  model: recoveringRunRef.current.request.model,
+                  effort: recoveringRunRef.current.request.effort,
+                }
+              : {}),
             conversationId: generatorConversationId,
             getConversation: () =>
               useConversationStore.getState().conversations[
                 generatorConversationId
               ] ?? null,
+            getRecoveryAppState: () => ({
+              logicalRunId: logicalRunIdRef.current,
+              profile: activeToolProfileRef.current,
+              mode: candidate?.getRunContext().mode ?? "chat",
+              forcedSkillIds: foregroundForcedSkillIdsRef.current,
+              customSystemPrompt: customSystemPromptRef.current,
+              expectedChangeModes: designRunExpectedChangeModesRef.current,
+              designContract: designContractControllerRef.current.getContract(),
+              uiBaselineIds:
+                useConversationStore
+                  .getState()
+                  .conversations[generatorConversationId]?.messages.map(
+                    (message) => message.id,
+                  ) ?? [],
+            }),
+            flushRecoveryState: async () => {
+              flushOutputBuffers();
+              await flushConversationPersistence();
+            },
+            restoreRecoveryContext: async (context: LocalRecoveryContext) => {
+              if (!isCurrentCandidate() || !candidate)
+                throw new DOMException("Recovery superseded", "AbortError");
+              const conversation =
+                useConversationStore.getState().conversations[
+                  generatorConversationId
+                ];
+              const ids = context.app.uiBaselineIds;
+              if (
+                !Array.isArray(ids) ||
+                !isConversationIdentityCurrent(
+                  context.identity,
+                  conversation,
+                ) ||
+                ids.some((id, index) => conversation.messages[index]?.id !== id)
+              ) {
+                throw new Error(getT().settings.localCli.recoveryIncompatible);
+              }
+              const registry = await getSkillRegistry();
+              const skills = await registry.prepareForcedSkills(
+                context.skillIds,
+              );
+              if (
+                skills.some((skill) => {
+                  const original = context.skillContext?.skills.find(
+                    (entry) => entry.skillId === skill.entry.id,
+                  );
+                  return (
+                    !original ||
+                    JSON.stringify([...original.allowedTools].sort()) !==
+                      JSON.stringify(
+                        [...(skill.entry.allowedTools ?? [])].sort(),
+                      )
+                  );
+                })
+              )
+                throw new Error(getT().settings.localCli.recoveryIncompatible);
+              if (!isCurrentCandidate())
+                throw new DOMException("Recovery superseded", "AbortError");
+              candidate.getSkillContext().clear();
+              candidate
+                .getSkillContext()
+                .activateMany(skills.map((skill) => skill.entry));
+              configureDesignRun(conversation, {
+                profile: context.app.profile as ToolProfile,
+                expectedChangeModes: context.app.expectedChangeModes as
+                  DesignChangeMode[] | undefined,
+                reusableContract: context.app.designContract as
+                  DesignContract | undefined,
+              });
+              recoveryToolOutputsRef.current = new Map(
+                conversation.messages
+                  .filter(
+                    (message) =>
+                      message.role === "tool" &&
+                      message.tool_call_id &&
+                      message.toolOutput,
+                  )
+                  .map((message) => [
+                    message.tool_call_id!,
+                    message.toolOutput!,
+                  ]),
+              );
+              recoveryInstructionMessagesRef.current = new Map([
+                ...conversation.messages
+                  .filter((message) => message.metadata?.instructionId)
+                  .map(
+                    (message) =>
+                      [message.metadata!.instructionId!, message] as const,
+                  ),
+                ...(conversation.pendingUserInstructions ?? []).map(
+                  (item) =>
+                    [
+                      item.id,
+                      {
+                        role: "user" as const,
+                        content:
+                          item.content ||
+                          (item.forcedSkillIds.length
+                            ? getT().chat.instructions.applySkills
+                            : ""),
+                        forcedSkillIds: context.app.forcedSkillIds as
+                          string[] | undefined,
+                        metadata: {
+                          instructionId: item.id,
+                          ...(item.attachments.length
+                            ? { attachments: item.attachments }
+                            : {}),
+                        },
+                      },
+                    ] as const,
+                ),
+              ]);
+              clearOutputBuffers();
+              setMessages((messages) => messages.slice(0, ids.length));
+            },
+            getRecoveredToolOutput: (callId) =>
+              recoveryToolOutputsRef.current.get(callId),
+            restoreUserInstructions: (ids) => {
+              if (!isCurrentCandidate())
+                throw new DOMException("Recovery superseded", "AbortError");
+              const messages = ids.map((id) =>
+                recoveryInstructionMessagesRef.current.get(id),
+              );
+              if (messages.some((message) => !message))
+                throw new Error(getT().settings.localCli.recoveryIncompatible);
+              const restored = messages as Message[];
+              setMessages((previous) => [
+                ...previous,
+                ...restored.filter(
+                  (message) =>
+                    !previous.some(
+                      (existing) =>
+                        existing.metadata?.instructionId ===
+                        message.metadata?.instructionId,
+                    ),
+                ),
+              ]);
+              useConversationStore
+                .getState()
+                .setPendingUserInstructions(
+                  generatorConversationId,
+                  (pending) => pending.filter((item) => !ids.includes(item.id)),
+                );
+              return restored as import("../lib/ai/generator-types").Message[];
+            },
             saveSession: (session) => {
               if (generatorRef.current !== candidate || !isCurrentCandidate()) {
                 return;
@@ -2627,6 +2909,12 @@ export function useGenerator({
       );
       if (
         !constructionIsCurrent ||
+        !isConversationIdentityCurrent(
+          candidateIdentity,
+          useConversationStore.getState().conversations[
+            generatorConversationId
+          ],
+        ) ||
         constructionRunEpoch !== generationRunEpochRef.current
       ) {
         candidate.abort();
@@ -3019,6 +3307,12 @@ export function useGenerator({
       ) {
         return;
       }
+      const reviewIdentity = captureConversationIdentity(conversation);
+      const reviewIsCurrent = () =>
+        isConversationIdentityCurrent(
+          reviewIdentity,
+          useConversationStore.getState().conversations[runConversationId],
+        );
       const phase = options.automaticDesignReviewPhase ?? "initial";
       if (!shouldRequestAutomaticDesignReview(changedUiPaths, phase)) return;
 
@@ -3057,6 +3351,10 @@ export function useGenerator({
         designContract: contract,
       })
         .then((sourceDigest) => {
+          if (!reviewIsCurrent()) {
+            pendingAutomaticCaptureIds.delete(requestId);
+            return;
+          }
           if (hasNewerGenuineUserMessage(runConversationId, requestId)) {
             pendingAutomaticCaptureIds.delete(requestId);
             updateAutomaticReviewActivity(runConversationId, requestId, {
@@ -3105,6 +3403,7 @@ export function useGenerator({
         })
         .catch(() => {
           pendingAutomaticCaptureIds.delete(requestId);
+          if (!reviewIsCurrent()) return;
           updateAutomaticReviewActivity(runConversationId, requestId, {
             status: "failed",
           });
@@ -3113,13 +3412,249 @@ export function useGenerator({
     [],
   );
 
+  const recoveryHandlersRef = useRef({
+    getGenerator,
+    applyDynamicGeneratorState,
+    configureDesignRun,
+    appendGenerationError,
+    clearOutputBuffers,
+    flushOutputBuffers,
+    isCurrentGeneratorRun,
+    setIsGenerating,
+  });
+  recoveryHandlersRef.current = {
+    getGenerator,
+    applyDynamicGeneratorState,
+    configureDesignRun,
+    appendGenerationError,
+    clearOutputBuffers,
+    flushOutputBuffers,
+    isCurrentGeneratorRun,
+    setIsGenerating,
+  };
+
+  // A new page reconciles native ownership before it accepts another prompt.
+  // No unload callback is required: the next page atomically takes the lease.
+  useEffect(() => {
+    if (
+      !conversationHydrated ||
+      !activeId ||
+      settings.runtime !== "localCli" ||
+      typeof window === "undefined" ||
+      !("__TAURI_INTERNALS__" in window)
+    )
+      return;
+    if (
+      recoveryCheckedRef.current === activeCheckoutKey ||
+      recoveryCheckingRef.current ||
+      runConversationIdRef.current
+    )
+      return;
+    const {
+      getGenerator,
+      applyDynamicGeneratorState,
+      configureDesignRun,
+      appendGenerationError,
+      flushOutputBuffers,
+      isCurrentGeneratorRun,
+      setIsGenerating,
+    } = recoveryHandlersRef.current;
+    const attempt = ++recoveryAttemptRef.current;
+    recoveryCheckedRef.current = activeCheckoutKey;
+    recoveryCheckingRef.current = true;
+    const expectedKey = activeCheckoutKey;
+    const originalEpoch = generationRunEpochRef.current;
+    const originalStopEpoch = recoveryStopEpochRef.current;
+    let cancelled = false;
+    setIsGenerating(true);
+    setRunState("preparing");
+    setRuntimeWaitMessage(getT().settings.localCli.recoveryChecking);
+    void (async () => {
+      const native = await import("../lib/local-agent/tauri");
+      const runs = await native.listRecoverableLocalAgents();
+      // Effect replacement (including StrictMode) is not a Stop. A stale
+      // discovery must never cancel a run that the next effect now owns.
+      if (cancelled) return;
+      if (recoveryStopEpochRef.current !== originalStopEpoch) {
+        await Promise.all(
+          runs
+            .filter((run) => run.request.scope.id === activeId)
+            .map((run) => retireStoppedLocalRun(native, run.runId)),
+        );
+        return;
+      }
+      if (generationRunEpochRef.current !== originalEpoch) return;
+      const store = useConversationStore.getState();
+      const conversation = store.activeId
+        ? store.conversations[store.activeId]
+        : undefined;
+      if (!conversation || checkoutKey(conversation) !== expectedKey) return;
+      // A changed checkout must never inherit the previous branch's writes.
+      const matching: LocalRecoverableRun[] = [];
+      let incompatible = false;
+      for (const run of runs) {
+        if (
+          run.request.scope.kind !== "conversation" ||
+          run.request.scope.id !== conversation.id
+        )
+          continue;
+        const same =
+          run.context?.version === 1 &&
+          isConversationIdentityCurrent(run.context.identity, conversation) &&
+          run.request.provider === settings.localAgent.provider;
+        if (same) {
+          matching.push(run);
+          continue;
+        }
+        // Retired journals from another branch are never replayed into this one.
+        if (!run.terminal) await native.cancelLocalAgent(run.runId);
+        // Keep unprojected terminal evidence for its original branch. It must
+        // neither overwrite the selected checkout nor block a new explicit run.
+        incompatible ||= !run.terminal;
+      }
+      const active = matching.filter((run) => !run.terminal);
+      const run = active[0] ?? matching.at(-1);
+      if (!run) {
+        if (incompatible)
+          appendGenerationError(
+            new Error(getT().settings.localCli.recoveryIncompatible),
+            { replaceExisting: true },
+          );
+        return;
+      }
+      if (generationRunEpochRef.current !== originalEpoch || cancelled) {
+        await native.cancelLocalAgent(run.runId);
+        return;
+      }
+      const identity = captureConversationIdentity(conversation);
+      const epoch = ++generationRunEpochRef.current;
+      runConversationIdRef.current = conversation.id;
+      runIdentityRef.current = identity;
+      prevActiveIdRef.current = expectedKey;
+      logicalRunIdRef.current =
+        typeof run.context.app.logicalRunId === "string"
+          ? run.context.app.logicalRunId
+          : crypto.randomUUID();
+      recoveringRunRef.current = run;
+      setRuntimeWaitMessage(getT().settings.localCli.recoveryConnecting);
+      const current = () =>
+        !cancelled &&
+        generationRunEpochRef.current === epoch &&
+        isCurrentGeneratorRun(conversation.id);
+      let recoveryBackend: GenerationBackend | null = null;
+      try {
+        const generator = await getGenerator();
+        recoveryBackend = generator;
+        if (!current()) return;
+        if (!generator?.recover)
+          throw new Error(getT().settings.localCli.recoveryUnavailable);
+        const profile = run.context.app.profile as ToolProfile;
+        const mode = run.request.mode === "plan" ? "plan" : "chat";
+        await applyDynamicGeneratorState(generator, run.context.skillIds, {
+          mode,
+          profile,
+          customSystemPromptSnapshot:
+            typeof run.context.app.customSystemPrompt === "string"
+              ? run.context.app.customSystemPrompt
+              : "",
+          isCurrent: current,
+        });
+        if (!current()) return;
+        configureDesignRun(conversation, {
+          profile,
+          expectedChangeModes: run.context.app.expectedChangeModes as
+            DesignChangeMode[] | undefined,
+          reusableContract: run.context.app.designContract as
+            DesignContract | undefined,
+        });
+        await generator.recover(run);
+      } catch (error) {
+        if (current()) {
+          await native.cancelLocalAgent(run.runId);
+          if (!(error instanceof Error && error.name === "AbortError"))
+            appendGenerationError(error, { replaceExisting: true });
+          await generatorRef.current?.acknowledgeRecovery?.();
+        }
+      } finally {
+        if (!current() && !run.terminal)
+          await native.cancelLocalAgent(run.runId);
+        // Stop clears generatorRef immediately. Retain this backend long enough
+        // to ACK only its observed terminal after the cancelled UI state saves.
+        await recoveryBackend?.acknowledgeRecovery?.();
+        if (recoveryStopEpochRef.current !== originalStopEpoch)
+          await retireStoppedLocalRun(native, run.runId);
+        recoveringRunRef.current = null;
+        if (current()) {
+          flushOutputBuffers();
+          runConversationIdRef.current = null;
+          setIsThinkingStreaming(false);
+        }
+      }
+    })()
+      .catch((error) => {
+        if (!cancelled) {
+          recoveryCheckedRef.current = null;
+          appendGenerationError(
+            new Error(
+              error instanceof Error &&
+                error.message === getT().settings.localCli.recoveryIncompatible
+                ? error.message
+                : getT().settings.localCli.recoveryUnavailable,
+            ),
+            { replaceExisting: true },
+          );
+        }
+      })
+      .finally(() => {
+        if (recoveryAttemptRef.current !== attempt) return;
+        recoveryCheckingRef.current = false;
+        if (!cancelled) {
+          setIsGenerating(false);
+          setRuntimeWaitMessage(null);
+          setRunState((state) =>
+            state === "error" || state === "aborted" ? state : "idle",
+          );
+        }
+      });
+    return () => {
+      cancelled = true;
+      if (recoveryAttemptRef.current === attempt) {
+        recoveryAttemptRef.current += 1;
+        recoveryCheckingRef.current = false;
+        recoveryCheckedRef.current = null;
+      }
+    };
+  }, [
+    conversationHydrated,
+    activeId,
+    activeCheckoutKey,
+    settings.runtime,
+    settings.localAgent.provider,
+  ]);
+
   const generate = useCallback(
     async (
       prompt: string,
       attachments?: Attachment[],
       options: GenerateRunOptions = {},
     ) => {
-      if (runConversationIdRef.current !== null) return;
+      if (runConversationIdRef.current !== null || recoveryCheckingRef.current)
+        return;
+      if (
+        settings.runtime === "localCli" &&
+        typeof window !== "undefined" &&
+        "__TAURI_INTERNALS__" in window &&
+        recoveryCheckedRef.current !==
+          checkoutKey(
+            useConversationStore.getState().conversations[
+              useConversationStore.getState().activeId ?? ""
+            ],
+          )
+      )
+        return;
+      const beforeRun = useConversationStore.getState();
+      if (beforeRun.activeId)
+        beforeRun.ensureWritableBranch(beforeRun.activeId);
       const runStartState = useConversationStore.getState();
       const runConversationId = runStartState.activeId;
       if (!runConversationId) return;
@@ -3174,6 +3709,19 @@ export function useGenerator({
         useSettingsStore.getState().system.customSystemPrompt;
       logicalRunIdRef.current = crypto.randomUUID();
       runConversationIdRef.current = runConversationId;
+      const runConversation =
+        useConversationStore.getState().conversations[runConversationId];
+      if (prevActiveIdRef.current !== checkoutKey(runConversation)) {
+        generatorConstructionEpochRef.current += 1;
+        generatorRef.current?.abort();
+        generatorRef.current = null;
+        generatorConfigRef.current = null;
+        clearOutputBuffers();
+        prevActiveIdRef.current = checkoutKey(runConversation);
+      }
+      runIdentityRef.current = captureConversationIdentity(runConversation);
+      recoveryCheckedRef.current = checkoutKey(runConversation);
+      setRuntimeWaitMessage(null);
       setRunState("preparing");
       setLastError(null);
       setIsThinkingStreaming(false);
@@ -3382,6 +3930,7 @@ export function useGenerator({
             replaceExisting: true,
             ...(options.messageOrigin ? { retryable: false } : {}),
           });
+          await generatorRef.current?.acknowledgeRecovery?.();
         }
       } finally {
         clearAgnesAttachments();
@@ -3421,6 +3970,14 @@ export function useGenerator({
   );
 
   const stop = useCallback(() => {
+    recoveryStopEpochRef.current += 1;
+    const discovered = recoveringRunRef.current;
+    if (discovered)
+      void import("../lib/local-agent/tauri")
+        .then((native) => native.cancelLocalAgent(discovered.runId))
+        .catch((error) =>
+          console.error("Local CLI recovery stop failed:", error),
+        );
     const stoppedConversationId = runConversationIdRef.current;
     if (stoppedConversationId)
       useConversationStore
@@ -3451,6 +4008,7 @@ export function useGenerator({
     designRunInitialFilesRef.current = {};
     designRunExpectedChangeModesRef.current = undefined;
     useInteractiveStore.getState().rejectAllPending("user stopped");
+    setRuntimeWaitMessage(null);
     setRunState("aborted");
     setIsGenerating(false);
     createSnapshotForCurrentState();
@@ -3537,13 +4095,30 @@ export function useGenerator({
 
     setLastError(null);
     setIsThinkingStreaming(false);
+    setRuntimeWaitMessage(null);
     setRunState("idle");
     setIsGenerating(false);
     return draft;
   }, [clearOutputBuffers, setIsGenerating]);
 
   const retry = useCallback(async () => {
-    if (runConversationIdRef.current !== null) return;
+    if (runConversationIdRef.current !== null || recoveryCheckingRef.current)
+      return;
+    if (
+      settings.runtime === "localCli" &&
+      typeof window !== "undefined" &&
+      "__TAURI_INTERNALS__" in window &&
+      recoveryCheckedRef.current !==
+        checkoutKey(
+          useConversationStore.getState().conversations[
+            useConversationStore.getState().activeId ?? ""
+          ],
+        )
+    )
+      return;
+    const beforeRetry = useConversationStore.getState();
+    if (beforeRetry.activeId)
+      beforeRetry.ensureWritableBranch(beforeRetry.activeId);
     const retryStartState = useConversationStore.getState();
     const runConversationId = retryStartState.activeId;
     if (!runConversationId) return;
@@ -3567,10 +4142,23 @@ export function useGenerator({
       useSettingsStore.getState().system.customSystemPrompt;
     logicalRunIdRef.current = crypto.randomUUID();
     runConversationIdRef.current = runConversationId;
+    const runConversation =
+      useConversationStore.getState().conversations[runConversationId];
+    if (prevActiveIdRef.current !== checkoutKey(runConversation)) {
+      generatorConstructionEpochRef.current += 1;
+      generatorRef.current?.abort();
+      generatorRef.current = null;
+      generatorConfigRef.current = null;
+      clearOutputBuffers();
+      prevActiveIdRef.current = checkoutKey(runConversation);
+    }
+    runIdentityRef.current = captureConversationIdentity(runConversation);
+    recoveryCheckedRef.current = checkoutKey(runConversation);
     const runEpoch = ++generationRunEpochRef.current;
     const isCurrentRun = () =>
       generationRunEpochRef.current === runEpoch &&
       isCurrentGeneratorRun(runConversationId);
+    setRuntimeWaitMessage(null);
     setRunState("preparing");
     setLastError(null);
     setIsThinkingStreaming(false);
@@ -3713,6 +4301,12 @@ export function useGenerator({
           .fail("Design Review is available only in Design mode.");
         return null;
       }
+      const reviewIdentity = captureConversationIdentity(conversation);
+      const reviewIsCurrent = () =>
+        isConversationIdentityCurrent(
+          reviewIdentity,
+          useConversationStore.getState().conversations[runConversationId],
+        );
       try {
         // Capture the UI language before any async digest or queue work so a
         // run/retry keeps one consistent report language.
@@ -3735,6 +4329,7 @@ export function useGenerator({
             designContract: null,
           }),
         ]);
+        if (!reviewIsCurrent()) return null;
         const provider: DesignReviewJobInput["provider"] =
           settings.runtime === "localCli"
             ? {
@@ -3786,9 +4381,14 @@ export function useGenerator({
         };
         const { designReviewJobRunner } =
           await import("../lib/design/review-jobs/runner");
+        if (!reviewIsCurrent()) return null;
         const run = options?.retryOf
           ? designReviewJobRunner.retry(options.retryOf, input)
           : designReviewJobRunner.start(input);
+        reviewBranchIdentities.set(
+          reviewIdentityKey(runConversationId, run.id),
+          reviewIdentity,
+        );
         reviewContractByRunIdRef.current.set(run.id, contract);
         useDesignReviewStore.getState().selectRun(runConversationId, run.id);
         if (options?.automaticEvidence) {
@@ -3806,6 +4406,7 @@ export function useGenerator({
         }
         return run;
       } catch (error) {
+        if (!reviewIsCurrent()) return null;
         const message = error instanceof Error ? error.message : String(error);
         useDesignReviewStore.getState().fail(message);
         if (options?.automaticEvidence) {
@@ -3852,6 +4453,14 @@ export function useGenerator({
         return;
       }
 
+      const reviewIdentity = captureConversationIdentity(conversation);
+      const reviewIsCurrent = () =>
+        isConversationIdentityCurrent(
+          reviewIdentity,
+          useConversationStore.getState().conversations[
+            evidence.conversationId
+          ],
+        );
       const runtimeSnapshots = screenshots.flatMap((screenshot) =>
         screenshot.semanticSnapshot ? [screenshot.semanticSnapshot] : [],
       );
@@ -3921,6 +4530,7 @@ export function useGenerator({
           { status: "deferred" },
         );
         await waitForDesignReviewRun(activeRun.id);
+        if (!reviewIsCurrent()) return;
         const resumedConversation =
           useConversationStore.getState().conversations[
             evidence.conversationId
@@ -3936,6 +4546,7 @@ export function useGenerator({
               designContract: evidence.contract,
             })
           : null;
+        if (!reviewIsCurrent()) return;
         const resumedState = useConversationStore.getState();
         const currentAutomatic =
           useDesignReviewStore.getState().automatic?.evidence.requestId ===
@@ -3982,6 +4593,7 @@ export function useGenerator({
         automaticEvidence: enrichedEvidence,
         captureErrors,
       });
+      if (!reviewIsCurrent()) return;
       if (!startedRun) {
         if (
           useDesignReviewStore.getState().automatic?.evidence.requestId ===
@@ -3997,6 +4609,7 @@ export function useGenerator({
         return;
       }
       const completedRun = await waitForDesignReviewRun(startedRun.id);
+      if (!reviewIsCurrent()) return;
       if (!completedRun) {
         if (
           useDesignReviewStore.getState().automatic?.evidence.requestId ===
@@ -4021,6 +4634,7 @@ export function useGenerator({
             designContract: evidence.contract,
           })
         : null;
+      if (!reviewIsCurrent()) return;
       const postDigestState = useConversationStore.getState();
       const currentProject =
         currentProjectSource !== null &&
@@ -4181,6 +4795,7 @@ export function useGenerator({
           ),
         },
       );
+      if (!reviewIsCurrent()) return;
       if (trackFixingOnRun && completedRun.report) {
         useDesignReviewStore
           .getState()
@@ -4207,6 +4822,7 @@ export function useGenerator({
       const initialState = useConversationStore.getState();
       const conversation = initialState.conversations[evidence.conversationId];
       if (!conversation) return;
+      const reviewIdentity = captureConversationIdentity(conversation);
       const scope = selectAutomaticDesignRepairScope(evidence, {
         overview: "Visual review unavailable.",
         findings: [],
@@ -4216,6 +4832,15 @@ export function useGenerator({
         designSystem: conversation.designState?.appliedSystem ?? null,
         designContract: evidence.contract,
       });
+      if (
+        !isConversationIdentityCurrent(
+          reviewIdentity,
+          useConversationStore.getState().conversations[
+            evidence.conversationId
+          ],
+        )
+      )
+        return;
       const fresh = Boolean(
         evidence.sourceDigest && currentDigest === evidence.sourceDigest,
       );
@@ -4308,7 +4933,23 @@ export function useGenerator({
   );
 
   const continueTask = useCallback(async () => {
-    if (runConversationIdRef.current !== null) return;
+    if (runConversationIdRef.current !== null || recoveryCheckingRef.current)
+      return;
+    if (
+      settings.runtime === "localCli" &&
+      typeof window !== "undefined" &&
+      "__TAURI_INTERNALS__" in window &&
+      recoveryCheckedRef.current !==
+        checkoutKey(
+          useConversationStore.getState().conversations[
+            useConversationStore.getState().activeId ?? ""
+          ],
+        )
+    )
+      return;
+    const beforeContinue = useConversationStore.getState();
+    if (beforeContinue.activeId)
+      beforeContinue.ensureWritableBranch(beforeContinue.activeId);
     const continueStartState = useConversationStore.getState();
     const runConversationId = continueStartState.activeId;
     if (!runConversationId) return;
@@ -4322,6 +4963,19 @@ export function useGenerator({
       useSettingsStore.getState().system.customSystemPrompt;
     logicalRunIdRef.current = crypto.randomUUID();
     runConversationIdRef.current = runConversationId;
+    const runConversation =
+      useConversationStore.getState().conversations[runConversationId];
+    if (prevActiveIdRef.current !== checkoutKey(runConversation)) {
+      generatorConstructionEpochRef.current += 1;
+      generatorRef.current?.abort();
+      generatorRef.current = null;
+      generatorConfigRef.current = null;
+      clearOutputBuffers();
+      prevActiveIdRef.current = checkoutKey(runConversation);
+    }
+    runIdentityRef.current = captureConversationIdentity(runConversation);
+    recoveryCheckedRef.current = checkoutKey(runConversation);
+    setRuntimeWaitMessage(null);
     setRunState("preparing");
     setLastError(null);
     setIsThinkingStreaming(false);
@@ -4454,6 +5108,7 @@ export function useGenerator({
     runState,
     lastError,
     isThinkingStreaming,
+    runtimeWaitMessage,
     generateUtilityText,
     getDesignContract: () => designContractControllerRef.current.getContract(),
   };

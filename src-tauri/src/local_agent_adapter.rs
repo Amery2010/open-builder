@@ -2,8 +2,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::local_agent::{
-    LocalAgentAvailability, LocalAgentCapabilities, LocalAgentModel, LocalAgentPreference,
-    LocalAgentPreferenceDecision, LocalAgentProvider, LocalAgentStartRequest,
+    LocalAgentAvailability, LocalAgentCapabilities, LocalAgentModel, LocalAgentOutputCapabilities,
+    LocalAgentPreference, LocalAgentPreferenceDecision, LocalAgentProvider,
+    LocalAgentReasoningTextSupport, LocalAgentStartRequest, LocalAgentTextGranularity,
+    LocalAgentTransport, UtilityEffortPolicy,
 };
 use crate::local_agent_bridge::canonical_tool_digest;
 use crate::local_agent_models::{
@@ -74,6 +76,7 @@ pub(crate) struct PreparedCliRun {
     actual_effort: Option<String>,
     resumed: bool,
     session_id: Option<String>,
+    output_capabilities: LocalAgentOutputCapabilities,
 }
 
 pub(crate) struct PreparedRunResources {
@@ -116,6 +119,10 @@ impl PreparedProviderRun {
 }
 
 impl PreparedCliRun {
+    pub(crate) fn output_capabilities(&self) -> LocalAgentOutputCapabilities {
+        self.output_capabilities.clone()
+    }
+
     pub(crate) fn cli_version(&self) -> &str {
         &self.cli_version
     }
@@ -384,6 +391,21 @@ pub(crate) fn validate_request(request: &LocalAgentStartRequest) -> Result<(), A
     }?)
 }
 
+fn lowest_supported_effort(model: Option<&str>, models: &[LocalAgentModel]) -> Option<String> {
+    const ORDER: &[&str] = &[
+        "off", "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+    ];
+    let model = models
+        .iter()
+        .find(|candidate| Some(candidate.id.as_str()) == model)?;
+    let ranks = model
+        .efforts
+        .iter()
+        .map(|effort| ORDER.iter().position(|known| *known == effort))
+        .collect::<Option<Vec<_>>>()?;
+    ranks.into_iter().min().map(|rank| ORDER[rank].to_string())
+}
+
 pub(crate) async fn prepare_run(
     executable: PathBuf,
     mut request: LocalAgentStartRequest,
@@ -421,27 +443,60 @@ pub(crate) async fn prepare_run(
         }
         .into());
     }
-    let actual = match resolved.launch_validation {
+    let mut actual = match resolved.launch_validation {
         LaunchValidation::Allowed {
             preference: _,
             actual,
             ..
-        } => {
-            // Pin the same resolved selection used by the compatibility key.
-            // This prevents a provider default from drifting between probe and
-            // launch while preserving an empty UI preference between runs.
-            request.model = actual.model.clone();
-            request.effort = actual.effort.clone();
-            actual
-        }
+        } => actual,
         LaunchValidation::Rejected { message } => return Err(message.into()),
     };
+    if request.utility_effort_policy == Some(UtilityEffortPolicy::LowestSupported) {
+        if let Some(effort) = lowest_supported_effort(actual.model.as_deref(), &probe.models) {
+            actual.effort = Some(effort);
+        }
+    }
+    // Pin the same resolved selection used by the compatibility key and process.
+    // A title's temporary effort never changes the saved provider preference.
+    request.model = actual.model.clone();
+    request.effort = actual.effort.clone();
     installation.verify_unchanged()?;
     let configuration_fingerprint = provider_configuration_fingerprint(request.provider)?;
+    let codex_transport = if request.provider == LocalAgentProvider::Codex {
+        Some(crate::local_agent_codex::select_transport(installation.canonical_path()).await?)
+    } else {
+        None
+    };
+    let output_capabilities = LocalAgentOutputCapabilities {
+        transport: match request.provider {
+            LocalAgentProvider::Codex => {
+                if codex_transport == Some(crate::local_agent_codex::Transport::AppServer) {
+                    LocalAgentTransport::CodexAppServer
+                } else {
+                    LocalAgentTransport::CodexExec
+                }
+            }
+            LocalAgentProvider::Claude => LocalAgentTransport::ClaudeStreamJson,
+            LocalAgentProvider::Pi => LocalAgentTransport::PiRpc,
+            LocalAgentProvider::Antigravity => LocalAgentTransport::AntigravityStreamJson,
+        },
+        text_granularity: if codex_transport == Some(crate::local_agent_codex::Transport::Exec) {
+            LocalAgentTextGranularity::Message
+        } else {
+            LocalAgentTextGranularity::Delta
+        },
+        reasoning_text: if request.provider == LocalAgentProvider::Antigravity {
+            LocalAgentReasoningTextSupport::Unknown
+        } else {
+            LocalAgentReasoningTextSupport::Supported
+        },
+    };
     let tool_digest = canonical_tool_digest(&request.tools)?;
     let compatibility_key = compatibility_key(CompatibilityKeyMaterial {
         provider: request.provider,
-        protocol_version: protocol_version(request.provider),
+        protocol_version: codex_transport
+            .map(|t| t.protocol_version())
+            .unwrap_or_else(|| protocol_version(request.provider)),
         installation_fingerprint: installation.fingerprint(),
         configuration_fingerprint: &configuration_fingerprint,
         model: actual.model.as_deref(),
@@ -451,21 +506,25 @@ pub(crate) async fn prepare_run(
     });
     let resumed = apply_session_compatibility(&mut request, &compatibility_key);
     let session_id = request.session_id.clone();
-    let provider_run = prepare_provider_run(ProtocolContext {
-        executable: installation.canonical_path().to_path_buf(),
-        request,
-        run_dir: resources.run_dir,
-        session_dir: resources.session_dir,
-        workspace_dir: resources.workspace_dir,
-        bridge_url: resources.bridge_url,
-        bridge_token: resources.bridge_token,
-        cancellation: resources.cancellation,
-        channel: resources.channel,
-        cli_version: probe
-            .version
-            .clone()
-            .unwrap_or_else(|| "unknown".to_string()),
-    })?;
+    let provider_run = prepare_provider_run(
+        ProtocolContext {
+            executable: installation.canonical_path().to_path_buf(),
+            request,
+            run_dir: resources.run_dir,
+            session_dir: resources.session_dir,
+            workspace_dir: resources.workspace_dir,
+            bridge_url: resources.bridge_url,
+            bridge_token: resources.bridge_token,
+            cancellation: resources.cancellation,
+            channel: resources.channel,
+            cli_version: probe
+                .version
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
+        },
+        codex_transport,
+    )
+    .await?;
     if provider_run.configuration_fingerprint() != configuration_fingerprint {
         return Err("local CLI configuration changed during preparation".into());
     }
@@ -481,17 +540,24 @@ pub(crate) async fn prepare_run(
         actual_effort: actual.effort,
         resumed,
         session_id,
+        output_capabilities,
     })
 }
 
-fn prepare_provider_run(context: ProtocolContext) -> Result<PreparedProviderRun, AdapterError> {
+async fn prepare_provider_run(
+    context: ProtocolContext,
+    codex_transport: Option<crate::local_agent_codex::Transport>,
+) -> Result<PreparedProviderRun, AdapterError> {
     match context.request.provider {
-        LocalAgentProvider::Codex => {
-            crate::local_agent_codex::prepare_run(context).map(PreparedProviderRun::Codex)
-        }
-        LocalAgentProvider::Claude => {
-            crate::local_agent_claude::prepare_run(context).map(PreparedProviderRun::Claude)
-        }
+        LocalAgentProvider::Codex => crate::local_agent_codex::prepare_run(
+            context,
+            codex_transport.expect("Codex transport is selected before compatibility"),
+        )
+        .await
+        .map(PreparedProviderRun::Codex),
+        LocalAgentProvider::Claude => crate::local_agent_claude::prepare_run(context)
+            .await
+            .map(PreparedProviderRun::Claude),
         LocalAgentProvider::Pi => {
             crate::local_agent_pi::prepare_run(context).map(PreparedProviderRun::Pi)
         }
@@ -531,6 +597,7 @@ mod tests {
 
     fn request() -> LocalAgentStartRequest {
         LocalAgentStartRequest {
+            utility_effort_policy: None,
             provider: LocalAgentProvider::Codex,
             model: Some("gpt-test".to_string()),
             effort: Some("high".to_string()),
@@ -548,6 +615,45 @@ mod tests {
             native_search: false,
             mode: "chat".to_string(),
         }
+    }
+
+    #[test]
+    fn selects_lowest_effort_only_from_the_resolved_models_reported_capabilities() {
+        let mut models = vec![
+            LocalAgentModel {
+                id: "other-model".to_string(),
+                display_name: "Other".to_string(),
+                is_default: false,
+                default_effort: Some("none".to_string()),
+                efforts: vec!["none".to_string()],
+            },
+            LocalAgentModel {
+                id: "resolved-model".to_string(),
+                display_name: "Resolved".to_string(),
+                is_default: true,
+                default_effort: Some("high".to_string()),
+                efforts: vec!["high".to_string(), "low".to_string(), "medium".to_string()],
+            },
+        ];
+        assert_eq!(
+            lowest_supported_effort(Some("resolved-model"), &models).as_deref(),
+            Some("low")
+        );
+        assert_eq!(lowest_supported_effort(None, &models), None);
+        assert_eq!(
+            lowest_supported_effort(Some("gateway-model"), &models),
+            None
+        );
+        models[1].efforts.push("custom-fast".to_string());
+        assert_eq!(
+            lowest_supported_effort(Some("resolved-model"), &models),
+            None
+        );
+        models[1].efforts.clear();
+        assert_eq!(
+            lowest_supported_effort(Some("resolved-model"), &models),
+            None
+        );
     }
 
     #[test]
@@ -581,6 +687,7 @@ mod tests {
         session_compatibility_key: Option<String>,
     ) -> LocalAgentStartRequest {
         LocalAgentStartRequest {
+            utility_effort_policy: None,
             provider,
             model: std::env::var("OPEN_BUILDER_MANUAL_CLI_MODEL")
                 .ok()
@@ -654,6 +761,100 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn utility_effort_is_consistent_through_prepare_key_and_process() {
+        use std::os::unix::fs::PermissionsExt;
+        const CHILD_ROOT: &str = "OPEN_BUILDER_TITLE_FIXTURE_ROOT";
+        let Ok(root) = std::env::var(CHILD_ROOT) else {
+            let root = ManualSmokeRoot(std::env::temp_dir().join(format!(
+                "open-builder-title-fixture-{}",
+                uuid::Uuid::new_v4()
+            )));
+            std::fs::create_dir_all(root.0.join("config")).unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "local_agent_adapter::tests::utility_effort_is_consistent_through_prepare_key_and_process", "--nocapture"])
+                .env(CHILD_ROOT, &root.0)
+                .env("CODEX_HOME", root.0.join("config"))
+                .output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        };
+        let root = PathBuf::from(root);
+        let executable = root.join("fake-codex");
+        std::fs::write(
+            &executable,
+            include_str!("../tests/fixtures/fake_codex_app_server.py")
+                .replace("FIXTURE_MODE", "utility"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let strategy = ModelStrategy::default();
+        for (model, expected_model, expected_effort) in [
+            (None, "default-model", "low"),
+            (Some("chosen-model"), "chosen-model", "medium"),
+        ] {
+            let mut keys = Vec::new();
+            for (index, policy, effort) in [
+                (0, Some(UtilityEffortPolicy::LowestSupported), None),
+                (1, None, None),
+                (2, None, Some(expected_effort)),
+            ] {
+                let run_dir = root.join(format!("{expected_model}-{index}"));
+                std::fs::create_dir_all(&run_dir).unwrap();
+                let (channel, _events) = manual_channel();
+                let mut request = request();
+                request.model = model.map(str::to_string);
+                request.effort = effort.map(str::to_string);
+                request.utility_effort_policy = policy;
+                request.mode = "subagent".to_string();
+                request.scope.kind = LocalAgentRunScopeKind::Utility;
+                request.session_id = None;
+                request.bootstrap_context = None;
+                let prepared = prepare_run(
+                    executable.clone(),
+                    request,
+                    &strategy,
+                    PreparedRunResources {
+                        run_dir: run_dir.clone(),
+                        session_dir: run_dir.clone(),
+                        workspace_dir: run_dir.clone(),
+                        bridge_url: "http://127.0.0.1:34567/mcp".to_string(),
+                        bridge_token: "fixture-token".to_string(),
+                        cancellation: CancellationToken::new(),
+                        channel: channel.into(),
+                    },
+                )
+                .await
+                .unwrap();
+                let actual_effort = if index == 1 { "high" } else { expected_effort };
+                assert_eq!(prepared.actual_model(), Some(expected_model));
+                assert_eq!(prepared.actual_effort(), Some(actual_effort));
+                keys.push(prepared.compatibility_key().to_string());
+                assert!(!prepared.launch().await.unwrap().aborted);
+                let process: serde_json::Value = serde_json::from_str(
+                    &std::fs::read_to_string(run_dir.join("utility-process-selection")).unwrap(),
+                )
+                .unwrap();
+                let turn: serde_json::Value = serde_json::from_str(
+                    &std::fs::read_to_string(run_dir.join("utility-turn-selection")).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(process["model"], expected_model);
+                assert_eq!(process["model_reasoning_effort"], actual_effort);
+                assert_eq!(turn["model"], expected_model);
+                assert_eq!(turn["effort"], actual_effort);
+            }
+            assert_ne!(keys[0], keys[1]);
+            assert_eq!(keys[0], keys[2]);
+        }
+    }
+
     async fn manual_turn(
         bridge: &ToolBridge,
         strategy: &ModelStrategy,
@@ -699,6 +900,35 @@ mod tests {
         .expect("the real local CLI must prepare");
         let compatibility_key = prepared.compatibility_key().to_string();
         let resumed = prepared.resumed();
+        let output_capabilities = prepared.output_capabilities();
+        let actual_model = prepared.actual_model().map(str::to_string);
+        let actual_effort = prepared.actual_effort().map(str::to_string);
+        let cli_version = prepared.cli_version().to_string();
+        let started = std::time::Instant::now();
+        let mut first_text_ms = None;
+        let mut first_reasoning_ms = None;
+        let mut text_deltas = 0usize;
+        let mut reasoning_deltas = 0usize;
+        let mut observe = |event: &serde_json::Value| {
+            if event
+                .get("delta")
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(str::is_empty)
+            {
+                return;
+            }
+            match event.get("type").and_then(serde_json::Value::as_str) {
+                Some("textDelta") => {
+                    text_deltas += 1;
+                    first_text_ms.get_or_insert(started.elapsed().as_millis());
+                }
+                Some("reasoningDelta") => {
+                    reasoning_deltas += 1;
+                    first_reasoning_ms.get_or_insert(started.elapsed().as_millis());
+                }
+                _ => {}
+            }
+        };
         let marker = root.join(format!("host-write-probe-{turn}.txt"));
         let mut launch = Box::pin(prepared.launch());
         let mut captured_events = Vec::new();
@@ -721,17 +951,23 @@ mod tests {
                             },
                         ).unwrap();
                     }
+                    observe(&event);
                     captured_events.push(event);
                 }
             }
         };
         while let Ok(event) = event_receiver.try_recv() {
+            observe(&event);
             captured_events.push(event);
         }
+        println!(
+            "{}",
+            serde_json::json!({"check":"local-cli-output", "turn":turn,"cliVersion":cli_version,"model":actual_model,"effort":actual_effort,"outputCapabilities":output_capabilities,"firstTextMs":first_text_ms,"firstReasoningMs":first_reasoning_ms,"textDeltas":text_deltas,"reasoningDeltas":reasoning_deltas,"reasoningReceived":reasoning_deltas>0,"doneMs":started.elapsed().as_millis(),"resumed":resumed,"aborted":outcome.aborted})
+        );
         bridge.unregister(&run_id, "manual smoke turn completed");
         assert!(
             marker.is_file(),
-            "the provider did not call host_write_probe: {captured_events:?}"
+            "the provider did not call host_write_probe"
         );
         assert_eq!(std::fs::read_to_string(&marker).unwrap(), "host-authorized");
         (outcome, compatibility_key, captured_events, resumed)
@@ -813,11 +1049,7 @@ mod tests {
             );
         }
 
-        println!(
-            "manual {provider_name} smoke passed: fresh={:?}, resumed={:?}",
-            first_text.trim(),
-            second_text.trim()
-        );
+        println!("manual {provider_name} smoke passed: fresh and resumed");
         bridge.shutdown_now();
     }
 }

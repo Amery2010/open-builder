@@ -248,6 +248,20 @@ describe("buildToolHandlers Design diagnostics", () => {
         openBuilder: { profile: "complete-prototype", schemaVersion: 1 },
       }),
     };
+    const unchangedFiles = files;
+    const missingResponsibility = {
+      ...document,
+      pages: document.pages.map(
+        ({ responsibility: _responsibility, ...page }) => page,
+      ),
+    };
+    const rejected = await built.combinedToolHandler("update_project_design", {
+      document: missingResponsibility,
+    });
+    expect(rejected).toMatchObject({ isError: true });
+    expect((rejected as { text: string }).text).toContain("responsibility");
+    expect(files).toBe(unchangedFiles);
+    expect(onProjectDesignUpdated).not.toHaveBeenCalled();
     const created = await built.combinedToolHandler("update_project_design", {
       document,
     });

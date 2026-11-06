@@ -15,6 +15,11 @@ import { useT } from "../../i18n";
 import type { ToolBlock } from "../../types";
 import { TOOL_METADATA } from "../../lib/ai/tool-metadata";
 import { getAttachmentBlob } from "../../lib/attachments/store";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "../ui/collapsible";
 
 export const TOOL_CARD_LIMITS = {
   maxJsonParseChars: 200_000,
@@ -56,18 +61,66 @@ export function countSearchResults(
   truncatedMessage?: string,
 ): {
   ok: boolean;
-  count: number;
+  count: number | null;
+  sources: { title: string; url: string; snippet?: string }[];
   error?: string;
 } {
+  // Older Local CLI messages persisted this completion text or a bare array.
+  if (result === "web_search completed without structured results.") {
+    return { ok: true, count: null, sources: [] };
+  }
   const d = parseToolJson(result);
-  if (!d) {
+  if (!d || typeof d !== "object") {
     return {
       ok: false,
-      count: 0,
+      count: null,
+      sources: [],
       error: truncateToolCardText(result, truncatedMessage),
     };
   }
-  return { ok: d.ok, count: d.results?.length ?? 0, error: d.error };
+  const results: unknown[] | null = Array.isArray(d)
+    ? d
+    : Array.isArray(d.results)
+      ? d.results
+      : null;
+  const ok = Array.isArray(d) || d.ok === true;
+  // Native CLI and older messages may have an empty details array without a
+  // match count. Only the known Host search contracts establish a true zero.
+  const confirmedHostSearch =
+    !Array.isArray(d) &&
+    ["tavily", "firecrawl", "exa"].includes(d.meta?.engine);
+  const sources: { title: string; url: string; snippet?: string }[] = [];
+  const seen = new Set<string>();
+  if (ok) {
+    for (const entry of results ?? []) {
+      if (!entry || typeof entry !== "object") continue;
+      const source = entry as Record<string, unknown>;
+      const url =
+        typeof source.url === "string"
+          ? safeExternalResourceUrl(source.url)
+          : null;
+      if (!url || seen.has(url)) continue;
+      seen.add(url);
+      const snippet = source.snippet ?? source.content;
+      sources.push({
+        title:
+          typeof source.title === "string" && source.title.trim()
+            ? source.title
+            : url,
+        url,
+        ...(typeof snippet === "string" && snippet ? { snippet } : {}),
+      });
+    }
+  }
+  return {
+    ok,
+    count:
+      results?.length === 0 && !confirmedHostSearch
+        ? null
+        : (results?.length ?? null),
+    sources,
+    error: typeof d.error === "string" ? d.error : undefined,
+  };
 }
 
 export function countImageResults(
@@ -217,7 +270,9 @@ export function classifyToolCardStatus(
   return "completed";
 }
 
-type ToolCallCardProps = Omit<ToolBlock, "type" | "id">;
+type ToolCallCardProps = Omit<ToolBlock, "type" | "id"> & {
+  status?: ToolCardStatus | "aborted";
+};
 
 export const ToolCallCard = memo(function ToolCallCard({
   toolName,
@@ -228,6 +283,7 @@ export const ToolCallCard = memo(function ToolCallCard({
   toolOutput,
   rawArgs,
   skillLoads,
+  status: explicitStatus,
 }: ToolCallCardProps) {
   const t = useT();
   const [expanded, setExpanded] = useState(false);
@@ -263,13 +319,30 @@ export const ToolCallCard = memo(function ToolCallCard({
           },
         ]
       : undefined);
-  const status = classifyToolCardStatus(
+  const inferredStatus = classifyToolCardStatus(
     toolName,
     result,
     toolOutput,
     visibleSkillLoads,
   );
-  const statusLabel = t.tool.status[status];
+  const status =
+    explicitStatus === "completed"
+      ? inferredStatus === "running"
+        ? "completed"
+        : inferredStatus
+      : (explicitStatus ?? inferredStatus);
+  const emptyResult =
+    !result &&
+    !toolOutput?.text &&
+    !toolOutput?.content?.length &&
+    !toolOutput?.structuredContent &&
+    !visibleSkillLoads?.length &&
+    status !== "running";
+  const hasDetails = Boolean(
+    result || toolOutput || visibleSkillLoads?.length || status !== "running",
+  );
+  const statusLabel =
+    status === "aborted" ? t.subagent.aborted : t.tool.status[status];
 
   const searchSummary =
     toolName === "web_search" && result
@@ -303,11 +376,13 @@ export const ToolCallCard = memo(function ToolCallCard({
   ).length;
 
   return (
-    <div className="border border-border/60 rounded-lg overflow-hidden bg-muted/30">
-      <button
+    <Collapsible
+      open={expanded}
+      onOpenChange={setExpanded}
+      className="border border-border/60 rounded-lg overflow-hidden bg-muted/30"
+    >
+      <CollapsibleTrigger
         type="button"
-        aria-expanded={expanded}
-        onClick={() => setExpanded((current) => !current)}
         className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-muted/50 transition-colors cursor-pointer"
       >
         <span className="flex items-center shrink-0">
@@ -322,7 +397,7 @@ export const ToolCallCard = memo(function ToolCallCard({
           <Badge variant="secondary" className="text-xs font-mono h-5">
             {visibleSkillLoads.length} {t.tool.skills}
           </Badge>
-        ) : toolName === "web_search" && result ? (
+        ) : toolName === "web_search" && searchSummary?.count != null ? (
           <Badge variant="secondary" className="text-xs font-mono h-5">
             {searchResultCount} {t.tool.results}
           </Badge>
@@ -380,6 +455,7 @@ export const ToolCallCard = memo(function ToolCallCard({
             status === "completed" && "bg-green-500",
             status === "failed" && "bg-red-500",
             status === "attention" && "bg-yellow-400",
+            status === "aborted" && "bg-muted-foreground",
           )}
           aria-hidden="true"
         />
@@ -387,179 +463,222 @@ export const ToolCallCard = memo(function ToolCallCard({
         <ChevronRight
           size={13}
           className={cn(
-            "text-muted-foreground transition-transform shrink-0",
+            "text-muted-foreground transition-transform duration-300 shrink-0",
             expanded && "rotate-90",
           )}
         />
-      </button>
+      </CollapsibleTrigger>
 
-      {expanded && (result || toolOutput || visibleSkillLoads?.length) && (
-        <div className="px-3 py-2 border-t border-border/60 bg-muted/20">
-          {visibleSkillLoads && visibleSkillLoads.length > 0 ? (
-            <div className="space-y-1.5">
-              {visibleSkillLoads.map((skill) => (
-                <div
-                  key={skill.name}
-                  className="flex items-start gap-2 text-xs text-muted-foreground"
-                >
-                  {skill.status === "completed" ? (
-                    <Check
-                      size={13}
-                      className="mt-0.5 shrink-0 text-green-500"
-                      aria-hidden="true"
-                    />
-                  ) : skill.status === "failed" ? (
-                    <X
-                      size={13}
-                      className="mt-0.5 shrink-0 text-red-500"
-                      aria-hidden="true"
-                    />
-                  ) : skill.status === "attention" ? (
-                    <AlertTriangle
-                      size={13}
-                      className="mt-0.5 shrink-0 text-yellow-500"
-                      aria-hidden="true"
-                    />
-                  ) : (
-                    <span
-                      aria-hidden="true"
-                      className="mt-1.5 size-1.5 shrink-0 animate-pulse rounded-full bg-yellow-400"
-                    />
-                  )}
-                  <span className="min-w-0 flex-1">
-                    <span className="block font-medium text-foreground">
-                      {skill.name}
-                    </span>
-                    {skill.referencePaths &&
-                      skill.referencePaths.length > 0 && (
-                        <span className="block truncate font-mono text-[11px]">
-                          {skill.referencePaths.join(", ")}
+      {hasDetails && (
+        <CollapsibleContent>
+          <div className="px-3 py-2 border-t border-border/60 bg-muted/20">
+            {emptyResult ? (
+              <p className="text-xs text-muted-foreground">
+                {status === "completed" ? t.tool.emptyResult : statusLabel}
+              </p>
+            ) : visibleSkillLoads && visibleSkillLoads.length > 0 ? (
+              <div className="space-y-1.5">
+                {visibleSkillLoads.map((skill) => (
+                  <div
+                    key={skill.name}
+                    className="flex items-start gap-2 text-xs text-muted-foreground"
+                  >
+                    {skill.status === "completed" ? (
+                      <Check
+                        size={13}
+                        className="mt-0.5 shrink-0 text-green-500"
+                        aria-hidden="true"
+                      />
+                    ) : skill.status === "failed" ? (
+                      <X
+                        size={13}
+                        className="mt-0.5 shrink-0 text-red-500"
+                        aria-hidden="true"
+                      />
+                    ) : skill.status === "attention" ? (
+                      <AlertTriangle
+                        size={13}
+                        className="mt-0.5 shrink-0 text-yellow-500"
+                        aria-hidden="true"
+                      />
+                    ) : (
+                      <span
+                        aria-hidden="true"
+                        className="mt-1.5 size-1.5 shrink-0 animate-pulse rounded-full bg-yellow-400"
+                      />
+                    )}
+                    <span className="min-w-0 flex-1">
+                      <span className="block font-medium text-foreground">
+                        {skill.name}
+                      </span>
+                      {skill.referencePaths &&
+                        skill.referencePaths.length > 0 && (
+                          <span className="block truncate font-mono text-[11px]">
+                            {skill.referencePaths.join(", ")}
+                          </span>
+                        )}
+                      {skill.error && (
+                        <span className="block whitespace-pre-wrap text-red-500">
+                          {truncateToolCardText(skill.error, truncatedMessage)}
                         </span>
                       )}
-                    {skill.error && (
-                      <span className="block whitespace-pre-wrap text-red-500">
-                        {truncateToolCardText(skill.error, truncatedMessage)}
+                      <span className="sr-only">
+                        {t.tool.status[skill.status]}
                       </span>
-                    )}
-                    <span className="sr-only">
-                      {t.tool.status[skill.status]}
                     </span>
-                  </span>
-                </div>
-              ))}
-            </div>
-          ) : toolOutput?.source?.kind === "mcp" ||
-            toolOutput?.content?.some((part) => part.type === "local_image") ? (
-            <RichToolResult
-              output={toolOutput}
-              fallback={displayResult ?? ""}
-            />
-          ) : toolName === "list_files" ? (
-            <FileTreeView content={displayResult ?? ""} />
-          ) : toolName === "read_files" ? (
-            <FileTreeView content={(paths || []).join("\n")} />
-          ) : toolName === "read_file" ? (
-            <span className="text-xs text-muted-foreground italic">
-              {t.tool.fileHidden}
-            </span>
-          ) : toolName === "get_console_logs" ? (
-            consoleIssues.length === 0 ? (
-              <p className="text-xs text-green-600">{t.tool.noIssues}</p>
-            ) : (
-              <div className="space-y-1">
-                {consoleIssues.map((issue, i) => (
-                  <div
-                    key={i}
-                    className={cn(
-                      "flex items-start gap-1.5 text-xs font-mono whitespace-pre-wrap leading-relaxed",
-                      issue.level === "error"
-                        ? "text-red-500"
-                        : "text-yellow-600",
-                    )}
-                  >
-                    {issue.level === "error" ? (
-                      <X size={12} className="mt-0.5 shrink-0" />
-                    ) : (
-                      <AlertTriangle size={12} className="mt-0.5 shrink-0" />
-                    )}
-                    <span>{issue.text}</span>
                   </div>
                 ))}
               </div>
-            )
-          ) : toolName === "web_search" ? (
-            <p className="text-xs text-muted-foreground">
-              {!searchSummary?.ok
-                ? `${t.tool.failed}${searchSummary?.error ?? result}`
-                : `${t.tool.found}${searchResultCount} ${t.tool.searchResults}`}
-            </p>
-          ) : toolName === "image_search" ? (
-            <p className="text-xs text-muted-foreground">
-              {!imageSummary?.ok
-                ? `${t.tool.failed}${imageSummary?.error ?? result}`
-                : `${t.tool.found}${imageResultCount} ${t.tool.imageResults}`}
-            </p>
-          ) : toolName === "search_npm_packages" ? (
-            <div className="space-y-2 text-xs">
-              <p className="text-muted-foreground">
-                {!npmSearchSummary?.success
-                  ? `${t.tool.failed}${npmSearchSummary?.error ?? result}`
-                  : `${t.tool.found}${npmSearchCount} ${t.tool.npmPackages}`}
-              </p>
-              {npmSearchSummary?.success && npmSearchCount > 0 && (
-                <ul className="space-y-2">
-                  {npmSearchSummary.packages.map((pkg, index) => (
-                    <li key={`${pkg.name}-${index}`}>
-                      <div className="flex flex-wrap items-baseline gap-2">
-                        <span className="font-mono text-foreground break-all">
-                          {pkg.name}
-                        </span>
-                        {pkg.version && (
-                          <span className="font-mono text-muted-foreground">
-                            {pkg.version}
-                          </span>
-                        )}
-                      </div>
-                      {pkg.description && (
-                        <p className="text-muted-foreground break-words">
-                          {pkg.description}
-                        </p>
+            ) : toolOutput?.source?.kind === "mcp" ||
+              toolOutput?.content?.some(
+                (part) => part.type === "local_image",
+              ) ? (
+              <RichToolResult
+                output={toolOutput}
+                fallback={displayResult ?? ""}
+              />
+            ) : toolName === "list_files" ? (
+              <FileTreeView content={displayResult ?? ""} />
+            ) : toolName === "read_files" ? (
+              <FileTreeView content={(paths || []).join("\n")} />
+            ) : toolName === "read_file" ? (
+              <span className="text-xs text-muted-foreground italic">
+                {t.tool.fileHidden}
+              </span>
+            ) : toolName === "get_console_logs" ? (
+              consoleIssues.length === 0 ? (
+                <p className="text-xs text-green-600">{t.tool.noIssues}</p>
+              ) : (
+                <div className="space-y-1">
+                  {consoleIssues.map((issue, i) => (
+                    <div
+                      key={i}
+                      className={cn(
+                        "flex items-start gap-1.5 text-xs font-mono whitespace-pre-wrap leading-relaxed",
+                        issue.level === "error"
+                          ? "text-red-500"
+                          : "text-yellow-600",
                       )}
-                    </li>
+                    >
+                      {issue.level === "error" ? (
+                        <X size={12} className="mt-0.5 shrink-0" />
+                      ) : (
+                        <AlertTriangle size={12} className="mt-0.5 shrink-0" />
+                      )}
+                      <span>{issue.text}</span>
+                    </div>
                   ))}
-                </ul>
-              )}
-            </div>
-          ) : toolName === "get_npm_package_detail" ? (
-            <p className="text-xs text-muted-foreground">
-              {!npmDetailSummary?.success
-                ? `${t.tool.failed}${npmDetailSummary?.error ?? result}`
-                : `${t.tool.found}${npmDetailName}`}
-            </p>
-          ) : toolName === "web_reader" ? (
-            <div className="space-y-0.5">
-              {readerUrls.map(({ url, ok }) => (
-                <div
-                  key={url}
-                  className="flex items-center gap-1.5 text-xs text-muted-foreground"
-                >
-                  {ok ? (
-                    <Check size={12} className="text-green-500 shrink-0" />
-                  ) : (
-                    <X size={12} className="text-red-500 shrink-0" />
-                  )}
-                  <span className="truncate">{url}</span>
                 </div>
-              ))}
-            </div>
-          ) : (
-            <pre className="text-xs font-mono whitespace-pre-wrap text-muted-foreground leading-relaxed">
-              {displayResult}
-            </pre>
-          )}
-        </div>
+              )
+            ) : toolName === "web_search" ? (
+              <div className="space-y-3 text-xs">
+                <p className="text-muted-foreground">
+                  {!searchSummary?.ok
+                    ? `${t.tool.failed}${searchSummary?.error ?? displayResult}`
+                    : searchSummary.count === null
+                      ? t.tool.searchResultsUnavailable
+                      : `${t.tool.found}${searchResultCount} ${t.tool.searchResults}`}
+                </p>
+                {searchSummary?.sources.length ? (
+                  <ul className="space-y-3">
+                    {searchSummary.sources.map((source) => (
+                      <li key={source.url} className="min-w-0 space-y-1">
+                        <a
+                          href={source.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex max-w-full items-start gap-1 text-primary hover:underline"
+                        >
+                          <span className="min-w-0 truncate">
+                            {source.title}
+                          </span>
+                          <ExternalLink
+                            size={12}
+                            className="mt-0.5 shrink-0"
+                            aria-hidden="true"
+                          />
+                        </a>
+                        <span className="block truncate text-muted-foreground">
+                          {source.url}
+                        </span>
+                        {source.snippet ? (
+                          <p className="line-clamp-2 break-words text-muted-foreground">
+                            {source.snippet}
+                          </p>
+                        ) : null}
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </div>
+            ) : toolName === "image_search" ? (
+              <p className="text-xs text-muted-foreground">
+                {!imageSummary?.ok
+                  ? `${t.tool.failed}${imageSummary?.error ?? result}`
+                  : `${t.tool.found}${imageResultCount} ${t.tool.imageResults}`}
+              </p>
+            ) : toolName === "search_npm_packages" ? (
+              <div className="space-y-2 text-xs">
+                <p className="text-muted-foreground">
+                  {!npmSearchSummary?.success
+                    ? `${t.tool.failed}${npmSearchSummary?.error ?? result}`
+                    : `${t.tool.found}${npmSearchCount} ${t.tool.npmPackages}`}
+                </p>
+                {npmSearchSummary?.success && npmSearchCount > 0 && (
+                  <ul className="space-y-2">
+                    {npmSearchSummary.packages.map((pkg, index) => (
+                      <li key={`${pkg.name}-${index}`}>
+                        <div className="flex flex-wrap items-baseline gap-2">
+                          <span className="font-mono text-foreground break-all">
+                            {pkg.name}
+                          </span>
+                          {pkg.version && (
+                            <span className="font-mono text-muted-foreground">
+                              {pkg.version}
+                            </span>
+                          )}
+                        </div>
+                        {pkg.description && (
+                          <p className="text-muted-foreground break-words">
+                            {pkg.description}
+                          </p>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            ) : toolName === "get_npm_package_detail" ? (
+              <p className="text-xs text-muted-foreground">
+                {!npmDetailSummary?.success
+                  ? `${t.tool.failed}${npmDetailSummary?.error ?? result}`
+                  : `${t.tool.found}${npmDetailName}`}
+              </p>
+            ) : toolName === "web_reader" ? (
+              <div className="space-y-0.5">
+                {readerUrls.map(({ url, ok }) => (
+                  <div
+                    key={url}
+                    className="flex items-center gap-1.5 text-xs text-muted-foreground"
+                  >
+                    {ok ? (
+                      <Check size={12} className="text-green-500 shrink-0" />
+                    ) : (
+                      <X size={12} className="text-red-500 shrink-0" />
+                    )}
+                    <span className="truncate">{url}</span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <pre className="text-xs font-mono whitespace-pre-wrap text-muted-foreground leading-relaxed">
+                {displayResult}
+              </pre>
+            )}
+          </div>
+        </CollapsibleContent>
       )}
-    </div>
+    </Collapsible>
   );
 });
 
@@ -749,14 +868,20 @@ function RichToolResult({
         }
       })}
       {structured && (
-        <details className="rounded-md border border-border/60 px-2.5 py-2">
-          <summary className="cursor-pointer text-xs font-medium text-foreground">
+        <Collapsible className="rounded-md border border-border/60 px-2.5 py-2">
+          <CollapsibleTrigger className="group flex w-full items-center gap-1 text-left text-xs font-medium text-foreground">
+            <ChevronRight
+              className="size-3 transition-transform duration-300 group-data-[state=open]:rotate-90"
+              aria-hidden="true"
+            />
             {t.tool.structuredContent}
-          </summary>
-          <pre className="mt-2 text-xs font-mono whitespace-pre-wrap text-muted-foreground leading-relaxed">
-            {structured}
-          </pre>
-        </details>
+          </CollapsibleTrigger>
+          <CollapsibleContent>
+            <pre className="mt-2 text-xs font-mono whitespace-pre-wrap text-muted-foreground leading-relaxed">
+              {structured}
+            </pre>
+          </CollapsibleContent>
+        </Collapsible>
       )}
       {!hasVisibleContent && !structured && (
         <pre className="text-xs font-mono whitespace-pre-wrap text-muted-foreground leading-relaxed">

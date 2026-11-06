@@ -316,7 +316,7 @@ export function ChatInputToolbar({
             <span
               className={`absolute inset-0 flex items-center justify-center transition-[opacity,transform,color,background-color,border-color] duration-200 ${isHoveringStop ? "opacity-100 scale-100" : "opacity-0 scale-50"}`}
             >
-              <Square size={8} fill="currentColor" />
+              <Square size={10} className="size-[10px]" fill="currentColor" />
             </span>
           </TooltipIconButton>
         ) : (

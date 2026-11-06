@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WebAppGenerator } from "../generator";
-import type { GeneratorOptions } from "../generator-types";
+import type { GeneratorEvents, GeneratorOptions } from "../generator-types";
 import { runSubagent, type RunSubagentOpts } from "./runner";
 import * as registry from "./registry";
 import { useSubagentStore } from "../../../store/subagent";
@@ -51,6 +51,193 @@ afterEach(() => {
 });
 
 describe("subagent iteration policy", () => {
+  it("flushes received output on Stop and rejects output before the backend settles", async () => {
+    const controller = new AbortController();
+    let callbacks: GeneratorEvents;
+    let finish = () => {};
+    let started = () => {};
+    const ready = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const waiting = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const run = runSubagent({
+      ...options(),
+      signal: controller.signal,
+      createGenerator: (config, events) => {
+        callbacks = events;
+        const generator = new WebAppGenerator(config, events);
+        vi.spyOn(generator, "generate").mockImplementation(async () => {
+          events.onText?.("Received before Stop");
+          started();
+          await waiting;
+          return {
+            files: {},
+            messages: [],
+            text: "Received before Stop LATE",
+            aborted: true,
+            maxIterationsReached: false,
+          };
+        });
+        return generator;
+      },
+    });
+    await ready;
+    controller.abort();
+    const stopped = useSubagentStore.getState().progress["subagent-1"];
+    expect(stopped.status).toBe("aborted");
+    expect(stopped.text).toBe("Received before Stop");
+    callbacks!.onText?.(" LATE");
+    callbacks!.onToolCall?.("read_files", "late-tool");
+    expect(useSubagentStore.getState().progress["subagent-1"]).toBe(stopped);
+    finish();
+    expect(JSON.parse((await run).text).text).toBe("Received before Stop");
+  });
+  it("persists an explicit completed state for a successful empty tool result", async () => {
+    const result = await runSubagent({
+      ...options(),
+      createGenerator: (config, events) => {
+        const generator = new WebAppGenerator(config, events);
+        vi.spyOn(generator, "generate").mockImplementation(async () => {
+          events.onToolCall?.("read_files", "read-empty");
+          events.onToolResult?.(
+            "read_files",
+            { paths: ["empty.txt"] },
+            "",
+            "read-empty",
+            { text: "", isError: false },
+          );
+          return {
+            files: {},
+            messages: [],
+            text: "Finished",
+            aborted: false,
+            maxIterationsReached: false,
+          };
+        });
+        return generator;
+      },
+    });
+    expect(JSON.parse(result.text).events).toEqual([
+      expect.objectContaining({
+        toolCallId: "read-empty",
+        status: "completed",
+        resultPreview: "",
+        finishedAt: expect.any(Number),
+        toolOutput: { text: "", isError: false },
+      }),
+    ]);
+  });
+
+  it("closes unfinished nested events when a child is cancelled", async () => {
+    const result = await runSubagent({
+      ...options(),
+      createGenerator: (config, events) => {
+        const generator = new WebAppGenerator(config, events);
+        vi.spyOn(generator, "generate").mockImplementation(async () => {
+          events.onToolCall?.("read_files", "read-cancelled");
+          return {
+            files: {},
+            messages: [],
+            text: "",
+            aborted: true,
+            maxIterationsReached: false,
+          };
+        });
+        return generator;
+      },
+    });
+    expect(JSON.parse(result.text).events[0]).toMatchObject({
+      status: "aborted",
+      finishedAt: expect.any(Number),
+    });
+  });
+
+  it("applies tool output retention before persisting child events", async () => {
+    const result = await runSubagent({
+      ...options(),
+      createGenerator: (config, events) => {
+        const generator = new WebAppGenerator(config, events);
+        vi.spyOn(generator, "generate").mockImplementation(async () => {
+          // Some providers send only the result event, without a start event.
+          events.onToolResult?.(
+            "read_files",
+            {},
+            "PRIVATE_RESULT",
+            "retained",
+            {
+              text: "PRIVATE_RESULT",
+              retention: "run-only",
+              structuredContent: { secret: "PRIVATE_STRUCTURED" },
+            },
+          );
+          return {
+            files: {},
+            messages: [],
+            text: "Finished",
+            aborted: false,
+            maxIterationsReached: false,
+          };
+        });
+        return generator;
+      },
+    });
+    expect(result.text).not.toContain("PRIVATE");
+    expect(JSON.parse(result.text).events[0]).toMatchObject({
+      toolCallId: "retained",
+      status: "completed",
+    });
+    const before = useSubagentStore.getState().progress["subagent-1"];
+    useSubagentStore.getState().appendText("subagent-1", "late");
+    useSubagentStore.getState().setToolResult("subagent-1", "retained", "late");
+    expect(useSubagentStore.getState().progress["subagent-1"]).toBe(before);
+  });
+
+  it("streams public lifecycle callbacks into live progress and aligns final text", async () => {
+    const result = await runSubagent({
+      ...options(),
+      createGenerator: (config, events) => {
+        const generator = new WebAppGenerator(config, events);
+        vi.spyOn(generator, "generate").mockImplementation(async () => {
+          events.onThinking?.("Inspecting the project");
+          events.onRetry?.(1, 2, new Error("temporary failure"));
+          events.onLocalCliStatus?.({
+            state: "streaming",
+            message: "Output arrived",
+          });
+          events.onLocalCliWarning?.("The provider sent a delayed chunk.");
+          return {
+            files: {},
+            messages: [],
+            text: "Final text supplied by the generator.",
+            aborted: false,
+            maxIterationsReached: false,
+          };
+        });
+        return generator;
+      },
+    });
+
+    const progress = useSubagentStore.getState().progress["subagent-1"];
+    expect(progress.text).toBe("Final text supplied by the generator.");
+    expect(progress.status).toBe("done");
+    expect(progress.activities.map((activity) => activity.kind)).toEqual([
+      "thinking",
+      "retry",
+      "status",
+      "warning",
+      "output",
+    ]);
+    expect(JSON.parse(result.text)).toMatchObject({
+      text: "Final text supplied by the generator.",
+      events: [],
+    });
+    expect(JSON.stringify(JSON.parse(result.text))).not.toContain(
+      "temporary failure",
+    );
+  });
+
   it("closes progress when the asynchronous generator factory fails", async () => {
     const result = await runSubagent({
       ...options(),

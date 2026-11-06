@@ -112,7 +112,7 @@ describe("replaySnapshots", () => {
     });
   });
 
-  it("falls back to replaying the whole chain when the target id is unknown", () => {
+  it("rejects unknown targets instead of returning the latest version", () => {
     const chain: ProjectSnapshot[] = [
       {
         id: "one",
@@ -134,7 +134,7 @@ describe("replaySnapshots", () => {
       },
     ];
 
-    expect(replaySnapshots(chain, "missing")).toEqual({ "a.txt": "B\n" });
+    expect(() => replaySnapshots(chain, "missing")).toThrow(/does not exist/);
   });
 
   it("rebuilds the patch chain when deleting a middle snapshot", () => {

@@ -17,6 +17,7 @@ vi.mock("../../../lib/storage/registry", () => ({
     designSystems: { bytes: 512, items: 2 },
     attachments: { bytes: 0, items: 0 },
     projectAssets: { bytes: 1536, items: 3 },
+    projectArchives: { bytes: 1024, items: 1 },
   })),
 }));
 
@@ -65,7 +66,7 @@ describe("StorageTab", () => {
     useProjectTemplateStore.setState({ templates: {} });
   });
 
-  it("includes Design systems and project asset Blobs in the item list and total", async () => {
+  it("includes Design systems, project assets and archives in the item list and total", async () => {
     render(<StorageTab />);
 
     await waitFor(() => {
@@ -76,6 +77,8 @@ describe("StorageTab", () => {
     expect(screen.getByText("3")).toBeInTheDocument();
     expect(screen.getByText("512 B")).toBeInTheDocument();
     expect(screen.getByText("1.5 KB")).toBeInTheDocument();
-    expect(screen.getByText("2.0 KB")).toBeInTheDocument();
+    expect(screen.getByText("Project archives")).toBeInTheDocument();
+    expect(screen.getByText("1.0 KB")).toBeInTheDocument();
+    expect(screen.getByText("3.0 KB")).toBeInTheDocument();
   });
 });

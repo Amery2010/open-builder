@@ -30,6 +30,12 @@ import {
 } from "../project-assets/core";
 import { getDesignSystemRegistry } from "../design-systems/registry";
 
+import {
+  clearProjectArchiveStorage,
+  estimateProjectArchiveStorage,
+} from "../project-archives/service";
+import { useProjectArchiveStore } from "../../store/project-archives";
+
 export interface StorageEstimate {
   bytes: number;
   items: number;
@@ -48,7 +54,8 @@ export interface StorageDomain {
     | "skills"
     | "designSystems"
     | "attachments"
-    | "projectAssets";
+    | "projectAssets"
+    | "projectArchives";
   estimate(): Promise<StorageEstimate>;
   clear(): Promise<void>;
   export(): Promise<unknown>;
@@ -302,6 +309,21 @@ export const STORAGE_DOMAINS: readonly StorageDomain[] = [
       ...(await estimateProjectAssetStorage()),
     }),
   },
+  {
+    id: "projectArchives",
+    estimate: estimateProjectArchiveStorage,
+    clear: async () => {
+      await clearProjectArchiveStorage();
+      await clearPersistedStore(() =>
+        useProjectArchiveStore.persist.clearStorage(),
+      );
+    },
+    export: async () => ({
+      note: "Project ZIP files are downloaded from their checkpoints; generic exports contain metadata only.",
+      records: useProjectArchiveStore.getState().records,
+      cleanup: useProjectArchiveStore.getState().cleanup,
+    }),
+  },
 ] as const;
 
 export async function estimateStorageDomains(): Promise<
@@ -365,7 +387,9 @@ export async function clearAllStorageDomains(): Promise<string[]> {
             ? (["conversations"] as const)
             : domain.id === "projectAssets"
               ? (["conversations", "snapshots", "templates"] as const)
-              : ([] as const);
+              : domain.id === "projectArchives"
+                ? (["conversations", "snapshots"] as const)
+                : ([] as const);
         const unavailableOwners = requiredOwners.filter((id) => failed.has(id));
         if (unavailableOwners.length > 0) {
           result.skipped.push({

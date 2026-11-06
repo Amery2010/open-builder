@@ -8,6 +8,7 @@ import type {
 } from "./types";
 import {
   LocalCliRuntime,
+  LOCAL_CLI_IDLE_MESSAGE,
   LocalCliRuntimeError,
   normalizeLocalCliProbe,
 } from "./runtime";
@@ -213,11 +214,225 @@ describe("LocalCliRuntime", () => {
       preparationMs: 20,
       handshakeMs: 30,
       firstActivityMs: 80,
+      firstTextMs: 110,
+      firstReasoningMs: 80,
+      transport: "unknown",
+      textGranularity: "unknown",
+      reasoningTextSupport: "unknown",
+      protocolFallback: null,
+      reasoningReceived: true,
+      deliveryBarrierMs: 0,
+      barrierBufferedEvents: 0,
       totalMs: 140,
       outcome: "completed",
       resumed: true,
     });
     expect(JSON.stringify(debug.mock.calls)).not.toContain("private");
+  });
+
+  it("forwards distinct text and thinking chunks before the terminal event", async () => {
+    let emit!: (event: LocalAgentEvent) => void;
+    const onEvent = vi.fn();
+    tauriMocks.start.mockImplementation(async (_request, callback) => {
+      emit = callback;
+      emit(
+        preparedEvent({
+          outputCapabilities: {
+            transport: "codexAppServer",
+            textGranularity: "delta",
+            reasoningText: "supported",
+          },
+        }),
+      );
+      return "incremental-run";
+    });
+    let completed = false;
+    const run = new LocalCliRuntime().run(request(), { onEvent });
+    void run.then(() => {
+      completed = true;
+    });
+    await vi.waitFor(() => expect(emit).toBeTypeOf("function"));
+    emit({ type: "textDelta", delta: "你好🌱 " });
+    emit({ type: "reasoningDelta", delta: "先检查 " });
+    emit({ type: "textDelta", delta: "world" });
+    emit({ type: "reasoningDelta", delta: "边界" });
+    emit({ type: "reasoningDelta", delta: "" });
+    expect(onEvent.mock.calls.slice(1).map(([event]) => event)).toEqual([
+      { type: "textDelta", delta: "你好🌱 " },
+      { type: "reasoningDelta", delta: "先检查 " },
+      { type: "textDelta", delta: "world" },
+      { type: "reasoningDelta", delta: "边界" },
+    ]);
+    await Promise.resolve();
+    expect(completed).toBe(false);
+    emit({ type: "done", aborted: false });
+    await expect(run).resolves.toMatchObject({
+      text: "你好🌱 world",
+      reasoning: "先检查 边界",
+      prepared: { outputCapabilities: { transport: "codexAppServer" } },
+    });
+  });
+
+  it.each([
+    undefined,
+    { transport: "futureProtocol", reasoningText: "supported" },
+  ])(
+    "accepts older or unknown optional output metadata: %j",
+    async (outputCapabilities) => {
+      tauriMocks.start.mockImplementation(async (_request, emit) => {
+        emit({ ...preparedEvent(), outputCapabilities });
+        emit({ type: "textDelta", delta: "Still works" });
+        emit({ type: "done", aborted: false });
+        return "compatible-run";
+      });
+      await expect(new LocalCliRuntime().run(request())).resolves.toMatchObject(
+        {
+          text: "Still works",
+          prepared: { resumed: false },
+        },
+      );
+    },
+  );
+
+  it("normalizes output capability aliases without treating reasoning support as observed text", async () => {
+    const debug = vi.spyOn(console, "debug").mockImplementation(() => {});
+    tauriMocks.start.mockImplementation(async (_request, emit) => {
+      emit({
+        ...preparedEvent(),
+        output_capabilities: {
+          transport: "codexExec",
+          text_granularity: "message",
+          reasoning_text: "supported",
+        },
+      });
+      emit({ type: "textDelta", delta: "Answer" });
+      emit({ type: "done", aborted: false });
+      return "fallback-run";
+    });
+    const result = await new LocalCliRuntime().run(request());
+    expect(result.prepared?.outputCapabilities).toEqual({
+      transport: "codexExec",
+      textGranularity: "message",
+      reasoningText: "supported",
+    });
+    expect(debug).toHaveBeenCalledWith(
+      "[local-cli] run timing",
+      expect.objectContaining({
+        transport: "codexExec",
+        protocolFallback: true,
+        reasoningReceived: false,
+        firstReasoningMs: null,
+      }),
+    );
+  });
+
+  it("measures receipt during the delivery barrier while preserving instruction ordering", async () => {
+    let now = 10;
+    vi.spyOn(performance, "now").mockImplementation(() => now);
+    const debug = vi.spyOn(console, "debug").mockImplementation(() => {});
+    let emit!: (event: LocalAgentEvent) => void;
+    let release!: () => void;
+    const order: string[] = [];
+    const executeHostTool = vi.fn(async () => {
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return {
+        resolution: { text: "PRIVATE_RESULT" },
+        hadSideEffect: false,
+        onDelivered: () => {
+          order.push("instruction-delivered");
+        },
+      };
+    });
+    tauriMocks.start.mockImplementation(async (_request, callback) => {
+      emit = callback;
+      return "barrier-run";
+    });
+    tauriMocks.resolve.mockImplementation(async () => {
+      now = 100;
+    });
+    const run = new LocalCliRuntime().run(request(), {
+      getToolAuthorityEpoch: () => 1,
+      executeHostTool,
+      onEvent: (event) => {
+        if (event.type === "textDelta" || event.type === "reasoningDelta")
+          order.push(event.type);
+      },
+    });
+    await vi.waitFor(() => expect(emit).toBeTypeOf("function"));
+    now = 30;
+    emit({
+      type: "toolRequest",
+      runId: "barrier-run",
+      callId: "tool-1",
+      name: "read_files",
+      arguments: {},
+    });
+    await vi.waitFor(() => expect(executeHostTool).toHaveBeenCalledOnce());
+    now = 50;
+    emit({ type: "textDelta", delta: "PRIVATE_TEXT" });
+    emit({ type: "reasoningDelta", delta: "PRIVATE_REASONING" });
+    expect(order).toEqual([]);
+    now = 90;
+    release();
+    await vi.waitFor(() =>
+      expect(order).toEqual([
+        "instruction-delivered",
+        "textDelta",
+        "reasoningDelta",
+      ]),
+    );
+    now = 130;
+    emit({ type: "done", aborted: false });
+    await run;
+    expect(debug).toHaveBeenCalledWith(
+      "[local-cli] run timing",
+      expect.objectContaining({
+        firstTextMs: 40,
+        firstReasoningMs: 40,
+        deliveryBarrierMs: 70,
+        barrierBufferedEvents: 2,
+        reasoningReceived: true,
+      }),
+    );
+    expect(JSON.stringify(debug.mock.calls)).not.toContain("PRIVATE");
+  });
+
+  it("logs Host execution and delivery phases without argument or result content", async () => {
+    const debug = vi.spyOn(console, "debug").mockImplementation(() => {});
+    tauriMocks.start.mockImplementation(async (_request, emit) => {
+      emit({
+        type: "toolRequest",
+        runId: "trace-run",
+        callId: "read-1",
+        name: "read_files",
+        arguments: { path: "PRIVATE_PATH" },
+      });
+      emit({ type: "done", aborted: false });
+      return "trace-run";
+    });
+    await new LocalCliRuntime().run(request(), {
+      executeHostTool: async () => ({
+        resolution: { text: "PRIVATE_CONTENT" },
+        hadSideEffect: false,
+      }),
+    });
+    const phases = debug.mock.calls
+      .filter(([message]) => message === "[local-cli] host tool")
+      .map(([, value]) => value);
+    expect(phases.map(({ phase }) => phase)).toEqual([
+      "started",
+      "executed",
+      "delivered",
+    ]);
+    expect(phases[1]).toMatchObject({
+      runId: "trace-run",
+      callId: "read-1",
+      resultChars: 15,
+      isError: false,
+    });
+    expect(JSON.stringify(debug.mock.calls)).not.toContain("PRIVATE");
   });
 
   it("normalizes readiness fields while preserving legacy availability", () => {
@@ -661,6 +876,142 @@ describe("LocalCliRuntime", () => {
     expect(tauriMocks.cancel).toHaveBeenCalledWith("run-consumer-error");
   });
 
+  it("shows an idle notice after 120 seconds, pauses for Host work, and clears it on activity", async () => {
+    vi.useFakeTimers();
+    let emit!: (event: LocalAgentEvent) => void;
+    tauriMocks.start.mockImplementation(async (_request, onEvent) => {
+      emit = onEvent;
+      return "idle-run";
+    });
+    let release!: () => void;
+    const executeHostTool = vi.fn(
+      () =>
+        new Promise<{
+          resolution: LocalToolResolution;
+          hadSideEffect: boolean;
+        }>((resolve) => {
+          release = () =>
+            resolve({ resolution: { text: "read" }, hadSideEffect: false });
+        }),
+    );
+    const onEvent = vi.fn();
+    const controller = new AbortController();
+    const pending = new LocalCliRuntime().run(
+      request(),
+      { onEvent, executeHostTool },
+      controller.signal,
+    );
+    try {
+      await vi.advanceTimersByTimeAsync(119_999);
+      expect(onEvent).not.toHaveBeenCalledWith(
+        expect.objectContaining({ message: LOCAL_CLI_IDLE_MESSAGE }),
+      );
+      await vi.advanceTimersByTimeAsync(1);
+      expect(onEvent).toHaveBeenCalledWith({
+        type: "status",
+        state: "streaming",
+        message: LOCAL_CLI_IDLE_MESSAGE,
+      });
+      emit({ type: "textDelta", delta: "progress" });
+      expect(onEvent).toHaveBeenCalledWith({
+        type: "status",
+        state: "streaming",
+      });
+      onEvent.mockClear();
+      emit({
+        type: "toolRequest",
+        runId: "idle-run",
+        callId: "waiting-tool",
+        name: "read_files",
+        arguments: {},
+      });
+      await vi.advanceTimersByTimeAsync(240_000);
+      expect(onEvent).not.toHaveBeenCalledWith(
+        expect.objectContaining({ message: LOCAL_CLI_IDLE_MESSAGE }),
+      );
+      release();
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(onEvent).toHaveBeenCalledWith(
+        expect.objectContaining({ message: LOCAL_CLI_IDLE_MESSAGE }),
+      );
+      expect(tauriMocks.cancel).not.toHaveBeenCalled();
+      emit({ type: "done", aborted: false });
+      await expect(pending).resolves.toMatchObject({ aborted: false });
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      controller.abort();
+      release?.();
+      emit?.({ type: "done", aborted: true });
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(["execution", "delivery"])(
+    "settles Stop while Host %s ignores cancellation",
+    async (stage) => {
+      let emit!: (event: LocalAgentEvent) => void;
+      tauriMocks.start.mockImplementation(async (_request, onEvent) => {
+        emit = onEvent;
+        return "run-unresponsive";
+      });
+      const controller = new AbortController();
+      let release!: () => void;
+      const blocked = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const onDelivered = vi.fn();
+      const onDeliveryFailed = vi.fn();
+      const executeHostTool = vi.fn(async () => {
+        if (stage === "execution") await blocked;
+        return {
+          resolution: { text: "late" },
+          hadSideEffect: false,
+          onDelivered,
+          onDeliveryFailed,
+        };
+      });
+      if (stage === "delivery")
+        tauriMocks.resolve.mockImplementation(() => blocked);
+      let settled = false;
+      const pending = new LocalCliRuntime()
+        .run(
+          request(),
+          { executeHostTool, getToolAuthorityEpoch: () => 1 },
+          controller.signal,
+        )
+        .then((result) => {
+          settled = true;
+          return result;
+        });
+      await vi.waitFor(() => expect(tauriMocks.start).toHaveBeenCalledOnce());
+      emit({
+        type: "toolRequest",
+        runId: "run-unresponsive",
+        callId: "slow",
+        name: "read_files",
+        arguments: {},
+      });
+      await vi.waitFor(() => expect(executeHostTool).toHaveBeenCalledOnce());
+      if (stage === "delivery")
+        await vi.waitFor(() =>
+          expect(tauriMocks.resolve).toHaveBeenCalledOnce(),
+        );
+      controller.abort();
+      emit({ type: "done", aborted: true });
+      try {
+        await vi.waitFor(() => expect(settled).toBe(true), { timeout: 100 });
+      } finally {
+        release();
+      }
+      expect(await pending).toMatchObject({ aborted: true });
+      await Promise.resolve();
+      expect(onDelivered).not.toHaveBeenCalled();
+      expect(onDeliveryFailed).toHaveBeenCalledOnce();
+      if (stage === "execution")
+        expect(tauriMocks.resolve).not.toHaveBeenCalled();
+    },
+  );
+
   it("reports an abort, not a bridge failure, when Stop interrupts a host tool", async () => {
     let emit!: (event: LocalAgentEvent) => void;
     tauriMocks.start.mockImplementation(
@@ -857,4 +1208,204 @@ it("stamps requests arriving before delivery ACK with the barrier's original aut
     { callId: "first", epoch: 0 },
     { callId: "old-write", epoch: 0 },
   ]);
+});
+
+function recoveryRun() {
+  return {
+    runId: "original-run",
+    request: request(),
+    terminal: false,
+    context: {
+      version: 1 as const,
+      identity: {
+        conversationId: "conversation-1",
+        branchId: "main",
+        checkoutEpoch: 0,
+      },
+      messages: [],
+      skillIds: [],
+      app: {},
+    },
+  };
+}
+
+it("recovers the original stream, deduplicates replay/live overlap, and never redispatches resolved tools", async () => {
+  const run = recoveryRun();
+  const lease = { owner: "new-page", epoch: 2 };
+  let emit!: (envelope: import("./types").LocalRecoveryEnvelope) => void;
+  const event = (sequence: number, event: LocalAgentEvent) => ({
+    runId: run.runId,
+    sequence,
+    event,
+  });
+  const queued = event(3, {
+    type: "toolRequest",
+    runId: run.runId,
+    callId: "queued",
+    name: "write_file",
+    arguments: {},
+  });
+  const start = vi.fn();
+  const claimTool = vi.fn(async () => ({ status: "execute" as const }));
+  const resolveTool = vi.fn(async () =>
+    emit(event(5, { type: "done", aborted: false })),
+  );
+  const runtime = new LocalCliRuntime({
+    start,
+    claimTool,
+    resolveTool,
+    attach: async (_id, callback) => {
+      emit = callback;
+      emit(queued); // A snapshot/live overlap must still dispatch exactly once.
+      emit(event(4, { type: "textDelta", delta: "after" }));
+      return {
+        ...run,
+        lease,
+        uncertain: false,
+        resolutions: { completed: { text: "already written" } },
+        events: [
+          event(1, { type: "textDelta", delta: "before" }),
+          event(2, {
+            type: "toolRequest",
+            runId: run.runId,
+            callId: "completed",
+            name: "write_file",
+            arguments: {},
+          }),
+          queued,
+        ],
+      };
+    },
+  });
+  let writes = 0;
+  const calls: string[] = [];
+  const result = await runtime.run(
+    run.request,
+    {
+      executeHostTool: async (call) => {
+        calls.push(call.callId);
+        if (!call.recoveredResolution) writes += 1;
+        return {
+          resolution: call.recoveredResolution ?? { text: "newly written" },
+          hadSideEffect: !call.recoveredResolution,
+        };
+      },
+    },
+    undefined,
+    run,
+  );
+  expect(result.text).toBe("beforeafter");
+  expect(result.runId).toBe("original-run");
+  expect(start).not.toHaveBeenCalled();
+  expect(calls).toEqual(["completed", "queued"]);
+  expect(writes).toBe(1);
+  expect(claimTool).toHaveBeenCalledTimes(1);
+  expect(resolveTool).toHaveBeenCalledTimes(1);
+  expect(claimTool).toHaveBeenCalledWith(run.runId, "queued", lease);
+});
+
+it("waits for project persistence before acknowledging an executed tool to Native", async () => {
+  let flush!: () => void;
+  const persisted = new Promise<void>((resolve) => {
+    flush = resolve;
+  });
+  const run = recoveryRun();
+  let emit!: (event: LocalAgentEvent) => void;
+  const resolveTool = vi.fn(async () => {
+    emit({ type: "done", aborted: false });
+  });
+  const runtime = new LocalCliRuntime({
+    start: async (_request, onEvent) => {
+      emit = onEvent;
+      emit({
+        type: "toolRequest",
+        runId: "original-run",
+        callId: "write",
+        name: "write_file",
+        arguments: {},
+      });
+      return "original-run";
+    },
+    claimTool: async () => ({ status: "execute" }),
+    resolveTool,
+  });
+  const execution = vi.fn(async () => ({
+    resolution: { text: "written" },
+    hadSideEffect: true,
+  }));
+  const completion = runtime.run(
+    { ...run.request, recovery: { owner: "page", context: run.context } },
+    {
+      executeHostTool: execution,
+      beforeToolDelivery: () => persisted,
+    },
+  );
+  await vi.waitFor(() => expect(execution).toHaveBeenCalledTimes(1));
+  expect(resolveTool).not.toHaveBeenCalled();
+  flush();
+  await completion;
+  expect(resolveTool).toHaveBeenCalledTimes(1);
+});
+
+it("waits for the terminal event and reports unknown outcomes without repeating a dispatched tool", async () => {
+  const run = recoveryRun();
+  let finish!: () => void;
+  const execute = vi.fn(
+    async (call: import("./runtime").LocalCliHostToolRequest) => {
+      expect(call.recoveredResolution?.isError).toBe(true);
+      return { resolution: call.recoveredResolution!, hadSideEffect: false };
+    },
+  );
+  const claim = vi.fn();
+  const runtime = new LocalCliRuntime({
+    claimTool: claim,
+    cancel: async () => true,
+    attach: async (_id, emit) => {
+      finish = () =>
+        emit({
+          runId: run.runId,
+          sequence: 2,
+          event: { type: "done", aborted: true },
+        });
+      return {
+        ...run,
+        lease: { owner: "new", epoch: 2 },
+        uncertain: true,
+        resolutions: {},
+        events: [
+          {
+            runId: run.runId,
+            sequence: 1,
+            event: {
+              type: "toolRequest",
+              runId: run.runId,
+              callId: "unknown",
+              name: "write_file",
+              arguments: {},
+            },
+          },
+        ],
+      };
+    },
+  });
+  let settled = false;
+  const result = runtime.run(
+    run.request,
+    { executeHostTool: execute },
+    undefined,
+    run,
+  );
+  const assertion = expect(result).rejects.toMatchObject({
+    failure: { code: "recoveryUncertain" },
+  });
+  void result
+    .finally(() => {
+      settled = true;
+    })
+    .catch(() => undefined);
+  await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(1));
+  expect(settled).toBe(false);
+  expect(claim).not.toHaveBeenCalled();
+  finish();
+  await assertion;
 });

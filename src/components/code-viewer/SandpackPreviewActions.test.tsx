@@ -20,7 +20,7 @@ vi.mock("@codesandbox/sandpack-react", () => ({
 }));
 
 describe("Sandpack preview actions", () => {
-  it("flushes before navigation refresh without restarting the shell", async () => {
+  it("delegates reload to the owner so it can rebuild the client", async () => {
     const events: string[] = [];
     sandpack.refresh.mockImplementation(() => {
       events.push("refresh");
@@ -31,7 +31,7 @@ describe("Sandpack preview actions", () => {
       <TooltipProvider>
         <SandpackRefreshAction
           label="Reload preview"
-          onBeforeRefresh={() => events.push("flush")}
+          onReload={() => events.push("reload")}
         />
       </TooltipProvider>,
     );
@@ -45,7 +45,8 @@ describe("Sandpack preview actions", () => {
     );
     await user.click(button);
 
-    expect(events).toEqual(["flush", "refresh"]);
+    expect(events).toEqual(["reload"]);
+    expect(sandpack.refresh).not.toHaveBeenCalled();
     expect(sandpack.restart).not.toHaveBeenCalled();
   });
 

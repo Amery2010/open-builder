@@ -1,6 +1,7 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useMemo } from "react";
 import { useSettingsStore } from "../store/settings";
 import { useConversationStore } from "../store/conversation";
+import { captureConversationIdentity } from "../lib/conversation/branches";
 import type { Message, ProjectFiles } from "../types";
 import { LOCAL_AGENT_PROVIDER_CATALOG } from "../lib/local-agent/providers";
 import type { LocalCliStatusNoticeValue } from "../components/chat/LocalCliStatusNotice";
@@ -14,6 +15,10 @@ export function useAppState() {
   // ── Conversation state from zustand ──
   const activeConv = useConversationStore((s) =>
     s.activeId ? (s.conversations[s.activeId] ?? null) : null,
+  );
+  const projectIdentity = useMemo(
+    () => (activeConv ? captureConversationIdentity(activeConv) : null),
+    [activeConv?.id, activeConv?.activeBranchId, activeConv?.checkoutEpoch],
   );
   const files = activeConv?.files ?? EMPTY_FILES;
   const messages = activeConv?.messages ?? EMPTY_MESSAGES;
@@ -102,6 +107,7 @@ export function useAppState() {
   }, []);
 
   return {
+    projectIdentity,
     files,
     setFiles,
     currentFile,

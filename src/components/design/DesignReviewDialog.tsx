@@ -26,6 +26,7 @@ import { useDesignReviewStore } from "../../store/design-review";
 import type { DesignReviewRun } from "../../lib/design/review-jobs/types";
 import { isDesignReviewRunActive } from "../../lib/design/review-jobs/types";
 import { formatDesignReviewLogEntry } from "../../lib/design/review-jobs/logs";
+import { readScreenshotImage } from "../../lib/images/screenshot";
 import {
   validateDesignReviewScreenshots,
   type DesignReviewFinding,
@@ -130,10 +131,7 @@ export function DesignReviewDialog({
     try {
       const next: DesignReviewScreenshot[] = [];
       for (const file of Array.from(files)) {
-        if (
-          !["image/png", "image/jpeg", "image/webp"].includes(file.type) ||
-          file.size > MAX_MANUAL_SCREENSHOT_BYTES
-        ) {
+        if (file.size > MAX_MANUAL_SCREENSHOT_BYTES) {
           throw new Error(t.designReview.invalidScreenshot);
         }
         const dataUrl = await new Promise<string>((resolve, reject) => {
@@ -143,9 +141,10 @@ export function DesignReviewDialog({
           reader.onload = () => resolve(String(reader.result));
           reader.readAsDataURL(file);
         });
+        const image = readScreenshotImage(dataUrl);
         next.push({
-          dataUrl,
-          mimeType: file.type as DesignReviewScreenshot["mimeType"],
+          dataUrl: image.dataUrl,
+          mimeType: image.mimeType,
           name: file.name,
           source: "manual",
         });

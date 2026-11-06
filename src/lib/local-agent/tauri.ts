@@ -9,6 +9,12 @@ import type {
   LocalGeneratedImage,
   LocalImageGenerationRequest,
   LocalToolResolution,
+  LocalRecoveryLease,
+  LocalRecoverableRun,
+  LocalRecoveryEnvelope,
+  LocalRecoverySnapshot,
+  LocalRecoveryContext,
+  LocalToolClaim,
 } from "./types";
 
 let localAgentSupportPromise: Promise<boolean> | null = null;
@@ -89,15 +95,29 @@ export async function startLocalAgent(
   onEvent: (event: LocalAgentEvent) => void,
 ): Promise<string> {
   const channel = new Channel<LocalAgentEvent>(onEvent);
-  return invoke<string>("local_agent_start", { request, onEvent: channel });
+  const { recovery, ...nativeRequest } = request;
+  return invoke<string>("local_agent_start", {
+    request: nativeRequest,
+    onEvent: channel,
+    recovery,
+    pageOwner: localAgentPageOwner,
+  });
 }
 
 export async function resolveLocalAgentTool(
   runId: string,
   callId: string,
   result: LocalToolResolution,
+  lease?: LocalRecoveryLease,
+  recoveryContext?: LocalRecoveryContext,
 ): Promise<void> {
-  await invoke("local_agent_resolve_tool", { runId, callId, result });
+  await invoke("local_agent_resolve_tool", {
+    runId,
+    callId,
+    result,
+    lease,
+    recoveryContext,
+  });
 }
 
 export async function cancelLocalAgent(runId: string): Promise<boolean> {
@@ -117,4 +137,41 @@ export async function generateLocalAgentImage(
 
 export async function cancelLocalAgentImage(taskId: string): Promise<boolean> {
   return invoke<boolean>("local_agent_cancel_image", { taskId });
+}
+
+export const localAgentPageOwner =
+  globalThis.crypto?.randomUUID?.() ?? `page-${Date.now()}-${Math.random()}`;
+let recoveryDiscovery: Promise<void> | undefined;
+export async function listRecoverableLocalAgents(): Promise<
+  LocalRecoverableRun[]
+> {
+  // Scripts have their own native process registry. The previous page's abort
+  // listeners no longer exist after reload, so retire them once per new page.
+  recoveryDiscovery ??= invoke<void>("cancel_all_skill_scripts");
+  await recoveryDiscovery;
+  return invoke("local_agent_list_recoverable", { owner: localAgentPageOwner });
+}
+export function attachLocalAgent(
+  runId: string,
+  onEvent: (event: LocalRecoveryEnvelope) => void,
+): Promise<LocalRecoverySnapshot> {
+  const channel = new Channel<LocalRecoveryEnvelope>(onEvent);
+  return invoke("local_agent_attach", {
+    runId,
+    owner: localAgentPageOwner,
+    onEvent: channel,
+  });
+}
+export function claimLocalAgentTool(
+  runId: string,
+  callId: string,
+  lease: LocalRecoveryLease,
+): Promise<LocalToolClaim> {
+  return invoke("local_agent_claim_tool", { runId, callId, lease });
+}
+export function acknowledgeLocalAgentTerminal(
+  runId: string,
+  lease: LocalRecoveryLease,
+): Promise<void> {
+  return invoke("local_agent_acknowledge_terminal", { runId, lease });
 }

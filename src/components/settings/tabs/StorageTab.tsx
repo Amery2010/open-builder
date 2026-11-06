@@ -33,11 +33,13 @@ export function StorageTab() {
     designSystems: ExtraStorageEstimate;
     attachments: ExtraStorageEstimate;
     projectAssets: ExtraStorageEstimate;
+    projectArchives: ExtraStorageEstimate;
   }>({
     mcp: { bytes: 0, items: 0 },
     designSystems: { bytes: 0, items: 0 },
     attachments: { bytes: 0, items: 0 },
     projectAssets: { bytes: 0, items: 0 },
+    projectArchives: { bytes: 0, items: 0 },
   });
 
   useEffect(() => {
@@ -51,6 +53,7 @@ export function StorageTab() {
             designSystems: estimates.designSystems,
             attachments: estimates.attachments,
             projectAssets: estimates.projectAssets,
+            projectArchives: estimates.projectArchives,
           });
         }
       });
@@ -181,6 +184,13 @@ export function StorageTab() {
         : formatBytes(extraDomains.designSystems.bytes),
     },
     {
+      label: t.settings.storage.projectArchives,
+      value: extraDomains.projectArchives.items,
+      detail: extraDomains.projectArchives.error
+        ? t.settings.storage.estimateUnavailable
+        : formatBytes(extraDomains.projectArchives.bytes),
+    },
+    {
       label: t.settings.storage.projectAssets,
       value: extraDomains.projectAssets.items,
       detail: extraDomains.projectAssets.error
@@ -206,7 +216,8 @@ export function StorageTab() {
                 extraDomains.mcp.bytes +
                 extraDomains.designSystems.bytes +
                 extraDomains.attachments.bytes +
-                extraDomains.projectAssets.bytes,
+                extraDomains.projectAssets.bytes +
+                extraDomains.projectArchives.bytes,
             )}
           </span>
         </div>

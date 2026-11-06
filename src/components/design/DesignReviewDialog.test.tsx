@@ -244,37 +244,40 @@ describe("DesignReviewDialog", () => {
     expect(screen.getByText("tablet failed")).toBeVisible();
   });
 
-  it("uses the same upload-only review flow on every platform", async () => {
-    const user = userEvent.setup();
-    const onRunReview = vi.fn(async () => {});
-    const onOpenChange = vi.fn();
-    render(
-      <DesignReviewDialog
-        open
-        onOpenChange={onOpenChange}
-        onRunReview={onRunReview}
-        onApplyFixes={vi.fn()}
-        isGenerating={false}
-      />,
-    );
-    const input =
-      document.querySelector<HTMLInputElement>('input[type="file"]');
-    expect(input).not.toBeNull();
-    await user.upload(
-      input!,
-      new File([pngBytes], "web-preview.png", { type: "image/png" }),
-    );
-    await user.click(
-      await screen.findByRole("button", { name: "Run read-only review" }),
-    );
-    expect(onRunReview).toHaveBeenCalledWith([
-      expect.objectContaining({
-        name: "web-preview.png",
-        mimeType: "image/png",
-      }),
-    ]);
-    expect(onOpenChange).toHaveBeenCalledWith(false);
-  });
+  it.each(["image/png", "image/webp", "application/octet-stream"])(
+    "accepts PNG screenshot bytes declared as %s in the upload flow",
+    async (mimeType) => {
+      const user = userEvent.setup({ applyAccept: false });
+      const onRunReview = vi.fn(async () => {});
+      const onOpenChange = vi.fn();
+      render(
+        <DesignReviewDialog
+          open
+          onOpenChange={onOpenChange}
+          onRunReview={onRunReview}
+          onApplyFixes={vi.fn()}
+          isGenerating={false}
+        />,
+      );
+      const input =
+        document.querySelector<HTMLInputElement>('input[type="file"]');
+      expect(input).not.toBeNull();
+      await user.upload(
+        input!,
+        new File([pngBytes], "web-preview.png", { type: mimeType }),
+      );
+      await user.click(
+        await screen.findByRole("button", { name: "Run read-only review" }),
+      );
+      expect(onRunReview).toHaveBeenCalledWith([
+        expect.objectContaining({
+          name: "web-preview.png",
+          mimeType: "image/png",
+        }),
+      ]);
+      expect(onOpenChange).toHaveBeenCalledWith(false);
+    },
+  );
 
   it("appends manual screenshots to partial automatic coverage when the total stays within three", async () => {
     const user = userEvent.setup();

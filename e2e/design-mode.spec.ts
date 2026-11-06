@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 import JSZip from "jszip";
+import { waitForAppReady } from "./helpers/app-ready";
 
 const initialTokens = `:root {
   --bg: #ffffff;
@@ -61,6 +62,7 @@ async function seedDesignProject(
   page: import("@playwright/test").Page,
 ): Promise<string> {
   await page.goto("/");
+  await waitForAppReady(page);
   const conversationId = await page.evaluate(
     async ({ files, tokens }) => {
       const conversationUrl = "/src/store/conversation.ts";
@@ -260,7 +262,7 @@ test("point-selects a real Sandpack element, keeps token edits pending until sav
 
   await page.getByRole("button", { name: "Code" }).click();
   const downloadPromise = page.waitForEvent("download");
-  await page.getByRole("button", { name: "Download" }).click();
+  await page.getByRole("button", { name: "Download", exact: true }).click();
   const download = await downloadPromise;
   const path = await download.path();
   expect(path).not.toBeNull();

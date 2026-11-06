@@ -1,3 +1,4 @@
+import type { ToolExecutionOutput } from "../generator-types";
 import type { AISettings } from "../../../store/settings";
 
 /** A built-in subagent definition. Hardcoded in the registry. */
@@ -23,6 +24,26 @@ export interface SubagentDefinition {
   writePolicy?: "readonly" | "fullWrite";
 }
 
+export type SubagentToolStatus = "running" | "completed" | "failed" | "aborted";
+
+/** Public, run-only activity shown while a subagent is still working. */
+export type SubagentLiveActivityKind =
+  | "output"
+  | "thinking"
+  | "tool"
+  | "tool-result"
+  | "retry"
+  | "status"
+  | "warning";
+
+export interface SubagentLiveActivity {
+  kind: SubagentLiveActivityKind;
+  text: string;
+  timestamp: number;
+  toolCallId?: string;
+  retry?: { attempt: number; maxAttempts: number };
+}
+
 /** A single inner-tool call captured for the UI. */
 export interface SubagentEvent {
   /** Inner tool name. */
@@ -31,6 +52,11 @@ export interface SubagentEvent {
   toolCallId: string;
   /** Brief preview of the tool result (truncated). Empty while pending. */
   resultPreview: string;
+  /** Optional only for legacy persisted events. */
+  status?: SubagentToolStatus;
+  startedAt?: number;
+  finishedAt?: number;
+  toolOutput?: Pick<ToolExecutionOutput, "text" | "isError">;
 }
 
 /** Status of a subagent invocation. */
@@ -58,6 +84,10 @@ export interface SubagentProgress {
   status: SubagentStatus;
   text: string;
   events: SubagentEvent[];
+  /** Run-only activity. It is deliberately absent from SubagentToolResult. */
+  activities: SubagentLiveActivity[];
+  runId: string;
+  lastUpdatedAt: number;
   startedAt: number;
   finishedAt?: number;
   error?: string;

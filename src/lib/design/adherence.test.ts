@@ -57,7 +57,7 @@ function contract(
 
 function project(appCss: string, importTokens = true): ProjectFiles {
   return {
-    "DESIGN.md": `<!-- package sha256 ${digest} -->\n# Graphite`,
+    "DESIGN.md": "# Graphite",
     "tokens.css": tokens,
     "index.html":
       '<html><head><title>App</title><meta name="viewport" content="width=device-width"></head><body><div id="root"></div></body></html>',
@@ -268,7 +268,7 @@ describe("Design-system adherence", () => {
 
   it("reports state and digest inconsistencies", () => {
     const files = project(completeConsumption);
-    files["DESIGN.md"] = "# digest removed";
+    files["tokens.css"] = tokens.replace(`/* package sha256 ${digest} */`, "");
     const report = runDesignSystemAdherenceCheck({
       files,
       beforeFiles: files,
@@ -282,7 +282,10 @@ describe("Design-system adherence", () => {
     expect(report.issues).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ code: "state_mismatch" }),
-        expect.objectContaining({ code: "digest_mismatch", path: "DESIGN.md" }),
+        expect.objectContaining({
+          code: "digest_mismatch",
+          path: "tokens.css",
+        }),
       ]),
     );
   });

@@ -15,6 +15,7 @@ use crate::local_agent::{
 };
 use crate::local_agent_adapter::{AdapterIdentity, AdapterProbe};
 use crate::local_agent_bridge::canonical_tool_digest;
+use crate::local_agent_content::{emit_content, ContentBlocks, ContentKind};
 use crate::local_agent_models::CatalogAuthority;
 use crate::local_agent_protocol::{
     apply_minimal_environment, command_output_capped, finish_process, provider_error,
@@ -1751,8 +1752,7 @@ fn send_usage(
 fn emit_final_assistant_content(
     context: &ProtocolContext,
     message: &Value,
-    saw_text_delta: bool,
-    saw_reasoning_delta: bool,
+    blocks: &mut ContentBlocks,
     last_usage: &mut Option<(u64, u64, u64)>,
 ) -> Result<(), String> {
     if message.get("role").and_then(Value::as_str) != Some("assistant") {
@@ -1764,29 +1764,18 @@ fn emit_final_assistant_content(
     let Some(content) = message.get("content").and_then(Value::as_array) else {
         return Ok(());
     };
-    for block in content {
-        match block.get("type").and_then(Value::as_str).unwrap_or("") {
-            "text" if !saw_text_delta => {
-                if let Some(delta) = block.get("text").and_then(Value::as_str) {
-                    context
-                        .channel
-                        .send(LocalAgentEvent::TextDelta {
-                            delta: delta.to_string(),
-                        })
-                        .map_err(|_| "local agent event consumer is unavailable".to_string())?;
-                }
-            }
-            "thinking" if !saw_reasoning_delta => {
-                if let Some(delta) = block.get("thinking").and_then(Value::as_str) {
-                    context
-                        .channel
-                        .send(LocalAgentEvent::ReasoningDelta {
-                            delta: delta.to_string(),
-                        })
-                        .map_err(|_| "local agent event consumer is unavailable".to_string())?;
-                }
-            }
-            _ => {}
+    for (index, block) in content.iter().enumerate() {
+        let (kind, field) = match block.get("type").and_then(Value::as_str) {
+            Some("text") => (ContentKind::Text, "text"),
+            Some("thinking") => (ContentKind::Thinking, "thinking"),
+            _ => continue,
+        };
+        if let Some(text) = block.get(field).and_then(Value::as_str) {
+            emit_content(
+                &context.channel,
+                kind,
+                blocks.snapshot(index as u64, kind, text)?,
+            )?;
         }
     }
     Ok(())
@@ -1799,6 +1788,11 @@ enum PiRuntimeEvent<'a> {
     OtherMessageStart,
     TextDelta(&'a str),
     ReasoningDelta(&'a str),
+    ContentEnd {
+        index: u64,
+        kind: ContentKind,
+        text: &'a str,
+    },
     ToolCallStart {
         content_index: u64,
         name: &'a str,
@@ -1963,9 +1957,22 @@ fn decode_runtime_event(value: &Value) -> Result<DecodedPiRuntimeEvent<'_>, Stri
                         name: tool_call_name(delta, content_index)?,
                     }
                 }
-                "text_start" | "text_end" | "thinking_start" | "thinking_end" => {
-                    PiRuntimeEvent::Ignore
-                }
+                "text_end" | "thinking_end" => PiRuntimeEvent::ContentEnd {
+                    index: delta
+                        .get("contentIndex")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0),
+                    kind: if delta["type"] == "text_end" {
+                        ContentKind::Text
+                    } else {
+                        ContentKind::Thinking
+                    },
+                    text: delta
+                        .get("content")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| "Pi content end omitted its text".to_string())?,
+                },
+                "text_start" | "thinking_start" => PiRuntimeEvent::Ignore,
                 "" => return Err("Pi assistant event omitted its type".to_string()),
                 _ => return Err("Pi emitted an unsupported assistant event".to_string()),
             }
@@ -2220,8 +2227,7 @@ async fn run_pi_protocol(
         .map(String::as_str)
         .collect::<HashSet<_>>();
     let mut saw_agent_start = false;
-    let mut saw_text_delta = false;
-    let mut saw_reasoning_delta = false;
+    let mut content = ContentBlocks::default();
     let mut last_usage = None;
     let mut active_tool_calls = BTreeMap::<u64, String>::new();
     loop {
@@ -2239,27 +2245,23 @@ async fn run_pi_protocol(
                         "Pi started a new assistant message with an active tool call".into(),
                     );
                 }
-                saw_text_delta = false;
-                saw_reasoning_delta = false;
+                content = ContentBlocks::default();
             }
             PiRuntimeEvent::OtherMessageStart | PiRuntimeEvent::Ignore => {}
-            PiRuntimeEvent::TextDelta(delta) => {
-                saw_text_delta = true;
-                context
-                    .channel
-                    .send(LocalAgentEvent::TextDelta {
-                        delta: delta.to_string(),
-                    })
-                    .map_err(|_| "local agent event consumer is unavailable".to_string())?;
+            PiRuntimeEvent::TextDelta(delta) | PiRuntimeEvent::ReasoningDelta(delta) => {
+                let kind = if matches!(decoded.event, PiRuntimeEvent::TextDelta(_)) {
+                    ContentKind::Text
+                } else {
+                    ContentKind::Thinking
+                };
+                let index = event
+                    .pointer("/assistantMessageEvent/contentIndex")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                emit_content(&context.channel, kind, content.append(index, kind, delta)?)?;
             }
-            PiRuntimeEvent::ReasoningDelta(delta) => {
-                saw_reasoning_delta = true;
-                context
-                    .channel
-                    .send(LocalAgentEvent::ReasoningDelta {
-                        delta: delta.to_string(),
-                    })
-                    .map_err(|_| "local agent event consumer is unavailable".to_string())?;
+            PiRuntimeEvent::ContentEnd { index, kind, text } => {
+                emit_content(&context.channel, kind, content.snapshot(index, kind, text)?)?;
             }
             PiRuntimeEvent::ToolCallStart { .. }
             | PiRuntimeEvent::ToolCallDelta { .. }
@@ -2269,13 +2271,7 @@ async fn run_pi_protocol(
                 if !active_tool_calls.is_empty() {
                     return Err("Pi ended an assistant message with an active tool call".into());
                 }
-                emit_final_assistant_content(
-                    context,
-                    message,
-                    saw_text_delta,
-                    saw_reasoning_delta,
-                    &mut last_usage,
-                )?;
+                emit_final_assistant_content(context, message, &mut content, &mut last_usage)?;
                 if message.get("role").and_then(Value::as_str) == Some("assistant")
                     && message.get("stopReason").and_then(Value::as_str) == Some("error")
                 {
@@ -2491,6 +2487,7 @@ mod tests {
 
     fn contract_request(session_id: Option<String>) -> LocalAgentStartRequest {
         LocalAgentStartRequest {
+            utility_effort_policy: None,
             provider: crate::local_agent::LocalAgentProvider::Pi,
             model: Some("openai/gpt-test".to_string()),
             effort: Some("high".to_string()),
@@ -2668,6 +2665,7 @@ mod tests {
         }
 
         let request = |session_id: &str| LocalAgentStartRequest {
+            utility_effort_policy: None,
             provider: crate::local_agent::LocalAgentProvider::Pi,
             model: Some("openai/gpt-test".to_string()),
             effort: Some("high".to_string()),
@@ -3685,5 +3683,42 @@ mod tests {
             }
             std::fs::remove_dir_all(root).unwrap();
         }
+    }
+    #[test]
+    fn final_content_completes_each_block_and_never_repeats_end_snapshots() {
+        let root =
+            std::env::temp_dir().join(format!("open-builder-pi-content-{}", uuid::Uuid::new_v4()));
+        let (channel, mut events) = event_channel();
+        let context = protocol_context(&root, PathBuf::from("pi"), contract_request(None), channel);
+        let mut blocks = ContentBlocks::default();
+        blocks.append(0, ContentKind::Thinking, "想").unwrap();
+        blocks.append(1, ContentKind::Text, "答").unwrap();
+        let end = json!({"type":"message_update","assistantMessageEvent":{"type":"thinking_end","contentIndex":0,"content":"想好"}});
+        let PiRuntimeEvent::ContentEnd { index, kind, text } =
+            decode_runtime_event(&end).unwrap().event
+        else {
+            panic!("missing content end");
+        };
+        emit_content(
+            &context.channel,
+            kind,
+            blocks.snapshot(index, kind, text).unwrap(),
+        )
+        .unwrap();
+        let message = json!({"role":"assistant","content":[{"type":"thinking","thinking":"想好"},{"type":"text","text":"答案🦀"},{"type":"text","text":"补充"},{"type":"thinking","thinking":"再想"}]});
+        emit_final_assistant_content(&context, &message, &mut blocks, &mut None).unwrap();
+        emit_final_assistant_content(&context, &message, &mut blocks, &mut None).unwrap();
+        let mut deltas = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            deltas.push(event["delta"].as_str().unwrap().to_string());
+        }
+        assert_eq!(deltas, ["好", "案🦀", "补充", "再想"]);
+        let conflict =
+            json!({"role":"assistant","content":[{"type":"thinking","thinking":"改写"}]});
+        assert!(emit_final_assistant_content(&context, &conflict, &mut blocks, &mut None).is_err());
+        let mut next_message = ContentBlocks::default();
+        emit_final_assistant_content(&context, &message, &mut next_message, &mut None).unwrap();
+        assert_eq!(events.try_recv().unwrap()["delta"], "想好");
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

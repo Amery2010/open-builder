@@ -221,8 +221,7 @@ impl LocalCliFailure {
                 if let Some((safe_message, retry_policy)) =
                     coded_failure(code, attempted_resume, &error.message)
                 {
-                    let mut failure =
-                        Self::new(provider, code, phase, safe_message, retry_policy);
+                    let mut failure = Self::new(provider, code, phase, safe_message, retry_policy);
                     if code == LocalCliFailureCode::IsolationViolation {
                         failure.isolation_reason = error.isolation_reason;
                         failure.item_kind = error.item_kind;

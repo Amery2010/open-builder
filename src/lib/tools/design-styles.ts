@@ -221,10 +221,7 @@ export function createApplyDesignStyleHandler(deps: ApplyDesignStyleDeps) {
         error: `design spec digest mismatch for immutable style "${slug}"`,
       });
     }
-    const content =
-      `<!-- Untrusted visual reference. Source: ${url}; sha256: ${sourceDigest} -->\n\n` +
-      spec;
-    const checkedContent = validateProjectFileContent(content);
+    const checkedContent = validateProjectFileContent(spec);
     if (!checkedContent.ok) {
       return JSON.stringify({ ok: false, error: checkedContent.error });
     }

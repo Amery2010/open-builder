@@ -18,6 +18,18 @@ export type LocalCliCatalogAuthority = "authoritative" | "partial";
 /** Lifecycle states the desktop runtime reports while a run is active. */
 export type LocalCliRunState = "preparing" | "handshaking" | "streaming";
 
+/** CLI protocol support; individual models/turns can still omit thinking text. */
+export interface LocalAgentOutputCapabilities {
+  transport:
+    | "codexAppServer"
+    | "codexExec"
+    | "claudeStreamJson"
+    | "piRpc"
+    | "antigravityStreamJson";
+  textGranularity: "delta" | "message" | "unknown";
+  reasoningText: "supported" | "unsupported" | "unknown";
+}
+
 export type LocalAgentRunScopeKind = "conversation" | "utility";
 
 export interface LocalAgentRunScope {
@@ -154,7 +166,43 @@ export interface LocalToolResolution {
   content?: LocalToolContent[];
 }
 
+export interface LocalRecoveryLease {
+  owner: string;
+  epoch: number;
+}
+export interface LocalRecoveryContext {
+  version: 1;
+  identity: { conversationId: string; branchId: string; checkoutEpoch: number };
+  messages: import("../ai/generator-types").Message[];
+  skillIds: string[];
+  skillContext?: import("../skills/active-context").SkillActiveContext | null;
+  app: Record<string, unknown>;
+}
+export interface LocalRecoverableRun {
+  runId: string;
+  request: LocalAgentStartRequest;
+  context: LocalRecoveryContext;
+  terminal: boolean;
+}
+export interface LocalRecoveryEnvelope {
+  runId: string;
+  sequence: number;
+  event: LocalAgentEvent;
+}
+export interface LocalRecoverySnapshot extends LocalRecoverableRun {
+  lease: LocalRecoveryLease;
+  events: LocalRecoveryEnvelope[];
+  resolutions: Record<string, LocalToolResolution>;
+  uncertain: boolean;
+  staleCallIds?: string[];
+}
+export type LocalToolClaim =
+  | { status: "execute" }
+  | { status: "resolved"; resolution: LocalToolResolution };
+
 export interface LocalAgentStartRequest {
+  /** Page recovery is an Open Builder IPC option, never a provider prompt. */
+  recovery?: { owner: string; context: LocalRecoveryContext };
   provider: LocalAgentProvider;
   model?: string;
   effort?: string;
@@ -164,6 +212,7 @@ export interface LocalAgentStartRequest {
   sessionId?: string;
   sessionCompatibilityKey?: string;
   scope: LocalAgentRunScope;
+  utilityEffortPolicy?: "lowestSupported";
   tools: LocalToolSpec[];
   nativeSearch: boolean;
   /** Zero disables the per-run tool-call budget. */
@@ -182,6 +231,8 @@ export type LocalAgentEvent =
       actualModel?: string | null;
       actualEffort?: string | null;
       resumed: boolean;
+      /** Absent on older desktop builds. Missing/unknown data never blocks a run. */
+      outputCapabilities?: LocalAgentOutputCapabilities;
     }
   | { type: "textDelta"; delta: string }
   | { type: "reasoningDelta"; delta: string }
@@ -238,6 +289,7 @@ export type LocalCliFailureCode =
   | "processExit"
   | "cancelled"
   | "consumerGone"
+  | "recoveryUncertain"
   | "internal";
 
 export type LocalCliFailurePhase =
@@ -299,6 +351,7 @@ export interface LocalCliPreparedMetadata {
   actualModel?: string;
   actualEffort?: string;
   resumed: boolean;
+  outputCapabilities?: LocalAgentOutputCapabilities;
 }
 
 export interface LocalCliUsage {

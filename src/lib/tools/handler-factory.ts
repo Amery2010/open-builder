@@ -303,8 +303,8 @@ export async function buildToolHandlers(
     );
   }
   if (screenshotToCodeHandler) {
-    runtimeHandlers.set("screenshot_to_code", (handlerArgs) =>
-      screenshotToCodeHandler("screenshot_to_code", handlerArgs),
+    runtimeHandlers.set("screenshot_to_code", (handlerArgs, context) =>
+      screenshotToCodeHandler("screenshot_to_code", handlerArgs, context),
     );
   }
   if (applyDesignStyleHandler) {

@@ -2,7 +2,6 @@ import { useState, useEffect, memo } from "react";
 import type { ComponentType, ReactNode } from "react";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import {
-  ChevronDown,
   ChevronRight,
   Lightbulb,
   GitCompareArrows,
@@ -14,6 +13,7 @@ import {
   Settings,
   Archive,
   Activity,
+  History,
 } from "lucide-react";
 import { ToolCallCard } from "./ToolCallCard";
 import { AgnesMediaResult, agnesToolNameForBlock } from "./AgnesMediaResult";
@@ -22,6 +22,7 @@ import {
   AskUserAnswerSummary,
   AskUserQuestionCard,
 } from "./AskUserQuestionCard";
+import { TooltipIconButton } from "../ui/tooltip-icon-button";
 import { SubagentCallCard } from "./SubagentCallCard";
 import { DesignReviewActivityBlock } from "./DesignReviewActivityBlock";
 import { useT } from "../../i18n";
@@ -35,6 +36,11 @@ import type {
 import { getAttachmentBlob } from "../../lib/attachments/store";
 import { LazyMarkdownContent } from "./LazyMarkdownContent";
 import { readAskUserAnswerSummary } from "../../lib/utils/tool-result";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "../ui/collapsible";
 
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -53,6 +59,8 @@ interface MessageBubbleProps {
   isThinkingStreaming?: boolean;
   isLastAssistant?: boolean;
   snapshotExists?: boolean;
+  branchCount?: number;
+  onOpenBranches?: (messageId: string) => void;
   onShowDiff?: (messageId: string) => void;
   onRollback?: (messageId: string) => void;
   onRetry?: () => void;
@@ -65,6 +73,7 @@ interface MessageBubbleProps {
   onWithdraw?: () => void;
   withdrawLabel?: string;
   statusLabel?: string;
+  sourceAction?: ReactNode;
 }
 
 function StoredAttachmentImage({ block }: { block: ImageBlock }) {
@@ -99,6 +108,8 @@ export const MessageBubble = memo(function MessageBubble({
   isThinkingStreaming = false,
   isLastAssistant = false,
   snapshotExists = false,
+  branchCount = 0,
+  onOpenBranches,
   onShowDiff,
   onRollback,
   onRetry,
@@ -109,6 +120,7 @@ export const MessageBubble = memo(function MessageBubble({
   onWithdraw,
   withdrawLabel = "Withdraw",
   statusLabel,
+  sourceAction,
 }: MessageBubbleProps) {
   const t = useT();
   const pendingInteractions = useInteractiveStore((state) => state.pending);
@@ -319,9 +331,23 @@ export const MessageBubble = memo(function MessageBubble({
         }
         return null;
       })}
-      {(snapshotExists || isError || assistantText) &&
+      {(snapshotExists ||
+        isError ||
+        assistantText ||
+        branchCount > 1 ||
+        sourceAction) &&
         !(isGenerating && isLastAssistant) && (
-          <div className="flex items-center gap-3 mt-2 pt-2 border-t border-border/30">
+          <div className="flex flex-wrap items-center gap-3 mt-2 pt-2 border-t border-border/30">
+            {branchCount > 1 && (
+              <TooltipIconButton
+                variant="ghost"
+                size="icon-xs"
+                label={t.branches.count.replace("{count}", String(branchCount))}
+                onClick={() => onOpenBranches?.(message.id)}
+              >
+                <History className="size-3.5" />
+              </TooltipIconButton>
+            )}
             {snapshotExists && (
               <>
                 <button
@@ -345,6 +371,7 @@ export const MessageBubble = memo(function MessageBubble({
             {assistantText && !isError && (
               <CopyMessageButton text={assistantText} />
             )}
+            {sourceAction}
             {isError && (
               <ErrorActions
                 message={message}
@@ -510,11 +537,13 @@ function ThinkingBlockCard({
   }, [isStreaming]);
 
   return (
-    <div className="border border-border/50 rounded-lg overflow-hidden bg-muted/30">
-      <button
+    <Collapsible
+      open={expanded}
+      onOpenChange={setExpanded}
+      className="border border-border/50 rounded-lg overflow-hidden bg-muted/30"
+    >
+      <CollapsibleTrigger
         type="button"
-        onClick={() => setExpanded((v) => !v)}
-        aria-expanded={expanded}
         aria-label={t.message.thinking}
         className="flex items-center gap-2 w-full px-3 py-2 text-muted-foreground hover:bg-muted/50 transition-colors"
       >
@@ -522,17 +551,15 @@ function ThinkingBlockCard({
         <span className="font-medium text-xs text-foreground">
           {t.message.thinking}
         </span>
-        {expanded ? (
-          <ChevronDown className="w-3.5 h-3.5 ml-auto" />
-        ) : (
-          <ChevronRight className="w-3.5 h-3.5 ml-auto" />
-        )}
-      </button>
-      {expanded && (
+        <ChevronRight
+          className={`w-3.5 h-3.5 ml-auto transition-transform duration-300 ${expanded ? "rotate-90" : ""}`}
+        />
+      </CollapsibleTrigger>
+      <CollapsibleContent>
         <div className="thought px-3 py-2 text-xs text-muted-foreground max-h-60 overflow-y-auto">
           <LazyMarkdownContent content={content} variant="assistant" />
         </div>
-      )}
-    </div>
+      </CollapsibleContent>
+    </Collapsible>
   );
 }

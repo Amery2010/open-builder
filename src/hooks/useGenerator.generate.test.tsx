@@ -4,6 +4,7 @@ import { act, renderHook } from "@testing-library/react";
 import { useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_TITLE, useConversationStore } from "../store/conversation";
+import { useSnapshotStore } from "../store/snapshot";
 import { useInteractiveStore } from "../store/interactive";
 import { useSettingsStore } from "../store/settings";
 import { useGenerator } from "./useGenerator";
@@ -31,6 +32,7 @@ describe("useGenerator optimistic request lifecycle", () => {
       legacyPlanModeMigrated: true,
     });
     useInteractiveStore.setState({ pending: [] });
+    useSnapshotStore.setState({ snapshots: {}, _hasHydrated: true });
   });
 
   function renderGenerator() {
@@ -56,6 +58,50 @@ describe("useGenerator optimistic request lifecycle", () => {
       return { ...generator, isGenerating };
     });
   }
+
+  it("discards request preparation after a checkout within the same project", async () => {
+    const state = useConversationStore.getState();
+    const id = state.createConversation();
+    state.setMessages([
+      { role: "user", content: "Version B" },
+      { role: "assistant", content: "Built B" },
+    ]);
+    state.setFiles({ "index.html": "B" });
+    const assistant =
+      useConversationStore.getState().conversations[id].messages[1];
+    const checkpoint = useSnapshotStore
+      .getState()
+      .createSnapshot(id, `assistant-${assistant.id}`, { "index.html": "B" })!;
+    state.setFiles({ "index.html": "C" });
+    const preparation = deferred();
+    const hook = renderGenerator();
+    let generation!: Promise<void>;
+    await act(async () => {
+      generation = hook.result.current.generate(
+        "Old pending request",
+        undefined,
+        { prepareRun: () => preparation.promise },
+      );
+      await Promise.resolve();
+    });
+    act(() =>
+      useConversationStore.getState().checkoutSnapshot(id, checkpoint.id),
+    );
+    expect(hook.result.current.isGenerating).toBe(false);
+    const checkedOut = useConversationStore.getState().conversations[id];
+    await act(async () => {
+      preparation.resolve();
+      await generation;
+    });
+    const restored = useConversationStore.getState().conversations[id];
+    expect(restored.files).toEqual({ "index.html": "B" });
+    expect(restored.messages).toEqual(checkedOut.messages);
+    expect(
+      restored.messages.some(
+        (message) => message.content === "Old pending request",
+      ),
+    ).toBe(false);
+  });
 
   it("shows the user message and loading before request preparation resolves", async () => {
     const conversationId = useConversationStore.getState().createConversation();
@@ -322,7 +368,12 @@ describe("useGenerator optimistic request lifecycle", () => {
 
     await vi.waitFor(() => expect(generateSmartTitle).toHaveBeenCalledOnce());
     expect(generateSmartTitle).toHaveBeenCalledWith(
-      [{ role: "user", content: "Original dashboard request" }],
+      [
+        expect.objectContaining({
+          role: "user",
+          content: "Original dashboard request",
+        }),
+      ],
       expect.objectContaining({ model: expect.any(String) }),
       undefined,
     );

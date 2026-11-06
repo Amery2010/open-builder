@@ -2,7 +2,11 @@ import type {
   DesignBridgeCaptureResult,
   DesignReviewViewportName,
 } from "./preview-bridge";
-import { DESIGN_BRIDGE_TIMEOUT_ATTEMPTS } from "./preview-bridge";
+import {
+  DESIGN_BRIDGE_TIMEOUT_ATTEMPTS,
+  DESIGN_CAPTURE_RUNTIME_GLOBAL,
+  isPreviewViewportSize,
+} from "./preview-bridge";
 import { PreviewRuntimeError } from "./preview-runtime";
 
 /** Keep waiting for the same preview operation across three timeout windows. */
@@ -18,7 +22,7 @@ export async function waitForPreviewReadiness({
   isCurrent?: () => boolean;
   signal: AbortSignal;
   timeoutMs: number;
-  errorMessage: string;
+  errorMessage: string | (() => string);
   pollIntervalMs?: number;
 }): Promise<void> {
   const deadline =
@@ -33,7 +37,10 @@ export async function waitForPreviewReadiness({
     }
     if (isReady()) return;
     const remaining = deadline - performance.now();
-    if (remaining <= 0) throw new Error(errorMessage);
+    if (remaining <= 0)
+      throw new Error(
+        typeof errorMessage === "function" ? errorMessage() : errorMessage,
+      );
     await new Promise<void>((resolve, reject) => {
       const abort = () => {
         clearTimeout(timer);
@@ -73,8 +80,7 @@ export function isDesignReviewViewportReady(
     readiness.captureRuntimeReady &&
     readiness.width !== undefined &&
     readiness.height !== undefined &&
-    Math.abs(readiness.width - viewport.width) <= 4 &&
-    Math.abs(readiness.height - viewport.height) <= 4
+    isPreviewViewportSize(viewport.name, readiness.width, readiness.height)
   );
 }
 
@@ -143,8 +149,24 @@ export async function collectDesignReviewCaptures({
 let captureRuntimePromise: Promise<string> | null = null;
 
 export function loadDesignCaptureRuntimeSource(): Promise<string> {
-  captureRuntimePromise ??= import("html-to-image/dist/html-to-image.js?raw")
-    .then((module) => module.default)
+  captureRuntimePromise ??= Promise.all([
+    import("html-to-image/dist/html-to-image.js?raw"),
+    import("./capture-canvas-adapter.js?raw"),
+  ])
+    .then(
+      ([module, adapter]) => `;(function () {
+  var captureExports = {};
+  (function (exports, module, define) {
+${module.default.replace(/\n?\/\/# sourceMappingURL=.*$/m, "")}
+  })(captureExports, { exports: captureExports }, undefined);
+${adapter.default.replace(/^export default /m, "")}
+  installCaptureCanvasAdapter(captureExports);
+  globalThis[${JSON.stringify(DESIGN_CAPTURE_RUNTIME_GLOBAL)}] = captureExports;
+  if (typeof globalThis.dispatchEvent === "function") {
+    globalThis.dispatchEvent(new Event("open-builder:capture-runtime-ready"));
+  }
+})();\n`,
+    )
     .catch((error) => {
       captureRuntimePromise = null;
       throw error;

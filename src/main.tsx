@@ -13,6 +13,11 @@ async function bootstrap() {
     installProxy();
   }
 
+  const { startProjectArchiveLifecycle } =
+    await import("./lib/project-archives/service");
+  const stopProjectArchives = startProjectArchiveLifecycle();
+  import.meta.hot?.dispose(stopProjectArchives);
+
   createRoot(document.getElementById("root")!).render(
     <StrictMode>
       <TooltipProvider>

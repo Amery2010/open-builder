@@ -16,6 +16,7 @@ use crate::local_agent::{
     LocalAgentRunScopeKind, LocalAgentStartRequest,
 };
 use crate::local_agent_adapter::{AdapterIdentity, AdapterProbe};
+use crate::local_agent_content::snapshot_suffix;
 use crate::local_agent_media::{
     read_generated_image, GeneratedImageBytes, PreparedLocalImageRequest,
 };
@@ -1410,6 +1411,49 @@ fn validate_runtime_tool(
     ))
 }
 
+#[derive(Default)]
+struct ResponseSteps {
+    text: BTreeMap<u64, String>,
+    completed: BTreeMap<(u64, String), Value>,
+}
+
+impl ResponseSteps {
+    fn accept(&mut self, value: &Value) -> Result<bool, String> {
+        let step = &value["step_update"];
+        let index = step.get("step_index").and_then(Value::as_u64).unwrap_or(0);
+        let kind = step.get("step_type").and_then(Value::as_str).unwrap_or("");
+        if !matches!(kind, "agent_response" | "thinking" | "reasoning") {
+            return Ok(true);
+        }
+        let key = (index, kind.to_string());
+        if let Some(completed) = self.completed.get(&key) {
+            if completed == step {
+                return Ok(false);
+            }
+            return Err("Antigravity protocol changed a completed step".to_string());
+        }
+        if kind == "agent_response" {
+            let text = self.text.entry(index).or_default();
+            if let Some(delta) = step.get("text_delta").and_then(Value::as_str) {
+                text.push_str(delta);
+            }
+        }
+        if step.get("state").and_then(Value::as_str) == Some("DONE") {
+            self.completed.insert(key, step.clone());
+        }
+        Ok(true)
+    }
+
+    fn finish(&self, text: &str) -> Result<String, String> {
+        let previous = self
+            .text
+            .last_key_value()
+            .map(|(_, text)| text.as_str())
+            .unwrap_or("");
+        snapshot_suffix(previous, text)
+    }
+}
+
 fn decode_step(
     value: &Value,
     expected_conversation: &str,
@@ -1634,9 +1678,12 @@ fn send_runtime_event(context: &ProtocolContext, event: RuntimeEvent) -> Result<
     let event = match event {
         RuntimeEvent::Text(delta) => {
             text = !delta.is_empty();
-            Some(LocalAgentEvent::TextDelta { delta })
+            (!delta.is_empty()).then_some(LocalAgentEvent::TextDelta { delta })
         }
-        RuntimeEvent::Reasoning(delta) => Some(LocalAgentEvent::ReasoningDelta { delta }),
+        RuntimeEvent::Reasoning(delta) if !delta.is_empty() => {
+            Some(LocalAgentEvent::ReasoningDelta { delta })
+        }
+        RuntimeEvent::Reasoning(_) => None,
         RuntimeEvent::Tool {
             call_id,
             name,
@@ -1757,7 +1804,7 @@ async fn run_protocol(
         })
         .map_err(|_| "local agent event consumer is unavailable".to_string())?;
 
-    let mut saw_text = false;
+    let mut responses = ResponseSteps::default();
     loop {
         let value = match read_value(reader, &context.cancellation).await {
             Ok(value) => value,
@@ -1771,13 +1818,16 @@ async fn run_protocol(
         };
         match value.get("event").and_then(Value::as_str) {
             Some("step_update") => {
-                for event in decode_step(
+                let events = decode_step(
                     &value,
                     &attestation.conversation_id,
                     &expected_runtime_tools,
                     &context.request,
-                )? {
-                    saw_text |= send_runtime_event(context, event)?;
+                )?;
+                if responses.accept(&value)? {
+                    for event in events {
+                        send_runtime_event(context, event)?;
+                    }
                 }
             }
             Some("result") => {
@@ -1816,16 +1866,14 @@ async fn run_protocol(
                 }
                 match status {
                     "SUCCESS" => {
-                        if !saw_text {
-                            if let Some(response) = result
-                                .get("response")
-                                .and_then(Value::as_str)
-                                .filter(|response| !response.is_empty())
-                            {
-                                send_runtime_event(
-                                    context,
-                                    RuntimeEvent::Text(response.to_string()),
-                                )?;
+                        if let Some(response) = result
+                            .get("response")
+                            .and_then(Value::as_str)
+                            .filter(|text| !text.is_empty())
+                        {
+                            let delta = responses.finish(response)?;
+                            if !delta.is_empty() {
+                                send_runtime_event(context, RuntimeEvent::Text(delta))?;
                             }
                         }
                         return Ok(ProtocolOutcome {
@@ -2846,6 +2894,7 @@ mod tests {
 
     fn request() -> LocalAgentStartRequest {
         LocalAgentStartRequest {
+            utility_effort_policy: None,
             provider: crate::local_agent::LocalAgentProvider::Antigravity,
             model: Some("gemini-3.5-flash-medium".to_string()),
             effort: Some("medium".to_string()),
@@ -4313,5 +4362,19 @@ mod tests {
             }
             std::fs::remove_dir_all(root).unwrap();
         }
+    }
+    #[test]
+    fn response_steps_complete_only_the_last_answer_and_preserve_equal_deltas() {
+        let mut state = ResponseSteps::default();
+        let step = |index, text, status| json!({"step_update":{"step_index":index,"step_type":"agent_response","state":status,"text_delta":text}});
+        assert!(state.accept(&step(1, "Commentary", "DONE")).unwrap());
+        assert!(state.accept(&step(3, "好", "ACTIVE")).unwrap());
+        assert!(state.accept(&step(3, "好", "ACTIVE")).unwrap());
+        let final_step = step(3, "!", "DONE");
+        assert!(state.accept(&final_step).unwrap());
+        assert!(!state.accept(&final_step).unwrap());
+        assert_eq!(state.finish("好好!🦀").unwrap(), "🦀");
+        assert!(state.finish("Commentary好好!").is_err());
+        assert!(state.accept(&step(3, "changed", "DONE")).is_err());
     }
 }

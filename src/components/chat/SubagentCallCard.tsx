@@ -1,7 +1,12 @@
-import { useMemo, useState, memo } from "react";
-import { ChevronRight, Bot } from "lucide-react";
+import { useMemo, useState, useEffect, useId, useRef, memo } from "react";
+import { ChevronRight, Bot, Check, X, Square } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import { LazyMarkdownContent } from "./LazyMarkdownContent";
 import { ToolCallCard } from "./ToolCallCard";
 import { AgnesMediaResult } from "./AgnesMediaResult";
@@ -12,9 +17,11 @@ import {
   SUBAGENT_LIMITS,
   limitSubagentEvents,
   truncateSubagentText,
+  subagentEventStatus,
 } from "../../lib/ai/subagents/limits";
 import type {
   SubagentEvent,
+  SubagentLiveActivity,
   SubagentStatus,
   SubagentToolResult,
 } from "../../lib/ai/subagents/types";
@@ -28,6 +35,7 @@ type SubagentCardData = {
   status: SubagentStatus;
   text: string;
   events: SubagentEvent[];
+  activities: SubagentLiveActivity[];
   durationMs?: number;
   error?: string;
 };
@@ -43,17 +51,38 @@ function parsePersisted(result: string): SubagentCardData | null {
     ) {
       return null;
     }
+    const events = Array.isArray(data.events)
+      ? limitSubagentEvents(data.events)
+      : [];
+    const text = truncateSubagentText(
+      data.text ?? "",
+      SUBAGENT_LIMITS.maxLiveTextChars,
+    );
     return {
       subagent: data.subagent,
       task: truncateSubagentText(data.task ?? "", SUBAGENT_LIMITS.maxTaskChars),
       status: data.status ?? (data.ok ? "done" : "failed"),
-      text: truncateSubagentText(
-        data.text ?? "",
-        SUBAGENT_LIMITS.maxLiveTextChars,
-      ),
-      events: Array.isArray(data.events)
-        ? limitSubagentEvents(data.events)
-        : [],
+      text,
+      events,
+      activities: [
+        ...events.map((event, index) => ({
+          kind: "tool" as const,
+          text: event.name,
+          timestamp: event.startedAt ?? index,
+          toolCallId: event.toolCallId,
+        })),
+        ...(text
+          ? [
+              {
+                kind: "output" as const,
+                text,
+                timestamp:
+                  (events.at(-1)?.finishedAt ?? events.at(-1)?.startedAt ?? 0) +
+                  1,
+              },
+            ]
+          : []),
+      ],
       durationMs: data.durationMs,
       error:
         data.error == null
@@ -103,6 +132,9 @@ function StatusBadge({
       {status === "running" && (
         <span className="w-1.5 h-1.5 rounded-full bg-yellow-500 animate-pulse mr-1" />
       )}
+      {status === "done" && <Check size={12} aria-hidden="true" />}
+      {status === "failed" && <X size={12} aria-hidden="true" />}
+      {status === "aborted" && <Square size={12} aria-hidden="true" />}
       {t.subagent[textKey]}
     </Badge>
   );
@@ -118,6 +150,11 @@ export const SubagentCallCard = memo(function SubagentCallCard({
 }: SubagentCallCardProps) {
   const t = useT();
   const [expanded, setExpanded] = useState(false);
+  const contentId = useId();
+  const [now, setNow] = useState(Date.now);
+  const timelineRef = useRef<HTMLDivElement>(null);
+  const followTimelineRef = useRef(true);
+  const followFrameRef = useRef<number | undefined>(undefined);
 
   const live = useSubagentStore((s) => s.progress[toolCallId]);
   const persisted = useMemo(() => parsePersisted(result), [result]);
@@ -151,6 +188,7 @@ export const SubagentCallCard = memo(function SubagentCallCard({
         status: live.status,
         text: live.text,
         events: live.events,
+        activities: live.activities,
         durationMs:
           live.finishedAt != null
             ? live.finishedAt - live.startedAt
@@ -172,6 +210,7 @@ export const SubagentCallCard = memo(function SubagentCallCard({
           ? ""
           : truncateSubagentText(result, SUBAGENT_LIMITS.maxLiveTextChars),
         events: [],
+        activities: [],
       };
     }
     if (cancelled) return { ...base, status: "aborted", error: undefined };
@@ -185,68 +224,256 @@ export const SubagentCallCard = memo(function SubagentCallCard({
     data.subagent;
   const def = getSubagentByName(data.subagent);
   const writePolicy = def?.writePolicy ?? "readonly";
+  useEffect(() => {
+    if (data.status !== "running") return;
+    const timer = setInterval(() => setNow(Date.now()), 1_000);
+    return () => clearInterval(timer);
+  }, [data.status]);
+  const durationMs =
+    data.durationMs ?? (live ? Math.max(0, now - live.startedAt) : undefined);
   const durationLabel =
-    data.durationMs != null
-      ? t.subagent.duration.replace("{n}", (data.durationMs / 1000).toFixed(1))
+    durationMs != null
+      ? t.subagent.duration.replace("{n}", (durationMs / 1000).toFixed(1))
       : "";
+  const latestEvent = data.events.at(-1);
+  const latestActivity = data.activities.at(-1);
+  const eventsById = useMemo(
+    () => new Map(data.events.map((event) => [event.toolCallId, event])),
+    [data.events],
+  );
+  const formatActivityText = (activity: SubagentLiveActivity): string => {
+    if (activity.kind !== "retry" || !activity.retry) return activity.text;
+    return t.subagent.retrying
+      .replace("{attempt}", String(activity.retry.attempt))
+      .replace("{maxAttempts}", String(activity.retry.maxAttempts))
+      .replace("{message}", activity.text);
+  };
+  const latestLabel = (
+    (latestActivity && formatActivityText(latestActivity)) ||
+    (latestEvent
+      ? (t.tool.names[latestEvent.name as keyof typeof t.tool.names] ??
+        latestEvent.name)
+      : "") ||
+    (data.status === "running" ? t.subagent.waitingForUpdate : "")
+  ).slice(-160);
+  const lastUpdatedLabel = live
+    ? t.subagent.updatedAgo.replace(
+        "{n}",
+        (Math.max(0, now - live.lastUpdatedAt) / 1000).toFixed(1),
+      )
+    : "";
+
+  useEffect(() => {
+    if (!expanded) return;
+    followTimelineRef.current = true;
+  }, [expanded]);
+
+  useEffect(() => {
+    if (!expanded || !followTimelineRef.current) return;
+    if (followFrameRef.current !== undefined) {
+      cancelAnimationFrame(followFrameRef.current);
+    }
+    followFrameRef.current = requestAnimationFrame(() => {
+      followFrameRef.current = undefined;
+      const timeline = timelineRef.current;
+      if (timeline) timeline.scrollTop = timeline.scrollHeight;
+    });
+    return () => {
+      if (followFrameRef.current !== undefined) {
+        cancelAnimationFrame(followFrameRef.current);
+        followFrameRef.current = undefined;
+      }
+    };
+  }, [data.activities, data.text, expanded]);
+
+  const handleTimelineScroll = () => {
+    const timeline = timelineRef.current;
+    if (!timeline) return;
+    followTimelineRef.current =
+      timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight <= 24;
+  };
 
   return (
-    <div className="border border-border/60 rounded-lg overflow-hidden bg-muted/30">
-      <button
-        className="w-full flex items-center gap-2 px-3 py-2 hover:bg-muted/50 transition-colors text-left"
-        onClick={() => setExpanded((v) => !v)}
-      >
-        <Bot size={14} className="text-violet-500 shrink-0" />
-        <span className="text-xs font-medium text-foreground shrink-0">
-          {displayName}
-        </span>
-        <span className="flex-1 min-w-0" aria-hidden="true" />
-        <Badge
-          variant="outline"
-          className="text-[10px] font-mono h-5 px-1.5 text-muted-foreground border-border/80"
+    <Collapsible
+      open={expanded}
+      onOpenChange={setExpanded}
+      className="overflow-hidden rounded-xl border border-violet-300/60 bg-violet-50/60 dark:border-violet-400/30 dark:bg-violet-500/5"
+    >
+      <CollapsibleTrigger asChild>
+        <button
+          className="flex w-full items-start gap-3 px-3 py-3 text-left transition-colors hover:bg-violet-100/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-violet-500 dark:hover:bg-violet-500/10"
+          type="button"
+          aria-controls={contentId}
         >
-          {writePolicy === "fullWrite"
-            ? t.subagent.policyFullWrite
-            : t.subagent.policyReadonly}
-        </Badge>
-        <StatusBadge status={data.status} t={t} />
-        <ChevronRight
-          size={13}
-          className={cn(
-            "text-muted-foreground transition-transform shrink-0",
-            expanded && "rotate-90",
-          )}
-        />
-      </button>
+          <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-violet-500/15 text-violet-700 dark:text-violet-300">
+            <Bot size={18} aria-hidden="true" />
+          </span>
+          <span className="min-w-0 flex-1 space-y-2">
+            <span className="flex flex-wrap items-center gap-2">
+              <span className="text-sm font-semibold text-foreground">
+                {displayName}
+              </span>
+              <StatusBadge status={data.status} t={t} />
+              <Badge
+                variant="outline"
+                className="h-5 border-violet-300/50 px-1.5 text-xs text-muted-foreground dark:border-violet-400/30"
+              >
+                {writePolicy === "fullWrite"
+                  ? t.subagent.policyFullWrite
+                  : t.subagent.policyReadonly}
+              </Badge>
+            </span>
+            {data.task && (
+              <span className="line-clamp-2 break-words text-xs leading-relaxed text-foreground/80">
+                {data.task}
+              </span>
+            )}
+            <span className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+              {latestLabel && (
+                <span
+                  className="min-w-0 truncate"
+                  title={`${t.subagent.latestActivity}: ${latestLabel}`}
+                >
+                  {latestLabel}
+                </span>
+              )}
+              <span>
+                {data.events.length} {t.subagent.toolCalls}
+              </span>
+              {durationLabel && (
+                <span className="font-mono tabular-nums">{durationLabel}</span>
+              )}
+              {lastUpdatedLabel && (
+                <span
+                  data-testid="subagent-last-updated"
+                  className="font-mono tabular-nums"
+                  title={t.subagent.latestActivity}
+                >
+                  {lastUpdatedLabel}
+                </span>
+              )}
+            </span>
+          </span>
+          <ChevronRight
+            size={14}
+            aria-hidden="true"
+            className={cn(
+              "mt-1 shrink-0 text-muted-foreground transition-transform",
+              expanded && "rotate-90",
+            )}
+          />
+        </button>
+      </CollapsibleTrigger>
 
-      {expanded && (
-        <div className="px-3 py-2 border-t border-border/60 bg-muted/20 space-y-3">
-          {data.task && (
+      <CollapsibleContent id={contentId}>
+        <div className="space-y-3 border-t border-violet-300/40 bg-background/50 px-3 py-3 dark:border-violet-400/20">
+          {data.activities.length > 0 ? (
+            <div>
+              <p className="mb-1 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                {t.subagent.output}
+              </p>
+              <div
+                ref={timelineRef}
+                data-testid="subagent-activity-list"
+                onScroll={handleTimelineScroll}
+                className="max-h-96 space-y-1.5 overflow-y-auto text-xs text-muted-foreground"
+              >
+                {data.activities.map((activity, index) => {
+                  if (activity.kind === "tool-result") return null;
+                  if (activity.kind === "tool") {
+                    const event = activity.toolCallId
+                      ? eventsById.get(activity.toolCallId)
+                      : undefined;
+                    if (!event) return null;
+                    if (
+                      agnesToolNameFromAlias(event.name) &&
+                      (event.resultPreview ||
+                        subagentEventStatus(event, data.status) === "running")
+                    ) {
+                      return (
+                        <div
+                          key={`${activity.timestamp}-${index}`}
+                          style={{
+                            contentVisibility: "auto",
+                            containIntrinsicSize: "0 52px",
+                          }}
+                        >
+                          <AgnesMediaResult
+                            block={{
+                              type: "tool",
+                              id: `subagent-tool-${event.toolCallId}`,
+                              toolName: event.name,
+                              title: event.name,
+                              path: "",
+                              result: event.resultPreview,
+                              toolCallId: event.toolCallId,
+                            }}
+                          />
+                        </div>
+                      );
+                    }
+                    return (
+                      <div
+                        key={`${activity.timestamp}-${index}`}
+                        style={{
+                          contentVisibility: "auto",
+                          containIntrinsicSize: "0 52px",
+                        }}
+                      >
+                        <ToolCallCard
+                          toolName={event.name}
+                          title={
+                            t.tool.names[
+                              event.name as keyof typeof t.tool.names
+                            ] ?? event.name
+                          }
+                          path=""
+                          result={event.resultPreview}
+                          toolCallId={event.toolCallId}
+                          toolOutput={event.toolOutput}
+                          status={subagentEventStatus(event, data.status)}
+                        />
+                      </div>
+                    );
+                  }
+                  const text = formatActivityText(activity);
+                  return (
+                    <div
+                      key={`${activity.timestamp}-${index}`}
+                      className="rounded-md border border-border/40 bg-muted/20 px-2 py-1.5 whitespace-pre-wrap"
+                      style={{
+                        contentVisibility: "auto",
+                        containIntrinsicSize: "0 32px",
+                      }}
+                    >
+                      {activity.kind === "output" &&
+                      data.status !== "running" ? (
+                        <LazyMarkdownContent
+                          content={text}
+                          variant="assistant"
+                        />
+                      ) : (
+                        text
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ) : data.text ? (
             <div>
               <p className="text-[11px] font-medium text-muted-foreground mb-1 uppercase tracking-wider">
-                {t.subagent.task}
+                {t.subagent.output}
               </p>
-              <p className="text-xs text-foreground whitespace-pre-wrap leading-relaxed">
-                {data.task}
-              </p>
-            </div>
-          )}
-          <div>
-            <p className="text-[11px] font-medium text-muted-foreground mb-1 uppercase tracking-wider">
-              {t.subagent.output}
-            </p>
-            {data.text ? (
               <LazyMarkdownContent content={data.text} variant="assistant" />
-            ) : data.status === "running" ? (
-              <p className="text-xs text-muted-foreground italic">
-                {t.subagent.running}…
-              </p>
-            ) : (
-              <p className="text-xs text-muted-foreground italic">
-                {t.subagent.noOutput}
-              </p>
-            )}
-          </div>
+            </div>
+          ) : (
+            <p className="text-xs text-muted-foreground">
+              {data.status === "running"
+                ? t.subagent.waitingForUpdate
+                : t.subagent.noOutput}
+            </p>
+          )}
           {data.error && (
             <div>
               <p className="text-[11px] font-medium text-red-500 mb-1 uppercase tracking-wider">
@@ -257,14 +484,16 @@ export const SubagentCallCard = memo(function SubagentCallCard({
               </p>
             </div>
           )}
-          {data.events.length > 0 && (
+          {data.activities.length === 0 && data.events.length > 0 && (
             <div>
               <p className="text-[11px] font-medium text-muted-foreground mb-1 uppercase tracking-wider">
                 {t.subagent.toolCalls}
               </p>
               <div className="space-y-1.5">
                 {data.events.map((ev) =>
-                  agnesToolNameFromAlias(ev.name) ? (
+                  agnesToolNameFromAlias(ev.name) &&
+                  (ev.resultPreview ||
+                    subagentEventStatus(ev, data.status) === "running") ? (
                     <AgnesMediaResult
                       key={ev.toolCallId}
                       block={{
@@ -288,6 +517,8 @@ export const SubagentCallCard = memo(function SubagentCallCard({
                       path=""
                       result={ev.resultPreview}
                       toolCallId={ev.toolCallId}
+                      toolOutput={ev.toolOutput}
+                      status={subagentEventStatus(ev, data.status)}
                     />
                   ),
                 )}
@@ -307,7 +538,7 @@ export const SubagentCallCard = memo(function SubagentCallCard({
             </div>
           )}
         </div>
-      )}
-    </div>
+      </CollapsibleContent>
+    </Collapsible>
   );
 });

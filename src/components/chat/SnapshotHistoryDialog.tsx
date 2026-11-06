@@ -9,7 +9,8 @@ import {
   Undo2,
   X,
 } from "lucide-react";
-import { saveAs } from "file-saver";
+import { downloadSnapshotArchive } from "../../lib/project-archives/download";
+import { useConversationStore } from "../../store/conversation";
 import {
   Dialog,
   DialogBody,
@@ -22,12 +23,9 @@ import { Button } from "@/components/ui/button";
 import { TooltipIconButton } from "@/components/ui/tooltip-icon-button";
 import { Input } from "@/components/ui/input";
 import { requestConfirmation } from "@/lib/confirmation";
-import { useSnapshotStore } from "../../store/snapshot";
+import { useSnapshotStore, selectVisibleSnapshots } from "../../store/snapshot";
 import { findPrecedingUserLabel } from "../../lib/utils/message-navigation";
-import {
-  buildProjectPatch,
-  projectPatchFileName,
-} from "../../lib/utils/project-patch-export";
+import { buildProjectPatch } from "../../lib/utils/project-patch-export";
 import {
   getNextVisibleCount,
   getVisibleListWindow,
@@ -61,7 +59,15 @@ export function SnapshotHistoryDialog({
   onRollback,
 }: SnapshotHistoryDialogProps) {
   const t = useT();
-  const snapshots = useSnapshotStore((s) => s.snapshots[conversationId] ?? []);
+  const chain = useSnapshotStore((s) => s.snapshots[conversationId]);
+  const conversation = useConversationStore(
+    (state) => state.conversations[conversationId],
+  );
+  const snapshots = useMemo(
+    () => selectVisibleSnapshots(conversation, chain ?? []),
+    [conversation, chain],
+  );
+  const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const renameSnapshot = useSnapshotStore((s) => s.renameSnapshot);
   const deleteSnapshot = useSnapshotStore((s) => s.deleteSnapshot);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -114,10 +120,13 @@ export function SnapshotHistoryDialog({
   const getPatchForSnapshot = (snapshot: ProjectSnapshot) => {
     const index = snapshots.findIndex((item) => item.id === snapshot.id);
     const reconstructFiles = useSnapshotStore.getState().reconstructFiles;
-    const previousFiles =
-      index > 0
-        ? reconstructFiles(conversationId, snapshots[index - 1].id)
-        : {};
+    const parentId =
+      snapshot.parentSnapshotId === undefined
+        ? snapshots[index - 1]?.id
+        : snapshot.parentSnapshotId;
+    const previousFiles = parentId
+      ? reconstructFiles(conversationId, parentId)
+      : {};
     const currentFiles = reconstructFiles(conversationId, snapshot.id);
     return buildProjectPatch(previousFiles, currentFiles, {
       fromLabel: index > 0 ? "previous snapshot" : "empty project",
@@ -126,23 +135,32 @@ export function SnapshotHistoryDialog({
   };
 
   const handleCopyPatch = async (snapshot: ProjectSnapshot) => {
-    const patch = getPatchForSnapshot(snapshot);
-    if (!patch) {
-      setNotice(t.snapshots.patchEmpty);
-      return;
+    try {
+      const patch = getPatchForSnapshot(snapshot);
+      if (!patch) {
+        setNotice(t.snapshots.patchEmpty);
+        return;
+      }
+      await navigator.clipboard.writeText(patch);
+      setNotice(t.snapshots.patchCopied);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
     }
-    await navigator.clipboard.writeText(patch);
-    setNotice(t.snapshots.patchCopied);
   };
 
-  const handleDownloadPatch = (snapshot: ProjectSnapshot, label: string) => {
-    const patch = getPatchForSnapshot(snapshot);
-    if (!patch) {
-      setNotice(t.snapshots.patchEmpty);
-      return;
+  const handleDownloadProject = async (snapshot: ProjectSnapshot) => {
+    setDownloadingId(snapshot.id);
+    setNotice(null);
+    try {
+      if (await downloadSnapshotArchive(conversationId, snapshot.id))
+        setNotice(t.projectArchives.saved);
+    } catch (error) {
+      setNotice(
+        error instanceof Error ? error.message : t.projectArchives.failed,
+      );
+    } finally {
+      setDownloadingId(null);
     }
-    const blob = new Blob([patch], { type: "text/x-patch;charset=utf-8" });
-    saveAs(blob, projectPatchFileName(label));
   };
 
   return (
@@ -237,7 +255,7 @@ export function SnapshotHistoryDialog({
                         variant="ghost"
                         size="icon"
                         className="h-8 w-8"
-                        onClick={() => onShowDiff(snapshot.messageId)}
+                        onClick={() => onShowDiff(snapshot.id)}
                         label={t.snapshots.viewDiff}
                       >
                         <Eye size={15} />
@@ -255,8 +273,13 @@ export function SnapshotHistoryDialog({
                         variant="ghost"
                         size="icon"
                         className="h-8 w-8"
-                        onClick={() => handleDownloadPatch(snapshot, label)}
-                        label={t.snapshots.downloadPatch}
+                        onClick={() => void handleDownloadProject(snapshot)}
+                        disabled={downloadingId !== null}
+                        label={
+                          downloadingId === snapshot.id
+                            ? t.projectArchives.preparing
+                            : t.projectArchives.download
+                        }
                       >
                         <Download size={15} />
                       </TooltipIconButton>
@@ -264,7 +287,7 @@ export function SnapshotHistoryDialog({
                         variant="ghost"
                         size="icon"
                         className="h-8 w-8"
-                        onClick={() => onRollback(snapshot.messageId)}
+                        onClick={() => onRollback(snapshot.id)}
                         label={t.snapshots.restore}
                       >
                         <Undo2 size={15} />

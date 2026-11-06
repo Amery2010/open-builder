@@ -194,6 +194,8 @@ export interface ToolExecutionContext {
 
 /** Internal message format */
 export interface Message {
+  /** Persisted UI identity; not part of provider message payloads. */
+  id?: string;
   role: "system" | "user" | "assistant" | "tool";
   content: string | ContentPart[] | null;
   tool_calls?: ToolCall[];
@@ -465,6 +467,10 @@ export interface GenerationRequestContext {
 
 /** Runtime-independent generation surface consumed by the React orchestrator. */
 export interface GenerationBackend {
+  recover?(
+    run: import("../local-agent/types").LocalRecoverableRun,
+  ): Promise<GenerateResult>;
+  acknowledgeRecovery?(): Promise<void>;
   getFiles(): ProjectFiles;
   setFiles(files: ProjectFiles): void;
   getMessages(): Message[];

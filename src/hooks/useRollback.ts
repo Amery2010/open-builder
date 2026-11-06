@@ -2,6 +2,7 @@ import { useState, useCallback } from "react";
 import { findPrecedingUserLabel } from "../lib/utils/message-navigation";
 import { useConversationStore } from "../store/conversation";
 import { useSnapshotStore } from "../store/snapshot";
+import { flushPendingSandpackFileChanges } from "../components/code-viewer/sandpack-file-changes";
 import type { Message, ProjectFiles } from "../types";
 
 export interface RollbackInfo {
@@ -14,24 +15,38 @@ interface UseRollbackArgs {
   messages: Message[];
   snapshotsLength: number;
   onSetFiles: (files: ProjectFiles) => void;
+  onBeforeCheckout?: () => void;
 }
 
 export function useRollback({
   activeId,
   messages,
-  snapshotsLength,
-  onSetFiles,
+  onBeforeCheckout,
 }: UseRollbackArgs) {
   const [rollbackConfirmId, setRollbackConfirmId] = useState<string | null>(
     null,
   );
-  const [rollbackInfo, setRollbackInfo] = useState<RollbackInfo | null>(null);
+  const [dismissedSnapshotId, setDismissedSnapshotId] = useState<string | null>(
+    null,
+  );
+  const [rollbackError, setRollbackError] = useState<string | null>(null);
+  const checkout = useConversationStore((state) =>
+    activeId ? state.conversations[activeId]?.checkout : undefined,
+  );
+  const rollbackInfo: RollbackInfo | null =
+    checkout && checkout.snapshotId !== dismissedSnapshotId
+      ? {
+          messageId: checkout.messageId,
+          label: findPrecedingUserLabel(messages, checkout.messageId),
+        }
+      : null;
 
   const flushSnapshotUpdate = useCallback(() => {
-    if (!activeId || snapshotsLength === 0) return;
+    if (!activeId) return;
+    flushPendingSandpackFileChanges(activeId);
     const conversation =
       useConversationStore.getState().conversations[activeId];
-    if (conversation) {
+    if (conversation && !conversation.checkout) {
       useSnapshotStore
         .getState()
         .updateLatestSnapshot(
@@ -40,31 +55,40 @@ export function useRollback({
           conversation.assets,
         );
     }
-  }, [activeId, snapshotsLength]);
+  }, [activeId]);
 
   const handleRollback = useCallback(
-    (messageId: string) => {
+    (messageOrSnapshotId: string) => {
       if (!activeId) return;
-      flushSnapshotUpdate();
-      const snap = useSnapshotStore
-        .getState()
-        .getSnapshotByMessageId(activeId, messageId);
-      if (!snap) return;
-      const restoredFiles = useSnapshotStore
-        .getState()
-        .reconstructFiles(activeId, snap.id);
-      const restoredAssets = useSnapshotStore
-        .getState()
-        .reconstructAssets(activeId, snap.id);
-      onSetFiles(restoredFiles);
-      useConversationStore
-        .getState()
-        .setAssetsForConversation(activeId, restoredAssets);
-      setRollbackConfirmId(null);
-      const label = findPrecedingUserLabel(messages, messageId);
-      setRollbackInfo({ messageId, label });
+      try {
+        onBeforeCheckout?.();
+        flushSnapshotUpdate();
+        const snapshots = useSnapshotStore.getState();
+        const snapshot =
+          snapshots.snapshots[activeId]?.find(
+            (item) => item.id === messageOrSnapshotId,
+          ) ?? snapshots.getSnapshotByMessageId(activeId, messageOrSnapshotId);
+        if (!snapshot)
+          throw new Error("The requested checkpoint is unavailable.");
+        useConversationStore.getState().checkoutSnapshot(activeId, snapshot.id);
+        setRollbackConfirmId(null);
+        setDismissedSnapshotId(null);
+        setRollbackError(null);
+      } catch (error) {
+        setRollbackConfirmId(null);
+        setRollbackError(
+          error instanceof Error ? error.message : String(error),
+        );
+      }
     },
-    [activeId, onSetFiles, messages, flushSnapshotUpdate],
+    [activeId, flushSnapshotUpdate, onBeforeCheckout],
+  );
+
+  const setRollbackInfo = useCallback(
+    (_value: null) => {
+      setDismissedSnapshotId(checkout?.snapshotId ?? null);
+    },
+    [checkout?.snapshotId],
   );
 
   return {
@@ -72,6 +96,7 @@ export function useRollback({
     setRollbackConfirmId,
     rollbackInfo,
     setRollbackInfo,
+    rollbackError,
     handleRollback,
     flushSnapshotUpdate,
   };

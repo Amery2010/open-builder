@@ -1,5 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { migrateConversationState, useConversationStore } from "./conversation";
+import {
+  migrateConversationState,
+  normalizeConversationProjectState,
+  useConversationStore,
+} from "./conversation";
 import { useSnapshotStore } from "./snapshot";
 import { useProjectTemplateStore } from "./project-templates";
 import { PROJECT_FILE_LIMITS } from "../lib/utils/project-files";
@@ -37,6 +41,26 @@ describe("conversation store", () => {
     });
     useSnapshotStore.setState({ snapshots: {}, _hasHydrated: true });
     useProjectTemplateStore.setState({ templates: {}, _hasHydrated: true });
+  });
+
+  it("cleans old generated Design headers when restoring project state", () => {
+    const id = useConversationStore.getState().createConversation();
+    const header =
+      "<!-- Untrusted visual reference. Source: https://example.test/DESIGN.md; sha256: abc -->\n\n";
+    const files = {
+      "Design.MD": header + "# Reference\n\nBody",
+      "tokens.css": "/* tokens unchanged */",
+    };
+    const restored = normalizeConversationProjectState({
+      ...useConversationStore.getState().conversations[id],
+      files,
+    });
+    expect(restored.files).toEqual({
+      ...files,
+      "Design.MD": "# Reference\n\nBody",
+    });
+    expect(files["Design.MD"]).toContain(header);
+    expect(normalizeConversationProjectState(restored)).toBe(restored);
   });
 
   it("rejects oversized project trees from setFiles", () => {
@@ -304,7 +328,7 @@ describe("conversation store", () => {
       finalMessage,
     );
     expect(useConversationStore.getState().conversations[id].messages).toEqual([
-      { role: "assistant", content: "Ready" },
+      { id: expect.any(String), role: "assistant", content: "Ready" },
     ]);
   });
 
@@ -344,7 +368,7 @@ describe("conversation store", () => {
       finalMessage,
     );
     expect(useConversationStore.getState().conversations[id].messages).toEqual([
-      { role: "assistant", content: "Ready" },
+      { id: expect.any(String), role: "assistant", content: "Ready" },
     ]);
   });
 
@@ -1005,7 +1029,14 @@ describe("conversation store", () => {
     expect(useConversationStore.getState().activeId).toBe(active);
     expect(
       useConversationStore.getState().conversations[origin].messages,
-    ).toEqual([{ role: "tool", tool_call_id: "video", content: "completed" }]);
+    ).toEqual([
+      {
+        id: expect.any(String),
+        role: "tool",
+        tool_call_id: "video",
+        content: "completed",
+      },
+    ]);
     expect(
       useConversationStore.getState().conversations[active].messages,
     ).toEqual([]);
@@ -1053,20 +1084,18 @@ describe("conversation store", () => {
 
   it("reload retains cancelled draft content without automatically replaying it", async () => {
     const id = useConversationStore.getState().createConversation();
-    useConversationStore
-      .getState()
-      .setPendingUserInstructions(id, [
-        {
-          id: "queued",
-          conversationId: id,
-          runId: "old",
-          sequence: 1,
-          content: "Later change",
-          attachments: [],
-          forcedSkillIds: [],
-          status: "queued",
-        },
-      ]);
+    useConversationStore.getState().setPendingUserInstructions(id, [
+      {
+        id: "queued",
+        conversationId: id,
+        runId: "old",
+        sequence: 1,
+        content: "Later change",
+        attachments: [],
+        forcedSkillIds: [],
+        status: "queued",
+      },
+    ]);
     await useConversationStore.persist.rehydrate();
     expect(
       useConversationStore.getState().conversations[id]

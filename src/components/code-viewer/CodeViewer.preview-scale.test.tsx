@@ -11,7 +11,10 @@ let sandpackProviderError: Error | null = null;
 const projectFilesForSandpackMock = vi.hoisted(() => vi.fn());
 const getProjectAssetBlobMock = vi.hoisted(() => vi.fn());
 
-vi.mock("@codesandbox/sandpack-react", () => ({
+vi.mock("@codesandbox/sandpack-react", async (importOriginal) => ({
+  SANDBOX_TEMPLATES: (
+    await importOriginal<typeof import("@codesandbox/sandpack-react")>()
+  ).SANDBOX_TEMPLATES,
   SandpackProvider: ({ children }: PropsWithChildren) => {
     if (sandpackProviderError) throw sandpackProviderError;
     return <>{children}</>;
@@ -35,6 +38,8 @@ vi.mock("@codesandbox/sandpack-react", () => ({
   ),
   SandpackConsole: () => <div data-testid="sandpack-console" />,
 }));
+
+vi.mock("./SandpackRuntimeSync", () => ({ SandpackRuntimeSync: () => null }));
 
 vi.mock("../../lib/project-assets/core", () => ({
   projectFilesForSandpack: projectFilesForSandpackMock,

@@ -282,7 +282,41 @@ describe("App Sandpack synchronization", () => {
     },
   );
 
-  it("keeps Host updates when asset projection unmounts the old listener", async () => {
+  it.each([false, true])(
+    "keeps desktop static projection out of canonical HTML and commits real editor changes (design=%s)",
+    async (design) => {
+      fixtures.desktopMode = true;
+      fixtures.template = "static";
+      const html =
+        '<!doctype html><html><head><style>h1{color:red}</style><link rel="stylesheet" href="/app.css"></head><body><main><h1>Canonical</h1></main></body></html>';
+      useConversationStore
+        .getState()
+        .setFiles({ "index.html": html, "app.css": "main { padding: 12px; }" });
+      useConversationStore.getState().setActiveFile("index.html");
+      if (design) useConversationStore.getState().setWorkspaceMode("design");
+      await mountProject();
+      const editor = screen.getByRole("textbox", {
+        name: "Project code",
+        hidden: true,
+      }) as HTMLTextAreaElement;
+      expect(editor.value).toContain("open-builder-static-preview");
+      flush();
+      expect(currentFiles()["index.html"]).toBe(html);
+      expect(fixtures.updateFiles).not.toHaveBeenCalled();
+      fireEvent.change(editor, {
+        target: { value: editor.value.replace("Canonical", "Edited") },
+      });
+      flush();
+      expect(currentFiles()["index.html"]).toBe(
+        html.replace("Canonical", "Edited"),
+      );
+      expect(currentFiles()["index.html"]).not.toContain(
+        "open-builder-static-preview",
+      );
+    },
+  );
+
+  it("keeps the current preview mounted while the next asset projection is pending", async () => {
     const asset = {
       path: "public/logo.png",
       blobRef: `sha256:${"a".repeat(64)}`,
@@ -296,6 +330,7 @@ describe("App Sandpack synchronization", () => {
       .getState()
       .setAssetsForConversation(conversationId, { [asset.path]: asset });
     await mountProject();
+    const previousPreview = screen.getByTestId("preview-code");
     let finishProjection!: (files: ProjectFiles) => void;
     fixtures.projectFilesForSandpack.mockImplementationOnce(
       () =>
@@ -308,7 +343,9 @@ describe("App Sandpack synchronization", () => {
 
     expect(currentFiles()["src/App.tsx"]).toBe(updated);
     expect(fixtures.updateFiles).not.toHaveBeenCalled();
+    expect(screen.getByTestId("preview-code")).toBe(previousPreview);
     await act(async () => finishProjection(project(updated)));
+    expect(screen.getByTestId("preview-code")).toBe(previousPreview);
     expect(await screen.findByTestId("preview-code")).toHaveTextContent(
       updated,
     );

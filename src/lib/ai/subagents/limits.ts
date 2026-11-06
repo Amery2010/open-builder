@@ -1,4 +1,8 @@
-import type { SubagentEvent } from "./types";
+import type {
+  SubagentEvent,
+  SubagentStatus,
+  SubagentToolStatus,
+} from "./types";
 
 export const SUBAGENT_LIMITS = {
   maxTaskChars: 4_000,
@@ -34,9 +38,33 @@ export function truncateSubagentText(value: unknown, maxChars: number): string {
 export function limitSubagentEvents(events: SubagentEvent[]): SubagentEvent[] {
   return events.slice(0, SUBAGENT_LIMITS.maxEvents).map((event) => ({
     ...event,
+    toolOutput: event.toolOutput
+      ? {
+          text: truncateSubagentText(
+            event.toolOutput.text,
+            SUBAGENT_LIMITS.maxToolPreviewChars,
+          ),
+          isError: event.toolOutput.isError,
+        }
+      : undefined,
     resultPreview: truncateSubagentText(
       event.resultPreview,
       SUBAGENT_LIMITS.maxToolPreviewChars,
     ),
   }));
+}
+
+/** Old history has no explicit lifecycle. A terminal parent must not leave
+ * an empty child tool looking permanently active. */
+export function subagentEventStatus(
+  event: SubagentEvent,
+  parent: SubagentStatus,
+): SubagentToolStatus {
+  if (event.status && event.status !== "running") return event.status;
+  if (event.toolOutput?.isError || event.resultPreview.startsWith("Error"))
+    return "failed";
+  if (!event.status && (event.toolOutput || event.resultPreview))
+    return "completed";
+  if (parent === "done") return "completed";
+  return parent === "running" ? "running" : parent;
 }

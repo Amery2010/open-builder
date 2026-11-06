@@ -19,6 +19,12 @@ import { cn } from "@/lib/utils";
 import { useTheme } from "@/hooks/useTheme";
 import { useT } from "../i18n";
 import { SandpackListener } from "./code-viewer/SandpackListener";
+import { projectStaticPreview } from "./code-viewer/sandpack-static-preview";
+import { projectSandpackRuntime } from "./code-viewer/sandpack-runtime-preview";
+import {
+  SandpackRuntimeSync,
+  type SandpackRuntimeSyncHandle,
+} from "./code-viewer/SandpackRuntimeSync";
 import type { ProjectFileChangeGuard } from "./code-viewer/sandpack-file-changes";
 import { ViewToolbar } from "./code-viewer/ViewToolbar";
 import { FileExplorer } from "./code-viewer/FileExplorer";
@@ -48,6 +54,7 @@ import { ProjectDesignOutlineDialog } from "./design/ProjectDesignOutlineDialog"
 import { useDesignSelectionStore } from "../store/design-selection";
 import {
   createDesignBridgeNonce,
+  designBridgeRuntimeRevision,
   DESIGN_BRIDGE_CAPTURE_TIMEOUT_MS,
   DESIGN_BRIDGE_TIMEOUT_ATTEMPTS,
   DESIGN_BRIDGE_MARKER,
@@ -505,7 +512,19 @@ export function CodeViewer({
   const captureTaskRef = useRef<Promise<void> | null>(null);
   const manualRetryOfRef = useRef<string | null>(null);
   const softRefreshRef = useRef<(() => void) | null>(null);
+  const runtimeSyncRef = useRef<SandpackRuntimeSyncHandle | null>(null);
+  const preparedProjectionRef = useRef<ProjectFiles>({});
+  const readinessRequestRef = useRef<string | null>(null);
+  const readinessReplyRef = useRef<string | null>(null);
+  const lastReadinessMessageRef = useRef<{
+    generation: string;
+    runtimeRevision: string;
+    captureRuntimeAvailable: boolean;
+    nonce?: string;
+  } | null>(null);
   const previewHostRef = useRef<HTMLDivElement>(null);
+  const captureContextRef = useRef({ conversationId, viewMode });
+  captureContextRef.current = { conversationId, viewMode };
   const isDark = useTheme();
   const effectiveViewMode = previewEnabled ? viewMode : "code";
   const workspaceMode = useConversationStore(
@@ -776,21 +795,30 @@ export function CodeViewer({
     () => ({ files, previewRenderRetry, sandpackKey }),
     [files, previewRenderRetry, sandpackKey],
   );
+  const projectedConversationRef = useRef<string | null>(null);
+  const assetProjectionPendingRef = useRef(false);
   useEffect(() => {
     let cancelled = false;
-    setAssetPreviewFiles(previewFiles);
     setAssetProjectionError(null);
+    assetProjectionPendingRef.current = true;
     if (Object.keys(projectAssets).length === 0) {
+      setAssetPreviewFiles(previewFiles);
+      projectedConversationRef.current = conversationId;
+      assetProjectionPendingRef.current = false;
       setAssetProjectionStatus("ready");
       return () => {
         cancelled = true;
       };
     }
-    setAssetProjectionStatus("loading");
+    if (projectedConversationRef.current !== conversationId) {
+      setAssetProjectionStatus("loading");
+    }
     void projectFilesForSandpack(previewFiles, projectAssets).then(
       (derived) => {
         if (cancelled) return;
         setAssetPreviewFiles(derived);
+        projectedConversationRef.current = conversationId;
+        assetProjectionPendingRef.current = false;
         setAssetProjectionStatus("ready");
       },
       (error) => {
@@ -804,7 +832,7 @@ export function CodeViewer({
     return () => {
       cancelled = true;
     };
-  }, [assetProjectionRetry, previewFiles, projectAssets]);
+  }, [assetProjectionRetry, conversationId, previewFiles, projectAssets]);
   useEffect(() => {
     if (assetProjectionStatus === "error") setViewMode("code");
   }, [assetProjectionStatus]);
@@ -843,32 +871,43 @@ export function CodeViewer({
       cancelled = true;
     };
   }, [previewEnabled, workspaceMode]);
+  const runtimePreviewProjection = useMemo(
+    () => projectSandpackRuntime(assetPreviewFiles, previewEnabled, template),
+    [assetPreviewFiles, previewEnabled, template],
+  );
+  const staticPreviewProjection = useMemo(
+    () =>
+      projectStaticPreview(
+        runtimePreviewProjection.files,
+        desktopMode && previewEnabled && template === "static",
+      ),
+    [runtimePreviewProjection.files, desktopMode, previewEnabled, template],
+  );
   const bridgeInjection = useMemo(
     () =>
       workspaceMode === "design"
         ? injectDesignBridge(
-            assetPreviewFiles,
+            staticPreviewProjection.files,
             template,
             previewEnabled,
             captureRuntimeSource ?? undefined,
             previewGeneration ?? "pending",
           )
-        : { supported: false as const, files: assetPreviewFiles },
+        : { supported: false as const, files: staticPreviewProjection.files },
     [
       captureRuntimeSource,
       previewEnabled,
-      assetPreviewFiles,
+      staticPreviewProjection.files,
       previewGeneration,
       template,
       workspaceMode,
     ],
   );
   const sandpackSourceFiles =
-    workspaceMode === "design" &&
-    effectiveViewMode === "preview" &&
-    bridgeInjection.supported
+    workspaceMode === "design" && bridgeInjection.supported
       ? bridgeInjection.files
-      : assetPreviewFiles;
+      : staticPreviewProjection.files;
+  preparedProjectionRef.current = sandpackSourceFiles;
   const invalidateAutomaticReview = useCallback(() => {
     const review = useDesignReviewStore.getState();
     if (review.automatic) review.reset();
@@ -886,12 +925,22 @@ export function CodeViewer({
       ) {
         return;
       }
-      if (
-        bridgeInjection.supported &&
-        path === bridgeInjection.indexPath &&
-        content.includes(DESIGN_BRIDGE_MARKER)
-      ) {
-        return;
+      let editableContent = content;
+      if (bridgeInjection.supported && path === bridgeInjection.indexPath) {
+        if (content === bridgeInjection.files[path]) return;
+        const startMarker = `<!-- ${DESIGN_BRIDGE_MARKER}:start -->`;
+        const endMarker = `<!-- ${DESIGN_BRIDGE_MARKER}:end -->`;
+        const start = content.indexOf(startMarker);
+        const end = content.indexOf(endMarker);
+        if (start >= 0 || end >= 0) {
+          if (start < 0 || end < start) return;
+          const afterMarker = end + endMarker.length;
+          // Remove the injected block and its own trailing newline only.
+          // The canonical HTML's surrounding whitespace belongs to the editor.
+          const afterBlock =
+            afterMarker + (content[afterMarker] === "\n" ? 1 : 0);
+          editableContent = content.slice(0, start) + content.slice(afterBlock);
+        }
       }
       const canonical = files[path];
       if (
@@ -900,7 +949,20 @@ export function CodeViewer({
       ) {
         return;
       }
-      const nextContent = getSandpackFileContentToCommit(canonical, content);
+      const restoredContent = staticPreviewProjection.restore(
+        path,
+        editableContent,
+      );
+      if (restoredContent === undefined) return;
+      const runtimeContent = runtimePreviewProjection.restore(
+        path,
+        restoredContent,
+      );
+      if (runtimeContent === undefined) return;
+      const nextContent = getSandpackFileContentToCommit(
+        canonical,
+        runtimeContent,
+      );
       if (nextContent === undefined) return;
       invalidateAutomaticReview();
       onFileChange(targetConversationId, path, nextContent, {
@@ -913,6 +975,8 @@ export function CodeViewer({
       invalidateAutomaticReview,
       onFileChange,
       projectAssets,
+      runtimePreviewProjection,
+      staticPreviewProjection,
     ],
   );
   const sandpackFiles = useMemo(
@@ -966,21 +1030,6 @@ export function CodeViewer({
         signal,
         timeoutMs: 5_000,
         errorMessage: "The preview bridge is not ready for navigation.",
-      }),
-    [],
-  );
-
-  const waitForDesignCaptureRuntime = useCallback(
-    (generation: string, signal: AbortSignal) =>
-      waitForPreviewReadiness({
-        isReady: () =>
-          designBridgeReadyRef.current &&
-          captureRuntimeReadyRef.current &&
-          bridgeGenerationRef.current === generation,
-        isCurrent: () => previewGenerationRef.current === generation,
-        signal,
-        timeoutMs: DESIGN_BRIDGE_CAPTURE_TIMEOUT_MS,
-        errorMessage: "The preview capture runtime is not ready.",
       }),
     [],
   );
@@ -1166,9 +1215,22 @@ export function CodeViewer({
         ...(target ? { target } : {}),
       };
       return new Promise<DesignBridgeCaptureResult>((resolve, reject) => {
+        const cancelRemoteCapture = () => {
+          iframe.contentWindow?.postMessage(
+            {
+              type: "open-builder:design-bridge-cancel-capture",
+              version: DESIGN_BRIDGE_PROTOCOL_VERSION,
+              generation,
+              nonce: expectation.nonce,
+              requestId: expectation.requestId,
+            },
+            targetOrigin,
+          );
+        };
         const abort = () => {
           const pending = pendingCaptureRef.current;
           if (!pending || pending.expectation !== expectation) return;
+          cancelRemoteCapture();
           clearPendingCapture(pending);
           reject(
             new DOMException("Preview capture was cancelled.", "AbortError"),
@@ -1177,6 +1239,7 @@ export function CodeViewer({
         const timeout = window.setTimeout(() => {
           const pending = pendingCaptureRef.current;
           if (!pending || pending.expectation !== expectation) return;
+          cancelRemoteCapture();
           clearPendingCapture(pending);
           reject(new Error("Preview capture timed out."));
         }, DESIGN_BRIDGE_CAPTURE_TIMEOUT_MS * DESIGN_BRIDGE_TIMEOUT_ATTEMPTS);
@@ -1325,12 +1388,22 @@ export function CodeViewer({
         return;
       }
       if (message.type === "open-builder:design-bridge-ready") {
+        if (readinessRequestRef.current)
+          lastReadinessMessageRef.current = message;
         bridgeGenerationRef.current = message.generation;
         designBridgeReadyRef.current =
           message.generation === previewGenerationRef.current;
         captureRuntimeReadyRef.current =
           designBridgeReadyRef.current &&
+          message.runtimeRevision ===
+            designBridgeRuntimeRevision(message.generation, true) &&
           message.captureRuntimeAvailable === true;
+        if (
+          captureRuntimeReadyRef.current &&
+          message.nonce === readinessRequestRef.current
+        ) {
+          readinessReplyRef.current = message.nonce ?? null;
+        }
         setDesignBridgeReady(designBridgeReadyRef.current);
         if (
           designBridgeReadyRef.current &&
@@ -1544,7 +1617,15 @@ export function CodeViewer({
         signal,
         timeoutMs: 5_000,
         pollIntervalMs: 50,
-        errorMessage: `Preview did not become ready at ${viewport.width}px width.`,
+        errorMessage: () => {
+          const iframe = getPreviewIframe();
+          const size = `${iframe?.clientWidth ?? 0}x${iframe?.clientHeight ?? 0}`;
+          if (!designBridgeReadyRef.current)
+            return `Preview bridge is not ready (actual viewport ${size}).`;
+          if (!captureRuntimeReadyRef.current)
+            return `Screenshot runtime is not ready (actual viewport ${size}).`;
+          return `Preview viewport ${size} does not represent ${viewport.name}.`;
+        },
       });
       await afterPreviewPaint();
       signal.throwIfAborted();
@@ -1554,22 +1635,110 @@ export function CodeViewer({
 
   const preparePreviewRuntime = useCallback(
     async (generation: string, signal: AbortSignal) => {
-      await waitForPreviewReadiness({
-        isReady: () => previewGenerationRef.current === generation,
-        signal,
-        timeoutMs: 5_000,
-        errorMessage:
-          "The mounted preview did not reach the current project generation.",
-      });
-      designBridgeReadyRef.current = false;
-      captureRuntimeReadyRef.current = false;
-      bridgeGenerationRef.current = undefined;
-      setDesignBridgeReady(false);
-      flushPendingSandpackFileChanges(conversationId);
-      softRefreshRef.current?.();
-      await afterPreviewPaint();
+      const runtimeSource = await loadDesignCaptureRuntimeSource();
+      signal.throwIfAborted();
+      const previousMode = captureContextRef.current.viewMode;
+      setCaptureRuntimeSource(runtimeSource);
+      setViewMode("preview");
+      try {
+        flushPendingSandpackFileChanges(conversationId);
+        await waitForPreviewReadiness({
+          isReady: () => previewGenerationRef.current === generation,
+          signal,
+          timeoutMs: 5_000,
+          errorMessage:
+            "The mounted preview did not reach the current project generation.",
+        });
+        await waitForPreviewReadiness({
+          isReady: () => {
+            const projection = preparedProjectionRef.current;
+            return (
+              !assetProjectionPendingRef.current &&
+              projection[DESIGN_CAPTURE_RUNTIME_VIRTUAL_PATH] ===
+                runtimeSource &&
+              projection[DESIGN_BRIDGE_VIRTUAL_PATH]?.includes(
+                designBridgeRuntimeRevision(generation, true),
+              ) === true &&
+              runtimeSyncRef.current?.isSynchronized(projection) === true
+            );
+          },
+          isCurrent: () => previewGenerationRef.current === generation,
+          signal,
+          timeoutMs: 5_000,
+          errorMessage:
+            "Screenshot runtime has not reached the current preview client.",
+        });
+        designBridgeReadyRef.current = false;
+        captureRuntimeReadyRef.current = false;
+        bridgeGenerationRef.current = undefined;
+        readinessReplyRef.current = null;
+        lastReadinessMessageRef.current = null;
+        const requestNonce = createDesignBridgeNonce();
+        readinessRequestRef.current = requestNonce;
+        setDesignBridgeReady(false);
+        await afterPreviewPaint();
+        try {
+          await waitForPreviewReadiness({
+            isReady: () => {
+              if (
+                readinessReplyRef.current === requestNonce &&
+                captureRuntimeReadyRef.current
+              )
+                return true;
+              const iframe = getPreviewIframe();
+              const origin =
+                iframe &&
+                getDesignBridgeTargetOrigin(iframe.src, window.location.href);
+              if (iframe?.contentWindow && origin)
+                iframe.contentWindow.postMessage(
+                  {
+                    type: "open-builder:design-bridge-readiness",
+                    version: DESIGN_BRIDGE_PROTOCOL_VERSION,
+                    generation,
+                    runtimeRevision: designBridgeRuntimeRevision(
+                      generation,
+                      true,
+                    ),
+                    nonce: requestNonce,
+                  },
+                  origin,
+                );
+              return false;
+            },
+            isCurrent: () => previewGenerationRef.current === generation,
+            signal,
+            timeoutMs: 5_000,
+            pollIntervalMs: 100,
+            errorMessage: () => {
+              const iframe = getPreviewIframe();
+              const size = `${iframe?.clientWidth ?? 0}x${iframe?.clientHeight ?? 0}`;
+              const reply = lastReadinessMessageRef.current;
+              if (
+                reply &&
+                (reply.generation !== generation ||
+                  reply.runtimeRevision !==
+                    designBridgeRuntimeRevision(generation, true))
+              ) {
+                return `Preview bridge is still running an older project or runtime revision (actual viewport ${size}).`;
+              }
+              if (reply?.captureRuntimeAvailable === false) {
+                return `Preview bridge reported the screenshot runtime unavailable (actual viewport ${size}).`;
+              }
+              return `Preview bridge did not acknowledge the current capture request (actual viewport ${size}).`;
+            },
+          });
+        } finally {
+          if (readinessRequestRef.current === requestNonce)
+            readinessRequestRef.current = null;
+        }
+      } finally {
+        if (captureContextRef.current.conversationId === conversationId) {
+          setViewMode(previousMode);
+          await afterPreviewPaint();
+        }
+      }
     },
-    [conversationId],
+    [conversationId, getPreviewIframe],
   );
 
   const capturePreviewCollection = useCallback(
@@ -1612,12 +1781,13 @@ export function CodeViewer({
       };
 
       try {
-        const runtimeSource = await loadDesignCaptureRuntimeSource();
-        signal.throwIfAborted();
-        if (captureRuntimeSource !== runtimeSource) {
-          captureRuntimeReadyRef.current = false;
-          setCaptureRuntimeSource(runtimeSource);
+        if (
+          !captureRuntimeReadyRef.current ||
+          bridgeGenerationRef.current !== generation
+        ) {
+          await preparePreviewRuntime(generation, signal);
         }
+        signal.throwIfAborted();
         setViewMode("preview");
         setShowConsole(false);
         if (previousSelection) deactivateDesignSelection();
@@ -1642,7 +1812,7 @@ export function CodeViewer({
       activateDesignSelection,
       bridgeInjection.supported,
       bridgeUnavailableReason,
-      captureRuntimeSource,
+      preparePreviewRuntime,
       deactivateDesignSelection,
       designSelectionActive,
       requestPreviewCapture,
@@ -1775,7 +1945,7 @@ export function CodeViewer({
             signal: controller.signal,
             run: async (adapter, signal) => {
               if (prototypePlan) {
-                await waitForDesignCaptureRuntime(generation, signal);
+                await adapter.prepare(generation, signal);
                 const sourceFrame = getPreviewIframe();
                 if (!sourceFrame) {
                   throw new Error("Preview iframe is not available.");
@@ -1864,8 +2034,8 @@ export function CodeViewer({
               dataUrl: capture.dataUrl,
               mimeType: capture.mimeType,
               name: capture.semanticSnapshot.prototypeIdentity
-                ? `preview-${capture.semanticSnapshot.prototypeIdentity.pageId}-${capture.semanticSnapshot.prototypeIdentity.scenarioId}-${capture.viewport.name}.webp`
-                : `preview-${capture.viewport.name}-${capture.viewport.width}x${capture.viewport.height}.webp`,
+                ? `preview-${capture.semanticSnapshot.prototypeIdentity.pageId}-${capture.semanticSnapshot.prototypeIdentity.scenarioId}-${capture.viewport.name}.${capture.mimeType.slice(6)}`
+                : `preview-${capture.viewport.name}-${capture.viewport.width}x${capture.viewport.height}.${capture.mimeType.slice(6)}`,
               source: "automatic",
               viewport: capture.viewport,
               semanticSnapshot: capture.semanticSnapshot,
@@ -1981,7 +2151,6 @@ export function CodeViewer({
       onAutomaticDesignReviewUnavailable,
       projectDesign,
       submitManualDesignReview,
-      waitForDesignCaptureRuntime,
     ],
   );
 
@@ -2077,10 +2246,6 @@ export function CodeViewer({
 
   const handleReloadPreview = useCallback(() => {
     flushPendingSandpackFileChanges(conversationId);
-    if (softRefreshRef.current) {
-      softRefreshRef.current();
-      return;
-    }
     retryPreviewRender();
   }, [conversationId, retryPreviewRender]);
 
@@ -2158,6 +2323,13 @@ export function CodeViewer({
       setPrototypeResetPending(false);
     }
   }, [conversationId, postPrototypeDataReset]);
+
+  const registerRuntimeSync = useCallback(
+    (handle: SandpackRuntimeSyncHandle | null) => {
+      runtimeSyncRef.current = handle;
+    },
+    [],
+  );
 
   const registerSoftRefresh = useCallback((refresh: (() => void) | null) => {
     softRefreshRef.current = refresh;
@@ -2455,7 +2627,7 @@ export function CodeViewer({
               )}
             >
               <SandpackProvider
-                key={sandpackKey}
+                key={`${sandpackKey}:${previewRenderRetry}`}
                 template={
                   (previewEnabled
                     ? template
@@ -2472,6 +2644,9 @@ export function CodeViewer({
                 style={{ height: "100%" }}
               >
                 <SandpackRefreshRegistration onChange={registerSoftRefresh} />
+                {previewEnabled && (
+                  <SandpackRuntimeSync onChange={registerRuntimeSync} />
+                )}
                 <SandpackListener
                   conversationId={conversationId}
                   requestedActiveFile={sandpackCurrentFile}
@@ -2496,9 +2671,9 @@ export function CodeViewer({
                           className={cn(
                             "grid grid-rows-3 h-full",
                             fixedPreview &&
-                              "overflow-hidden rounded-lg border bg-background shadow-lg",
+                              "overflow-hidden rounded-lg bg-background shadow-lg",
                             captureViewport &&
-                              "absolute left-0 top-0 rounded-none border-0 shadow-none transition-none",
+                              "absolute left-0 top-0 rounded-none shadow-none transition-none",
                           )}
                           style={previewSurfaceStyle}
                         >
@@ -2533,11 +2708,7 @@ export function CodeViewer({
                               </SandpackActionButton>
                               <SandpackRefreshAction
                                 label={t.toolbar.reloadPreview}
-                                onBeforeRefresh={() =>
-                                  flushPendingSandpackFileChanges(
-                                    conversationId,
-                                  )
-                                }
+                                onReload={handleReloadPreview}
                               />
                             </div>
                           </div>

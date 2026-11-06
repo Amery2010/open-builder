@@ -9,15 +9,22 @@ import {
   rebuildSnapshotChainWithoutSnapshot,
   replaySnapshotAssets,
   replaySnapshots,
+  snapshotLineage,
 } from "./snapshot-replay";
-import {
-  isSnapshotWithinStorageBudget,
-  pruneSnapshotRecord,
-} from "../lib/utils/storage-governance";
+import { isSnapshotWithinStorageBudget } from "../lib/utils/storage-governance";
 
 export { replaySnapshots } from "./snapshot-replay";
 
-const SNAPSHOT_STORE_VERSION = 3;
+import { useConversationStore } from "./conversation";
+import {
+  canonicalSnapshotMessageId,
+  conversationBranchStates,
+  defaultBranchId,
+} from "../lib/conversation/branches";
+import { filterMemoryMessages } from "../lib/utils/memory-filter";
+import { mergeMessages } from "../lib/utils/merge-messages";
+
+const SNAPSHOT_STORE_VERSION = 4;
 /** How many patch snapshots to write between checkpoints. The first snapshot
  *  in a chain is always a checkpoint so reconstruction is anchored even for
  *  short chains. */
@@ -40,6 +47,7 @@ const snapshotMigrations: MigrationStep[] = [
     return state;
   },
   (state) => state,
+  (state) => state,
 ];
 
 const snapshotStorage = createLocalforageStorage(
@@ -55,9 +63,11 @@ interface SnapshotState {
     messageId: string,
     currentFiles: ProjectFiles,
     currentAssets?: ProjectAssets,
-  ) => void;
+  ) => ProjectSnapshot | undefined;
 
   getSnapshots: (conversationId: string) => ProjectSnapshot[];
+  migrateLegacyMessageLinks: () => void;
+  getRetainedSnapshotIds: (conversationId: string) => Set<string>;
 
   getSnapshotByMessageId: (
     conversationId: string,
@@ -143,8 +153,11 @@ function releaseSnapshotAssetCandidates(
             return null;
           }
           return [
-            ...Object.values(conversations.conversations).map(
-              (conversation) => conversation.assets,
+            ...Object.values(conversations.conversations).flatMap(
+              (conversation) =>
+                conversationBranchStates(conversation).map(
+                  (branch) => branch.assets,
+                ),
             ),
             ...Object.values(snapshots.snapshots)
               .flat()
@@ -170,6 +183,68 @@ function patchesSinceCheckpoint(chain: ProjectSnapshot[]): number {
   return chain.length;
 }
 
+function branchSnapshots(
+  conversationId: string,
+  chain: ProjectSnapshot[],
+): ProjectSnapshot[] {
+  const conversation =
+    useConversationStore.getState().conversations[conversationId];
+  if (!conversation) return chain;
+  const branchId =
+    conversation.activeBranchId ?? defaultBranchId(conversationId);
+  const head =
+    conversation.checkout?.snapshotId ??
+    conversation.branches?.[branchId]?.headSnapshotId;
+  if (head && chain.some((snapshot) => snapshot.id === head))
+    return snapshotLineage(chain, head);
+  return chain.filter(
+    (snapshot) => snapshot.branchId === branchId || !snapshot.branchId,
+  );
+}
+
+export function selectVisibleSnapshots(
+  conversation: import("../types").Conversation | undefined,
+  chain: ProjectSnapshot[],
+): ProjectSnapshot[] {
+  if (!conversation) return chain.filter((snapshot) => !snapshot.hidden);
+  const branchId =
+    conversation.activeBranchId ?? defaultBranchId(conversation.id);
+  const head =
+    conversation.checkout?.snapshotId ??
+    conversation.branches?.[branchId]?.headSnapshotId;
+  let lineage = chain.filter(
+    (snapshot) => snapshot.branchId === branchId || !snapshot.branchId,
+  );
+  if (head && chain.some((snapshot) => snapshot.id === head)) {
+    try {
+      lineage = snapshotLineage(chain, head);
+    } catch {
+      /* Keep corrupt history inspectable; checkout/export still fail closed. */
+    }
+  }
+  return lineage
+    .filter((snapshot) => !snapshot.hidden)
+    .map((snapshot) => {
+      const messageId = canonicalSnapshotMessageId(snapshot, conversation);
+      return messageId === snapshot.messageId
+        ? snapshot
+        : { ...snapshot, messageId };
+    });
+}
+
+function retainedSnapshotIds(conversationId: string): Set<string> {
+  const conversation =
+    useConversationStore.getState().conversations[conversationId];
+  return new Set([
+    ...(conversation?.checkout ? [conversation.checkout.snapshotId] : []),
+    ...Object.values(conversation?.branches ?? {}).flatMap((branch) =>
+      [branch.headSnapshotId, branch.forkSnapshotId].filter(
+        (id): id is string => !!id,
+      ),
+    ),
+  ]);
+}
+
 export const useSnapshotStore = create<SnapshotState>()(
   persist(
     (set, get) => ({
@@ -183,10 +258,13 @@ export const useSnapshotStore = create<SnapshotState>()(
         currentAssets = {},
       ) => {
         const state = get();
-        const chain = state.snapshots[conversationId] ?? [];
-
-        // Deduplicate: if a snapshot for this messageId already exists, skip
-        if (chain.some((s) => s.messageId === messageId)) return;
+        const all = state.snapshots[conversationId] ?? [];
+        const conversation =
+          useConversationStore.getState().conversations[conversationId];
+        if (conversation?.checkout) return;
+        const chain = branchSnapshots(conversationId, all);
+        const branchId =
+          conversation?.activeBranchId ?? defaultBranchId(conversationId);
 
         // Reconstruct previous file state
         const prevFiles: ProjectFiles =
@@ -220,7 +298,14 @@ export const useSnapshotStore = create<SnapshotState>()(
           Object.keys(patches).length === 0 &&
           Object.keys(addedFiles).length === 0 &&
           deletedFiles.length === 0 &&
-          sameProjectAssets(prevAssets, currentAssets)
+          sameProjectAssets(prevAssets, currentAssets) &&
+          (!conversation ||
+            !chain.at(-1)?.projectState ||
+            (chain.at(-1)!.projectState!.template === conversation.template &&
+              chain.at(-1)!.projectState!.previewMode ===
+                conversation.previewMode &&
+              JSON.stringify(chain.at(-1)!.projectState!.designState) ===
+                JSON.stringify(conversation.designState)))
         ) {
           return;
         }
@@ -229,7 +314,8 @@ export const useSnapshotStore = create<SnapshotState>()(
         // snapshot in a chain is always a checkpoint; otherwise we emit one
         // every CHECKPOINT_INTERVAL patches so future reconstructions don't
         // walk the entire history.
-        const isFirst = chain.length === 0;
+        const isFirst =
+          chain.length === 0 || chain.at(-1)?.branchId !== branchId;
         const dueForCheckpoint =
           patchesSinceCheckpoint(chain) >= CHECKPOINT_INTERVAL;
         const asCheckpoint = isFirst || dueForCheckpoint;
@@ -238,6 +324,22 @@ export const useSnapshotStore = create<SnapshotState>()(
           id: crypto.randomUUID(),
           conversationId,
           messageId,
+          branchId,
+          parentSnapshotId: chain.at(-1)?.id ?? null,
+          messageCount: conversation?.messages.length,
+          endMessageId: conversation
+            ? filterMemoryMessages(conversation.messages).at(-1)?.id
+            : undefined,
+          messageLinkVersion: 1,
+          projectState: conversation
+            ? {
+                template: conversation.template,
+                previewMode: conversation.previewMode,
+                designState: conversation.designState,
+                activeFile: conversation.activeFile,
+                isProjectInitialized: conversation.isProjectInitialized,
+              }
+            : undefined,
           patches,
           addedFiles,
           deletedFiles,
@@ -245,6 +347,10 @@ export const useSnapshotStore = create<SnapshotState>()(
           kind: asCheckpoint ? "checkpoint" : "patch",
           assets: { ...currentAssets },
         };
+        base.messageId = canonicalSnapshotMessageId(
+          { ...base, messageLinkVersion: undefined },
+          conversation,
+        );
         const snapshot: ProjectSnapshot = asCheckpoint
           ? { ...base, fullFiles: { ...currentFiles } }
           : base;
@@ -262,16 +368,61 @@ export const useSnapshotStore = create<SnapshotState>()(
             ],
           },
         }));
+        useConversationStore
+          .getState()
+          .setBranchHeadSnapshot(conversationId, snapshot.id);
+        return snapshot;
       },
 
+      migrateLegacyMessageLinks: () => {
+        const conversations = useConversationStore.getState().conversations;
+        const old = get().snapshots;
+        let changed = false;
+        const snapshots = Object.fromEntries(
+          Object.entries(old).map(([id, chain]) => {
+            const conversation = conversations[id];
+            if (!conversation) return [id, chain];
+            const next = chain.map((snapshot) => {
+              if (snapshot.messageLinkVersion === 1) return snapshot;
+              changed = true;
+              return {
+                ...snapshot,
+                messageId: canonicalSnapshotMessageId(snapshot, conversation),
+                messageLinkVersion: 1 as const,
+              };
+            });
+            return [id, next];
+          }),
+        );
+        if (changed) set({ snapshots });
+      },
+
+      getRetainedSnapshotIds: retainedSnapshotIds,
+
       getSnapshots: (conversationId) => {
-        return get().snapshots[conversationId] ?? [];
+        const conversation =
+          useConversationStore.getState().conversations[conversationId];
+        return selectVisibleSnapshots(
+          conversation,
+          get().snapshots[conversationId] ?? [],
+        );
       },
 
       getSnapshotByMessageId: (conversationId, messageId) => {
-        return (get().snapshots[conversationId] ?? []).find(
-          (s) => s.messageId === messageId,
-        );
+        const conversation =
+          useConversationStore.getState().conversations[conversationId];
+        return [
+          ...selectVisibleSnapshots(
+            conversation,
+            get().snapshots[conversationId] ?? [],
+          ),
+        ]
+          .reverse()
+          .find(
+            (snapshot) =>
+              snapshot.messageId === messageId ||
+              canonicalSnapshotMessageId(snapshot, conversation) === messageId,
+          );
       },
 
       reconstructFiles: (conversationId, snapshotId) => {
@@ -285,59 +436,25 @@ export const useSnapshotStore = create<SnapshotState>()(
       },
 
       updateLatestSnapshot: (conversationId, currentFiles, currentAssets) => {
-        const state = get();
-        const chain = state.snapshots[conversationId] ?? [];
-        if (chain.length === 0) return;
-
-        const latest = chain[chain.length - 1];
-        const nextAssets = currentAssets ?? latest.assets ?? {};
-
-        // Reconstruct file state before the latest snapshot
-        const prevFiles: ProjectFiles =
-          chain.length > 1
-            ? replaySnapshots(chain, chain[chain.length - 2].id)
-            : {};
-
-        const patches: Record<string, string> = {};
-        const addedFiles: Record<string, string> = {};
-        const deletedFiles: string[] = [];
-
-        for (const [path, content] of Object.entries(currentFiles)) {
-          if (!(path in prevFiles)) {
-            addedFiles[path] = content;
-          } else if (prevFiles[path] !== content) {
-            patches[path] = createPatch(path, prevFiles[path], content);
-          }
-        }
-        for (const path of Object.keys(prevFiles)) {
-          if (!(path in currentFiles)) {
-            deletedFiles.push(path);
-          }
-        }
-
-        const updatedSnapshot: ProjectSnapshot = {
-          ...latest,
-          patches,
-          addedFiles,
-          deletedFiles,
-          assets: { ...nextAssets },
-          // Keep checkpoint metadata in sync with the new file state so a
-          // future replay anchored at this snapshot stays correct.
-          ...(latest.kind === "checkpoint"
-            ? { fullFiles: { ...currentFiles } }
-            : {}),
-        };
-
-        if (!isSnapshotWithinStorageBudget(updatedSnapshot)) {
-          return;
-        }
-
-        set((s) => ({
-          snapshots: {
-            ...s.snapshots,
-            [conversationId]: [...chain.slice(0, -1), updatedSnapshot],
-          },
-        }));
+        const conversation =
+          useConversationStore.getState().conversations[conversationId];
+        if (conversation?.checkout) return;
+        const chain = branchSnapshots(
+          conversationId,
+          get().snapshots[conversationId] ?? [],
+        );
+        const messageId = conversation
+          ? mergeMessages(conversation.messages)
+              .filter((message) => message.role === "assistant")
+              .at(-1)?.id
+          : chain.at(-1)?.messageId;
+        if (!messageId && Object.keys(currentFiles).length === 0) return;
+        get().createSnapshot(
+          conversationId,
+          messageId ?? `manual-${crypto.randomUUID()}`,
+          currentFiles,
+          currentAssets ?? conversation?.assets ?? chain.at(-1)?.assets ?? {},
+        );
       },
 
       deleteSnapshotsForConversation: (conversationId) => {
@@ -366,6 +483,20 @@ export const useSnapshotStore = create<SnapshotState>()(
       },
 
       deleteSnapshot: (conversationId, snapshotId) => {
+        if (retainedSnapshotIds(conversationId).has(snapshotId)) {
+          set((state) => ({
+            snapshots: {
+              ...state.snapshots,
+              [conversationId]: (state.snapshots[conversationId] ?? []).map(
+                (snapshot) =>
+                  snapshot.id === snapshotId
+                    ? { ...snapshot, hidden: true }
+                    : snapshot,
+              ),
+            },
+          }));
+          return;
+        }
         const removed = (get().snapshots[conversationId] ?? []).filter(
           (snapshot) => snapshot.id === snapshotId,
         );
@@ -387,18 +518,24 @@ export const useSnapshotStore = create<SnapshotState>()(
 
       pruneSnapshots: (maxPerConversation) => {
         const before = Object.values(get().snapshots).flat();
+        const next = { ...get().snapshots };
         let removedCount = 0;
-        set((s) => {
-          const result = pruneSnapshotRecord(
-            s.snapshots,
-            maxPerConversation,
-            CHECKPOINT_INTERVAL,
-          );
-          removedCount = result.removedCount;
-          return { snapshots: result.snapshots };
-        });
+        for (const [id, source] of Object.entries(next)) {
+          const protectedIds = retainedSnapshotIds(id);
+          let chain = source;
+          for (const snapshot of source.slice(
+            0,
+            Math.max(0, source.length - Math.max(0, maxPerConversation)),
+          )) {
+            if (protectedIds.has(snapshot.id)) continue;
+            chain = rebuildSnapshotChainWithoutSnapshot(chain, snapshot.id);
+            removedCount++;
+          }
+          next[id] = chain;
+        }
+        set({ snapshots: next });
         const retainedIds = new Set(
-          Object.values(get().snapshots)
+          Object.values(next)
             .flat()
             .map((snapshot) => snapshot.id),
         );
@@ -424,6 +561,14 @@ export const useSnapshotStore = create<SnapshotState>()(
         ),
       onRehydrateStorage: () => () => {
         useSnapshotStore.setState({ _hasHydrated: true });
+        void import("./conversation").then(({ useConversationStore }) => {
+          if (
+            useConversationStore?.persist?.hasHydrated() &&
+            useConversationStore.getState()._hasHydrated &&
+            useSnapshotStore
+          )
+            useSnapshotStore.getState().migrateLegacyMessageLinks();
+        });
       },
     },
   ),

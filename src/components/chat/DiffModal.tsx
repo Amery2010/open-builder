@@ -8,7 +8,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { TooltipIconButton } from "@/components/ui/tooltip-icon-button";
-import { useSnapshotStore } from "../../store/snapshot";
+import { useConversationStore } from "../../store/conversation";
+import { useSnapshotStore, selectVisibleSnapshots } from "../../store/snapshot";
 import { cn } from "@/lib/utils";
 import { useT } from "../../i18n";
 import { DiffViewer, type DiffMode } from "./diff/DiffViewer";
@@ -30,9 +31,18 @@ export function DiffModal({
   onClose,
 }: DiffModalProps) {
   const t = useT();
-  const snapshots = useSnapshotStore((s) => s.snapshots[conversationId] ?? []);
-  const snapshot = snapshots.find((s) => s.messageId === messageId);
-  const snapshotIndex = snapshots.findIndex((s) => s.messageId === messageId);
+  const chain = useSnapshotStore((s) => s.snapshots[conversationId]);
+  const conversation = useConversationStore(
+    (state) => state.conversations[conversationId],
+  );
+  const snapshots = useMemo(
+    () => selectVisibleSnapshots(conversation, chain ?? []),
+    [conversation, chain],
+  );
+  const snapshot =
+    snapshots.find((item) => item.id === messageId) ??
+    [...snapshots].reverse().find((item) => item.messageId === messageId);
+  const snapshotIndex = snapshots.findIndex((item) => item.id === snapshot?.id);
 
   const changedFiles = useMemo<ChangedFile[]>(() => {
     if (!snapshot) return [];
@@ -55,18 +65,29 @@ export function DiffModal({
   const [changeCount, setChangeCount] = useState(0);
   const [jumpTo, setJumpTo] = useState<number | null>(null);
 
-  const diffChanges = useMemo<Change[]>(() => {
-    if (!snapshot || !selectedFile) return [];
-    const reconstructFiles = useSnapshotStore.getState().reconstructFiles;
-    const prevFiles =
-      snapshotIndex > 0
-        ? reconstructFiles(conversationId, snapshots[snapshotIndex - 1].id)
+  const diffResult = useMemo<{ changes: Change[]; error?: string }>(() => {
+    if (!snapshot || !selectedFile) return { changes: [] };
+    try {
+      const reconstructFiles = useSnapshotStore.getState().reconstructFiles;
+      const parentId =
+        snapshot.parentSnapshotId === undefined
+          ? snapshots[snapshotIndex - 1]?.id
+          : snapshot.parentSnapshotId;
+      const prevFiles = parentId
+        ? reconstructFiles(conversationId, parentId)
         : {};
-    const currFiles = reconstructFiles(conversationId, snapshot.id);
-    const oldContent = prevFiles[selectedFile] ?? "";
-    const newContent = currFiles[selectedFile] ?? "";
-    return diffLines(oldContent, newContent);
+      const currFiles = reconstructFiles(conversationId, snapshot.id);
+      const oldContent = prevFiles[selectedFile] ?? "";
+      const newContent = currFiles[selectedFile] ?? "";
+      return { changes: diffLines(oldContent, newContent) };
+    } catch (error) {
+      return {
+        changes: [],
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
   }, [snapshot, selectedFile, snapshotIndex, conversationId, snapshots]);
+  const diffChanges = diffResult.changes;
 
   const handleChangeCount = useCallback((count: number) => {
     setChangeCount(count);
@@ -162,6 +183,11 @@ export function DiffModal({
           </TooltipIconButton>
         </DialogHeader>
 
+        {diffResult.error && (
+          <p role="alert" className="px-5 pb-3 text-sm text-destructive">
+            {diffResult.error}
+          </p>
+        )}
         <div className="flex flex-col sm:flex-row flex-1 min-h-0 overflow-hidden">
           <div
             className={cn(

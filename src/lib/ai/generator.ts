@@ -1117,6 +1117,9 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
       instructions,
       messages: coreMessages,
       tools: this.toolRun.modelTools,
+      // ai@7's browser tracing creates an unobserved completion promise on
+      // cancellation. This renderer does not publish SDK telemetry.
+      telemetry: { isEnabled: false },
       maxRetries: 0,
       abortSignal: this.ctrl!.signal,
       providerOptions: providerOptions as any,

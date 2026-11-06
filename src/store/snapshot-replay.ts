@@ -1,6 +1,33 @@
 import { applyPatch, createPatch } from "diff";
 import type { ProjectAssets, ProjectFiles, ProjectSnapshot } from "../types";
 
+/** Follow explicit branch ancestry, retaining the linear interpretation for legacy records. */
+export function snapshotLineage(
+  chain: ProjectSnapshot[],
+  targetId: string,
+): ProjectSnapshot[] {
+  const byId = new Map(chain.map((snapshot) => [snapshot.id, snapshot]));
+  const reversed: ProjectSnapshot[] = [];
+  const seen = new Set<string>();
+  let id: string | null = targetId;
+  while (id !== null) {
+    if (seen.has(id))
+      throw new Error("Project snapshot ancestry contains a cycle.");
+    seen.add(id);
+    const snapshot = byId.get(id);
+    if (!snapshot) throw new Error(`Project snapshot "${id}" does not exist.`);
+    if (snapshot.parentSnapshotId === undefined) {
+      return [
+        ...chain.slice(0, chain.indexOf(snapshot) + 1),
+        ...reversed.reverse(),
+      ];
+    }
+    reversed.push(snapshot);
+    id = snapshot.parentSnapshotId;
+  }
+  return reversed.reverse();
+}
+
 /** Reconstruct full file state by replaying snapshots up to (and including)
  *  `targetId`. Starts from the nearest preceding checkpoint when available;
  *  otherwise replays from the head of the chain. */
@@ -8,9 +35,8 @@ export function replaySnapshots(
   chain: ProjectSnapshot[],
   targetId: string,
 ): ProjectFiles {
-  // Locate target index. If not found, replay everything (best-effort).
-  let targetIdx = chain.findIndex((s) => s.id === targetId);
-  if (targetIdx < 0) targetIdx = chain.length - 1;
+  chain = snapshotLineage(chain, targetId);
+  const targetIdx = chain.length - 1;
 
   // Walk backwards to find the nearest checkpoint at or before targetIdx.
   let startIdx = 0;
@@ -31,9 +57,11 @@ export function replaySnapshots(
     for (const [path, patch] of Object.entries(snap.patches)) {
       const old = files[path] ?? "";
       const result = applyPatch(old, patch);
-      if (typeof result === "string") {
-        files[path] = result;
-      }
+      if (typeof result !== "string")
+        throw new Error(
+          `Cannot reconstruct snapshot "${snap.id}": invalid patch for "${path}".`,
+        );
+      files[path] = result;
     }
     for (const path of snap.deletedFiles) {
       delete files[path];
@@ -49,7 +77,9 @@ export function replaySnapshotAssets(
   targetSnapshotId: string,
 ): ProjectAssets {
   const target = snapshots.find((snapshot) => snapshot.id === targetSnapshotId);
-  return { ...(target?.assets ?? {}) };
+  if (!target)
+    throw new Error(`Project snapshot "${targetSnapshotId}" does not exist.`);
+  return { ...(target.assets ?? {}) };
 }
 
 function diffFiles(
@@ -84,7 +114,7 @@ function diffFiles(
 export function rebuildSnapshotChainWithoutSnapshot(
   chain: ProjectSnapshot[],
   snapshotId: string,
-  checkpointInterval = 10,
+  _checkpointInterval = 10,
 ): ProjectSnapshot[] {
   const targetIndex = chain.findIndex((snapshot) => snapshot.id === snapshotId);
   if (targetIndex < 0) return chain;
@@ -94,26 +124,18 @@ export function rebuildSnapshotChainWithoutSnapshot(
   );
   const kept = chain.filter((snapshot) => snapshot.id !== snapshotId);
 
-  let prevFiles: ProjectFiles = {};
-  let patchesSinceCheckpoint = 0;
-  return kept.map((snapshot, index) => {
-    const currentFiles = filesBySnapshot.get(snapshot.id) ?? {};
-    const delta = diffFiles(prevFiles, currentFiles);
-    const asCheckpoint =
-      index === 0 || patchesSinceCheckpoint >= checkpointInterval;
-    const rebuilt: ProjectSnapshot = {
-      ...snapshot,
-      ...delta,
-      kind: asCheckpoint ? "checkpoint" : "patch",
-    };
-    if (asCheckpoint) {
-      rebuilt.fullFiles = { ...currentFiles };
-      patchesSinceCheckpoint = 0;
-    } else {
-      delete rebuilt.fullFiles;
-      patchesSinceCheckpoint++;
-    }
-    prevFiles = currentFiles;
-    return rebuilt;
-  });
+  // Re-anchor each surviving version independently. Content and IDs stay immutable,
+  // and deleting an ancestor cannot make another branch depend on a missing patch.
+  return kept.map((snapshot) => ({
+    ...snapshot,
+    ...diffFiles({}, filesBySnapshot.get(snapshot.id)!),
+    kind: "checkpoint" as const,
+    fullFiles: filesBySnapshot.get(snapshot.id),
+    parentSnapshotId:
+      snapshot.parentSnapshotId === snapshotId
+        ? chain[targetIndex].parentSnapshotId !== undefined
+          ? chain[targetIndex].parentSnapshotId
+          : (chain[targetIndex - 1]?.id ?? null)
+        : snapshot.parentSnapshotId,
+  }));
 }

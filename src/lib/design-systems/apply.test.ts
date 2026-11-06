@@ -33,7 +33,7 @@ describe("applyDesignSystemPackage", () => {
 
     expect(files["DESIGN.md"]).toBe("old design");
     expect(files["TOKENS.css"]).toBe("old tokens");
-    expect(result.files["DESIGN.md"]).toContain("# Stripe reference");
+    expect(result.files["DESIGN.md"]).toBe("# Stripe reference");
     expect(result.files["TOKENS.css"]).toContain("--accent: #533afd");
     expect(result.changes).toEqual([
       { path: "DESIGN.md", action: "modified" },

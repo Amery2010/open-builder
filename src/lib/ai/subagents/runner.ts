@@ -1,3 +1,5 @@
+import { CANCELLED_TOOL_OUTPUT_KIND } from "../run-guard";
+import { sanitizeToolExecutionOutputForHistory } from "../../utils/message-security";
 import type { ToolSet } from "ai";
 import { WebAppGenerator } from "../generator";
 import type {
@@ -167,11 +169,56 @@ export async function runSubagent(
     return { text: JSON.stringify(failure) };
   }
 
-  store.init(opts.toolCallId, def.name, checkedTask.task);
+  const runId = store.init(opts.toolCallId, def.name, checkedTask.task);
   const startedAt = Date.now();
 
+  let settled = false;
+  let pendingUpdates: Array<{ kind: "text" | "thinking"; text: string }> = [];
+  let flushTimer: ReturnType<typeof setTimeout> | undefined;
+  const currentProgress = () => {
+    const progress = useSubagentStore.getState().progress[opts.toolCallId];
+    return progress?.runId === runId ? progress : undefined;
+  };
+  const eventsSnapshot = () =>
+    limitSubagentEvents(currentProgress()?.events ?? []);
+  const isCurrentRun = () => {
+    return !settled && currentProgress()?.status === "running";
+  };
+  const flushPending = () => {
+    if (flushTimer !== undefined) clearTimeout(flushTimer);
+    flushTimer = undefined;
+    if (!isCurrentRun()) {
+      pendingUpdates = [];
+      return;
+    }
+    const updates = pendingUpdates;
+    pendingUpdates = [];
+    for (const update of updates) {
+      if (update.kind === "text") {
+        useSubagentStore
+          .getState()
+          .appendText(opts.toolCallId, update.text, runId);
+      } else {
+        useSubagentStore
+          .getState()
+          .appendThinking(opts.toolCallId, update.text, runId);
+      }
+    }
+  };
+  const scheduleFlush = () => {
+    if (flushTimer || settled) return;
+    flushTimer = setTimeout(flushPending, 16);
+  };
+  const settleLiveProgress = () => {
+    flushPending();
+    settled = true;
+    if (flushTimer) clearTimeout(flushTimer);
+    flushTimer = undefined;
+  };
+
   if (opts.signal.aborted) {
-    store.markStatus(opts.toolCallId, "aborted", "Aborted before start");
+    settleLiveProgress();
+    store.markStatus(opts.toolCallId, "aborted", "Aborted before start", runId);
     const aborted: SubagentToolResult = {
       ok: false,
       subagent: def.name,
@@ -206,15 +253,85 @@ export async function runSubagent(
 
   const events: GeneratorEvents = {
     onText: (delta) => {
-      useSubagentStore.getState().appendText(opts.toolCallId, delta);
+      if (!isCurrentRun()) return;
+      const last = pendingUpdates.at(-1);
+      if (last?.kind === "text") last.text += delta;
+      else pendingUpdates.push({ kind: "text", text: delta });
+      scheduleFlush();
+    },
+    onThinking: (delta) => {
+      if (!isCurrentRun()) return;
+      const last = pendingUpdates.at(-1);
+      if (last?.kind === "thinking") last.text += delta;
+      else pendingUpdates.push({ kind: "thinking", text: delta });
+      scheduleFlush();
     },
     onToolCall: (name, innerId) => {
-      useSubagentStore.getState().addToolCall(opts.toolCallId, name, innerId);
-    },
-    onToolResult: (_name, _args, result, innerId) => {
+      if (!isCurrentRun()) return;
+      flushPending();
       useSubagentStore
         .getState()
-        .setToolResult(opts.toolCallId, innerId, String(result ?? ""));
+        .addToolCall(opts.toolCallId, name, innerId, runId);
+    },
+    onRetry: (attempt, maxAttempts, error) => {
+      if (!isCurrentRun()) return;
+      flushPending();
+      useSubagentStore
+        .getState()
+        .recordRetry(
+          opts.toolCallId,
+          attempt,
+          maxAttempts,
+          error.message,
+          runId,
+        );
+    },
+    onLocalCliStatus: (status) => {
+      if (!isCurrentRun()) return;
+      flushPending();
+      useSubagentStore
+        .getState()
+        .recordActivity(
+          opts.toolCallId,
+          "status",
+          status.message || status.state,
+          undefined,
+          runId,
+        );
+    },
+    onLocalCliWarning: (message) => {
+      if (!isCurrentRun()) return;
+      flushPending();
+      useSubagentStore
+        .getState()
+        .recordActivity(opts.toolCallId, "warning", message, undefined, runId);
+    },
+    onToolResult: (name, args, result, innerId, output) => {
+      if (!isCurrentRun()) return;
+      flushPending();
+      const safeOutput = sanitizeToolExecutionOutputForHistory(
+        name,
+        args,
+        output ?? { text: String(result ?? "") },
+      );
+      useSubagentStore
+        .getState()
+        .addToolCall(opts.toolCallId, name, innerId, runId);
+      useSubagentStore
+        .getState()
+        .setToolResult(
+          opts.toolCallId,
+          innerId,
+          safeOutput?.text ?? "",
+          safeOutput,
+          output?.structuredContent &&
+            typeof output.structuredContent === "object" &&
+            "kind" in output.structuredContent &&
+            output.structuredContent.kind === CANCELLED_TOOL_OUTPUT_KIND
+            ? "aborted"
+            : undefined,
+          runId,
+        );
     },
     onError: () => {
       // Caught by outer try/catch.
@@ -243,7 +360,13 @@ export async function runSubagent(
   };
 
   let inner: GenerationBackend | undefined;
-  const onAbort = () => inner?.abort();
+  const onAbort = () => {
+    settleLiveProgress();
+    useSubagentStore
+      .getState()
+      .markStatus(opts.toolCallId, "aborted", undefined, runId);
+    inner?.abort();
+  };
   const maxResultLength = def.maxResultLength ?? 4000;
 
   try {
@@ -254,20 +377,27 @@ export async function runSubagent(
     if (opts.signal.aborted) inner.abort();
     opts.signal.throwIfAborted();
     const innerResult = await inner.generate(checkedTask.task);
-    const finalText = (innerResult.text || "").slice(0, maxResultLength);
-    const eventsSnapshot = limitSubagentEvents(
-      useSubagentStore.getState().progress[opts.toolCallId]?.events ?? [],
-    );
+    flushPending();
+    const receivedText = opts.signal.aborted
+      ? (currentProgress()?.text ?? "")
+      : innerResult.text || "";
+    useSubagentStore
+      .getState()
+      .setFinalText(opts.toolCallId, receivedText, runId);
+    const finalText = receivedText.slice(0, maxResultLength);
 
     if (innerResult.aborted || opts.signal.aborted) {
-      useSubagentStore.getState().markStatus(opts.toolCallId, "aborted");
+      settleLiveProgress();
+      useSubagentStore
+        .getState()
+        .markStatus(opts.toolCallId, "aborted", undefined, runId);
       const aborted: SubagentToolResult = {
         ok: false,
         subagent: def.name,
         task: checkedTask.task,
         status: "aborted",
         text: finalText,
-        events: eventsSnapshot,
+        events: eventsSnapshot(),
         durationMs: Date.now() - startedAt,
         error: "Aborted",
       };
@@ -278,16 +408,17 @@ export async function runSubagent(
       ? "The subagent reached its explicitly configured iteration limit before completing."
       : undefined;
     const status = budgetError ? "failed" : "done";
+    settleLiveProgress();
     useSubagentStore
       .getState()
-      .markStatus(opts.toolCallId, status, budgetError);
+      .markStatus(opts.toolCallId, status, budgetError, runId);
     const result: SubagentToolResult = {
       ok: !budgetError,
       subagent: def.name,
       task: checkedTask.task,
       status,
       text: finalText,
-      events: eventsSnapshot,
+      events: eventsSnapshot(),
       durationMs: Date.now() - startedAt,
       ...(budgetError ? { error: budgetError } : {}),
     };
@@ -303,21 +434,23 @@ export async function runSubagent(
     const status = isAbort ? "aborted" : "failed";
     const message =
       (err as { message?: string })?.message ?? "Unknown subagent error";
-    const eventsSnapshot = limitSubagentEvents(
-      useSubagentStore.getState().progress[opts.toolCallId]?.events ?? [],
-    );
-    const textSnapshot =
-      useSubagentStore.getState().progress[opts.toolCallId]?.text ?? "";
+    settleLiveProgress();
+    const textSnapshot = currentProgress()?.text ?? "";
     useSubagentStore
       .getState()
-      .markStatus(opts.toolCallId, status, isAbort ? undefined : message);
+      .markStatus(
+        opts.toolCallId,
+        status,
+        isAbort ? undefined : message,
+        runId,
+      );
     const failure: SubagentToolResult = {
       ok: false,
       subagent: def.name,
       task: checkedTask.task,
       status,
       text: textSnapshot.slice(0, maxResultLength),
-      events: eventsSnapshot,
+      events: eventsSnapshot(),
       durationMs: Date.now() - startedAt,
       error: isAbort
         ? "Aborted"
@@ -325,6 +458,7 @@ export async function runSubagent(
     };
     return { text: JSON.stringify(failure) };
   } finally {
+    settleLiveProgress();
     opts.signal.removeEventListener("abort", onAbort);
   }
 }

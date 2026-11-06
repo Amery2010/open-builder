@@ -100,8 +100,74 @@ describe("ToolCallCard result guards", () => {
   it("keeps normal small tool summaries working", () => {
     expect(
       countSearchResults(JSON.stringify({ ok: true, results: [{}, {}] })),
-    ).toEqual({ ok: true, count: 2, error: undefined });
+    ).toMatchObject({ ok: true, count: 2 });
   });
+
+  it("reads persisted Codex search arrays and preserves safe sources", () => {
+    expect(
+      countSearchResults(
+        JSON.stringify([
+          {
+            type: "text_result",
+            title: "Codex",
+            url: "https://openai.com/codex",
+            snippet: "Official documentation",
+          },
+          { title: "Unsafe", url: "javascript:alert(1)" },
+          { title: "Private file", url: "file:///tmp/private" },
+          { title: "Duplicate", url: "https://openai.com/codex" },
+          null,
+        ]),
+      ),
+    ).toMatchObject({
+      ok: true,
+      count: 5,
+      sources: [
+        {
+          title: "Codex",
+          url: "https://openai.com/codex",
+          snippet: "Official documentation",
+        },
+      ],
+    });
+  });
+
+  it.each([
+    JSON.stringify({ ok: true, results: null }),
+    JSON.stringify({ ok: true, results: [] }),
+    "[]",
+    "web_search completed without structured results.",
+  ])(
+    "distinguishes unavailable search results from zero results: %s",
+    (result) => {
+      expect(countSearchResults(result)).toMatchObject({
+        ok: true,
+        count: null,
+      });
+      expect(
+        countSearchResults(
+          '{"ok":true,"results":[],"meta":{"engine":"tavily"}}',
+        ),
+      ).toMatchObject({
+        ok: true,
+        count: 0,
+      });
+      expect(
+        countSearchResults('{"ok":false,"error":"Search failed"}'),
+      ).toMatchObject({ ok: false, error: "Search failed" });
+    },
+  );
+
+  it.each(["tavily", "firecrawl", "exa"])(
+    "keeps confirmed empty %s Host results distinct from missing source details",
+    (engine) => {
+      expect(
+        countSearchResults(
+          JSON.stringify({ ok: true, results: [], meta: { engine } }),
+        ),
+      ).toMatchObject({ ok: true, count: 0, sources: [] });
+    },
+  );
 
   it("allows only http(s) MCP resource links", () => {
     expect(safeExternalResourceUrl("https://example.com/result")).toBe(

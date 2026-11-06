@@ -1,3 +1,7 @@
+#[path = "local_agent_codex_stream.rs"]
+mod streaming;
+pub(crate) use streaming::{select_transport, Transport};
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -14,7 +18,7 @@ use crate::local_agent::{
 };
 use crate::local_agent_adapter::{AdapterIdentity, AdapterProbe};
 use crate::local_agent_media::{
-    read_generated_image, GeneratedImageBytes, PreparedLocalImageRequest,
+    read_generated_image, read_generated_image_at, GeneratedImageBytes, PreparedLocalImageRequest,
 };
 use crate::local_agent_models::{
     CatalogAuthority, EffortKnowledge, ModelCandidate, ModelPreference,
@@ -1441,6 +1445,8 @@ fn build_exec_args(
     for (key, value) in &provider_config.overrides {
         push_config(&mut args, key, value.clone());
     }
+    push_config(&mut args, "model_reasoning_summary", toml_string("auto"));
+    push_config(&mut args, "hide_agent_reasoning", "false".to_string());
     push_isolation_config(
         &mut args,
         prompt_path,
@@ -1460,6 +1466,26 @@ fn build_exec_args(
     }
     Ok(args)
 }
+
+const IMAGE_DISABLED_FEATURES: &[&str] = &[
+    "shell_tool",
+    "unified_exec",
+    "hooks",
+    "multi_agent",
+    "multi_agent_v2",
+    "apps",
+    "plugins",
+    "browser_use",
+    "browser_use_external",
+    "browser_use_full_cdp_access",
+    "computer_use",
+    "in_app_browser",
+    "js_repl",
+    "skill_search",
+    "skill_mcp_dependency_install",
+    "workspace_dependencies",
+    "view_image",
+];
 
 fn push_image_isolation_config(args: &mut Vec<String>, provider_config: &CodexProviderConfig) {
     push_config(args, "instructions", "\"\"".to_string());
@@ -1485,30 +1511,14 @@ fn push_image_isolation_config(args: &mut Vec<String>, provider_config: &CodexPr
         serde_json::to_string(&provider_config.excluded_environment_names())
             .unwrap_or_else(|_| "[]".to_string()),
     );
-    for feature in [
-        "shell_tool",
-        "unified_exec",
-        "hooks",
-        "multi_agent",
-        "multi_agent_v2",
-        "apps",
-        "plugins",
-        "browser_use",
-        "browser_use_external",
-        "browser_use_full_cdp_access",
-        "computer_use",
-        "in_app_browser",
-        "js_repl",
-        "skill_search",
-        "skill_mcp_dependency_install",
-        "workspace_dependencies",
-        "view_image",
-    ] {
+    for feature in IMAGE_DISABLED_FEATURES {
         push_config(args, &format!("features.{feature}"), "false".to_string());
     }
     push_config(args, "features.image_generation", "true".to_string());
     push_config(args, "agents.enabled", "false".to_string());
     push_config(args, "approval_policy", toml_string("never"));
+    push_config(args, "sandbox_mode", toml_string("read-only"));
+    push_config(args, "notify", "[]".to_string());
 }
 
 fn build_image_app_server_args(provider_config: &CodexProviderConfig) -> Vec<String> {
@@ -1520,16 +1530,37 @@ fn build_image_app_server_args(provider_config: &CodexProviderConfig) -> Vec<Str
     args
 }
 
+fn image_codex_home() -> Result<PathBuf, String> {
+    let home = std::env::var_os("CODEX_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            #[cfg(windows)]
+            let home = std::env::var_os("USERPROFILE");
+            #[cfg(not(windows))]
+            let home = std::env::var_os("HOME");
+            home.map(|home| PathBuf::from(home).join(".codex"))
+        })
+        .filter(|home| home.is_absolute())
+        .ok_or_else(|| "Codex home directory must use an absolute path".to_string())?;
+    // Freeze the trusted root before either process starts. Never accept a root
+    // supplied by a generated image event or copy the user's credentials.
+    std::fs::canonicalize(home).map_err(|_| "failed to resolve Codex home directory".to_string())
+}
+
 fn frozen_image_process_spec(
     executable: &Path,
     run_dir: &Path,
     provider_config: &CodexProviderConfig,
+    arguments: &[String],
+    codex_home: &Path,
 ) -> Result<FrozenProcessSpec, String> {
     let mut command = Command::new(executable);
     apply_minimal_environment(&mut command);
     provider_config.apply(&mut command);
     command
-        .args(build_image_app_server_args(provider_config))
+        .env("CODEX_HOME", codex_home)
+        .args(arguments)
         .current_dir(run_dir);
     FrozenProcessSpec::capture(&command)
 }
@@ -1621,6 +1652,16 @@ impl CodexAppServerIo {
         self.write(&json!({"method":"initialized"})).await
     }
 
+    async fn configuration(&mut self) -> Result<Value, String> {
+        let result = self
+            .request(5, "config/read", json!({"includeLayers":false}))
+            .await?;
+        result
+            .get("config")
+            .cloned()
+            .ok_or_else(|| "Codex image configuration probe omitted its configuration".to_string())
+    }
+
     async fn image_capability(&mut self) -> Result<bool, String> {
         let result = self
             .request(2, "modelProvider/capabilities/read", json!({}))
@@ -1656,9 +1697,157 @@ async fn stop_app_server<T>(
     output.ok_or_else(|| "Codex app server completed without an output".into())
 }
 
+fn image_isolation_check(config: &Value) -> Result<(), AdapterError> {
+    let invalid = || {
+        AdapterError::coded(
+            LocalCliFailureCode::IsolationViolation,
+            "Codex image effective isolation configuration did not match the prepared task",
+        )
+    };
+    if config.get("web_search").and_then(Value::as_str) != Some("disabled")
+        || config.get("approval_policy").and_then(Value::as_str) != Some("never")
+        || config.get("sandbox_mode").and_then(Value::as_str) != Some("read-only")
+        || config.get("instructions").and_then(Value::as_str) != Some("")
+        || config.get("developer_instructions").and_then(Value::as_str) != Some("")
+        || config.get("project_doc_max_bytes").and_then(Value::as_u64) != Some(0)
+        || config
+            .get("notify")
+            .and_then(Value::as_array)
+            .is_none_or(|items| !items.is_empty())
+        || config
+            .pointer("/features/image_generation")
+            .and_then(Value::as_bool)
+            != Some(true)
+    {
+        return Err(invalid());
+    }
+    for feature in IMAGE_DISABLED_FEATURES {
+        let value = config
+            .get("features")
+            .and_then(|features| features.get(feature));
+        if value.and_then(Value::as_bool) != Some(false)
+            && value
+                .and_then(|value| value.get("enabled"))
+                .and_then(Value::as_bool)
+                != Some(false)
+        {
+            return Err(invalid());
+        }
+    }
+    let servers = config
+        .get("mcp_servers")
+        .and_then(Value::as_object)
+        .ok_or_else(invalid)?;
+    if servers
+        .values()
+        .any(|server| server.get("enabled").and_then(Value::as_bool) != Some(false))
+    {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+async fn prepare_image_process(
+    executable: &Path,
+    request: &PreparedLocalImageRequest,
+    provider: &CodexProviderConfig,
+    codex_home: &Path,
+) -> Result<FrozenProcessSpec, AdapterError> {
+    let mut arguments = build_image_app_server_args(provider);
+    if let Some(model) = request.model.as_deref() {
+        push_config(&mut arguments, "model", toml_string(model));
+    }
+    if let Some(effort) = request.effort.as_deref() {
+        push_config(
+            &mut arguments,
+            "model_reasoning_effort",
+            toml_string(effort),
+        );
+    }
+    let process = RunSupervisor::spawn(
+        frozen_image_process_spec(
+            executable,
+            &request.run_dir,
+            provider,
+            &arguments,
+            codex_home,
+        )?,
+        request.cancellation.child_token(),
+    )?;
+    let supervisor = process.supervisor;
+    let mut io = CodexAppServerIo {
+        stdin: process.stdin,
+        reader: BufReader::new(process.stdout),
+        cancellation: request.cancellation.clone(),
+        pending_notifications: Vec::new(),
+    };
+    // config/read does not start a thread or connect inherited MCP servers.
+    let result = supervisor
+        .monitor(async {
+            io.initialize().await?;
+            let mut config = io.configuration().await?;
+            let servers = config
+                .get_mut("mcp_servers")
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| "Codex image configuration omitted its MCP servers".to_string())?;
+            let names = servers.keys().cloned().collect::<Vec<_>>();
+            for server in servers.values_mut() {
+                server
+                    .as_object_mut()
+                    .ok_or_else(|| {
+                        "Codex image configuration returned an invalid MCP server".to_string()
+                    })?
+                    .insert("enabled".to_string(), json!(false));
+            }
+            image_isolation_check(&config)?;
+            Ok::<_, AdapterError>(names)
+        })
+        .await;
+    let names =
+        stop_app_server(supervisor, result, "Codex image isolation preflight failed").await?;
+    if !names.is_empty() {
+        let entries = names
+            .iter()
+            .map(|name| format!("{}={{enabled=false}}", toml_string(name)))
+            .collect::<Vec<_>>()
+            .join(",");
+        // A table preserves literal dots/quotes in inherited server names.
+        push_config(&mut arguments, "mcp_servers", format!("{{{entries}}}"));
+    }
+    frozen_image_process_spec(
+        executable,
+        &request.run_dir,
+        provider,
+        &arguments,
+        codex_home,
+    )
+    .map_err(Into::into)
+}
+
+fn image_artifact_component(value: &str) -> String {
+    // Codex 0.163 image-generation/artifact.rs uses this exact mapping.
+    let value: String = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if value.is_empty() {
+        "generated_image".to_string()
+    } else {
+        value
+    }
+}
+
 async fn read_codex_image_item(
     item: &Value,
     run_dir: &Path,
+    codex_home: &Path,
+    thread_id: &str,
 ) -> Result<GeneratedImageBytes, AdapterError> {
     if let Some(failure) = item.get("failure").filter(|value| !value.is_null()) {
         if failure.get("type").and_then(Value::as_str) == Some("usageLimitExceeded") {
@@ -1683,7 +1872,17 @@ async fn read_codex_image_item(
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
         .ok_or_else(|| "Codex image generation completed without an image file".to_string())?;
-    let (mime_type, bytes, file_name) = read_generated_image(run_dir, &saved_path)?;
+    let relative_artifact = PathBuf::from("generated_images")
+        .join(image_artifact_component(thread_id))
+        .join(format!("{}.png", image_artifact_component(id)));
+    let expected_artifact = codex_home.join(&relative_artifact);
+    let (mime_type, bytes, file_name) = if saved_path.as_os_str() == expected_artifact.as_os_str() {
+        read_generated_image_at(codex_home, &relative_artifact)?
+    } else {
+        // Older providers may save in the private task directory. Its existing
+        // containment check still rejects every other home/thread/call path.
+        read_generated_image(run_dir, &saved_path)?
+    };
     let revised_prompt = item
         .get("revisedPrompt")
         .and_then(Value::as_str)
@@ -1710,6 +1909,7 @@ async fn handle_image_notification(
     expected_thread_id: &str,
     expected_turn_id: Option<&str>,
     run_dir: &Path,
+    codex_home: &Path,
     generated: &mut Option<GeneratedImageBytes>,
 ) -> Result<bool, AdapterError> {
     let method = notification
@@ -1717,6 +1917,18 @@ async fn handle_image_notification(
         .and_then(Value::as_str)
         .unwrap_or_default();
     let params = notification.get("params").unwrap_or(&Value::Null);
+    if ((method.starts_with("thread/") && method != "thread/started")
+        || method.starts_with("turn/")
+        || method.starts_with("item/"))
+        && params.get("threadId").and_then(Value::as_str) != Some(expected_thread_id)
+    {
+        return Err("Codex image task emitted an event without its expected thread".into());
+    }
+    if method.starts_with("item/")
+        && params.get("turnId").and_then(Value::as_str) != expected_turn_id
+    {
+        return Err("Codex image task emitted an item without its expected turn".into());
+    }
     if let Some(thread_id) = params.get("threadId").and_then(Value::as_str) {
         if thread_id != expected_thread_id {
             return Err("Codex image task emitted an event for another thread".into());
@@ -1743,6 +1955,8 @@ async fn handle_image_notification(
     }
     match method {
         "thread/started"
+        | "thread/status/changed"
+        | "thread/readState/changed"
         | "turn/started"
         | "thread/tokenUsage/updated"
         | "account/rateLimits/updated"
@@ -1759,6 +1973,23 @@ async fn handle_image_notification(
         | "remoteControl/status/changed"
         | "turn/moderationMetadata"
         | "warning" => Ok(false),
+        "thread/settings/updated" => {
+            if params
+                .pointer("/threadSettings/approvalPolicy")
+                .and_then(Value::as_str)
+                != Some("never")
+                || params
+                    .pointer("/threadSettings/sandboxPolicy/type")
+                    .and_then(Value::as_str)
+                    != Some("readOnly")
+            {
+                return Err(AdapterError::coded(
+                    LocalCliFailureCode::IsolationViolation,
+                    "Codex image task changed the prepared thread permissions",
+                ));
+            }
+            Ok(false)
+        }
         "item/started" | "item/updated" => {
             let kind = params
                 .pointer("/item/type")
@@ -1787,7 +2018,8 @@ async fn handle_image_notification(
                     "Codex image task attempted a disabled native capability",
                 ));
             }
-            let image = read_codex_image_item(item, run_dir).await?;
+            let image =
+                read_codex_image_item(item, run_dir, codex_home, expected_thread_id).await?;
             if let Some(previous) = generated.as_ref() {
                 if previous.id == image.id {
                     return Ok(false);
@@ -1808,7 +2040,6 @@ async fn handle_image_notification(
                 _ => Err(RUN_ERROR.into()),
             }
         }
-        _ if method.starts_with("codex/event/") => Ok(false),
         _ => Err(format!("Codex image task emitted unsupported notification {method}").into()),
     }
 }
@@ -1816,8 +2047,10 @@ async fn handle_image_notification(
 async fn run_image_app_server(
     io: &mut CodexAppServerIo,
     request: &PreparedLocalImageRequest,
+    codex_home: &Path,
 ) -> Result<GeneratedImageBytes, AdapterError> {
     io.initialize().await?;
+    image_isolation_check(&io.configuration().await?)?;
     io.pending_notifications.clear();
     if !io.image_capability().await? {
         return Err(MEDIA_UNSUPPORTED.into());
@@ -1830,6 +2063,7 @@ async fn run_image_app_server(
             "thread/start",
             json!({
                 "model": request.model,
+                "allowProviderModelFallback": false,
                 "cwd": cwd,
                 "approvalPolicy": "never",
                 "sandbox": "read-only",
@@ -1844,10 +2078,31 @@ async fn run_image_app_server(
             }),
         )
         .await?;
+    if thread.get("approvalPolicy").and_then(Value::as_str) != Some("never")
+        || thread.pointer("/sandbox/type").and_then(Value::as_str) != Some("readOnly")
+    {
+        return Err(AdapterError::coded(
+            LocalCliFailureCode::IsolationViolation,
+            "Codex image task changed the prepared thread permissions",
+        ));
+    }
+    if request
+        .model
+        .as_deref()
+        .is_some_and(|model| thread.get("model").and_then(Value::as_str) != Some(model))
+        || request.effort.as_deref().is_some_and(|effort| {
+            thread.get("reasoningEffort").and_then(Value::as_str) != Some(effort)
+        })
+    {
+        return Err(AdapterError::coded(
+            LocalCliFailureCode::SelectionRejected,
+            "Codex image task changed the selected model or reasoning effort",
+        ));
+    }
     let thread_id = thread
         .pointer("/thread/id")
         .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
+        .filter(|value| valid_session_id(value))
         .ok_or_else(|| "Codex image thread start omitted its id".to_string())?
         .to_string();
     let mut input = vec![json!({"type":"text","text":request.prompt})];
@@ -1869,6 +2124,7 @@ async fn run_image_app_server(
                 "effort": request.effort,
                 "cwd": cwd,
                 "approvalPolicy": "never",
+                "sandboxPolicy": {"type":"readOnly"},
                 "environments": [],
                 "runtimeWorkspaceRoots": []
             }),
@@ -1888,6 +2144,7 @@ async fn run_image_app_server(
             &thread_id,
             Some(&turn_id),
             &request.run_dir,
+            codex_home,
             &mut generated,
         )
         .await?
@@ -1909,6 +2166,7 @@ async fn run_image_app_server(
             &thread_id,
             Some(&turn_id),
             &request.run_dir,
+            codex_home,
             &mut generated,
         )
         .await?
@@ -1945,9 +2203,15 @@ pub(crate) async fn probe_image_capabilities(executable: &Path) -> LocalAgentCap
         }
     }
     let cancellation = CancellationToken::new();
-    let result = match load_provider_config()
-        .and_then(|config| frozen_image_process_spec(executable, &root, &config))
-    {
+    let result = match load_provider_config().and_then(|config| {
+        frozen_image_process_spec(
+            executable,
+            &root,
+            &config,
+            &build_image_app_server_args(&config),
+            &image_codex_home()?,
+        )
+    }) {
         Ok(spec) => match RunSupervisor::spawn(spec, cancellation.child_token()) {
             Ok(process) => {
                 let supervisor = process.supervisor;
@@ -1986,7 +2250,18 @@ async fn generate_image_with_config(
     request: PreparedLocalImageRequest,
     provider_config: &CodexProviderConfig,
 ) -> Result<GeneratedImageBytes, AdapterError> {
-    let process_spec = frozen_image_process_spec(&executable, &request.run_dir, provider_config)?;
+    let codex_home = image_codex_home()?;
+    generate_image_with_home(executable, request, provider_config, codex_home).await
+}
+
+async fn generate_image_with_home(
+    executable: PathBuf,
+    request: PreparedLocalImageRequest,
+    provider_config: &CodexProviderConfig,
+    codex_home: PathBuf,
+) -> Result<GeneratedImageBytes, AdapterError> {
+    let process_spec =
+        prepare_image_process(&executable, &request, provider_config, &codex_home).await?;
     let cancellation = request.cancellation.clone();
     let process = RunSupervisor::spawn(process_spec, cancellation.child_token())?;
     let supervisor = process.supervisor;
@@ -1997,7 +2272,7 @@ async fn generate_image_with_config(
         pending_notifications: Vec::new(),
     };
     let result = supervisor
-        .monitor(run_image_app_server(&mut io, &request))
+        .monitor(run_image_app_server(&mut io, &request, &codex_home))
         .await;
     stop_app_server(supervisor, result, "Codex image app server failed").await
 }
@@ -2331,7 +2606,7 @@ fn validate_item_kind(
 ) -> Result<(), AdapterError> {
     match item_kind(item) {
         "agent_message" | "agentMessage" | "assistant_message" | "reasoning" | "plan"
-        | "user_message" | "userMessage" | "context_compaction" => {
+        | "user_message" | "userMessage" | "context_compaction" | "contextCompaction" => {
             if contains_capability_semantics(item) {
                 Err(isolation_error(
                     item,
@@ -2655,6 +2930,7 @@ pub(crate) struct PreparedCodexRun {
     process_spec: FrozenProcessSpec,
     instructions_file: PreparedPrivateFile,
     configuration_fingerprint: String,
+    transport: Transport,
 }
 
 impl PreparedCodexRun {
@@ -2674,6 +2950,7 @@ fn prepare_with_config(
         process_spec,
         instructions_file,
         configuration_fingerprint,
+        transport: Transport::Exec,
     })
 }
 
@@ -2698,9 +2975,22 @@ fn prepare_process(
     Ok((instructions_file, process_spec))
 }
 
-pub(crate) fn prepare_run(context: ProtocolContext) -> Result<PreparedCodexRun, AdapterError> {
+pub(crate) async fn prepare_run(
+    context: ProtocolContext,
+    transport: Transport,
+) -> Result<PreparedCodexRun, AdapterError> {
     let provider_config = load_provider_config()?;
-    Ok(prepare_with_config(context, provider_config)?)
+    let mut prepared = prepare_with_config(context, provider_config.clone())?;
+    if transport == Transport::AppServer {
+        let path = prepared
+            .context
+            .run_dir
+            .join("open-builder-codex-instructions.md");
+        prepared.process_spec =
+            streaming::isolated_spec(&prepared.context, &provider_config, &path).await?;
+    }
+    prepared.transport = transport;
+    Ok(prepared)
 }
 
 pub(crate) async fn launch_prepared(
@@ -2710,12 +3000,16 @@ pub(crate) async fn launch_prepared(
         context,
         process_spec,
         instructions_file,
+        transport,
         ..
     } = prepared;
     instructions_file
         .verify_unchanged()
         .map_err(|_| PREPARED_INSTRUCTIONS_CHANGED_ERROR.to_string())?;
-    run_prepared(&context, process_spec).await
+    match transport {
+        Transport::AppServer => streaming::run(&context, process_spec).await,
+        Transport::Exec => run_prepared(&context, process_spec).await,
+    }
 }
 
 fn frozen_process_spec(
@@ -3281,6 +3575,7 @@ mod tests {
 
     fn request() -> LocalAgentStartRequest {
         LocalAgentStartRequest {
+            utility_effort_policy: None,
             provider: LocalAgentProvider::Codex,
             model: Some("gpt-test".to_string()),
             effort: Some("high".to_string()),
@@ -3421,6 +3716,8 @@ mod tests {
                 "revisedPrompt":"A red fox"
             }),
             &root,
+            &root,
+            "thread-1",
         )
         .await
         .unwrap();
@@ -3439,6 +3736,8 @@ mod tests {
                 "failure":{"type":"usageLimitExceeded","limitId":"images","resetsAt":null}
             }),
             &root,
+            &root,
+            "thread-1",
         )
         .await
         .unwrap_err();
@@ -3457,25 +3756,14 @@ mod tests {
         ));
         std::fs::create_dir(&root).unwrap();
         let executable = root.join("fake-codex");
-        let script = r#"#!/bin/sh
-IFS= read -r _line || exit 1
-echo '{"id":1,"result":{"userAgent":"fake-codex"}}'
-IFS= read -r _line || exit 1
-IFS= read -r _line || exit 1
-echo '{"id":2,"result":{"namespaceTools":false,"imageGeneration":true,"webSearch":false}}'
-IFS= read -r _line || exit 1
-echo '{"id":3,"result":{"thread":{"id":"thread-1"},"model":"gpt-test","modelProvider":"openai"}}'
-IFS= read -r _line || exit 1
-echo '{"id":4,"result":{"turn":{"id":"turn-1","status":"inProgress","items":[],"error":null}}}'
-printf '\211PNG\r\n\032\n\000\000\000\rIHDRpayload\000\000\000\000IEND\256B`\202' > "$PWD/generated.png"
-echo "{\"method\":\"item/completed\",\"params\":{\"threadId\":\"thread-1\",\"turnId\":\"turn-1\",\"completedAtMs\":1,\"item\":{\"id\":\"image-1\",\"type\":\"imageGeneration\",\"status\":\"completed\",\"result\":\"completed\",\"savedPath\":\"$PWD/generated.png\",\"revisedPrompt\":\"A red fox\",\"failure\":null,\"transparentBackground\":null}}}"
-echo '{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed","items":[],"error":null}}}'
-"#;
+        let script = include_str!("../tests/fixtures/fake_codex_image_server.py");
         std::fs::write(&executable, script).unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
 
         let cancellation = CancellationToken::new();
-        let result = generate_image_with_config(
+        let home = root.join("codex-home");
+        std::fs::create_dir(&home).unwrap();
+        let result = generate_image_with_home(
             executable,
             PreparedLocalImageRequest {
                 model: Some("gpt-test".to_string()),
@@ -3486,16 +3774,266 @@ echo '{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"t
                 cancellation: cancellation.clone(),
             },
             &CodexProviderConfig::default(),
+            home.clone(),
         )
         .await
         .unwrap();
         assert_eq!(result.id, "image-1");
         assert_eq!(result.mime_type, "image/png");
         assert_eq!(result.revised_prompt.as_deref(), Some("A red fox"));
-        assert_eq!(result.file_name.as_deref(), Some("generated.png"));
+        assert_eq!(result.file_name.as_deref(), Some("image-1.png"));
         assert!(result.bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
         assert!(!cancellation.is_cancelled());
+        assert!(home.join("generated_images/thread-1/image-1.png").exists());
+        let processes = std::fs::read_to_string(root.join("image-processes.jsonl")).unwrap();
+        let processes: Vec<Value> = processes
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(processes.len(), 2);
+        assert_eq!(processes[0]["disabled"], false);
+        assert_eq!(processes[1]["disabled"], true);
+        for process in processes {
+            assert_eq!(
+                unsafe { libc::kill(process["pid"].as_i64().unwrap() as i32, 0) },
+                -1
+            );
+        }
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "explicitly sends a real image-generation request and imports its bytes"]
+    async fn manual_real_codex_image_generation() {
+        let executable = PathBuf::from(
+            std::env::var("OPEN_BUILDER_MANUAL_CLI_EXECUTABLE")
+                .expect("set OPEN_BUILDER_MANUAL_CLI_EXECUTABLE"),
+        );
+        struct PrivateImageTask(PathBuf);
+        impl Drop for PrivateImageTask {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let private = PrivateImageTask(std::env::temp_dir().join(format!(
+            "open-builder-manual-image-{}",
+            uuid::Uuid::new_v4()
+        )));
+        std::fs::create_dir(&private.0).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&private.0, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let image = tokio::time::timeout(Duration::from_secs(600),generate_image(
+            executable,
+            PreparedLocalImageRequest {
+                model: std::env::var("OPEN_BUILDER_MANUAL_CLI_MODEL").ok(),
+                effort: std::env::var("OPEN_BUILDER_MANUAL_CLI_EFFORT").ok(),
+                prompt: "Generate exactly one simple image: a solid red circle centered on a plain white background. Use the built-in image generation tool once.".to_string(),
+                references: Vec::new(), run_dir: private.0.clone(), cancellation: CancellationToken::new(),
+            },
+        )).await.expect("real image task must finish within its explicit acceptance deadline")
+            .expect("real image generation and validated artifact import must succeed");
+        assert!(!image.bytes.is_empty());
+        if let Ok(directory) = std::env::var("OPEN_BUILDER_MANUAL_IMAGE_OUTPUT_DIR") {
+            let directory = PathBuf::from(directory);
+            assert!(directory.is_absolute());
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(
+                directory.join(image.file_name.as_deref().unwrap_or("image.png")),
+                &image.bytes,
+            )
+            .unwrap();
+        }
+        println!(
+            "manual Codex image {}",
+            json!({"mimeType":image.mime_type,"bytes":image.bytes.len(),"imported":true})
+        );
+    }
+
+    #[tokio::test]
+    async fn image_accepts_scoped_status_and_read_state_notifications() {
+        for method in [
+            "thread/status/changed",
+            "thread/readState/changed",
+            "thread/settings/updated",
+        ] {
+            let notification = json!({
+                "method": method,
+                "params": {"threadId":"thread-1", "status":{"type":"active"},
+                    "threadSettings":{"approvalPolicy":"never","sandboxPolicy":{"type":"readOnly"}}}
+            });
+            assert!(!handle_image_notification(
+                notification,
+                "thread-1",
+                Some("turn-1"),
+                Path::new("/private/run"),
+                Path::new("/private/codex"),
+                &mut None,
+            )
+            .await
+            .unwrap());
+        }
+    }
+
+    #[tokio::test]
+    async fn image_reads_current_thread_artifact_from_codex_home() {
+        let root = std::env::temp_dir().join(format!(
+            "open-builder-codex-image-home-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let run = root.join("run");
+        let home = root.join("home");
+        let directory = home.join("generated_images/thread-1");
+        std::fs::create_dir_all(&run).unwrap();
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("image-1.png");
+        std::fs::write(
+            &path,
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDRpayload\x00\x00\x00\x00IEND\xaeB`\x82",
+        )
+        .unwrap();
+        let result = read_codex_image_item(
+            &json!({"id":"image-1","status":"completed","savedPath":path}),
+            &run,
+            &home,
+            "thread-1",
+        )
+        .await;
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(result.unwrap().mime_type, "image/png");
+    }
+
+    #[tokio::test]
+    async fn image_rejects_other_artifacts_and_unscoped_notifications() {
+        let root =
+            std::env::temp_dir().join(format!("open-builder-image-scope-{}", uuid::Uuid::new_v4()));
+        let run = root.join("run");
+        let home = root.join("home");
+        std::fs::create_dir_all(&run).unwrap();
+        for path in [
+            home.join("generated_images/other-thread/image-1.png"),
+            home.join("generated_images/thread-1/other-call.png"),
+            home.join("unrelated.png"),
+            home.join("generated_images/thread-1/../thread-1/image-1.png"),
+        ] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"not an authorized image").unwrap();
+            assert!(read_codex_image_item(
+                &json!({"id":"image-1","status":"completed","savedPath":path}),
+                &run,
+                &home,
+                "thread-1",
+            )
+            .await
+            .is_err());
+        }
+        for notification in [
+            json!({"method":"thread/status/changed","params":{}}),
+            json!({"method":"thread/readState/changed","params":{"threadId":"other-thread"}}),
+            json!({"method":"thread/settings/updated","params":{"threadId":"other-thread"}}),
+            json!({"method":"thread/settings/updated","params":{}}),
+            json!({"method":"thread/settings/updated","params":{"threadId":"thread-1","threadSettings":{"approvalPolicy":"never","sandboxPolicy":{"type":"dangerFullAccess"}}}}),
+            json!({"method":"thread/settings/updated","params":{"threadId":"thread-1","threadSettings":{"approvalPolicy":"on-request","sandboxPolicy":{"type":"readOnly"}}}}),
+            json!({"method":"item/completed","params":{"threadId":"thread-1","item":{"type":"agentMessage"}}}),
+            json!({"method":"item/started","params":{"threadId":"thread-1","turnId":"other-turn","item":{"type":"imageGeneration"}}}),
+            json!({"method":"codex/event/exec_command_begin","params":{}}),
+        ] {
+            assert!(handle_image_notification(
+                notification,
+                "thread-1",
+                Some("turn-1"),
+                &run,
+                &home,
+                &mut None
+            )
+            .await
+            .is_err());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn image_preflight_failure_and_cancellation_reap_processes() {
+        use std::os::unix::fs::PermissionsExt;
+        for mode in [
+            "isolation-mismatch",
+            "thread-permission-mismatch",
+            "selection-mismatch",
+            "permission-drift",
+            "unauthorized-tool",
+            "cancel",
+        ] {
+            let root = std::env::temp_dir().join(format!(
+                "open-builder-image-lifecycle-{}",
+                uuid::Uuid::new_v4()
+            ));
+            let home = root.join("home");
+            std::fs::create_dir_all(&home).unwrap();
+            std::fs::write(root.join("fixture-mode"), mode).unwrap();
+            let executable = root.join("fake-codex");
+            std::fs::write(
+                &executable,
+                include_str!("../tests/fixtures/fake_codex_image_server.py"),
+            )
+            .unwrap();
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let cancellation = CancellationToken::new();
+            let request = PreparedLocalImageRequest {
+                model: Some("gpt-test".into()),
+                effort: None,
+                prompt: "Draw a fox".into(),
+                references: Vec::new(),
+                run_dir: root.clone(),
+                cancellation: cancellation.clone(),
+            };
+            let task = tokio::spawn(async move {
+                generate_image_with_home(executable, request, &CodexProviderConfig::default(), home)
+                    .await
+            });
+            if mode == "cancel" {
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    while !root.join("turn-started").exists() {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                cancellation.cancel();
+            }
+            let error = tokio::time::timeout(Duration::from_secs(10), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap_err();
+            if mode != "cancel" {
+                assert_eq!(
+                    error.code,
+                    Some(if mode == "selection-mismatch" {
+                        LocalCliFailureCode::SelectionRejected
+                    } else {
+                        LocalCliFailureCode::IsolationViolation
+                    })
+                );
+            }
+            if matches!(mode, "thread-permission-mismatch" | "selection-mismatch") {
+                assert!(!root.join("turn-started").exists());
+            }
+            if mode == "isolation-mismatch" {
+                assert!(!root.join("thread-started").exists());
+            }
+            let processes = std::fs::read_to_string(root.join("image-processes.jsonl")).unwrap();
+            for line in processes.lines() {
+                let process: Value = serde_json::from_str(line).unwrap();
+                assert_eq!(
+                    unsafe { libc::kill(process["pid"].as_i64().unwrap() as i32, 0) },
+                    -1
+                );
+            }
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[tokio::test]
@@ -3517,6 +4055,7 @@ echo '{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"t
             "thread-1",
             Some("turn-1"),
             &root,
+            &root,
             &mut None,
         )
         .await
@@ -3534,6 +4073,7 @@ echo '{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"t
             }),
             "thread-1",
             Some("turn-1"),
+            &root,
             &root,
             &mut generated,
         )

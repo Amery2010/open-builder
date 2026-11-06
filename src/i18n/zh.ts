@@ -125,6 +125,14 @@ export const zh = {
         openSettings: "打开模型设置",
       },
       utilityTimeout: "本地 CLI 辅助任务在 {timeoutMs} 毫秒后超时。",
+      recoveryChecking: "正在检查已有的本地 CLI 任务…",
+      recoveryConnecting: "正在重新连接本地 CLI 任务…",
+      recoveryUnavailable:
+        "无法确认后台任务状态。请刷新页面；若仍然失败，请重新启动桌面应用。",
+      recoveryIncompatible:
+        "会话或配置已变化，无法安全恢复之前的本地 CLI 任务。已有项目修改已保留。",
+      recoveryUncertain:
+        "页面断连时有工具正在执行，结果尚未确认。本轮已停止，未重复执行该操作。请检查项目及外部操作结果后继续。",
     },
     webSearch: {
       desc: "配置后，AI 将能够搜索网页和读取网页内容",
@@ -219,6 +227,7 @@ export const zh = {
       attachments: "附件",
       designSystems: "导入的设计系统",
       projectAssets: "项目图片",
+      projectArchives: "项目工程包",
       estimateUnavailable: "暂时无法估算",
       messages: "消息",
       memories: "记忆",
@@ -939,6 +948,8 @@ export const zh = {
           processExit: "本地 CLI 未能完成本次运行。",
           cancelled: "本地 CLI 运行已取消。",
           consumerGone: "页面已停止接收此次本地 CLI 运行。",
+          recoveryUncertain:
+            "断连前的工具可能已执行，但结果尚未确认。本轮已停止，未重复执行该操作。请检查项目及外部操作结果后继续。",
           internal: "Open Builder 遇到了本地 CLI 内部运行错误。",
         },
       },
@@ -978,7 +989,7 @@ export const zh = {
     initialState: "初始状态",
     confirm: "确认回滚",
     confirmDesc:
-      "回滚将把项目文件恢复到此次操作时的状态，此操作不可撤销。确定继续吗？",
+      "回滚将恢复此时的对话和项目文件，当前分支会保留。新的消息或编辑将创建新分支。",
     cancel: "取消",
   },
   resetProject: {
@@ -987,6 +998,29 @@ export const zh = {
       "这会永久删除当前对话历史、项目文件、模板状态和快照，且无法撤销。",
     cancel: "取消",
     confirm: "重置项目",
+  },
+  branches: {
+    name: "分支 {n}",
+    title: "对话分支",
+    count: "{count} 个分支",
+    current: "当前分支",
+    switch: "切换分支",
+    summary: "暂无新消息",
+    created: "创建时间",
+    updated: "最近更新",
+    error: "无法恢复此分支。",
+  },
+  projectArchives: {
+    title: "项目源码",
+    source: "源码",
+    pending: "正在打包项目 ZIP",
+    preparing: "正在打包项目 ZIP",
+    ready: "项目 ZIP 已就绪",
+    failed: "项目 ZIP 保存失败",
+    download: "下载完整项目 ZIP",
+    retry: "重新打包",
+    saved: "项目 ZIP 已保存",
+    stageSaved: "检查点已保存",
   },
   snapshots: {
     title: "快照历史",
@@ -1343,6 +1377,7 @@ export const zh = {
     show: "显示控制台",
   },
   tool: {
+    emptyResult: "已完成，无文本内容",
     results: "条结果",
     images: "张图片",
     packages: "个包",
@@ -1367,6 +1402,7 @@ export const zh = {
     status: {
       running: "运行中",
       completed: "已完成",
+      aborted: "已停止",
       failed: "失败",
       attention: "需要关注",
     },
@@ -1375,6 +1411,7 @@ export const zh = {
     failed: "失败: ",
     found: "已找到 ",
     searchResults: "条搜索结果",
+    searchResultsUnavailable: "搜索已完成，未返回可展示的来源详情。",
     imageResults: "张图片素材",
     npmPackages: "个 npm 包",
     names: {
@@ -1442,6 +1479,12 @@ export const zh = {
     output: "子代理输出",
     toolCalls: "工具调用",
     noOutput: "未产生输出",
+    latestActivity: "最新动作",
+    updatedAgo: "{n}秒前",
+    waitingForUpdate: "正在等待新进展",
+    retrying: "正在重试请求（{attempt}/{maxAttempts}）：{message}",
+    waitingForResponse: "正在等待本地 CLI 响应，可停止此任务。",
+    messageOutputNotice: "当前 CLI 版本使用分段输出，内容可能整段到达。",
     duration: "{n}s",
     policyReadonly: "只读",
     policyFullWrite: "可写入文件",

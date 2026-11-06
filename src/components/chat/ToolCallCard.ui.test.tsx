@@ -17,6 +17,90 @@ describe("ToolCallCard UI", () => {
     vi.restoreAllMocks();
   });
 
+  it.each(["host", "codex"])(
+    "shows %s search sources after expansion",
+    async (shape) => {
+      const user = userEvent.setup();
+      const results = [
+        {
+          title: "Codex documentation",
+          url: "https://openai.com/codex",
+          snippet: "Search documentation",
+        },
+        { title: "Unsafe link", url: "javascript:alert(1)" },
+      ];
+      render(
+        <ToolCallCard
+          toolName="web_search"
+          title="Web search"
+          path=""
+          toolCallId="search"
+          result={JSON.stringify(
+            shape === "codex" ? results : { ok: true, results },
+          )}
+        />,
+      );
+      const trigger = screen.getByRole("button", {
+        name: /Web search.*2 results.*Completed/,
+      });
+      expect(screen.queryByRole("link")).toBeNull();
+      await user.click(trigger);
+      const source = screen.getByRole("link", { name: /Codex documentation/ });
+      expect(source).toHaveAttribute("href", "https://openai.com/codex");
+      expect(source).toHaveAttribute("rel", "noopener noreferrer");
+      expect(screen.getAllByRole("link")).toHaveLength(1);
+      expect(screen.getByText("Search documentation")).toBeInTheDocument();
+      expect(screen.queryByText(/Failed:/)).toBeNull();
+    },
+  );
+
+  it.each([{ results: null }, { results: [] }])(
+    "does not report missing native search details $results as zero results or failure",
+    async ({ results }) => {
+      const user = userEvent.setup();
+      render(
+        <ToolCallCard
+          toolName="web_search"
+          title="Web search"
+          path=""
+          toolCallId="search"
+          result={JSON.stringify({ ok: true, results })}
+        />,
+      );
+      await user.click(
+        screen.getByRole("button", { name: /Web search.*Completed/ }),
+      );
+      expect(
+        screen.getByText(
+          "Search completed. No displayable source details were returned.",
+        ),
+      ).toBeInTheDocument();
+      expect(screen.queryByText(/0 results|Failed:/)).toBeNull();
+    },
+  );
+
+  it("shows zero only for a confirmed empty Host search response", async () => {
+    const user = userEvent.setup();
+    render(
+      <ToolCallCard
+        toolName="web_search"
+        title="Web search"
+        path=""
+        toolCallId="host-empty-search"
+        result={JSON.stringify({
+          ok: true,
+          results: [],
+          meta: { engine: "tavily" },
+        })}
+      />,
+    );
+    await user.click(
+      screen.getByRole("button", { name: /Web search.*0 results.*Completed/ }),
+    );
+    expect(screen.getByText("Found 0 search results")).toBeInTheDocument();
+    expect(screen.queryByText(/No displayable source details/)).toBeNull();
+  });
+
   it("adds a localized accessible status without changing result payloads", () => {
     useSettingsStore.getState().setSystem({
       ...originalSystem,

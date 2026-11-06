@@ -1,4 +1,5 @@
 import type { ToolSet } from "ai";
+import { prepareScreenshot } from "../../images/screenshot";
 import { createOpenAIGenerator } from "../../ai/client";
 import type {
   GenerationBackend,
@@ -80,18 +81,28 @@ function cleanScreenshotName(value: string | undefined, index: number): string {
   );
 }
 
-function screenshotAttachments(
+async function screenshotAttachments(
   conversationId: string,
   screenshots: readonly DesignReviewScreenshot[],
-): ResolvedAttachment[] {
-  return screenshots.map((screenshot, index) => ({
-    id: `design-review-${conversationId}-${index}`,
-    type: "image",
-    name: cleanScreenshotName(screenshot.name, index),
-    mimeType: screenshot.mimeType ?? "image/png",
-    size: Math.max(1, getDesignReviewScreenshotByteLength(screenshot.dataUrl)),
-    content: screenshot.dataUrl,
-  }));
+  signal: AbortSignal,
+): Promise<ResolvedAttachment[]> {
+  const attachments: ResolvedAttachment[] = [];
+  for (const [index, screenshot] of screenshots.entries()) {
+    const image = await prepareScreenshot(
+      screenshot.dataUrl,
+      cleanScreenshotName(screenshot.name, index),
+      signal,
+    );
+    attachments.push({
+      id: `design-review-${conversationId}-${index}`,
+      type: "image",
+      name: image.name,
+      mimeType: image.mimeType,
+      size: getDesignReviewScreenshotByteLength(image.dataUrl),
+      content: image.dataUrl,
+    });
+  }
+  return attachments;
 }
 
 function providerRef(config: DesignReviewBackendConfig): string {
@@ -171,6 +182,12 @@ export function createIsolatedDesignReviewSession(
           extras,
         );
 
+  const preparation = new AbortController();
+  const abortBackend = backend.abort.bind(backend);
+  backend.abort = () => {
+    preparation.abort();
+    abortBackend();
+  };
   backend.syncMessages([]);
   // `setReadOnlyMode(true)` maps the shared generator to Plan Mode, where the
   // chat-only submit_design_review capability is denied. This isolated run is
@@ -199,9 +216,15 @@ export function createIsolatedDesignReviewSession(
   return {
     backend,
     run: async () => {
+      const attachments = await screenshotAttachments(
+        options.conversationId,
+        options.screenshots,
+        preparation.signal,
+      );
+      preparation.signal.throwIfAborted();
       const firstResult = await backend.generate(
         DESIGN_REVIEW_REQUEST,
-        screenshotAttachments(options.conversationId, options.screenshots),
+        attachments,
       );
       if (!sameFiles(initialFiles, backend.getFiles())) {
         backend.setFiles(initialFiles);

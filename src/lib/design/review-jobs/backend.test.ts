@@ -4,6 +4,7 @@ import type { GenerationBackend } from "../../ai/generator-types";
 const mocks = vi.hoisted(() => ({
   api: vi.fn(),
   local: vi.fn(),
+  prepareScreenshot: vi.fn(),
 }));
 
 vi.mock("../../ai/client", () => ({
@@ -12,6 +13,10 @@ vi.mock("../../ai/client", () => ({
 
 vi.mock("../../local-agent/generator", () => ({
   createLocalAgentGenerator: mocks.local,
+}));
+
+vi.mock("../../images/screenshot", () => ({
+  prepareScreenshot: mocks.prepareScreenshot,
 }));
 
 import { createIsolatedDesignReviewSession } from "./backend";
@@ -72,6 +77,88 @@ describe("isolated Design Review backend", () => {
   beforeEach(() => {
     mocks.api.mockReset();
     mocks.local.mockReset();
+    mocks.prepareScreenshot
+      .mockReset()
+      .mockImplementation(async (dataUrl, name) => ({
+        dataUrl,
+        name,
+        mimeType: "image/png",
+      }));
+  });
+
+  it.each(["api", "local"] as const)(
+    "compresses manual and automatic screenshots before %s submission",
+    async (runtime) => {
+      const files = { "index.html": "page" };
+      const backend = fakeBackend(files);
+      vi.mocked(backend.generate).mockResolvedValue(
+        generationResult(
+          files,
+          `<design_review_report>${JSON.stringify(firstReport)}</design_review_report>`,
+        ),
+      );
+      mocks[runtime].mockReturnValue(backend);
+      const compressed = {
+        dataUrl: "data:image/jpeg;base64,/9j/",
+        mimeType: "image/jpeg",
+        name: "preview.jpg",
+      };
+      mocks.prepareScreenshot.mockResolvedValue(compressed);
+      const session = createIsolatedDesignReviewSession({
+        conversationId: "compression",
+        locale: "en",
+        files,
+        screenshots: [
+          { ...screenshot, source: "manual" },
+          { ...screenshot, source: "automatic" },
+        ],
+        provider:
+          runtime === "api"
+            ? { runtime, config: { apiKey: "key", model: "review" } }
+            : { runtime, config: { provider: "codex" } },
+      });
+      await session.run();
+      expect(mocks.prepareScreenshot).toHaveBeenCalledTimes(2);
+      expect(backend.generate).toHaveBeenCalledWith(expect.any(String), [
+        expect.objectContaining({
+          content: compressed.dataUrl,
+          mimeType: "image/jpeg",
+          name: "preview.jpg",
+          size: 3,
+        }),
+        expect.objectContaining({
+          content: compressed.dataUrl,
+          mimeType: "image/jpeg",
+        }),
+      ]);
+    },
+  );
+
+  it("does not start the model when cancelled during screenshot compression", async () => {
+    const files = { "index.html": "page" };
+    const backend = fakeBackend(files);
+    const abort = backend.abort;
+    mocks.api.mockReturnValue(backend);
+    let finish!: (image: typeof screenshot) => void;
+    mocks.prepareScreenshot.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const session = createIsolatedDesignReviewSession({
+      conversationId: "cancel",
+      locale: "en",
+      files,
+      screenshots: [screenshot],
+      provider: { runtime: "api", config: { apiKey: "key", model: "review" } },
+    });
+    const pending = session.run();
+    session.backend.abort();
+    finish(screenshot);
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(abort).toHaveBeenCalledOnce();
+    expect(backend.generate).not.toHaveBeenCalled();
   });
 
   it("creates a fresh API backend with exactly the read-only review tools", async () => {

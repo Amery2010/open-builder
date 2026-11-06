@@ -192,7 +192,7 @@ describe("Design System Application", () => {
     expect(port.commitCalls).toHaveLength(1);
     expect(port.restoreCalls).toHaveLength(0);
     expect(port.snapshot.files["src/App.tsx"]).toContain("export default");
-    expect(port.snapshot.files["DESIGN.md"]).toContain("Unofficial reference");
+    expect(port.snapshot.files["DESIGN.md"]).toBe("# Stripe reference");
     expect(port.snapshot.files["tokens.css"]).toContain("--accent: #6d28d9");
     expect(port.snapshot.designState?.appliedSystem).toEqual(selected);
   });
@@ -369,7 +369,7 @@ describe("Design System Application", () => {
 
     expect(prepared.reference).toEqual(selected);
     expect(prepared.expectedRevision).toBe(1);
-    expect(prepared.files["DESIGN.md"]).toContain("Custom design system");
+    expect(prepared.files["DESIGN.md"]).toBe("# Quiet Workshop reference");
     expect(prepared.files["tokens.css"]).toContain("--motion-base: 180ms");
     expect(prepared.designState.appliedSystem).toEqual(selected);
     expect(port.commitCalls).toHaveLength(0);

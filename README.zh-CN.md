@@ -41,6 +41,10 @@ Tauri 桌面版（macOS / Windows / Linux）提供 stdio MCP 等本机运行能�
 
 ## 功能特性
 
+### 2.0 版本概览
+
+自 1.9.0 起，Open Builder 新增 Design 工作区与多页原型、隔离的桌面本地 CLI 运行时、可复用的项目起点库、会话分支和按版本下载项目 ZIP。完整列表见 [2.0.0 更新日志](CHANGELOG.md#v200)。
+
 ### 核心能力
 
 - **自然语言生成代码** — 描述你的想法，AI 自动规划并生成完整项目结构
@@ -50,12 +54,12 @@ Tauri 桌面版（macOS / Windows / Linux）提供 stdio MCP 等本机运行能�
 - **依赖管理** — AI 可自动修改 `package.json` 并触发依赖重装
 - **构建加速工具** — 通过专用工具安装 shadcn 组件、将截图转换为组件、应用设计规范，并管理类型安全的环境变量 schema
 - **项目规范** — 可读取根目录的 `AGENTS.md`、`CLAUDE.md` 和 `DESIGN.md` 作为生成参考，同时将其视为不能覆盖工具与安全策略的不可信项目数据
-- **项目快照** — 支持查看快照历史、命名快照、查看变更、导出 patch 并回滚到历史版本
+- **项目快照与分支** — 支持查看和命名快照、检查变更、导出 patch 或对应版本 ZIP，并检出历史版本；从历史检出状态继续工作会创建新分支，保留原有对话与项目
 - **项目健康检查** — `/health` 可检查结构、依赖、运行日志、可访问性与响应式风险；隔离的自动 QA 只执行受限项目检查，不访问 MCP 或预览控制台
 - **上下文压缩** — 通过 `/compact` 或命令面板总结长对话，降低 Token 消耗
 - **Plan Mode** — 支持先探索代码并提交方案，用户批准后再写入文件；`ask_user_question` 既可批量确认独立问题，也可逐题进行依赖式压力访谈
 - **Design 模式** — 以项目为单位在编程 / 计划 / 设计间切换，生成带真实导航、共享模拟数据、页面与场景控制的完整多页面产品原型，并提供精选或自定义设计系统与显式设计自检
-- **子代理协作** — 内置代码浏览、代码审查、依赖建议、Bug 调查、UI 审查等只读子代理
+- **子代理协作** — 内置代码浏览、代码审查、依赖建议、Bug 调查、UI 审查等只读子代理，展示流式输出、公开思考摘要、内部工具活动、重试与完成状态
 - **内置搜索** — 支持启用模型内置的搜索服务
 - **桌面 API 代理** — Tauri 可转发经允许的 HTTP/HTTPS 模型请求，处理浏览器 CORS 限制；静态 Web 部署仍依赖服务商允许跨域访问
 - **桌面本地 CLI 运行时** — 可主动选择通过隔离运行的 Codex、Claude、Pi 或 Antigravity CLI 执行完整生成流程，同时保持 API 为默认模式；Codex 可生成图片或以参考图编辑图片，Antigravity 可生成图片但不支持参考图编辑，不支持媒体的服务商不会收到该工具
@@ -66,6 +70,7 @@ Tauri 桌面版（macOS / Windows / Linux）提供 stdio MCP 等本机运行能�
 - **多会话管理** — 会话列表侧边栏支持创建、切换、删除，历史记录持久化保存
 - **会话整理** — 支持会话搜索、置顶、归档、复制与智能重命名
 - **项目起始库** — 可搜索、编辑、更新并复用经过安全处理的本地项目副本及托管项目图片；保存前会确定性分析技术栈、排除敏感路径、脱敏高置信明文凭据，并要求显式确认
+- **项目操作权限** — 文件删除、移动与整体项目替换在执行前请求确认；可单次允许或为符合条件的操作授予当前会话权限，并查看权限活动
 - **智能会话命名** — 根据对话内容自动生成会话标题，无需手动命名
 - **Slash 指令** — 输入框支持 `/new`、`/fork`、`/clear`、`/reset`、`/compact`、`/health`、`/review`、`/continue`、`/retry`
 - **命令面板与快捷键** — 可通过 `Cmd/Ctrl+K` 打开命令面板，并使用键盘新建会话、打开设置、聚焦输入框或停止生成
@@ -73,11 +78,11 @@ Tauri 桌面版（macOS / Windows / Linux）提供 stdio MCP 等本机运行能�
 - **技能系统** — 开启的 Skill 只提供 metadata 供 AI 自动发现；仅在调用 `read_skill` 或为下一条消息选择 Skill 时加载全文，选择结果会传给子代理并在发送后清空。同一轮 Agent 加载的 Skill 会合并为一张可展开列表。8 个内置 Skill 为 `debug-web-app`、`build-tailwind-ui`、`build-accessible-ui`、`write-safe-typescript`、`art-direct-web`、`design-product-ui`、`review-code` 与 `simplify-code`；旧内置 ID 会自动迁移，导入 Skill 默认关闭自动发现
 - **自定义指令** — 高级设置可安全追加最多 32,000 个字符，覆盖 Chat、Plan、重试与子代理，但不能授予工具或改变模式限制；自动 QA、智能标题与上下文压缩不会携带它
 - **本地设置** — 服务商配置、API Key 与自定义指令会持久化到浏览器本地存储
-- **存储治理** — 可查看包含导入设计系统与保留项目图片 Blob 在内的本地数据占用，并安全清理归档会话、空会话、旧快照或全部本地存储域
-- **流式输出** — 实时展示 AI 思考过程和代码生成进度
+- **存储治理** — 可查看包含项目 ZIP 工程包、导入设计系统与保留项目图片 Blob 在内的本地数据占用，并安全清理归档会话、空会话、旧快照或全部本地存储域
+- **流式输出** — 随服务商返回展示正文、工具活动与可读思考摘要；能否返回思考内容取决于运行时、服务商与模型
 - **扩展思考** — 支持 Extended Thinking / Reasoning 模式（DeepSeek-R1、Claude 4.6 等）
-- **一键下载** — 将生成的项目打包为 ZIP 文件下载到本地
-- **工作区工具** — 支持代码/预览切换、使用 Material Icon Theme 图标浏览并搜索和管理文件、Sandpack 控制台，以及桌面/平板/手机预览宽度、自适应和缩放
+- **项目下载** — 将当前项目导出为 ZIP，或从消息旁及快照历史下载对应版本源码与托管图片；工程包准备失败后可重试
+- **工作区工具** — 支持代码/预览切换、使用 Material Icon Theme 图标浏览并搜索和管理文件、Sandpack 控制台，以及桌面/平板/手机预览宽度与缩放
 - **交互式设计修改** — 在受支持的 Sandpack 预览中点选带稳定 `data-ob-id` 的元素，将清洗后的选择上下文交给下一条请求，并通过带快照的保存修改规范语义 Token
 - **设计审查与桌面导出** — 在 Web 或桌面端上传最多三张截图进行按需只读审查，或在桌面端将规范项目文件导出到全新的不覆盖目录
 - **自适应布局** — 桌面端使用横向可调分栏，平板端使用工作区在上、对话在下的纵向可调分栏，手机端使用对话优先并内嵌预览的布局
@@ -105,6 +110,12 @@ Tauri 桌面版（macOS / Windows / Linux）提供 stdio MCP 等本机运行能�
 | `Cmd/Ctrl+/` | 聚焦对话输入框                 |
 | `Esc`        | 优先关闭命令面板，否则停止生成 |
 
+### 项目历史与下载
+
+检出快照会恢复项目文件与可用资源，并在存在相应记录时恢复对话上下文与 Design 状态。旧快照或消息关联已丢失的快照，其上下文或 Design 历史可能不完整。发送新请求或编辑检出的项目会创建新分支；通过对应消息旁的分支历史可返回已保存的后续进展。`/fork` 仍用于创建独立会话。
+
+新快照会排队准备对应版本的 ZIP，旧版本则按需打包。无需切换当前项目，即可通过消息操作或快照历史下载对应源码。本地工程包存储依赖 OPFS 与 Web Locks；存储 API 不可用或打包失败时会明确提示，并支持重试。存储治理会将工程包占用与快照等本地数据一并统计和清理。
+
 ### Design 模式
 
 Design 模式的产物仍位于当前会话的普通项目文件树和 Sandpack 预览中，不创建独立 Artifact 存储。“编程”只调整界面文案，内部继续使用 `"auto"` 兼容值。模式、自动判断结果、待选设计系统与已应用设计系统均按项目记忆；从 Design 进入 Plan 后，批准方案会返回 Design。
@@ -126,7 +137,7 @@ Design 模式的产物仍位于当前会话的普通项目文件树和 Sandpack 
 | 设计系统导入                  | ZIP 或浏览器目录选择器           | ZIP 或本地目录                           |
 | 项目导出                      | ZIP                              | ZIP 或全新唯一命名目录；不提供双向同步   |
 | 模型运行                      | API 或允许浏览器 CORS 的远程端点 | API、Tauri 代理或受支持的本地 CLI 运行时 |
-| 视觉审查                      | 用户手动上传截图                 | 用户手动上传截图                         |
+| 视觉审查                      | 上传截图或采集原型目标           | 上传截图或采集原型目标                   |
 | 本地进程 / stdio / Skill 脚本 | 静态 Web 部署不支持              | 遵循现有桌面能力检测与批准限制           |
 
 Design Review 与自动 QA 明确分离。受限审查运行只能列出、读取和搜索项目文件，并提交最多 8 条结构化问题；它不能写文件、调用 MCP 或联网工具、加载 Skill 或执行脚本。完整原型的证据绑定项目 generation、蓝图修订、页面、场景和视口；声明的目标会在临时预览 iframe 中串行采集，未采集目标显示为未审查，项目发生变化后旧证据显示为已过期。手动审查只有在用户勾选问题并点击**应用所选修复**后，才会进入正常 Design 修改流程。符合条件的 Design 生成完成后，自动审查可以针对确定性问题、P0/P1 视觉问题及非 P3 的系统一致性问题执行一次有界修复，并再做一次复核。只有证据与会话仍为当前状态时才会修复；等待、失败、不可用或被新状态取代的任务会明确显示，也不会被描述为审查无问题。
@@ -206,13 +217,17 @@ pnpm tauri:android:build
 
 请安装并配置一个受支持的 CLI：
 
-- **Codex：**安装官方 Codex CLI，再运行 `codex login`。Open Builder 使用稳定的 [`codex exec --json`](https://learn.chatgpt.com/docs/developer-commands?surface=cli) 协议，并启用 `--ignore-user-config` 与 `--ignore-rules`；随后仅导入经过校验的机器级当前 [`model_provider`](https://developers.openai.com/codex/config-advanced/) 定义及其引用的环境凭据。推理强度会按所选模型实际报告的能力校验，因此 CLI 宣布支持时可使用 `max`、`ultra` 等值；自定义服务商无法验证的能力会保留为“未验证”。自定义服务商还必须声明顶层 `model`；`env_http_headers` 项为可选项，仅在它引用的环境变量存在时生效。项目规则、hooks、插件、无关 MCP 服务、静态服务商密钥和凭据辅助命令仍被隔离。详见官方 [最新模型指南](https://developers.openai.com/api/docs/guides/latest-model)。
+- **Codex：**安装官方 Codex CLI，再运行 `codex login`。Open Builder 优先使用 app-server 增量协议；只有在任务发出前确认能力缺失且通过隔离验证时，才使用 [`codex exec --json`](https://learn.chatgpt.com/docs/developer-commands?surface=cli) 兼容路径。app-server 路径使用私有配置并校验实际隔离状态，exec 路径启用 `--ignore-user-config` 与 `--ignore-rules`；两者均仅导入经过校验的机器级当前 [`model_provider`](https://developers.openai.com/codex/config-advanced/) 定义及其引用的环境凭据。推理强度会按所选模型实际报告的能力校验，因此 CLI 宣布支持时可使用 `max`、`ultra` 等值；自定义服务商无法验证的能力会保留为“未验证”。自定义服务商还必须声明顶层 `model`；`env_http_headers` 项为可选项，仅在它引用的环境变量存在时生效。项目规则、hooks、插件、无关 MCP 服务、静态服务商密钥和凭据辅助命令仍被隔离。详见官方 [最新模型指南](https://developers.openai.com/api/docs/guides/latest-model)。
 - **Claude：**安装官方 Claude Code CLI 并完成账号登录流程（也可运行 `claude auth status` 查看状态）。Open Builder 要求官方文档中的 [`stream-json` 与隔离参数](https://code.claude.com/docs/en/cli-usage)，以受限模式运行，不加载用户／项目设置源，使用私有系统提示文件、严格 MCP 配置，且只开放 Open Builder 工具桥。Claude 的安全模式会连同其他自定义项一起停用本次运行显式注入的 MCP 桥，因此这里不会启用。经过校验的 Claude 网关可提供 endpoint、显式凭据和模型路由环境，但不会加载其余用户设置。Open Builder 会自动对该网关执行有界的只读 `GET /v1/models`，接受官方 [Anthropic 模型列表格式](https://platform.claude.com/docs/en/api/beta/models/list)及兼容网关格式，并按网关顺序展示全部合法 ID，包括 GPT 与 Gemini 模型；不要求开启 Claude Code 的可选[网关目录发现](https://code.claude.com/docs/en/llm-gateway-connect)。本地 alias 与精确 gateway ID 会分别保留。
 - **使用 Node.js 22.19 或更高版本安装 Pi：**运行 `npm install -g --ignore-scripts @earendil-works/pi-coding-agent` 安装。Pi 也提供官方安装器 `curl -fsSL https://pi.dev/install.sh | sh`。Open Builder 会检测已安装版本及所需的 RPC 与隔离能力。启动 `pi` 后，在 Pi 内运行 `/login` 配置模型服务商。详见 [Pi 快速开始](https://pi.dev/docs/latest/quickstart)。
 - **Windows 上的 Pi 独立程序：**从 [Pi release](https://github.com/earendil-works/pi/releases/latest) 下载官方 `pi-windows-x64.zip` 或 `pi-windows-arm64.zip` 及 `SHA256SUMS`，解压；若程序不在 `PATH`，可通过**选择程序**指定 `pi.exe`。
 - **Antigravity：**安装现代 Google Antigravity CLI 并完成账号登录流程。只有当 `agy` 宣布支持官方[流式 headless 协议](https://antigravity.google/docs/cli/headless/)的 `--input-format stream-json`、`--output-format stream-json` 与 `--agent` 参数时，Open Builder 才会接入；可用 `agy models` 查看模型。应用支持官方的 [`modelProvider: "gemini"`](https://antigravity.google/docs/cli/install/#using-a-gemini-api-key) 模式、`GEMINI_API_KEY`，以及可选且经过校验的 `GOOGLE_GEMINI_BASE_URL`。兼容性由实际检测到的结构化 headless 能力决定。应用不会回退到纯文本协议。
 
 启动桌面版，打开 **设置 → 模型 → 运行方式 → 本地 CLI**，选择 CLI 服务商，并确认状态为**已安装并可用**或**已就绪，首条消息将验证登录并可能消耗额度**。后者表示设置页检测不会发起模型调用；第一条真实消息才会验证凭据或网关，并可能消耗额度。Open Builder 会扫描 `PATH` 与常见安装位置；**选择程序**只会把验证过的可执行文件覆盖路径保存到原生 app data。模型和推理强度偏好按服务商分别保存，并由所选 CLI 提供；普通检测使用短时缓存，**重新检测**会强制读取最新目录。如果目录不完整或已过期（partial/stale），当前保存的模型和推理强度仍可作为**未验证**选项使用，未知的推理强度会隐藏，界面会提示而不会清空偏好。Codex、Claude、Pi 与 Antigravity 之间切换时绝不会复用对方的 session；安装、启动配置、模型、推理强度或协议发生变化时会新建对应服务商的 session。
+
+本地 CLI 的正文和公开思考摘要会在到达后进入聊天链路，界面继续按原有逐字效果播放。Codex 优先使用 app-server 增量协议，仅在运行前通过兼容与隔离验证后降级；能否返回思考文本仍取决于 CLI、模型和服务商。详见[流式输出与思考摘要说明](docs/local-cli-streaming.md)。
+
+桌面后台进程仍存活时，页面刷新后会检查并重新接管原 CLI 任务，不重新发送提示词；已确认工具结果只重放展示，不重复执行。如果工具已开始但无法确认副作用结果，恢复会停止，并要求先核对项目或外部操作。点击 Stop、切换会话或分支仍表示取消；桌面进程退出或崩溃后无法通过此机制恢复。涉及原生重连的更新需要重启或重新构建桌面应用，只刷新页面不会加载新的原生能力。
 
 本地 CLI 的 Chat 运行中，Codex 会收到支持可选 opaque 参考图 ID 的 `generate_image`，Antigravity 只会收到文生图能力，Claude 与 Pi 不会收到该工具。生成结果会先保留在对话中；只有代理为已初始化项目调用 `import_generated_image` 后，Host 才会在请求的安全路径创建托管项目图片模块。这些媒体工具不向 Plan 及其他受限 profile 开放。
 
@@ -373,7 +388,7 @@ docker run --rm -p 8080:8080 ghcr.io/amery2010/open-builder:latest
 
 打开 `http://localhost:8080`。镜像支持 `linux/amd64` 和 `linux/arm64`，且不会包含服务商凭据、API 代理、stdio MCP、本地 CLI 或 Skill 脚本运行时；浏览器直接访问的模型和搜索服务仍须通过 CORS 允许当前部署来源。
 
-推送 `v1.8.0` 这样的语义化版本标签后，GitHub Actions 会先执行完整前端门禁和容器冒烟检查，再向 `ghcr.io/amery2010/open-builder` 发布 `1.8.0`、`1.8`、`1` 与 `latest` 标签。预发布版本只发布完整的预发布标签。GitHub 首次创建容器包时默认设为私有，因此仓库所有者需要在首次成功发布后将可见性一次性调整为公开。
+推送 `v2.0.0` 这样的语义化版本标签后，GitHub Actions 会先执行完整前端门禁和容器冒烟检查，再向 `ghcr.io/amery2010/open-builder` 发布 `2.0.0`、`2.0`、`2` 与 `latest` 标签。预发布版本只发布完整的预发布标签。GitHub 首次创建容器包时默认设为私有，因此仓库所有者需要在首次成功发布后将可见性一次性调整为公开。
 
 详见 [.github/workflows/release.yml](.github/workflows/release.yml)。
 

@@ -1,3 +1,4 @@
+import { reconcileConversation } from "../conversation/branches";
 import { useConversationStore } from "../../store/conversation";
 import { useDesignReviewStore } from "../../store/design-review";
 import { useSnapshotStore } from "../../store/snapshot";
@@ -99,12 +100,15 @@ export async function mutateConversationDesignTokens(
           }
           previousFiles = conversation.files;
           committedRevision = Math.max(Date.now(), conversation.updatedAt + 1);
-          committedConversation = {
-            ...conversation,
-            files: { ...request.nextFiles },
-            isProjectInitialized: Object.keys(request.nextFiles).length > 0,
-            updatedAt: committedRevision,
-          };
+          committedConversation = reconcileConversation(
+            {
+              ...conversation,
+              files: { ...request.nextFiles },
+              isProjectInitialized: Object.keys(request.nextFiles).length > 0,
+              updatedAt: committedRevision,
+            },
+            conversation,
+          );
           return {
             conversations: {
               ...state.conversations,
@@ -136,11 +140,14 @@ export async function mutateConversationDesignTokens(
             return {
               conversations: {
                 ...state.conversations,
-                [request.conversationId]: {
-                  ...conversation,
-                  files: previousFiles!,
-                  updatedAt: request.currentRevision as number,
-                },
+                [request.conversationId]: reconcileConversation(
+                  {
+                    ...initial,
+                    files: previousFiles!,
+                    updatedAt: request.currentRevision as number,
+                  },
+                  conversation,
+                ),
               },
             };
           });
@@ -163,11 +170,14 @@ export async function mutateConversationDesignTokens(
               return {
                 conversations: {
                   ...state.conversations,
-                  [request.conversationId]: {
-                    ...conversation,
-                    files: previousFiles!,
-                    updatedAt: request.currentRevision as number,
-                  },
+                  [request.conversationId]: reconcileConversation(
+                    {
+                      ...initial,
+                      files: previousFiles!,
+                      updatedAt: request.currentRevision as number,
+                    },
+                    conversation,
+                  ),
                 },
               };
             });

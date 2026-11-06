@@ -170,7 +170,7 @@ export function SessionList({ onClose }: SessionListProps) {
         const localText =
           ai.runtime === "localCli"
             ? await import("../../lib/local-agent/generator").then(
-                ({ runLocalUtilityText }) => {
+                ({ runLocalTitleText }) => {
                   const provider = ai.localAgent.provider;
                   const preferences = ai.localAgent.preferences[provider];
                   return (
@@ -178,7 +178,7 @@ export function SessionList({ onClose }: SessionListProps) {
                     prompt: string,
                     options?: { timeoutMs?: number; signal?: AbortSignal },
                   ) =>
-                    runLocalUtilityText(
+                    runLocalTitleText(
                       {
                         provider,
                         model: preferences.model,

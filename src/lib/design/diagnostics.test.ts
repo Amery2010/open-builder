@@ -62,7 +62,7 @@ const tokenCss = `/* package sha256 ${digest} */
   --motion-base: 180ms;
 }`;
 const files: ProjectFiles = {
-  "DESIGN.md": `<!-- package sha256 ${digest} -->\n# Graphite`,
+  "DESIGN.md": "# Graphite",
   "tokens.css": tokenCss,
   "index.html":
     '<html lang="en"><head><title>App</title></head><body><main id="root"></main></body></html>',
@@ -188,7 +188,7 @@ describe("Design diagnostics", () => {
       designSystem: {
         applied: { id: "graphite", digest },
         files: {
-          designDigestMarkerMatches: true,
+          designDigestMarkerMatches: false,
           tokenDigestMarkerMatches: true,
         },
       },

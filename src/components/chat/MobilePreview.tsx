@@ -2,8 +2,9 @@ import { SandpackProvider, SandpackPreview } from "@codesandbox/sandpack-react";
 import type { SandpackPredefinedTemplate } from "@codesandbox/sandpack-react";
 import { useTheme } from "../../hooks/useTheme";
 import type { ProjectAssets, ProjectFiles } from "../../types";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { projectFilesForPreview } from "../../lib/utils/project-file-policy";
+import { projectSandpackRuntime } from "../code-viewer/sandpack-runtime-preview";
 import { useT } from "../../i18n";
 import { SandpackRefreshAction } from "../code-viewer/SandpackPreviewActions";
 import {
@@ -13,6 +14,7 @@ import {
 import { Button } from "../ui/button";
 import { useConversationStore } from "../../store/conversation";
 import { projectFilesForSandpack } from "../../lib/project-assets/core";
+import { SandpackRuntimeSync } from "../code-viewer/SandpackRuntimeSync";
 
 const EMPTY_PROJECT_ASSETS: ProjectAssets = {};
 
@@ -62,6 +64,7 @@ export function MobilePreview({
 }: MobilePreviewProps) {
   const t = useT();
   const isDark = useTheme();
+  const conversationId = useConversationStore((state) => state.activeId);
   const assets = useConversationStore((state) => {
     const active = state.activeId
       ? state.conversations[state.activeId]
@@ -83,20 +86,24 @@ export function MobilePreview({
     () => ({ files, renderRetry, sandpackKey }),
     [files, renderRetry, sandpackKey],
   );
+  const projectedRef = useRef<string | null | undefined>(undefined);
   useEffect(() => {
     let cancelled = false;
-    setAssetPreviewFiles(previewFiles);
     setAssetProjectionError(null);
     if (Object.keys(assets).length === 0) {
+      projectedRef.current = conversationId;
+      setAssetPreviewFiles(previewFiles);
       setAssetProjectionStatus("ready");
       return () => {
         cancelled = true;
       };
     }
-    setAssetProjectionStatus("loading");
+    if (projectedRef.current !== conversationId)
+      setAssetProjectionStatus("loading");
     void projectFilesForSandpack(previewFiles, assets).then(
       (derived) => {
         if (cancelled) return;
+        projectedRef.current = conversationId;
         setAssetPreviewFiles(derived);
         setAssetProjectionStatus("ready");
       },
@@ -111,15 +118,17 @@ export function MobilePreview({
     return () => {
       cancelled = true;
     };
-  }, [assetProjectionRetry, assets, previewFiles]);
+  }, [assetProjectionRetry, assets, conversationId, previewFiles]);
   const sandpackFiles = useMemo(() => {
     return Object.fromEntries(
-      Object.entries(assetPreviewFiles).map(([path, content]) => [
+      Object.entries(
+        projectSandpackRuntime(assetPreviewFiles, true, template).files,
+      ).map(([path, content]) => [
         path.startsWith("/") ? path : `/${path}`,
         { code: content },
       ]),
     );
-  }, [assetPreviewFiles]);
+  }, [assetPreviewFiles, template]);
 
   return (
     <div className="editor border rounded-lg min-h-160 overflow-hidden bg-background">
@@ -169,18 +178,25 @@ export function MobilePreview({
           )}
         >
           <SandpackProvider
-            key={sandpackKey}
+            key={`${sandpackKey}:${renderRetry}`}
             template={template as SandpackPredefinedTemplate}
             theme={isDark ? "dark" : "light"}
             files={sandpackFiles}
           >
+            <SandpackRuntimeSync />
             <SandpackPreview
               showNavigator
               showOpenInCodeSandbox={false}
               showRefreshButton={false}
               showRestartButton={false}
               actionsChildren={
-                <SandpackRefreshAction label={t.toolbar.reloadPreview} />
+                <SandpackRefreshAction
+                  label={t.toolbar.reloadPreview}
+                  onReload={() => {
+                    setRenderRetry((attempt) => attempt + 1);
+                    onReloadPreview();
+                  }}
+                />
               }
               style={{ height: 640 }}
             />

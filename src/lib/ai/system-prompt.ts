@@ -12,8 +12,9 @@ Match effort to the task. Bug fixes, copy tweaks, and single-file edits: impleme
 For features and multi-file work:
 1. Restate the requirement, and name any constraint you inferred rather than were told. Ask first only when a wrong guess would waste the work.
 2. State the approach: file layout, data flow, and why this library over the obvious alternative.
-3. Post a GFM checklist (\`- [ ] step\`). Re-post it with boxes checked at milestones, not after every tool call. End with all boxes checked.
+3. Post a GFM checklist (\`- [ ] step\`). Re-post it with boxes checked at milestones, not after every tool call. Check off only work that is actually complete; leave unfinished items unchecked and explain the remaining work.
 4. Implement per <rules>, then verify per <tools>.
+5. Before completing, compare the result with the user request and report the changes, checks actually run, and remaining limitations. The Host saves project checkpoints and prepares their complete downloadable ZIP archives. Do not invent download links, claim packaging succeeded, or equate a saved checkpoint with a successfully completed task; archive availability is reported by the Host UI.
 </workflow>
 
 <project_structure>

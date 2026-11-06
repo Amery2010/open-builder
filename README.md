@@ -41,6 +41,10 @@ The Tauri desktop build (macOS / Windows / Linux) provides local runtime capabil
 
 ## Features
 
+### Version 2.0 at a Glance
+
+Since 1.9.0, Open Builder adds Design workspaces and multi-page prototypes, isolated desktop CLI runtimes, reusable project starters, conversation branches, and version-specific project ZIP downloads. See the [2.0.0 changelog](CHANGELOG.md#v200) for the full list.
+
 ### Core
 
 - **Natural Language to Code** — Describe your idea, AI plans and generates the complete project structure
@@ -50,12 +54,12 @@ The Tauri desktop build (macOS / Windows / Linux) provides local runtime capabil
 - **Dependency Management** — AI can modify `package.json` and trigger dependency reinstallation
 - **Build Accelerators** — Install shadcn components, translate screenshots into components, apply design specifications, and manage typed environment schemas through dedicated tools
 - **Project Guidance** — Root-level `AGENTS.md`, `CLAUDE.md`, and `DESIGN.md` files can guide generation while remaining untrusted project data that cannot override tool or safety policy
-- **Project Snapshots** — Browse snapshot history, name snapshots, inspect diffs, export patches, and roll back to historical versions
+- **Project Snapshots & Branches** — Browse and name snapshots, inspect diffs, export patches or version-specific ZIPs, and return to historical versions; continuing from a checkout creates a branch while preserving the original conversation and project
 - **Project Health Check** — Run `/health` to inspect structure, dependencies, runtime logs, accessibility, and responsive risks; isolated Automatic QA performs a restricted project check without MCP or preview-console access
 - **Context Compression** — Use `/compact` or the command palette to summarize long conversations and reduce token usage
 - **Plan Mode** — Explore the code and submit an implementation plan for approval before writing files; `ask_user_question` supports both independent clarification batches and one-question-at-a-time stress-test interviews
 - **Design Mode** — Generate runnable marketing sites and complete multi-page product prototypes with real navigation, shared mock data, page and scenario controls, curated or custom design systems, and explicit design self-checks
-- **Subagent Collaboration** — Built-in read-only subagents for code exploration, review, dependency advice, bug investigation, and UI critique
+- **Subagent Collaboration** — Built-in read-only subagents for code exploration, review, dependency advice, bug investigation, and UI critique, with streamed output, public thinking summaries, nested tool activity, retries, and completion status
 - **Built-in Search** — Supports enabling the model's built-in search service
 - **Desktop API Proxy** — Tauri can forward approved HTTP/HTTPS provider requests that would otherwise be blocked by browser CORS; static Web deployments still depend on provider CORS support
 - **Desktop Local CLI Runtime** — Explicitly run the complete generation workflow through an isolated, signed-in Codex, Claude, Pi, or Antigravity CLI while keeping API mode as the default; Codex can generate or edit images, Antigravity can generate images without reference-image editing, and unsupported providers do not receive the media tool
@@ -66,6 +70,7 @@ The Tauri desktop build (macOS / Windows / Linux) provides local runtime capabil
 - **Multi-Session Management** — Sidebar with create, switch, delete sessions; history persisted locally
 - **Session Organization** — Search, pin, archive, fork, and smart-rename conversations
 - **Project Starter Library** — Search, edit, update, and reuse safely prepared local project copies with deterministic stack metadata and managed project images; sensitive paths are excluded and high-confidence plaintext credentials are redacted before an explicit save confirmation
+- **Project Permissions** — Review file deletion, moves, and full project replacement before execution; allow once or grant eligible operations for the current session, and inspect permission activity
 - **Smart Session Naming** — Auto-generates session titles based on conversation content
 - **Slash Commands** — Input box supports `/new`, `/fork`, `/clear`, `/reset`, `/compact`, `/health`, `/review`, `/continue`, and `/retry`
 - **Command Palette & Shortcuts** — Open commands with `Cmd/Ctrl+K`, create sessions, open settings, focus input, or stop generation from the keyboard
@@ -73,11 +78,11 @@ The Tauri desktop build (macOS / Windows / Linux) provides local runtime capabil
 - **Skills System** — Enabled Skills expose metadata for automatic discovery; full instructions load only after `read_skill` or when a Skill is selected for the next message, which also applies to subagents and clears after sending. Skill loads in one Agent turn appear as one expandable list. The eight built-ins are `debug-web-app`, `build-tailwind-ui`, `build-accessible-ui`, `write-safe-typescript`, `art-direct-web`, `design-product-ui`, `review-code`, and `simplify-code`; legacy built-in IDs migrate automatically, while imported Skills start with discovery disabled
 - **Custom Instructions** — Advanced settings can safely append up to 32,000 characters to Chat, Plan, retry, and subagent requests without granting tools or changing mode restrictions; utility calls such as Automatic QA, titles, and compression exclude them
 - **Local Settings** — Provider configuration, API keys, and custom instructions persist in browser local storage
-- **Storage Governance** — Inspect local data usage, including imported Design systems and retained project-image Blobs, and safely clean archived sessions, empty sessions, old snapshots, or every local storage domain
-- **Streaming Output** — Real-time display of AI thinking process and code generation progress
+- **Storage Governance** — Inspect local data usage, including project ZIP archives, imported Design systems, and retained project-image Blobs, and safely clean archived sessions, empty sessions, old snapshots, or every local storage domain
+- **Streaming Output** — Display generated text, tool activity, and readable thinking summaries as the provider emits them; thinking availability depends on the runtime, provider, and model
 - **Extended Thinking** — Supports Extended Thinking / Reasoning mode (DeepSeek-R1, Claude 4.6, etc.)
-- **One-Click Download** — Export generated project as a ZIP file
-- **Workspace Tools** — Switch between code and preview, browse files with Material Icon Theme artwork, search and manage files, inspect the Sandpack console, and preview desktop/tablet/phone widths with fit and zoom controls
+- **Project Downloads** — Export the current project as ZIP, or download a snapshot's matching source and managed images from its message or snapshot history; failed archive preparation can be retried
+- **Workspace Tools** — Switch between code and preview, browse files with Material Icon Theme artwork, search and manage files, inspect the Sandpack console, and preview desktop/tablet/phone widths with zoom controls
 - **Interactive Design Editing** — Point-select stable `data-ob-id` elements in supported Sandpack previews, pass a sanitized selection to the next request, and tune canonical semantic tokens with snapshot-backed saves
 - **Design Review & Desktop Export** — Upload up to three screenshots for an opt-in read-only review on Web or desktop, or export canonical project files from desktop to a new non-overwriting directory
 - **Adaptive Layout** — Desktop uses a horizontal resizable split, tablets use a vertical resizable workspace-over-chat split, and phones use a chat-first layout with inline preview
@@ -105,6 +110,12 @@ The Tauri desktop build (macOS / Windows / Linux) provides local runtime capabil
 | `Cmd/Ctrl+/` | Focus the chat input                               |
 | `Esc`        | Close the palette first, otherwise stop generation |
 
+### Project History and Downloads
+
+Checking out a snapshot restores its project files and available assets, along with conversation context and Design state when those records were saved. Legacy snapshots or snapshots whose message links are missing may have incomplete context or Design history. Sending a new request or editing the checked-out project starts a new branch. Use branch history beside the relevant message to return to a saved continuation; `/fork` still creates a separate session.
+
+New snapshots queue version-specific ZIP preparation, while older versions are packaged on demand. Download the corresponding source from message actions or snapshot history without switching the current project. Local archive storage requires OPFS and Web Locks; an unavailable storage API or packaging failure is reported and can be retried. Storage Governance includes archive usage and cleanup alongside snapshots and other local data.
+
 ### Design Mode
 
 Design mode keeps its output in the current conversation's normal project file tree and Sandpack preview; it does not create a separate artifact store. The Code label retains the existing internal `"auto"` value for compatibility. The mode and its automatic decision, selected system, and applied system are remembered per project. Entering Plan from Design returns to Design after approval.
@@ -120,14 +131,14 @@ Design mode keeps its output in the current conversation's normal project file t
 - Point selection is available for `static`, `vite`, `vite-react`, and `vite-react-ts`. Unsupported or code-only projects can still use Design prompts and file tools, but the UI explains why selection or live token preview is unavailable.
 - Legacy root-only `DESIGN.md` files remain read-only visual references until the user explicitly upgrades them to a token-bearing system.
 
-| Capability                              | Web                                              | Desktop                                                              |
-| --------------------------------------- | ------------------------------------------------ | -------------------------------------------------------------------- |
-| Generation, live preview, point editing | Full core flow                                   | Full core flow                                                       |
-| Design-system import                    | ZIP or browser directory picker                  | ZIP or local directory                                               |
-| Project export                          | ZIP                                              | ZIP or a new, uniquely named directory; no two-way sync              |
-| Model runtime                           | API or remote endpoint that permits browser CORS | API, Tauri proxy, or supported local CLI runtime                     |
-| Visual review                           | User-uploaded screenshots                        | User-uploaded screenshots                                            |
-| Local processes / stdio / Skill scripts | Unavailable in a static Web deployment           | Subject to the existing desktop capability and approval restrictions |
+| Capability                              | Web                                                | Desktop                                                              |
+| --------------------------------------- | -------------------------------------------------- | -------------------------------------------------------------------- |
+| Generation, live preview, point editing | Full core flow                                     | Full core flow                                                       |
+| Design-system import                    | ZIP or browser directory picker                    | ZIP or local directory                                               |
+| Project export                          | ZIP                                                | ZIP or a new, uniquely named directory; no two-way sync              |
+| Model runtime                           | API or remote endpoint that permits browser CORS   | API, Tauri proxy, or supported local CLI runtime                     |
+| Visual review                           | Uploaded screenshots or captured prototype targets | Uploaded screenshots or captured prototype targets                   |
+| Local processes / stdio / Skill scripts | Unavailable in a static Web deployment             | Subject to the existing desktop capability and approval restrictions |
 
 Design Review is deliberately separate from Automatic QA. Its restricted run can only list, read, and search project files and submit up to eight structured findings; it cannot write files, use MCP or network tools, load Skills, or run scripts. Complete-prototype reviews bind evidence to the project generation, blueprint revision, page, scenario, and viewport. They capture declared targets serially in a temporary preview iframe, mark uncaptured targets as unreviewed, and mark prior evidence stale after the project changes. A manual review never starts a fix until the user selects findings and clicks **Apply selected fixes**. After an eligible Design generation, the automatic review may run one bounded repair for deterministic issues, P0/P1 visual findings, and non-P3 system-consistency findings, followed by one verification pass. It repairs only while the evidence and conversation remain current; deferred, failed, unavailable, or superseded work is reported explicitly and is never presented as a clean review.
 
@@ -206,13 +217,17 @@ The desktop app can use installed Codex, Claude, Pi, and Antigravity CLIs as com
 
 Install and configure one supported CLI:
 
-- **Codex:** install the official Codex CLI, then run `codex login`. Open Builder uses the stable [`codex exec --json`](https://learn.chatgpt.com/docs/developer-commands?surface=cli) protocol with `--ignore-user-config` and `--ignore-rules`, then imports only the selected, validated machine-level [`model_provider`](https://developers.openai.com/codex/config-advanced/) definition and its referenced environment credentials. Reasoning effort is checked against the selected model's reported capabilities, so values such as `max` and `ultra` work when the CLI advertises them; custom-provider capabilities that cannot be verified remain explicitly unverified. Custom providers must also declare a top-level `model`; `env_http_headers` entries remain optional and are applied only when their referenced environment variable exists. Project rules, hooks, plugins, unrelated MCP servers, static provider secrets, and credential-helper commands remain excluded. See the official [latest-model guidance](https://developers.openai.com/api/docs/guides/latest-model).
+- **Codex:** install the official Codex CLI, then run `codex login`. Open Builder prefers the app-server delta protocol; only a verified capability limitation and successful isolation checks permit the [`codex exec --json`](https://learn.chatgpt.com/docs/developer-commands?surface=cli) compatibility path before a task starts. The app-server path uses a private configuration with effective-isolation checks; the exec path uses `--ignore-user-config` and `--ignore-rules`. Both import only the selected, validated machine-level [`model_provider`](https://developers.openai.com/codex/config-advanced/) definition and its referenced environment credentials. Reasoning effort is checked against the selected model's reported capabilities, so values such as `max` and `ultra` work when the CLI advertises them; custom-provider capabilities that cannot be verified remain explicitly unverified. Custom providers must also declare a top-level `model`; `env_http_headers` entries remain optional and are applied only when their referenced environment variable exists. Project rules, hooks, plugins, unrelated MCP servers, static provider secrets, and credential-helper commands remain excluded. See the official [latest-model guidance](https://developers.openai.com/api/docs/guides/latest-model).
 - **Claude:** install the official Claude Code CLI and complete its account sign-in flow (or run `claude auth status` to inspect it). Open Builder requires the documented [`stream-json` and isolation flags](https://code.claude.com/docs/en/cli-usage) and runs in restricted mode with no user/project setting sources, a private system-prompt file, strict MCP configuration, and only the Open Builder tool bridge. Claude's safe mode is intentionally not used because it disables the explicit per-run MCP bridge along with other customizations. A validated Claude gateway configuration may supply its endpoint, explicit credential, and model-routing environment without loading the rest of user settings. Open Builder automatically performs a bounded, read-only `GET /v1/models` against that configured gateway, accepts the documented [Anthropic model-list shape](https://platform.claude.com/docs/en/api/beta/models/list) and compatible gateway shapes, and shows every valid ID in gateway order, including GPT and Gemini models; this does not require Claude Code's optional [gateway discovery](https://code.claude.com/docs/en/llm-gateway-connect) switch. Local aliases remain separate from exact gateway IDs.
 - **Pi with Node.js 22.19 or newer:** Install with `npm install -g --ignore-scripts @earendil-works/pi-coding-agent`. Pi also publishes the official installer `curl -fsSL https://pi.dev/install.sh | sh`. Open Builder detects the installed version and checks its required RPC and isolation capabilities. Start `pi`, then run `/login` inside Pi to configure a model provider. See the [Pi quickstart](https://pi.dev/docs/latest/quickstart).
 - **Pi standalone on Windows:** download the official `pi-windows-x64.zip` or `pi-windows-arm64.zip` asset and `SHA256SUMS` from a [Pi release](https://github.com/earendil-works/pi/releases/latest), extract it, then select `pi.exe` with **Choose program** if it is not on `PATH`.
 - **Antigravity:** install the modern Google Antigravity CLI and complete its account sign-in flow. Open Builder accepts `agy` only when it advertises the official [streaming headless protocol](https://antigravity.google/docs/cli/headless/) flags `--input-format stream-json`, `--output-format stream-json`, and `--agent`; use `agy models` to inspect available models. The official [`modelProvider: "gemini"`](https://antigravity.google/docs/cli/install/#using-a-gemini-api-key) mode is supported with `GEMINI_API_KEY` and an optional validated `GOOGLE_GEMINI_BASE_URL`. Compatibility is determined by the detected structured headless capabilities. Plain-text fallback is intentionally unavailable.
 
 Start the desktop app, open **Settings → Model → Runtime → Local CLI**, select the CLI provider, and confirm that its status is either **Installed and ready** or **Ready. The first message verifies login and may use quota.** The latter means the first real message—not the settings scan—will verify the configured credentials or gateway and may consume quota. Open Builder scans `PATH` and common installation locations; **Choose program** stores only a validated executable override in native app data. Model and reasoning choices are provider-specific and come from the selected CLI. Ordinary checks use a short-lived cached catalog; **Rescan** forces a fresh read. If a catalog is partial or stale, the currently saved model and effort remain selectable as **Unverified**, unknown effort choices are hidden, and the UI warns rather than clearing the preference. Switching among Codex, Claude, Pi, and Antigravity never reuses another provider's session; an installation, launch configuration, model, effort, or protocol change starts a fresh provider-scoped session.
+
+Local CLI output and any public thinking summaries enter chat as they arrive, while the existing typewriter animation controls display speed. Codex prefers the app-server delta protocol with a verified pre-run compatibility fallback; thinking text still depends on the CLI, model, and provider. See [streaming and thinking behavior](docs/local-cli-streaming.md).
+
+If the page reloads while the desktop process remains running, Open Builder checks for the original CLI task and reconnects without resending the prompt. Confirmed tool results are replayed without repeating execution. If a tool started but its side effects cannot be confirmed, recovery stops and asks you to check the project or external operation before continuing. Stop or switching sessions or branches cancels the run; exiting or crashing the desktop process ends this recovery window. Native recovery changes require restarting or rebuilding the desktop app, not just refreshing its page.
 
 In Local CLI Chat runs, Codex receives `generate_image` with optional opaque reference-image IDs, while Antigravity receives text-to-image generation only. Claude and Pi do not receive that tool. A generated result stays in the conversation until the agent calls `import_generated_image` for an initialized project; the Host then creates a managed project-image module at the requested safe path. These media tools remain unavailable in Plan and other restricted profiles.
 
@@ -373,7 +388,7 @@ docker run --rm -p 8080:8080 ghcr.io/amery2010/open-builder:latest
 
 Open `http://localhost:8080`. The image supports `linux/amd64` and `linux/arm64`. It intentionally contains no provider credentials, API proxy, stdio MCP, Local CLI, or Skill script runtime; browser-facing provider and search endpoints must allow the deployed origin through CORS.
 
-Pushing a semantic version tag such as `v1.8.0` runs the frontend quality gates and a container smoke test before publishing `1.8.0`, `1.8`, `1`, and `latest` tags to `ghcr.io/amery2010/open-builder`. Pre-release tags publish only their full pre-release version. GitHub initializes a new container package as private, so a repository owner must change its visibility to public once after the first successful publish.
+Pushing a semantic version tag such as `v2.0.0` runs the frontend quality gates and a container smoke test before publishing `2.0.0`, `2.0`, `2`, and `latest` tags to `ghcr.io/amery2010/open-builder`. Pre-release tags publish only their full pre-release version. GitHub initializes a new container package as private, so a repository owner must change its visibility to public once after the first successful publish.
 
 See [.github/workflows/release.yml](.github/workflows/release.yml).
 

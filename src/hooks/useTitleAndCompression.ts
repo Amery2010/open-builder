@@ -1,3 +1,7 @@
+import {
+  captureConversationIdentity,
+  isConversationIdentityCurrent,
+} from "../lib/conversation/branches";
 import { useCallback, useRef } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { useConversationStore, DEFAULT_TITLE } from "../store/conversation";
@@ -15,6 +19,7 @@ interface UseTitleAndCompressionArgs {
     prompt: string,
     options?: { timeoutMs?: number; signal?: AbortSignal },
   ) => Promise<string>;
+  generateTitleOverride?: UseTitleAndCompressionArgs["generateTextOverride"];
 }
 
 interface SmartTitleRequest {
@@ -28,6 +33,7 @@ export function useTitleAndCompression({
   setIsGenerating,
   setMessages,
   generateTextOverride,
+  generateTitleOverride,
 }: UseTitleAndCompressionArgs) {
   const titleTasksRef = useRef(new Set<string>());
 
@@ -59,7 +65,7 @@ export function useTitleAndCompression({
         const title = await generateSmartTitle(
           [firstRequest],
           config,
-          generateTextOverride,
+          generateTitleOverride ?? generateTextOverride,
         );
         if (!title || title === provisionalTitle) return;
 
@@ -79,7 +85,7 @@ export function useTitleAndCompression({
         titleTasksRef.current.delete(conversationId);
       }
     },
-    [generateTextOverride],
+    [generateTextOverride, generateTitleOverride],
   );
 
   const compressContext = useCallback(async () => {
@@ -88,15 +94,22 @@ export function useTitleAndCompression({
       ? storeState.conversations[storeState.activeId]
       : null;
     if (!conv) return;
+    const identity = captureConversationIdentity(conv);
+    const isCurrent = () =>
+      useConversationStore.getState().activeId === conv.id &&
+      isConversationIdentityCurrent(
+        identity,
+        useConversationStore.getState().conversations[conv.id],
+      );
 
     setIsGenerating(true);
     try {
       const cfg = await resolveConfig();
-      if (useConversationStore.getState().activeId !== conv.id) return;
+      if (!isCurrent()) return;
       const { runCompress } = await import("../lib/utils/run-compress");
-      await runCompress(cfg, conv, generateTextOverride);
+      await runCompress(cfg, conv, generateTextOverride, isCurrent);
     } catch (err: any) {
-      if (useConversationStore.getState().activeId !== conv.id) return;
+      if (!isCurrent()) return;
       setMessages((prev) => [
         ...prev,
         {
@@ -105,7 +118,7 @@ export function useTitleAndCompression({
         },
       ]);
     } finally {
-      if (useConversationStore.getState().activeId === conv.id) {
+      if (isCurrent()) {
         setIsGenerating(false);
       }
     }

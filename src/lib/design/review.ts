@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { readScreenshotImage } from "../images/screenshot";
 import type { Message } from "../../types";
 import type { ResolvedLocale } from "../../i18n";
 import type {
@@ -116,32 +117,6 @@ export function getDesignReviewScreenshotByteLength(dataUrl: string): number {
   return Math.max(0, Math.floor((encoded.length * 3) / 4) - padding);
 }
 
-function hasExpectedImageSignature(
-  format: "png" | "jpeg" | "webp",
-  encoded: string,
-): boolean {
-  let header: number[];
-  try {
-    header = Array.from(atob(encoded.slice(0, 32)), (character) =>
-      character.charCodeAt(0),
-    );
-  } catch {
-    return false;
-  }
-  if (format === "png") {
-    return [137, 80, 78, 71, 13, 10, 26, 10].every(
-      (byte, index) => header[index] === byte,
-    );
-  }
-  if (format === "jpeg") {
-    return header[0] === 0xff && header[1] === 0xd8 && header[2] === 0xff;
-  }
-  return (
-    String.fromCharCode(...header.slice(0, 4)) === "RIFF" &&
-    String.fromCharCode(...header.slice(8, 12)) === "WEBP"
-  );
-}
-
 export function validateDesignReviewScreenshots(
   screenshots: readonly DesignReviewScreenshot[],
 ): void {
@@ -156,25 +131,10 @@ export function validateDesignReviewScreenshots(
   let totalBytes = 0;
   const targetKeys = new Set<string>();
   for (const screenshot of screenshots) {
-    const match =
-      /^data:image\/(png|jpeg|webp);base64,([A-Za-z0-9+/]*={0,2})$/.exec(
-        screenshot.dataUrl,
-      );
-    if (!match) {
+    try {
+      readScreenshotImage(screenshot.dataUrl);
+    } catch {
       throw new Error("Design Review received an invalid screenshot payload.");
-    }
-    if (
-      !hasExpectedImageSignature(match[1] as "png" | "jpeg" | "webp", match[2])
-    ) {
-      throw new Error(
-        "Design Review screenshot data does not match its image type.",
-      );
-    }
-    if (
-      screenshot.mimeType !== undefined &&
-      screenshot.mimeType !== `image/${match[1]}`
-    ) {
-      throw new Error("Design Review screenshot MIME metadata does not match.");
     }
     const decodedBytes = getDesignReviewScreenshotByteLength(
       screenshot.dataUrl,

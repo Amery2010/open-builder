@@ -427,8 +427,6 @@ describe("advanced project write tools", () => {
     expect(String(fetchMock.mock.calls[0][0])).toContain(
       DESIGN_STYLE_SOURCE_COMMIT,
     );
-    expect(deps.getFiles()["DESIGN.md"]).toContain(
-      "Untrusted visual reference",
-    );
+    expect(deps.getFiles()["DESIGN.md"]).toBe("# Stripe\nUse purple.");
   });
 });

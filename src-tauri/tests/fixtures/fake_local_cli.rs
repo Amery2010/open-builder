@@ -370,7 +370,10 @@ fn run_codex(mode: &str, args: &[String]) {
         return;
     }
     if mode.contains("resource-discovery") {
-        for (tool, key) in [("list_mcp_resources", "resources"), ("list_mcp_resource_templates", "resourceTemplates")] {
+        for (tool, key) in [
+            ("list_mcp_resources", "resources"),
+            ("list_mcp_resource_templates", "resourceTemplates"),
+        ] {
             let payload = json_escape(&format!("{{\"{key}\":[]}}"));
             writeln!(stdout, "{{\"type\":\"item.started\",\"item\":{{\"id\":\"{tool}\",\"type\":\"mcp_tool_call\",\"server\":\"codex\",\"tool\":\"{tool}\",\"arguments\":{{}},\"result\":null,\"error\":null,\"status\":\"in_progress\"}}}}").unwrap();
             writeln!(stdout, "{{\"type\":\"item.completed\",\"item\":{{\"id\":\"{tool}\",\"type\":\"mcp_tool_call\",\"server\":\"codex\",\"tool\":\"{tool}\",\"arguments\":{{}},\"result\":{{\"content\":[{{\"type\":\"text\",\"text\":\"{payload}\"}}],\"structured_content\":null}},\"error\":null,\"status\":\"completed\"}}}}").unwrap();
@@ -505,7 +508,7 @@ fn run_claude(mode: &str, args: &[String]) {
     stdout
         .write_all(
             format!(
-                "{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"{}\",\"result\":\"done\",\"usage\":{{\"input_tokens\":4,\"output_tokens\":2}}}}\n",
+                "{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"{}\",\"result\":\"claude answer\",\"usage\":{{\"input_tokens\":4,\"output_tokens\":2}}}}\n",
                 json_escape(&session)
             )
             .as_bytes(),
@@ -659,13 +662,13 @@ fn run_pi(mode: &str, args: &[String]) {
                         .unwrap();
                 }
                 stdout
-                    .write_all(b"{\"type\":\"message_update\",\"usage\":{\"input\":5,\"output\":1,\"cacheRead\":2},\"assistantMessageEvent\":{\"type\":\"thinking_delta\",\"delta\":\"checked\"}}\n")
+                    .write_all(b"{\"type\":\"message_update\",\"usage\":{\"input\":5,\"output\":1,\"cacheRead\":2},\"assistantMessageEvent\":{\"type\":\"thinking_delta\",\"contentIndex\":0,\"delta\":\"checked\"}}\n")
                     .unwrap();
                 stdout
-                    .write_all(b"{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_delta\",\"delta\":\"pi answer\"}}\n")
+                    .write_all(b"{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_delta\",\"contentIndex\":1,\"delta\":\"pi answer\"}}\n")
                     .unwrap();
                 stdout
-                    .write_all(b"{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"pi answer\"}],\"stopReason\":\"stop\",\"usage\":{\"input\":5,\"output\":1,\"cacheRead\":2}}}\n")
+                    .write_all(b"{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"checked\"},{\"type\":\"text\",\"text\":\"pi answer\"}],\"stopReason\":\"stop\",\"usage\":{\"input\":5,\"output\":1,\"cacheRead\":2}}}\n")
                     .unwrap();
                 stdout.write_all(b"{\"type\":\"agent_settled\"}\n").unwrap();
                 stdout.flush().unwrap();
@@ -762,7 +765,7 @@ fn run_antigravity(mode: &str, args: &[String]) {
     stdout
         .write_all(
             format!(
-                "{{\"event\":\"step_update\",\"step_update\":{{\"conversation_id\":\"{}\",\"step_type\":\"thinking\",\"thinking_delta\":\"checked\"}}}}\n",
+                "{{\"event\":\"step_update\",\"step_update\":{{\"conversation_id\":\"{}\",\"step_index\":0,\"state\":\"DONE\",\"step_type\":\"thinking\",\"thinking_delta\":\"checked\"}}}}\n",
                 json_escape(&session)
             )
             .as_bytes(),
@@ -782,7 +785,7 @@ fn run_antigravity(mode: &str, args: &[String]) {
     stdout
         .write_all(
             format!(
-                "{{\"event\":\"step_update\",\"step_update\":{{\"conversation_id\":\"{}\",\"step_type\":\"agent_response\",\"text_delta\":\"antigravity answer\"}}}}\n",
+                "{{\"event\":\"step_update\",\"step_update\":{{\"conversation_id\":\"{}\",\"step_index\":2,\"state\":\"DONE\",\"step_type\":\"agent_response\",\"text_delta\":\"antigravity answer\"}}}}\n",
                 json_escape(&session)
             )
             .as_bytes(),
@@ -791,7 +794,7 @@ fn run_antigravity(mode: &str, args: &[String]) {
     stdout
         .write_all(
             format!(
-                "{{\"event\":\"result\",\"result\":{{\"status\":\"SUCCESS\",\"conversation_id\":\"{}\",\"response\":\"done\",\"usage\":{{\"input_tokens\":6,\"output_tokens\":2,\"cache_read_tokens\":1}}}}}}\n",
+                "{{\"event\":\"result\",\"result\":{{\"status\":\"SUCCESS\",\"conversation_id\":\"{}\",\"response\":\"antigravity answer\",\"usage\":{{\"input_tokens\":6,\"output_tokens\":2,\"cache_read_tokens\":1}}}}}}\n",
                 json_escape(&session)
             )
             .as_bytes(),

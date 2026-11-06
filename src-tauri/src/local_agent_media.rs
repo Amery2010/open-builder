@@ -285,9 +285,96 @@ pub(crate) fn read_generated_image(
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NOFOLLOW);
     }
-    let mut file = options
+    let file = options
         .open(&canonical)
         .map_err(|_| "failed to open generated local image file".to_string())?;
+    read_opened_generated_image(file, &canonical)
+}
+
+/// Read a provider-owned artifact through normal, non-symlink path components.
+/// The caller supplies the trusted root and the exact task-relative path.
+pub(crate) fn read_generated_image_at(
+    root: &Path,
+    relative: &Path,
+) -> Result<(String, Vec<u8>, String), String> {
+    let components = relative
+        .components()
+        .map(|component| match component {
+            std::path::Component::Normal(name) => Ok(name),
+            _ => Err("generated local image path is invalid".to_string()),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if components.is_empty() {
+        return Err("generated local image path is invalid".to_string());
+    }
+    #[cfg(unix)]
+    let file = {
+        use std::ffi::CString;
+        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut directory = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(root)
+            .map_err(|_| "failed to open generated image root".to_string())?;
+        // Resolve each child relative to an already-open directory. O_NOFOLLOW
+        // on just the final absolute path would not protect parent directories.
+        for (index, component) in components.iter().enumerate() {
+            let name = CString::new(component.as_bytes())
+                .map_err(|_| "generated local image path is invalid".to_string())?;
+            let mut flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+            if index + 1 < components.len() {
+                flags |= libc::O_DIRECTORY;
+            } else {
+                flags |= libc::O_NONBLOCK;
+            }
+            // SAFETY: directory owns a live descriptor, name is NUL terminated,
+            // and the returned descriptor is transferred exactly once to File.
+            let fd = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), flags) };
+            if fd < 0 {
+                return Err("failed to open generated image without symlinks".to_string());
+            }
+            directory = unsafe { std::fs::File::from_raw_fd(fd) };
+        }
+        directory
+    };
+    #[cfg(not(unix))]
+    let file = {
+        let canonical_root = std::fs::canonicalize(root)
+            .map_err(|_| "failed to resolve generated image root".to_string())?;
+        let mut path = canonical_root.clone();
+        for component in components {
+            path.push(component);
+            let metadata = std::fs::symlink_metadata(&path)
+                .map_err(|_| "generated local image file is unavailable".to_string())?;
+            if metadata.file_type().is_symlink() {
+                return Err("generated local image path contains a symlink".to_string());
+            }
+        }
+        let canonical = std::fs::canonicalize(&path)
+            .map_err(|_| "failed to resolve generated local image file".to_string())?;
+        if !canonical.starts_with(canonical_root) {
+            return Err("generated local image escaped its artifact directory".to_string());
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            options.custom_flags(0x0020_0000); // FILE_FLAG_OPEN_REPARSE_POINT
+        }
+        options
+            .open(path)
+            .map_err(|_| "failed to open generated local image file".to_string())?
+    };
+    read_opened_generated_image(file, relative)
+}
+
+fn read_opened_generated_image(
+    mut file: std::fs::File,
+    path: &Path,
+) -> Result<(String, Vec<u8>, String), String> {
     let opened_metadata = file
         .metadata()
         .map_err(|_| "failed to inspect generated local image file".to_string())?;
@@ -298,14 +385,16 @@ pub(crate) fn read_generated_image(
         return Err("generated local image file is invalid".to_string());
     }
     let mut bytes = Vec::with_capacity(opened_metadata.len() as usize);
-    file.read_to_end(&mut bytes)
+    file.by_ref()
+        .take(MAX_GENERATED_IMAGE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
         .map_err(|_| "failed to read generated local image file".to_string())?;
     if bytes.len() != opened_metadata.len() as usize {
         return Err("generated local image changed while it was read".to_string());
     }
     let mime_type = image_mime_type(&bytes)?.to_string();
     let expected_extension = extension_for_mime(&mime_type);
-    let actual_extension = canonical
+    let actual_extension = path
         .extension()
         .and_then(|value| value.to_str())
         .unwrap_or_default()
@@ -315,7 +404,7 @@ pub(crate) fn read_generated_image(
     if !extension_matches {
         return Err("generated local image extension does not match its bytes".to_string());
     }
-    let file_name = canonical
+    let file_name = path
         .file_name()
         .and_then(|value| value.to_str())
         .ok_or_else(|| "generated local image file name is invalid".to_string())?
@@ -807,6 +896,59 @@ mod tests {
 
         std::fs::remove_dir_all(root).unwrap();
         std::fs::remove_file(outside).unwrap();
+    }
+
+    #[test]
+    fn provider_artifacts_validate_bytes_extensions_and_size() {
+        let root = std::env::temp_dir().join(format!(
+            "open-builder-artifact-bytes-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("image.png"), PNG).unwrap();
+        assert_eq!(
+            read_generated_image_at(&root, Path::new("image.png"))
+                .unwrap()
+                .1,
+            PNG
+        );
+        std::fs::write(root.join("invalid.png"), b"not an image").unwrap();
+        assert!(read_generated_image_at(&root, Path::new("invalid.png")).is_err());
+        std::fs::write(root.join("wrong.webp"), PNG).unwrap();
+        assert!(read_generated_image_at(&root, Path::new("wrong.webp")).is_err());
+        let large = std::fs::File::create(root.join("large.png")).unwrap();
+        large.set_len(MAX_GENERATED_IMAGE_BYTES as u64 + 1).unwrap();
+        assert!(read_generated_image_at(&root, Path::new("large.png")).is_err());
+        assert!(read_generated_image_at(&root, Path::new("../image.png")).is_err());
+        assert!(read_generated_image_at(&root, &root.join("image.png")).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provider_artifacts_reject_symlinks_at_every_child_level() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!(
+            "open-builder-artifact-links-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let outside = root.join("outside");
+        let home = root.join("home");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(outside.join("image.png"), PNG).unwrap();
+        let relative = Path::new("generated_images/thread/image.png");
+        symlink(&outside, home.join("generated_images")).unwrap();
+        assert!(read_generated_image_at(&home, relative).is_err());
+        std::fs::remove_file(home.join("generated_images")).unwrap();
+        std::fs::create_dir(home.join("generated_images")).unwrap();
+        symlink(&outside, home.join("generated_images/thread")).unwrap();
+        assert!(read_generated_image_at(&home, relative).is_err());
+        std::fs::remove_file(home.join("generated_images/thread")).unwrap();
+        std::fs::create_dir(home.join("generated_images/thread")).unwrap();
+        symlink(outside.join("image.png"), home.join(relative)).unwrap();
+        assert!(read_generated_image_at(&home, relative).is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

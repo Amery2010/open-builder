@@ -218,7 +218,7 @@ export function mergeMessages(
         merged.push({
           role: "user",
           blocks: [],
-          id: `user-${i}`,
+          id: `user-${msg.id ?? i}`,
           origin: "design_review",
           reviewJobId: msg.metadata.reviewJobId,
           reviewSummary: msg.metadata.reviewSummary,
@@ -277,7 +277,7 @@ export function mergeMessages(
         merged.push({
           role: "user",
           blocks,
-          id: `user-${i}`,
+          id: `user-${msg.id ?? i}`,
           origin,
           ...(instructionId ? { instructionId } : {}),
         });
@@ -409,7 +409,7 @@ export function mergeMessages(
         merged.push({
           role: "assistant",
           blocks,
-          id: `assistant-${i}`,
+          id: `assistant-${msg.id ?? i}`,
           ...(isError ? { isError: true } : {}),
           ...(errorKind ? { errorKind } : {}),
           ...(errorRetryable !== undefined ? { errorRetryable } : {}),
@@ -441,8 +441,11 @@ export function findWithdrawableUserMessageIndex(
   }
 
   const match = /^user-(\d+)$/.exec(lastVisible.id);
-  if (!match) return null;
-  const start = Number.parseInt(match[1], 10);
+  const stableIndex = messages.findIndex(
+    (message) => message.id && `user-${message.id}` === lastVisible.id,
+  );
+  if (!match && stableIndex < 0) return null;
+  const start = stableIndex >= 0 ? stableIndex : Number.parseInt(match![1], 10);
   if (
     !Number.isSafeInteger(start) ||
     messages[start]?.role !== "user" ||

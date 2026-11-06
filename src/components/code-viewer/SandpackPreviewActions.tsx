@@ -34,21 +34,14 @@ export function SandpackActionButton({
 
 export function SandpackRefreshAction({
   label,
-  onBeforeRefresh,
+  onReload,
 }: {
   label: string;
-  onBeforeRefresh?: () => void;
+  onReload?: () => void;
 }) {
   const { refresh } = useSandpackNavigation();
-
   return (
-    <SandpackActionButton
-      label={label}
-      onClick={() => {
-        onBeforeRefresh?.();
-        refresh();
-      }}
-    >
+    <SandpackActionButton label={label} onClick={onReload ?? refresh}>
       <RefreshCw size={16} />
     </SandpackActionButton>
   );

@@ -8,7 +8,12 @@ import type { GeneratorEvents, GeneratorOptions } from "../ai/generator-types";
 import { DISPATCH_SUBAGENT_TOOL } from "../tools/subagent-tool";
 import { SCREENSHOT_TO_CODE_TOOL } from "../tools/screenshot-to-code";
 import { computeConversationFingerprint } from "./context";
-import { createLocalAgentGenerator, runLocalUtilityText } from "./generator";
+import {
+  createLocalAgentGenerator,
+  runLocalTitleText,
+  runLocalUtilityText,
+} from "./generator";
+import { generateSmartTitle } from "../utils/smart-title";
 import type { LocalAgentEvent, LocalAgentStartRequest } from "./types";
 import type {
   LocalAgentObservedCapabilities,
@@ -30,6 +35,9 @@ const localAgentMocks = vi.hoisted(() => ({
   cancel: vi.fn(),
   resolve: vi.fn(),
   supports: vi.fn(),
+  attach: vi.fn(),
+  claim: vi.fn(),
+  acknowledge: vi.fn(),
 }));
 
 const attachmentMocks = vi.hoisted(() => ({
@@ -57,6 +65,10 @@ vi.mock("./tauri", () => ({
   startLocalAgent: localAgentMocks.start,
   cancelLocalAgent: localAgentMocks.cancel,
   resolveLocalAgentTool: localAgentMocks.resolve,
+  attachLocalAgent: localAgentMocks.attach,
+  claimLocalAgentTool: localAgentMocks.claim,
+  acknowledgeLocalAgentTerminal: localAgentMocks.acknowledge,
+  localAgentPageOwner: "test-page",
 }));
 
 vi.mock("../attachments/store", () => ({
@@ -134,6 +146,9 @@ function generator(
     provider?: LocalAgentProvider;
     onFileChange?: NonNullable<GeneratorEvents["onFileChange"]>;
     onLocalCliPrepared?: NonNullable<GeneratorEvents["onLocalCliPrepared"]>;
+    onLocalCliStatus?: NonNullable<GeneratorEvents["onLocalCliStatus"]>;
+    onThinking?: NonNullable<GeneratorEvents["onThinking"]>;
+    onToolResult?: NonNullable<GeneratorEvents["onToolResult"]>;
     onError?: NonNullable<GeneratorEvents["onError"]>;
     projectPermissionSession?: ProjectPermissionSession;
     observedCapabilities?: LocalAgentObservedCapabilities;
@@ -161,6 +176,9 @@ function generator(
       onComplete: options.onComplete,
       onFileChange: options.onFileChange,
       onLocalCliPrepared: options.onLocalCliPrepared,
+      onLocalCliStatus: options.onLocalCliStatus,
+      onThinking: options.onThinking,
+      onToolResult: options.onToolResult,
       onError: options.onError,
     },
     conversation.files,
@@ -466,6 +484,95 @@ describe("LocalAgentGenerator", () => {
       resumed: false,
     });
   });
+
+  it("announces compatibility output during preparation before any answer arrives", async () => {
+    const onLocalCliStatus = vi.fn();
+    let emit!: (event: LocalAgentEvent) => void;
+    localAgentMocks.start.mockImplementation(async (_request, onEvent) => {
+      emit = onEvent;
+      onEvent({
+        type: "prepared",
+        compatibilityKey: "exec-compatible",
+        installationFingerprint: "install-1",
+        cliVersion: "older-codex",
+        resumed: false,
+        outputCapabilities: {
+          transport: "codexExec",
+          textGranularity: "message",
+          reasoningText: "supported",
+        },
+      });
+      return "compatibility-run";
+    });
+    const { instance, onText } = generator(
+      baseConversation(),
+      vi.fn(),
+      vi.fn(),
+      { onLocalCliStatus },
+    );
+    const run = instance.generate("Build a page");
+    await vi.waitFor(() =>
+      expect(onLocalCliStatus).toHaveBeenCalledWith({
+        state: "handshaking",
+        message: "This CLI version delivers output in message-sized chunks.",
+      }),
+    );
+    expect(onText).not.toHaveBeenCalled();
+    emit({ type: "textDelta", delta: "Built" });
+    emit({ type: "done", aborted: false });
+    await run;
+  });
+
+  it.each(["completed", "stopped", "failed"] as const)(
+    "keeps streamed thinking separate from text when a run is %s",
+    async (outcome) => {
+      const onThinking = vi.fn();
+      let emit!: (event: LocalAgentEvent) => void;
+      localAgentMocks.start.mockImplementation(async (_request, onEvent) => {
+        emit = onEvent;
+        return "thinking-run";
+      });
+      localAgentMocks.cancel.mockImplementation(async () => {
+        emit({ type: "done", aborted: true });
+        return true;
+      });
+      const { instance, onText } = generator(
+        baseConversation(),
+        vi.fn(),
+        vi.fn(),
+        { onThinking },
+      );
+      const run = instance.generate("Inspect the page");
+      // Observe rejection immediately so an intentional error never becomes an
+      // unhandled promise while we check the final message history.
+      const result = run.catch((error: unknown) => error);
+      await vi.waitFor(() => expect(emit).toBeTypeOf("function"));
+      emit({ type: "reasoningDelta", delta: "" });
+      expect(onThinking).not.toHaveBeenCalled();
+      emit({ type: "reasoningDelta", delta: "先检查🌱 " });
+      emit({ type: "reasoningDelta", delta: "布局边界" });
+      emit({ type: "textDelta", delta: "The answer" });
+      expect(onThinking.mock.calls).toEqual([["先检查🌱 "], ["布局边界"]]);
+      expect(onText).toHaveBeenCalledWith("The answer");
+      if (outcome === "stopped") instance.abort();
+      else {
+        if (outcome === "failed")
+          emit({ type: "error", message: "stream failed", retryable: false });
+        emit({ type: "done", aborted: false });
+      }
+      await result;
+      expect(instance.getMessages()).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            role: "assistant",
+            content: "The answer",
+            thinking: "先检查🌱 布局边界",
+          }),
+        ]),
+      );
+      expect(localAgentMocks.start).toHaveBeenCalledOnce();
+    },
+  );
 
   it("writes project files through the Host bridge and reports FileChange", async () => {
     const onFileChange = vi.fn();
@@ -899,6 +1006,9 @@ describe("LocalAgentGenerator", () => {
       "codex",
       expect.objectContaining({ installationFingerprint: "install-1" }),
     );
+    expect(localAgentMocks.start.mock.calls[0][0]).not.toHaveProperty(
+      "utilityEffortPolicy",
+    );
   });
 
   it("aborts a local utility title call when its timeout expires", async () => {
@@ -913,6 +1023,88 @@ describe("LocalAgentGenerator", () => {
       ),
     ).rejects.toMatchObject({ name: "TimeoutError" });
     expect(localAgentMocks.cancel).toHaveBeenCalledWith("utility-timeout-run");
+  });
+
+  it("finishes a local smart title after ten seconds while the main run remains active", async () => {
+    vi.useFakeTimers();
+    try {
+      let mainEvents!: (event: LocalAgentEvent) => void;
+      const requests: LocalAgentStartRequest[] = [];
+      localAgentMocks.start.mockImplementation(
+        async (
+          request: LocalAgentStartRequest,
+          onEvent: (event: LocalAgentEvent) => void,
+        ) => {
+          requests.push(request);
+          if (request.scope.kind === "conversation") {
+            mainEvents = onEvent;
+            return "main-run";
+          }
+          setTimeout(() => completeRun(onEvent, "title-run"), 15_000);
+          return "title-run";
+        },
+      );
+      const { instance } = generator(baseConversation());
+      let mainSettled = false;
+      const main = instance.generate("Build a dashboard").then(() => {
+        mainSettled = true;
+      });
+      const config = { provider: "codex" as const, model: "", effort: "high" };
+      const title = generateSmartTitle(
+        [{ role: "user", content: "Build a dashboard" }],
+        { apiType: "openai", apiKey: "", apiBaseUrl: "", model: "" },
+        (instructions, prompt, options) =>
+          runLocalTitleText(config, instructions, prompt, options),
+      );
+      await vi.waitFor(() => expect(requests).toHaveLength(2));
+      await vi.advanceTimersByTimeAsync(15_000);
+
+      await expect(title).resolves.toBe("Built locally");
+      expect(mainSettled).toBe(false);
+      expect(localAgentMocks.cancel).not.toHaveBeenCalled();
+      expect(
+        requests.find((request) => request.scope.kind === "utility"),
+      ).toMatchObject({
+        utilityEffortPolicy: "lowestSupported",
+        model: undefined,
+      });
+      expect(
+        requests.find((request) => request.scope.kind === "conversation"),
+      ).not.toHaveProperty("utilityEffortPolicy");
+      expect(config.effort).toBe("high");
+      completeRun(mainEvents, "main-run");
+      await main;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels only the title at its fixed sixty-second deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      localAgentMocks.start.mockResolvedValue("title-deadline-run");
+      const pending = runLocalTitleText(
+        { provider: "codex", model: "", effort: "high" },
+        "Create a title",
+        "Original request",
+        { timeoutMs: 10_000 },
+      );
+      const assertion = expect(pending).rejects.toMatchObject({
+        name: "TimeoutError",
+      });
+      await vi.waitFor(() =>
+        expect(localAgentMocks.start).toHaveBeenCalledOnce(),
+      );
+      await vi.advanceTimersByTimeAsync(59_000);
+      expect(localAgentMocks.cancel).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1_000);
+      await assertion;
+      expect(localAgentMocks.cancel).toHaveBeenCalledExactlyOnceWith(
+        "title-deadline-run",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("aborts a running local utility call from an external signal", async () => {
@@ -2594,6 +2786,40 @@ describe("LocalAgentGenerator", () => {
     });
   });
 
+  it.each([
+    [],
+    [{ type: "text_result", title: "Codex", url: "https://openai.com/codex" }],
+    null,
+  ])(
+    "normalizes completed Codex search results for the Host result interface: %j",
+    async (results) => {
+      const onToolResult = vi.fn();
+      localAgentMocks.start.mockImplementation(async (_request, onEvent) => {
+        queueMicrotask(() => {
+          onEvent({
+            type: "nativeTool",
+            callId: "search-1",
+            name: "web_search",
+            phase: "completed",
+            result: results,
+          });
+          onEvent({ type: "done", aborted: false });
+        });
+        return "run-native-result";
+      });
+      const { instance } = generator(baseConversation(), vi.fn(), vi.fn(), {
+        nativeSearch: true,
+        onToolResult,
+      });
+      await instance.generate("Search once");
+      expect(onToolResult).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(onToolResult.mock.calls[0][2])).toEqual({
+        ok: true,
+        results,
+      });
+    },
+  );
+
   it("counts duplicate native tool updates only once", async () => {
     let emit: ((event: LocalAgentEvent) => void) | undefined;
     localAgentMocks.start.mockImplementation(
@@ -3388,4 +3614,57 @@ it("refreshes newly allowed media capabilities only after the CLI turn naturally
   expect(requests).toHaveLength(2);
   expect(requests.map((request) => request.maxToolCalls)).toEqual([2, 1]);
   expect(localAgentMocks.cancel).not.toHaveBeenCalled();
+});
+
+it("acknowledges a recovered run after an explicit Stop without starting a replacement", async () => {
+  vi.clearAllMocks();
+  const conversation = baseConversation({
+    messages: [{ role: "user", content: "Original task" }],
+  });
+  const { instance } = generator(conversation);
+  const run: import("./types").LocalRecoverableRun = {
+    runId: "original-run",
+    terminal: false,
+    request: {
+      provider: "codex",
+      systemPrompt: "system",
+      prompt: "Original task",
+      scope: { kind: "conversation", id: conversation.id },
+      tools: [],
+      nativeSearch: false,
+      mode: "chat",
+      maxToolCalls: 0,
+    },
+    context: {
+      version: 1,
+      identity: {
+        conversationId: conversation.id,
+        branchId: "main",
+        checkoutEpoch: 0,
+      },
+      messages: conversation.messages,
+      skillIds: [],
+      app: {},
+    },
+  };
+  const lease = { owner: "new-page", epoch: 2 };
+  let emit!: (event: import("./types").LocalRecoveryEnvelope) => void;
+  localAgentMocks.attach.mockImplementation(async (_id, callback) => {
+    emit = callback;
+    return { ...run, lease, events: [], resolutions: {}, uncertain: false };
+  });
+  localAgentMocks.cancel.mockImplementation(async () => {
+    emit({
+      runId: run.runId,
+      sequence: 1,
+      event: { type: "done", aborted: true },
+    });
+    return true;
+  });
+  const recovery = instance.recover(run);
+  await vi.waitFor(() => expect(localAgentMocks.attach).toHaveBeenCalled());
+  instance.abort();
+  await expect(recovery).resolves.toMatchObject({ aborted: true });
+  expect(localAgentMocks.acknowledge).toHaveBeenCalledWith(run.runId, lease);
+  expect(localAgentMocks.start).not.toHaveBeenCalled();
 });

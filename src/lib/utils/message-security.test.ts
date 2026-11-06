@@ -100,90 +100,94 @@ describe("message security", () => {
     });
   });
 
-  it("persists preview evidence metadata without images or element text", () => {
-    const sentinel = "private-preview-element-text";
-    const generation = "a".repeat(64);
-    const imageDigest = "b".repeat(64);
-    const structuredContent = {
-      kind: "preview_evidence_v1",
-      status: "complete",
-      generation,
-      target: {
-        pageId: "pricing",
-        route: "#/pricing?scenario=default",
-        scenarioId: "default",
-      },
-      evidence: [
-        {
-          view: "mobile",
-          image: { mimeType: "image/webp", bytes: 30, digest: imageDigest },
-          viewport: {
-            name: "mobile",
-            width: 375,
-            height: 667,
-            capturedHeight: 667,
-            fullHeight: 667,
-            truncated: false,
-          },
-          semantic: {
-            route: "#/pricing?scenario=default",
-            prototypeIdentity: {
-              pageId: "pricing",
-              route: "#/pricing?scenario=default",
-              scenarioId: "default",
-            },
-            horizontalOverflow: false,
-            fonts: "ready",
-            elementCount: 12,
-          },
+  it.each(["image/webp", "image/png", "image/jpeg"])(
+    "persists %s preview evidence metadata without images or element text",
+    (mimeType) => {
+      const sentinel = "private-preview-element-text";
+      const generation = "a".repeat(64);
+      const imageDigest = "b".repeat(64);
+      const structuredContent = {
+        kind: "preview_evidence_v1",
+        status: "complete",
+        generation,
+        target: {
+          pageId: "pricing",
+          route: "#/pricing?scenario=default",
+          scenarioId: "default",
         },
-      ],
-      errors: [],
-      placeholder: "untrusted placeholder",
-    };
-    const output = sanitizeToolExecutionOutputForHistory(
-      "capture_preview_evidence",
-      {},
-      {
-        text: JSON.stringify(structuredContent),
-        structuredContent,
-        content: [
-          { type: "text", text: sentinel },
+        evidence: [
           {
-            type: "image",
-            data: "base64-image-sentinel",
-            mimeType: "image/webp",
+            view: "mobile",
+            image: { mimeType, bytes: 30, digest: imageDigest },
+            viewport: {
+              name: "mobile",
+              width: 390,
+              height: 844,
+              capturedHeight: 844,
+              fullHeight: 844,
+              truncated: false,
+            },
+            semantic: {
+              route: "#/pricing?scenario=default",
+              prototypeIdentity: {
+                pageId: "pricing",
+                route: "#/pricing?scenario=default",
+                scenarioId: "default",
+              },
+              horizontalOverflow: false,
+              fonts: "ready",
+              elementCount: 12,
+            },
           },
         ],
-        modelOutput: {
-          type: "content",
-          value: [{ type: "text", text: sentinel }],
-        },
-      },
-    );
-
-    expect(JSON.stringify(output)).not.toContain(sentinel);
-    expect(JSON.stringify(output)).not.toContain("base64-image-sentinel");
-    expect(output?.structuredContent).toMatchObject({
-      kind: "preview_evidence_v1",
-      generation,
-      target: { pageId: "pricing", scenarioId: "default" },
-      evidence: [
+        errors: [],
+        placeholder: "untrusted placeholder",
+      };
+      const output = sanitizeToolExecutionOutputForHistory(
+        "capture_preview_evidence",
+        {},
         {
-          view: "mobile",
-          image: { digest: imageDigest },
-          semantic: { prototypeIdentity: { pageId: "pricing" } },
+          text: JSON.stringify(structuredContent),
+          structuredContent,
+          content: [
+            { type: "text", text: sentinel },
+            {
+              type: "image",
+              data: "base64-image-sentinel",
+              mimeType,
+            },
+          ],
+          modelOutput: {
+            type: "content",
+            value: [{ type: "text", text: sentinel }],
+          },
         },
-      ],
-    });
-    expect(output?.content).toEqual([
-      expect.objectContaining({ type: "placeholder" }),
-    ]);
-    expect(output?.modelOutput).toEqual({
-      type: "text",
-      value: output?.text,
-    });
-  });
+      );
+
+      expect(JSON.stringify(output)).not.toContain(sentinel);
+      expect(JSON.stringify(output)).not.toContain("base64-image-sentinel");
+      expect(output?.structuredContent).toMatchObject({
+        kind: "preview_evidence_v1",
+        generation,
+        target: { pageId: "pricing", scenarioId: "default" },
+        evidence: [
+          {
+            view: "mobile",
+            image: { mimeType, digest: imageDigest },
+            viewport: { width: 390, height: 844 },
+            semantic: { prototypeIdentity: { pageId: "pricing" } },
+          },
+        ],
+      });
+      expect(output?.content).toEqual([
+        expect.objectContaining({ type: "placeholder" }),
+      ]);
+      expect(output?.modelOutput).toEqual({
+        type: "text",
+        value: output?.text,
+      });
+    },
+  );
 
   it("bounds generic summary-only output and drops rich blocks", () => {
     const output = sanitizeToolExecutionOutputForHistory(
