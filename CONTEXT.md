@@ -25,21 +25,41 @@ The digest of the exact project files, template, and Preview Mode that a mounted
 _Avoid_: Build number, Conversation timestamp
 
 **Preview Evidence**:
-A run-scoped capture and bounded semantic snapshot for one explicit device category at its actual viewport dimensions, using WebP where supported and PNG or JPEG otherwise. Conversation history retains only dimensions, formats, digests, overflow/font/element counts, errors, and placeholder text.
+A run-scoped capture and bounded semantic snapshot for one explicit device category and capture scope. The actual viewport dimensions, covered document region, and image resolution are distinct; a complete page may be uniformly scaled. Conversation history retains only geometry, dimensions, formats, digests, overflow/font/element counts, errors, and placeholder text.
 _Avoid_: Design Review report, persisted screenshot
 
 **Preview Comparison**:
 An exact comparison between current Preview Evidence and a previously persisted evidence summary in the same Conversation. It compares image digests and bounded metadata, not perceptual regions or historical file snapshots.
 _Avoid_: Pixel diff, snapshot renderer
 
+**Preview Annotation**:
+A user-edited frozen image of the current visible preview or complete rendered document, with optional marks and a selected crop. Only its flattened image becomes a message attachment; the editable drawing is temporary and belongs to the active Conversation branch and checkout.
+_Avoid_: Preview Evidence, live page overlay, persisted drawing document
+
+**Project Runtime Validation**:
+An isolated compilation check bound to the exact staged project files and resources. Successful validation permits importing those contents as a new Conversation; a later content change invalidates it.
+_Avoid_: Framework-name detection, deployment proof
+
+**Static Deployment Archive**:
+A ZIP containing the actual static site files produced from one project state. Compatibility builds target modern browsers and carry different guarantees from the project's original build workflow.
+_Avoid_: Source archive, deployed site
+
+**Preview Sequence**:
+Run-scoped captures of the same mounted Preview Generation at requested time offsets, preserving its current interaction state. Actual sampling times describe delays; history retains summaries rather than image bytes.
+_Avoid_: Video, exact animation frames, refreshed scenario
+
+**Delegated Edit Task**:
+A parent-assigned development task with exclusive ownership of explicit project paths. It works on an independent snapshot and contributes only successful, conflict-free edits through an atomic parent commit.
+_Avoid_: Shared writable project, unrestricted subagent, whole-tree replacement
+
 ## Design language
 
 **Project Design Blueprint**:
-The validated root `design-project.json` authority for a complete prototype's product goal, stable pages, shared layouts and UI, flows, scenarios, and build checkpoint. It travels with project files, snapshots, copies, and exports; Conversation state does not own another copy.
+The root `design-project.json` authority for a prototype's known product goal, stable pages, shared layouts and UI, flows, scenarios, tasks, and committed progress. It can be incomplete; missing information is tracked for the affected target. It travels with project files, snapshots, copies, and exports; Conversation state does not own another copy.
 _Avoid_: Design system, chat outline, runtime route table
 
 **Prototype Page**:
-A stable blueprint page ID with one canonical application route, responsibility, shared references, applicable scenarios, and source-file scope.
+A stable blueprint page ID with its known responsibility, route declaration, shared references, applicable scenarios, and source-file scope. A draft page can exist before it has a usable preview location.
 _Avoid_: Browser tab, screenshot, generated component
 
 **Prototype Scenario**:
@@ -47,12 +67,20 @@ A declarative, named state for a Prototype Page, such as default, loading, empty
 _Avoid_: Arbitrary JavaScript, test runner, URL pathname
 
 **Prototype Build Batch**:
-One revision-bound unit of Design work scoped to selected page files and declared shared files. Its completed pages and flows are recorded in the Project Design Blueprint before the next batch or a later `/continue` run.
+A historical label for a recorded group of prototype work. New work follows the current request's concrete tasks and committed changes rather than a fixed sequence of phases.
 _Avoid_: Model turn, unrestricted project rewrite, release milestone
 
 **Prototype Review Coverage**:
-The persisted status for one blueprint revision, Prototype Page, Prototype Scenario, and viewport. Captured targets can become passed or needs-fix; missing targets remain unreviewed, and project changes make prior evidence stale.
+The persisted status for one source state, Prototype Page, Prototype Scenario, and viewport. Captured targets can become passed or needs-fix; unavailable targets remain unreviewed. Changes to source, preview targets, or the visual system make prior evidence stale; progress notes alone do not.
 _Avoid_: WCAG certification, deployment proof, screenshot archive
+
+**Design Run**:
+The host-owned context for one user design request, its selected scope, applied visual system, concrete tasks, and committed changes. It is reconstructed from current project state when work continues.
+_Avoid_: Model-submitted permission, fixed build phase
+
+**Prototype Preview Location**:
+A concrete, safe application location resolved from a Prototype Page and scenario. Dynamic route declarations require a known sample path before they can be checked visually.
+_Avoid_: Route declaration, invented business ID
 
 **Design Token Contract**:
 The validated root `tokens.css` contract attached to the currently applied Design system.

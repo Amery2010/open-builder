@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "open-builder-design-system/v1",
+  "id": "circuit-lab",
+  "name": "Circuit Lab",
+  "category": "product",
+  "description": "A precise circuit bench with pale board surfaces, green paths, dark terminal labels and carefully separated node states. Connection geometry and on/off cues explain actual relationships; they are not decorative data.",
+  "files": {
+    "design": "DESIGN.md",
+    "tokens": "tokens.css"
+  }
+}

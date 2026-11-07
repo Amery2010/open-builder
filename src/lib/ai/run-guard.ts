@@ -106,12 +106,19 @@ export function findPendingToolCall(
 /** Complete abandoned groups before replay without discarding completed work. */
 export function cancelPendingToolCalls(
   messages: readonly Message[],
+  reason:
+    "user-stopped" | "conversation-switched" | "interrupted" = "interrupted",
 ): Message[] {
   const result: Message[] = [];
   let pending = new Map<string, NonNullable<Message["tool_calls"]>[number]>();
   function closeGroup(): void {
     for (const call of pending.values()) {
-      const text = "Tool execution was cancelled before a result was received.";
+      const text =
+        reason === "user-stopped"
+          ? "Tool execution stopped at the user's request."
+          : reason === "conversation-switched"
+            ? "Tool execution stopped because the conversation changed."
+            : "Tool execution was interrupted before a result was received.";
       result.push({
         role: "tool",
         tool_call_id: call.id,
@@ -119,7 +126,7 @@ export function cancelPendingToolCalls(
         toolOutput: {
           text,
           isError: true,
-          structuredContent: { kind: CANCELLED_TOOL_OUTPUT_KIND },
+          structuredContent: { kind: CANCELLED_TOOL_OUTPUT_KIND, reason },
         },
       });
     }

@@ -133,6 +133,31 @@ describe("generation run guard", () => {
 });
 
 describe("cancelPendingToolCalls", () => {
+  it.each(["user-stopped", "conversation-switched", "interrupted"] as const)(
+    "records the actual %s terminal reason",
+    async (reason) => {
+      const { cancelPendingToolCalls } = await import("./run-guard");
+      const messages: Message[] = [
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id: "pending",
+              type: "function",
+              function: { name: "update_project_design", arguments: "{}" },
+            },
+          ],
+        },
+      ];
+      expect(
+        cancelPendingToolCalls(messages, reason).at(-1)?.toolOutput
+          ?.structuredContent,
+      ).toMatchObject({ reason });
+      expect(cancelPendingToolCalls(messages, reason)[0]).toBe(messages[0]);
+    },
+  );
+
   it("closes incomplete tool groups before a later user message without losing work", async () => {
     const { cancelPendingToolCalls } = await import("./run-guard");
     const messages: Message[] = [

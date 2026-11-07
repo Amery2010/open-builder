@@ -11,6 +11,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useT } from "../../i18n";
+import { useConversationStore } from "../../store/conversation";
+import { validateProjectRuntime } from "../../lib/project-runtime/validation";
 import {
   stageProjectFromDirectoryHandle,
   stageProjectFromFileList,
@@ -27,6 +29,7 @@ interface ProjectImportDialogProps {
   onClose: () => void;
   onImport: (
     project: StagedProjectImport,
+    signal?: AbortSignal,
   ) => Promise<ProjectImportCommitResult> | ProjectImportCommitResult;
 }
 
@@ -55,43 +58,66 @@ function isTauri(): boolean {
 
 export function ProjectImportDialog({
   open,
-  hasExistingProject,
   isGenerating,
   onClose,
   onImport,
 }: ProjectImportDialogProps) {
   const t = useT();
+  const conversationId = useConversationStore((state) => state.activeId);
   const folderInputRef = useRef<HTMLInputElement>(null);
   const zipInputRef = useRef<HTMLInputElement>(null);
+  const operationRef = useRef<AbortController | null>(null);
   const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState("");
   const [staged, setStaged] = useState<StagedProjectImport | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!open) {
-      setBusy(false);
-      setStaged(null);
-      setError(null);
-    }
-  }, [open]);
+    setBusy(false);
+    setStaged(null);
+    setError(null);
+    return () => {
+      operationRef.current?.abort();
+    };
+  }, [open, conversationId]);
 
   const runStage = async (
     loader: () => Promise<StagedProjectImport | null>,
   ) => {
+    operationRef.current?.abort();
+    const controller = new AbortController();
+    operationRef.current = controller;
     setBusy(true);
+    setProgress(t.chat.projectImport.reading);
     setError(null);
     setStaged(null);
     try {
       const result = await loader();
-      if (result) setStaged(result);
+      controller.signal.throwIfAborted();
+      if (result) {
+        setStaged(result);
+        setProgress(t.chat.projectImport.verifying);
+        const validation = await validateProjectRuntime({
+          files: result.files,
+          assets: result.assets,
+          signal: controller.signal,
+        });
+        controller.signal.throwIfAborted();
+        setStaged({
+          ...result,
+          template: validation.template,
+          previewMode: "sandpack",
+          validation,
+        });
+      }
     } catch (reason: unknown) {
-      if (!isPickerCancellation(reason)) {
+      if (!controller.signal.aborted && !isPickerCancellation(reason)) {
         const message =
           reason instanceof Error ? reason.message : String(reason);
         setError(t.chat.projectImport.failed.replace("{message}", message));
       }
     } finally {
-      setBusy(false);
+      if (!controller.signal.aborted) setBusy(false);
     }
   };
 
@@ -113,11 +139,11 @@ export function ProjectImportDialog({
   };
 
   const applyImport = async () => {
-    if (!staged || busy || isGenerating) return;
+    if (!staged?.validation || busy || isGenerating) return;
     setBusy(true);
     setError(null);
     try {
-      const result = await onImport(staged);
+      const result = await onImport(staged, operationRef.current?.signal);
       if (!result.ok) {
         setError(
           t.chat.projectImport.failed.replace("{message}", result.error),
@@ -250,7 +276,7 @@ export function ProjectImportDialog({
               className="flex items-center justify-center gap-2 rounded-lg border bg-muted/30 px-3 py-8 text-sm text-muted-foreground"
             >
               <Loader2 className="size-4 animate-spin" aria-hidden="true" />
-              {t.chat.projectImport.reading}
+              {progress}
             </div>
           )}
 
@@ -260,6 +286,16 @@ export function ProjectImportDialog({
               className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive"
             >
               {error}
+              {staged && !busy && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="mt-2 block"
+                  onClick={() => void runStage(async () => staged)}
+                >
+                  {t.chat.projectImport.retry}
+                </Button>
+              )}
             </p>
           )}
 
@@ -267,7 +303,7 @@ export function ProjectImportDialog({
             <div className="space-y-3 rounded-lg border bg-muted/20 p-3">
               <div className="flex items-start gap-2">
                 <ShieldCheck
-                  className="mt-0.5 size-4 shrink-0 text-emerald-600"
+                  className={`mt-0.5 size-4 shrink-0 ${staged.validation ? "text-emerald-600" : "text-muted-foreground"}`}
                   aria-hidden="true"
                 />
                 <div className="min-w-0 flex-1">
@@ -302,16 +338,14 @@ export function ProjectImportDialog({
                   {skippedDetails}
                 </p>
               )}
-              {staged.previewMode === "code-only" && (
-                <p className="text-xs text-amber-700 dark:text-amber-300">
-                  {t.chat.projectImport.codeOnly}
+              {staged.validation && (
+                <p className="text-xs text-emerald-700 dark:text-emerald-300">
+                  {t.chat.projectImport.verified}
                 </p>
               )}
-              {hasExistingProject && (
-                <p className="text-xs text-amber-700 dark:text-amber-300">
-                  {t.chat.projectImport.replaceWarning}
-                </p>
-              )}
+              <p className="text-xs text-muted-foreground">
+                {t.chat.projectImport.newConversation}
+              </p>
             </div>
           )}
         </DialogBody>
@@ -322,12 +356,10 @@ export function ProjectImportDialog({
           </Button>
           <Button
             type="button"
-            disabled={!staged || busy || isGenerating}
+            disabled={!staged?.validation || busy || isGenerating}
             onClick={() => void applyImport()}
           >
-            {hasExistingProject
-              ? t.chat.projectImport.replace
-              : t.chat.projectImport.import}
+            {t.chat.projectImport.import}
           </Button>
         </DialogFooter>
       </DialogContent>

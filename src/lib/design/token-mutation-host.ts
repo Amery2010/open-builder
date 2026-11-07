@@ -10,13 +10,18 @@ import {
   type DesignTokenChange,
   type DesignTokenMutationResult,
 } from "./token-mutation";
-import type { DesignContract } from "./run-contract";
+import type { DesignRunContext } from "./design-run";
 
 export interface MutateConversationDesignTokensInput {
   conversationId: string;
   changes: readonly DesignTokenChange[];
   principal: "model" | "user";
-  acceptedDesignContract?: DesignContract | unknown;
+  designRunContext?: DesignRunContext;
+  acceptedDesignContract?: unknown;
+  prepareProjectFiles?: (
+    before: ProjectFiles,
+    proposed: ProjectFiles,
+  ) => ProjectFiles;
   snapshotLabel?: string;
   onProjectFilesChanged?: (
     files: ProjectFiles,
@@ -48,7 +53,9 @@ export async function mutateConversationDesignTokens(
       expectedRevision,
       changes: input.changes,
       principal: input.principal,
+      designRunContext: input.designRunContext,
       acceptedDesignContract: input.acceptedDesignContract,
+      prepareProjectFiles: input.prepareProjectFiles,
     },
     {
       readProject: (conversationId) => {
@@ -119,12 +126,14 @@ export async function mutateConversationDesignTokens(
         if (!previousFiles || committedRevision === undefined) {
           throw new Error("The project revision changed before commit.");
         }
-        const changedTokenPath = Object.keys(request.nextFiles).find(
-          (path) => request.previousFiles[path] !== request.nextFiles[path],
-        );
-        const fileChanges: FileChange[] = [
-          { path: changedTokenPath ?? "tokens.css", action: "modified" },
-        ];
+        const fileChanges: FileChange[] = Object.keys(request.nextFiles)
+          .filter(
+            (path) => request.previousFiles[path] !== request.nextFiles[path],
+          )
+          .map((path) => ({
+            path,
+            action: path in request.previousFiles ? "modified" : "created",
+          }));
         try {
           input.onProjectFilesChanged?.(request.nextFiles, fileChanges);
         } catch (error) {

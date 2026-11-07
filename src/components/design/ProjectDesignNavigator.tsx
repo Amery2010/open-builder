@@ -22,7 +22,7 @@ import { cn } from "@/lib/utils";
 export type ProjectDesignBlueprintStatus = "ready" | "missing" | "invalid";
 
 export type ProjectDesignBuildStatus =
-  "not-started" | "in-progress" | "complete" | "blocked";
+  "not-started" | "in-progress" | "complete" | "blocked" | "recorded";
 
 export type ProjectDesignReviewStatus =
   "unreviewed" | "in-review" | "approved" | "changes-requested" | "stale";
@@ -38,6 +38,7 @@ export interface ProjectDesignPageViewModel {
   parentId?: string;
   name: string;
   responsibility: string;
+  previewIssue?: string;
   buildProgress: number;
   buildStatus?: ProjectDesignBuildStatus;
   reviewStatus: ProjectDesignReviewStatus;
@@ -135,6 +136,7 @@ const DEFAULT_LABELS = {
     "not-started": "Not started",
     "in-progress": "In progress",
     complete: "Complete",
+    recorded: "Recorded progress",
     blocked: "Blocked",
   },
   reviewStatuses: {
@@ -211,29 +213,40 @@ function buildStatusClass(status: ProjectDesignBuildStatus): string {
 function BlueprintEmptyState({
   blueprint,
   labels,
+  collapsed,
 }: {
   blueprint: ProjectDesignBlueprintViewModel;
   labels: ProjectDesignNavigatorLabels;
+  collapsed: boolean;
 }) {
   const isInvalid = blueprint.status === "invalid";
-  const title = isInvalid
-    ? (labels.invalidBlueprintTitle ?? DEFAULT_LABELS.invalidBlueprintTitle)
-    : (labels.missingBlueprintTitle ?? DEFAULT_LABELS.missingBlueprintTitle);
-  const description = isInvalid
-    ? (labels.invalidBlueprintDescription ??
-      DEFAULT_LABELS.invalidBlueprintDescription)
-    : (labels.missingBlueprintDescription ??
-      DEFAULT_LABELS.missingBlueprintDescription);
-  const Icon = isInvalid ? TriangleAlert : AlertCircle;
+  const isEmpty = blueprint.status === "ready";
+  const title = isEmpty
+    ? (labels.noPagesTitle ?? DEFAULT_LABELS.noPagesTitle)
+    : isInvalid
+      ? (labels.invalidBlueprintTitle ?? DEFAULT_LABELS.invalidBlueprintTitle)
+      : (labels.missingBlueprintTitle ?? DEFAULT_LABELS.missingBlueprintTitle);
+  const description = isEmpty
+    ? (labels.noPagesDescription ?? DEFAULT_LABELS.noPagesDescription)
+    : isInvalid
+      ? (labels.invalidBlueprintDescription ??
+        DEFAULT_LABELS.invalidBlueprintDescription)
+      : (labels.missingBlueprintDescription ??
+        DEFAULT_LABELS.missingBlueprintDescription);
+  const Icon = isEmpty ? File : isInvalid ? TriangleAlert : AlertCircle;
 
   return (
     <div
-      className="rounded-lg border border-dashed bg-muted/15 p-3"
-      data-blueprint-status={blueprint.status}
+      className={cn(
+        "rounded-lg border border-dashed bg-muted/15 p-3",
+        collapsed && "md:p-2",
+      )}
+      data-blueprint-status={isEmpty ? "empty" : blueprint.status}
+      title={collapsed ? title : undefined}
       role="status"
       aria-live="polite"
     >
-      <div className="flex gap-2.5">
+      <div className={cn("flex gap-2.5", collapsed && "md:justify-center")}>
         <Icon
           aria-hidden="true"
           className={cn(
@@ -243,7 +256,7 @@ function BlueprintEmptyState({
               : "text-muted-foreground",
           )}
         />
-        <div className="min-w-0">
+        <div className={cn("min-w-0", collapsed && "md:sr-only")}>
           <p className="text-xs font-medium">{title}</p>
           <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
             {blueprint.message ?? description}
@@ -406,7 +419,7 @@ export function ProjectDesignNavigator({
       labels.buildProgress ?? DEFAULT_LABELS.buildProgress
     }: ${progress} percent, ${buildLabel}. ${
       labels.reviewStatus ?? DEFAULT_LABELS.reviewStatus
-    }: ${reviewLabel}.`;
+    }: ${reviewLabel}.${page.previewIssue ? ` ${page.previewIssue}` : ""}`;
 
     return (
       <div key={page.id} role="none" data-page-id={page.id}>
@@ -425,6 +438,7 @@ export function ProjectDesignNavigator({
                 : "hover:bg-accent/60",
             )}
             data-selected={selected ? "true" : "false"}
+            data-preview-available={page.previewIssue ? "false" : "true"}
             onClick={() => selectPage(page.id)}
           >
             <File
@@ -440,6 +454,11 @@ export function ProjectDesignNavigator({
                 <span className="mt-0.5 block truncate text-[11px] leading-relaxed text-muted-foreground">
                   {page.responsibility}
                 </span>
+                {page.previewIssue && (
+                  <span className="mt-1 block text-[11px] leading-relaxed text-amber-700 dark:text-amber-400">
+                    {page.previewIssue}
+                  </span>
+                )}
                 <span className="mt-2 flex items-center gap-2">
                   <span className="sr-only">
                     {labels.buildProgress ?? DEFAULT_LABELS.buildProgress}:{" "}
@@ -702,26 +721,12 @@ export function ProjectDesignNavigator({
               />
             )}
 
-            {!blueprintReady ? (
+            {!blueprintReady || model.pages.length === 0 ? (
               <BlueprintEmptyState
                 blueprint={model.blueprint}
                 labels={labels}
+                collapsed={collapsed}
               />
-            ) : model.pages.length === 0 ? (
-              <div
-                className="rounded-lg border border-dashed bg-muted/15 p-3"
-                data-blueprint-status="empty"
-                role="status"
-                aria-live="polite"
-              >
-                <p className="text-xs font-medium">
-                  {labels.noPagesTitle ?? DEFAULT_LABELS.noPagesTitle}
-                </p>
-                <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                  {labels.noPagesDescription ??
-                    DEFAULT_LABELS.noPagesDescription}
-                </p>
-              </div>
             ) : (
               <div
                 id={treeId}

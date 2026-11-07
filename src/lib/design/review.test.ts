@@ -128,6 +128,12 @@ describe("structured Design Review", () => {
     expect(english).toContain(
       "Write the user-facing text in overview, findings[].title, findings[].evidence, and findings[].recommendation in English.",
     );
+    expect(chinese).toContain(
+      "intentional gradients, glass, pixel type, maximalism, texture, or other defining style traits are not defects by themselves",
+    );
+    expect(chinese).toContain(
+      "Do not impose a universal 44px minimum target size",
+    );
     for (const prompt of [chinese, english]) {
       expect(prompt).toContain("JSON keys");
       expect(prompt).toContain("lowercase kebab-case");

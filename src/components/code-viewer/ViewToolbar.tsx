@@ -4,7 +4,6 @@ import {
   Monitor,
   Tablet,
   Smartphone,
-  Download,
   Minus,
   Plus,
   Shapes,
@@ -13,6 +12,7 @@ import {
   FolderOutput,
   ScanSearch,
   RefreshCw,
+  Camera,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { saveAs } from "file-saver";
@@ -25,6 +25,14 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { buildProjectZip } from "@/lib/project-assets/archive";
+import { ProjectBuildDownload } from "./ProjectBuildDownload";
+import type { PreviewCaptureScope } from "../../lib/design/preview-runtime";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "../ui/dropdown-menu";
 
 export type ViewMode = "preview" | "code";
 export type DeviceSize = PreviewView;
@@ -63,6 +71,9 @@ interface ViewToolbarProps {
   onExportDirectory?: () => void;
   onOpenDesignReview?: () => void;
   isGenerating?: boolean;
+  interactionLocked?: boolean;
+  onAnnotate?: (scope: PreviewCaptureScope) => void;
+  annotationUnavailableReason?: string;
   prototypeNavigation?: {
     pages: readonly { id: string; name: string }[];
     scenarios: readonly { id: string; name: string }[];
@@ -139,11 +150,17 @@ export function ViewToolbar({
   onExportDirectory,
   onOpenDesignReview,
   isGenerating = false,
+  interactionLocked = false,
+  onAnnotate,
+  annotationUnavailableReason,
   prototypeNavigation,
 }: ViewToolbarProps) {
   const t = useT();
   return (
-    <div className="h-14 border-b bg-background px-4 flex items-center justify-between shrink-0 z-10">
+    <div
+      inert={interactionLocked}
+      className="min-h-14 border-b bg-background px-4 py-2 flex flex-wrap items-center justify-between gap-2 shrink-0 z-10"
+    >
       <div className="flex items-center gap-1 p-0.5 rounded-lg border">
         {previewEnabled && (
           <Button
@@ -211,6 +228,40 @@ export function ViewToolbar({
       <div className="flex items-center gap-2">
         {previewEnabled && viewMode === "preview" && (
           <div className="flex items-center gap-1">
+            {onAnnotate && (
+              <DropdownMenu>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span
+                      className="inline-flex"
+                      tabIndex={annotationUnavailableReason ? 0 : undefined}
+                    >
+                      <DropdownMenuTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          aria-label={t.annotation.title}
+                          disabled={!!annotationUnavailableReason}
+                        >
+                          <Camera size={15} />
+                        </Button>
+                      </DropdownMenuTrigger>
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    {annotationUnavailableReason || t.annotation.title}
+                  </TooltipContent>
+                </Tooltip>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem onSelect={() => onAnnotate("viewport")}>
+                    {t.annotation.viewport}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => onAnnotate("full-page")}>
+                    {t.annotation.fullPage}
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
             {designMode && onOpenDesignReview && (
               <ToolbarIconButton
                 onClick={onOpenDesignReview}
@@ -328,12 +379,12 @@ export function ViewToolbar({
                 <Shapes size={15} />
               </ToolbarIconButton>
             )}
-            <ToolbarIconButton
-              onClick={() => void downloadProjectAsZip(files, assets)}
-              label={t.toolbar.download}
-            >
-              <Download size={16} />
-            </ToolbarIconButton>
+            <ProjectBuildDownload
+              files={files}
+              assets={assets}
+              isGenerating={isGenerating}
+              onDownloadSource={() => downloadProjectAsZip(files, assets)}
+            />
             {desktopMode && onExportDirectory && (
               <ToolbarIconButton
                 onClick={onExportDirectory}

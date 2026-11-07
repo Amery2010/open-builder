@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 
+import { Blob as NodeBlob } from "node:buffer";
 import { describe, expect, it, vi } from "vitest";
 import { createIsolatedPreviewSession } from "./prototype-preview-session";
 import {
@@ -20,6 +21,7 @@ import {
   parseDesignBridgeNavigationResponse,
   parseDesignBridgeRouteMessage,
   parseDesignBridgeCaptureResponse,
+  parseDesignBridgeAnnotationResponse,
   sanitizePrototypePreviewTarget,
   sanitizeDesignSelectionPayload,
   stripDesignBridge,
@@ -774,7 +776,7 @@ describe("Design preview bridge", () => {
     expect(
       sanitizePrototypePreviewTarget({
         ...target,
-        route: "#/" + "a".repeat(256),
+        route: "#/" + "a".repeat(2048),
       }),
     ).toBeNull();
     expect(getDesignPreviewRoute(target.route)).toBe(target.route);
@@ -872,63 +874,72 @@ describe("Design preview bridge", () => {
     expect(source).not.toContain("eval(data");
   });
 
-  it("navigates an injected preview through its HashRouter location", async () => {
-    const iframe = document.createElement("iframe");
-    document.body.appendChild(iframe);
-    const previewWindow = iframe.contentWindow as
-      (Window & typeof globalThis) | null;
-    const previewDocument = iframe.contentDocument;
-    if (!previewWindow || !previewDocument) {
-      throw new Error("Preview iframe did not initialize.");
-    }
-    previewDocument.open();
-    previewDocument.write("<!doctype html><body><main>Dashboard</main></body>");
-    previewDocument.close();
-    const messages: Record<string, unknown>[] = [];
-    Object.defineProperty(previewWindow, "parent", {
-      configurable: true,
-      value: previewWindow,
-    });
-    previewWindow.postMessage = ((message: Record<string, unknown>) => {
-      messages.push(message);
-    }) as typeof previewWindow.postMessage;
-    const target = {
-      pageId: "dashboard",
-      route: "#/dashboard",
-      scenarioId: "default",
-    };
-    const result = injectDesignBridge(
-      { "index.html": "<!doctype html><body></body>" },
-      "static",
-      true,
-      undefined,
-      "generation-a",
-    );
-    previewWindow.eval(result.files[DESIGN_BRIDGE_VIRTUAL_PATH]);
-    previewWindow.dispatchEvent(
-      new previewWindow.MessageEvent("message", {
-        data: {
-          type: "open-builder:design-bridge-navigate",
-          version: 1,
+  it.each([
+    "#/dashboard",
+    "#/%E5%95%86%E5%93%81/sku-42?tab=history&scenario=default",
+    "#/" + "a".repeat(500),
+  ])(
+    "navigates an injected preview through its HashRouter location (%s)",
+    async (route) => {
+      const iframe = document.createElement("iframe");
+      document.body.appendChild(iframe);
+      const previewWindow = iframe.contentWindow as
+        (Window & typeof globalThis) | null;
+      const previewDocument = iframe.contentDocument;
+      if (!previewWindow || !previewDocument) {
+        throw new Error("Preview iframe did not initialize.");
+      }
+      previewDocument.open();
+      previewDocument.write(
+        "<!doctype html><body><main>Dashboard</main></body>",
+      );
+      previewDocument.close();
+      const messages: Record<string, unknown>[] = [];
+      Object.defineProperty(previewWindow, "parent", {
+        configurable: true,
+        value: previewWindow,
+      });
+      previewWindow.postMessage = ((message: Record<string, unknown>) => {
+        messages.push(message);
+      }) as typeof previewWindow.postMessage;
+      const target = {
+        pageId: "dashboard",
+        route,
+        scenarioId: "default",
+      };
+      const result = injectDesignBridge(
+        { "index.html": "<!doctype html><body></body>" },
+        "static",
+        true,
+        undefined,
+        "generation-a",
+      );
+      previewWindow.eval(result.files[DESIGN_BRIDGE_VIRTUAL_PATH]);
+      previewWindow.dispatchEvent(
+        new previewWindow.MessageEvent("message", {
+          data: {
+            type: "open-builder:design-bridge-navigate",
+            version: 1,
+            generation: "generation-a",
+            nonce: "0123456789abcdef0123456789abcdef",
+            requestId: "abcdef0123456789abcdef0123456789",
+            target,
+          },
+          origin: "https://builder.example.test",
+          source: previewWindow,
+        }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(messages).toContainEqual(
+        expect.objectContaining({
+          type: "open-builder:design-bridge-navigation-result",
           generation: "generation-a",
-          nonce: "0123456789abcdef0123456789abcdef",
-          requestId: "abcdef0123456789abcdef0123456789",
-          target,
-        },
-        origin: "https://builder.example.test",
-        source: previewWindow,
-      }),
-    );
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    expect(messages).toContainEqual(
-      expect.objectContaining({
-        type: "open-builder:design-bridge-navigation-result",
-        generation: "generation-a",
-        payload: { target, route: "#/dashboard" },
-      }),
-    );
-    iframe.remove();
-  });
+          payload: { target, route },
+        }),
+      );
+      iframe.remove();
+    },
+  );
 
   it.each([true, false])(
     "captures only with a genuinely available static runtime (%s)",
@@ -1642,6 +1653,361 @@ describe("capture viewport and cancellation identity", () => {
         iframe.remove();
         vi.clearAllTimers();
         vi.useRealTimers();
+      }
+    },
+  );
+});
+
+describe("live viewport capture", () => {
+  it("preserves scroll, input and dialog state and samples without waiting for fonts", async () => {
+    const iframe = document.createElement("iframe");
+    document.body.appendChild(iframe);
+    try {
+      const frame = iframe.contentWindow as Window & typeof globalThis;
+      frame.document.body.innerHTML =
+        '<input value="edited"><dialog open>Current dialog</dialog>';
+      const input = frame.document.querySelector("input")!;
+      input.value = "unsaved value";
+      Object.defineProperty(frame, "parent", {
+        configurable: true,
+        value: frame,
+      });
+      Object.defineProperty(frame, "scrollY", {
+        configurable: true,
+        value: 400,
+      });
+      Object.defineProperty(frame.document, "fonts", {
+        configurable: true,
+        value: { status: "loading", ready: new Promise(() => {}) },
+      });
+      frame.scrollTo = vi.fn();
+      let resolve!: (message: Record<string, unknown>) => void;
+      const done = new Promise<Record<string, unknown>>((next) => {
+        resolve = next;
+      });
+      frame.postMessage = ((message: Record<string, unknown>) => {
+        if (
+          String(message.type).includes("capture-result") ||
+          String(message.type).includes("capture-error")
+        )
+          resolve(message);
+      }) as typeof frame.postMessage;
+      const toCanvas = vi.fn(async () => ({
+        toDataURL: () => webpDataUrl(1024, 768),
+      }));
+      Object.defineProperty(frame, DESIGN_CAPTURE_RUNTIME_GLOBAL, {
+        value: { toCanvas },
+      });
+      frame.eval(
+        injectDesignBridge(
+          { "index.html": "<body></body>" },
+          "static",
+          true,
+          "runtime",
+          "live-generation",
+        ).files[DESIGN_BRIDGE_VIRTUAL_PATH],
+      );
+      frame.dispatchEvent(
+        new frame.MessageEvent("message", {
+          source: frame,
+          origin: "https://builder.test",
+          data: {
+            type: "open-builder:design-bridge-capture",
+            version: 1,
+            generation: "live-generation",
+            nonce: "live-nonce",
+            requestId: "live-request",
+            currentViewport: true,
+            viewport: { name: "desktop", width: 1024, height: 768 },
+          },
+        }),
+      );
+      expect(await done).toMatchObject({
+        type: "open-builder:design-bridge-capture-result",
+      });
+      expect(frame.scrollTo).not.toHaveBeenCalled();
+      expect(input.value).toBe("unsaved value");
+      expect(frame.document.querySelector("dialog")!.open).toBe(true);
+      expect(toCanvas).toHaveBeenCalledWith(
+        frame.document.documentElement,
+        expect.objectContaining({
+          height: 768,
+          canvasHeight: 768,
+          style: expect.objectContaining({ top: "-400px" }),
+        }),
+      );
+    } finally {
+      iframe.remove();
+    }
+  });
+});
+
+describe("capture region protocol", () => {
+  function fixture() {
+    const expected = {
+      generation: "long-page",
+      nonce: "capture-nonce",
+      requestId: "capture-request",
+      viewportName: "desktop" as const,
+      viewportWidth: 1440,
+      viewportHeight: 900,
+      currentViewport: true,
+      scope: "full-page" as const,
+    };
+    const capture = {
+      scope: "full-page" as const,
+      region: { x: 0, y: 0, width: 1440, height: 10000 },
+      scale: 0.4096,
+    };
+    const payload = {
+      dataUrl: webpDataUrl(589, 4096),
+      capture,
+      viewport: {
+        name: "desktop",
+        width: 1440,
+        height: 900,
+        capturedHeight: 10000,
+        fullHeight: 10000,
+        truncated: false,
+      },
+      semanticSnapshot: {
+        route: "/",
+        viewport: { width: 1440, height: 900, devicePixelRatio: 1 },
+        document: {
+          scrollWidth: 1440,
+          scrollHeight: 10000,
+          horizontalOverflow: false,
+          fonts: "ready",
+        },
+        elements: [],
+      },
+    };
+    return {
+      expected,
+      message: {
+        ...expected,
+        type: "open-builder:design-bridge-capture-result",
+        version: 1,
+        payload,
+      },
+    };
+  }
+  it("accepts complete downscaled evidence without changing the CSS viewport", () => {
+    const { expected, message } = fixture();
+    expect(parseDesignBridgeCaptureResponse(message, expected)).toMatchObject({
+      ok: true,
+      result: {
+        capture: message.payload.capture,
+        viewport: { width: 1440, capturedHeight: 10000, truncated: false },
+      },
+    });
+  });
+  it("rejects a partial document presented as a complete full-page capture", () => {
+    const { expected, message } = fixture();
+    message.payload.capture.region.height = 900;
+    message.payload.capture.scale = 1;
+    message.payload.viewport.capturedHeight = 900;
+    message.payload.viewport.fullHeight = 900;
+    message.payload.dataUrl = webpDataUrl(1440, 900);
+    expect(parseDesignBridgeCaptureResponse(message, expected)).toBeNull();
+  });
+  it.each(["scope", "scale", "width", "truncated", "generation", "missing"])(
+    "rejects inconsistent %s",
+    (field) => {
+      const { expected, message } = fixture();
+      if (field === "scope")
+        Object.assign(message.payload.capture, { scope: "viewport" });
+      if (field === "scale") message.payload.capture.scale = 0.5;
+      if (field === "width") message.payload.capture.region.width = 1441;
+      if (field === "truncated") message.payload.viewport.truncated = true;
+      if (field === "generation") message.generation = "outdated";
+      if (field === "missing")
+        Object.assign(message.payload, { capture: undefined });
+      expect(parseDesignBridgeCaptureResponse(message, expected)).toBeNull();
+    },
+  );
+  it("accepts a natural-size PNG Blob only for an annotation request", async () => {
+    vi.stubGlobal("Blob", NodeBlob);
+    try {
+      const { expected, message } = fixture();
+      const png = fallbackImageDataUrl("image/png", 1440, 10000);
+      const blob = new Blob(
+        [Uint8Array.from(atob(png.split(",")[1]), (ch) => ch.charCodeAt(0))],
+        { type: "image/png" },
+      );
+      const payload = {
+        ...message.payload,
+        dataUrl: undefined,
+        blob,
+        capture: { ...message.payload.capture, scale: 1 },
+      };
+      const annotation = {
+        ...message,
+        type: "open-builder:design-bridge-annotation-result",
+        payload,
+      };
+      expect(
+        await parseDesignBridgeAnnotationResponse(annotation, {
+          ...expected,
+          output: "annotation",
+        }),
+      ).toMatchObject({
+        ok: true,
+        result: {
+          blob,
+          capture: { scale: 1 },
+          viewport: { capturedHeight: 10000 },
+        },
+      });
+      expect(parseDesignBridgeCaptureResponse(annotation, expected)).toBeNull();
+      expect(
+        await parseDesignBridgeAnnotationResponse(annotation, expected),
+      ).toBeNull();
+      expect(
+        await parseDesignBridgeAnnotationResponse(
+          {
+            ...annotation,
+            payload: { ...payload, capture: message.payload.capture },
+          },
+          { ...expected, output: "annotation" },
+        ),
+      ).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe("long-page rendering requests", () => {
+  it.each(["evidence", "annotation"] as const)(
+    "captures all document pixels for %s without scrolling the live page",
+    async (output) => {
+      vi.stubGlobal("Blob", NodeBlob);
+      const iframe = document.createElement("iframe");
+      document.body.appendChild(iframe);
+      try {
+        const frame = iframe.contentWindow as Window & typeof globalThis;
+        Object.defineProperty(frame, "parent", {
+          configurable: true,
+          value: frame,
+        });
+        Object.defineProperty(frame, "scrollY", {
+          configurable: true,
+          value: 400,
+        });
+        Object.defineProperty(frame.document.documentElement, "scrollHeight", {
+          value: 10000,
+        });
+        Object.defineProperty(frame.document.documentElement, "scrollWidth", {
+          value: 1600,
+        });
+        frame.scrollTo = vi.fn();
+        let reply!: (message: Record<string, unknown>) => void;
+        const result = new Promise<Record<string, unknown>>((resolve) => {
+          reply = resolve;
+        });
+        frame.postMessage = ((message: Record<string, unknown>) => {
+          if (
+            String(message.type).includes("capture-result") ||
+            String(message.type).includes("annotation-result") ||
+            String(message.type).includes("capture-error")
+          )
+            reply(message);
+        }) as typeof frame.postMessage;
+        const toCanvas = vi.fn(async (_node, options) => {
+          const width = options.canvasWidth;
+          const height = options.canvasHeight;
+          return {
+            width,
+            height,
+            toDataURL: () => webpDataUrl(width, height),
+            toBlob: (resolve: (blob: Blob) => void) => {
+              const png = fallbackImageDataUrl("image/png", width, height);
+              resolve(
+                new Blob(
+                  [
+                    Uint8Array.from(atob(png.split(",")[1]), (ch) =>
+                      ch.charCodeAt(0),
+                    ),
+                  ],
+                  { type: "image/png" },
+                ),
+              );
+            },
+          };
+        });
+        Object.defineProperty(frame, DESIGN_CAPTURE_RUNTIME_GLOBAL, {
+          value: { toCanvas },
+        });
+        frame.eval(
+          injectDesignBridge(
+            { "index.html": "<body></body>" },
+            "static",
+            true,
+            "runtime",
+            "long-generation",
+          ).files[DESIGN_BRIDGE_VIRTUAL_PATH],
+        );
+        const expectation = {
+          generation: "long-generation",
+          nonce: "long-nonce",
+          requestId: "long-request",
+          currentViewport: true,
+          scope: "full-page" as const,
+          output,
+          viewportName: "desktop" as const,
+          viewportWidth: 1024,
+          viewportHeight: 768,
+        };
+        frame.dispatchEvent(
+          new frame.MessageEvent("message", {
+            source: frame,
+            origin: "https://builder.test",
+            data: {
+              ...expectation,
+              type: "open-builder:design-bridge-capture",
+              version: 1,
+              viewport: { name: "desktop", width: 1024, height: 768 },
+            },
+          }),
+        );
+        const message = await result;
+        const parsed =
+          output === "annotation"
+            ? await parseDesignBridgeAnnotationResponse(message, expectation)
+            : parseDesignBridgeCaptureResponse(message, expectation);
+        expect(parsed).toMatchObject({
+          ok: true,
+          result: {
+            capture: {
+              scope: "full-page",
+              region: { x: 0, y: 0, width: 1600, height: 10000 },
+              scale: output === "annotation" ? 1 : 0.4096,
+            },
+            viewport: {
+              width: 1024,
+              height: 768,
+              capturedHeight: 10000,
+              fullHeight: 10000,
+              truncated: false,
+            },
+          },
+        });
+        expect(toCanvas).toHaveBeenCalledWith(
+          frame.document.documentElement,
+          expect.objectContaining({
+            windowWidth: 1024,
+            windowHeight: 768,
+            width: 1600,
+            height: 10000,
+            canvasWidth: output === "annotation" ? 1600 : 655,
+            canvasHeight: output === "annotation" ? 10000 : 4096,
+          }),
+        );
+        expect(frame.scrollTo).not.toHaveBeenCalled();
+      } finally {
+        iframe.remove();
+        vi.unstubAllGlobals();
       }
     },
   );

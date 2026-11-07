@@ -10,6 +10,7 @@ import {
   DesignSystemRegistry,
   MemoryDesignSystemStorage,
 } from "../../lib/design-systems/registry";
+import { BUNDLED_DESIGN_SYSTEMS } from "../../lib/design-systems/catalog";
 import { DesignSystemPanel } from "./DesignSystemPanel";
 import { stageDesignSystemFiles } from "../../lib/design-systems/importer";
 
@@ -29,25 +30,33 @@ const validTokens = `:root {
   --motion-base: 180ms;
 }`;
 
-async function customPackage() {
+async function designPackage(
+  id = "custom-quiet-workshop",
+  name = "Quiet Workshop",
+  source: "custom" | "imported" = "custom",
+) {
   return stageDesignSystemFiles(
     [
       {
         path: "manifest.json",
         content: JSON.stringify({
           schemaVersion: "open-builder-design-system/v1",
-          id: "custom-quiet-workshop",
-          name: "Quiet Workshop",
+          id,
+          name,
           description: "Calm and precise.",
-          source: { kind: "custom" },
+          source: source === "custom" ? { kind: "custom" } : undefined,
           files: { design: "DESIGN.md", tokens: "tokens.css" },
         }),
       },
-      { path: "DESIGN.md", content: "# Quiet Workshop" },
+      { path: "DESIGN.md", content: `# ${name}` },
       { path: "tokens.css", content: validTokens },
     ],
-    "custom",
+    source,
   );
+}
+
+async function customPackage() {
+  return designPackage();
 }
 
 const stripe = {
@@ -64,6 +73,15 @@ const claude = {
   version: "pinned",
   digest: "b".repeat(64),
 };
+
+async function findCatalogSystem(name: string) {
+  const search = screen.getByRole("textbox", {
+    name: "Search design systems",
+  });
+  await userEvent.clear(search);
+  await userEvent.type(search, name);
+  return screen.findByRole("button", { name: new RegExp(name, "i") });
+}
 
 describe("DesignSystemPanel", () => {
   beforeEach(() => {
@@ -105,9 +123,7 @@ describe("DesignSystemPanel", () => {
     expect(useConversationStore.getState().conversations[id].files).toEqual({
       "src/App.tsx": "existing",
     });
-    await userEvent.click(
-      await screen.findByRole("button", { name: /Quiet Workshop/i }),
-    );
+    await userEvent.click(await findCatalogSystem("Quiet Workshop"));
     await waitFor(() => {
       expect(onOpenChange).toHaveBeenCalledWith(false);
       expect(onApply).toHaveBeenCalledWith(quietWorkshop.id);
@@ -145,9 +161,7 @@ describe("DesignSystemPanel", () => {
       </TooltipProvider>,
     );
 
-    await userEvent.click(
-      await screen.findByRole("button", { name: /Quiet Workshop/i }),
-    );
+    await userEvent.click(await findCatalogSystem("Quiet Workshop"));
     expect(
       await screen.findByText(/contract application failed/i),
     ).toBeVisible();
@@ -183,9 +197,7 @@ describe("DesignSystemPanel", () => {
         />
       </TooltipProvider>,
     );
-    await userEvent.click(
-      await screen.findByRole("button", { name: /Quiet Workshop/i }),
-    );
+    await userEvent.click(await findCatalogSystem("Quiet Workshop"));
     expect(
       screen.getByRole("button", { name: /Quiet Workshop/i }),
     ).toHaveTextContent("Applied");
@@ -216,9 +228,7 @@ describe("DesignSystemPanel", () => {
       </TooltipProvider>,
     );
 
-    await userEvent.click(
-      await screen.findByRole("button", { name: /Quiet Workshop/i }),
-    );
+    await userEvent.click(await findCatalogSystem("Quiet Workshop"));
     await waitFor(() => expect(onApply).toHaveBeenCalledWith(quietWorkshop.id));
   });
 
@@ -284,9 +294,7 @@ describe("DesignSystemPanel", () => {
       </TooltipProvider>,
     );
 
-    await userEvent.click(
-      await screen.findByRole("button", { name: /Quiet Workshop/i }),
-    );
+    await userEvent.click(await findCatalogSystem("Quiet Workshop"));
     expect(onApply).not.toHaveBeenCalled();
     expect(onOpenChange).toHaveBeenCalledWith(false);
     expect(
@@ -319,15 +327,17 @@ describe("DesignSystemPanel", () => {
       </TooltipProvider>,
     );
 
-    const choice = await screen.findByRole("button", {
-      name: /Quiet Workshop/i,
-    });
+    const choice = await findCatalogSystem("Quiet Workshop");
     vi.spyOn(registry, "loadImported").mockReturnValue(pendingLoad);
     await userEvent.click(choice);
     expect(choice).toBeDisabled();
     const secondId = useConversationStore.getState().createConversation();
     resolveLoad(stagedCustom.package);
-    await waitFor(() => expect(choice).toBeEnabled());
+    await waitFor(() =>
+      expect(
+        screen.getByRole("textbox", { name: "Search design systems" }),
+      ).toHaveValue(""),
+    );
 
     expect(onApply).not.toHaveBeenCalled();
     expect(onOpenChange).not.toHaveBeenCalled();
@@ -385,7 +395,7 @@ describe("DesignSystemPanel", () => {
     const previews = document.querySelectorAll(
       '[role="dialog"] img[src^="/design-systems/previews/"]',
     );
-    expect(previews).toHaveLength(12);
+    expect(previews).toHaveLength(Math.min(9, BUNDLED_DESIGN_SYSTEMS.length));
     for (const preview of previews) {
       expect(preview).toHaveAttribute("loading", "lazy");
       expect(preview).toHaveAttribute("decoding", "async");
@@ -394,6 +404,242 @@ describe("DesignSystemPanel", () => {
         /^\/design-systems\/previews\/.+\.webp$/,
       );
     }
+  });
+
+  it("filters by localized metadata and paginates the unified catalog", async () => {
+    useConversationStore.getState().createConversation();
+    render(
+      <TooltipProvider>
+        <DesignSystemPanel
+          open
+          onOpenChange={vi.fn()}
+          onApply={vi.fn()}
+          isGenerating={false}
+          registry={new DesignSystemRegistry(new MemoryDesignSystemStorage())}
+        />
+      </TooltipProvider>,
+    );
+
+    expect(
+      document.querySelectorAll(
+        '[role="dialog"] img[src^="/design-systems/previews/"]',
+      ),
+    ).toHaveLength(Math.min(9, BUNDLED_DESIGN_SYSTEMS.length));
+    const nextPage = screen.getByRole("button", { name: "Next page" });
+    if (BUNDLED_DESIGN_SYSTEMS.length > 9) {
+      expect(nextPage).toBeEnabled();
+      await userEvent.click(nextPage);
+      expect(screen.getAllByText(/Page 2 of/i).length).toBeGreaterThan(0);
+      await userEvent.click(
+        screen.getByRole("button", { name: "Previous page" }),
+      );
+    } else {
+      expect(nextPage).toBeDisabled();
+    }
+
+    const search = screen.getByRole("textbox", {
+      name: "Search design systems",
+    });
+    await userEvent.type(search, "金融");
+    expect(screen.getByRole("button", { name: /Stripe/i })).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: /Linear/i }),
+    ).not.toBeInTheDocument();
+
+    await userEvent.clear(search);
+    await userEvent.type(search, "no-such-design-system");
+    expect(
+      screen.getByText("No design systems match this search."),
+    ).toBeVisible();
+    await userEvent.click(
+      screen.getAllByRole("button", { name: "Clear search" })[0],
+    );
+    expect(search).toHaveValue("");
+  });
+
+  it("keeps every built-in style reachable and excludes avoid-only matches", async () => {
+    useConversationStore.getState().createConversation();
+    render(
+      <TooltipProvider>
+        <DesignSystemPanel
+          open
+          onOpenChange={vi.fn()}
+          onApply={vi.fn()}
+          isGenerating={false}
+          registry={new DesignSystemRegistry(new MemoryDesignSystemStorage())}
+        />
+      </TooltipProvider>,
+    );
+
+    const seen = new Set<string>();
+    const pageCount = Math.ceil(BUNDLED_DESIGN_SYSTEMS.length / 9);
+    for (let pageIndex = 0; pageIndex < pageCount; pageIndex += 1) {
+      for (const entry of BUNDLED_DESIGN_SYSTEMS) {
+        if (document.querySelector(`img[src="${entry.previewPath}"]`)) {
+          seen.add(entry.id);
+        }
+      }
+      if (pageIndex + 1 < pageCount) {
+        await userEvent.click(
+          screen.getByRole("button", { name: "Next page" }),
+        );
+        await waitFor(() =>
+          expect(
+            screen.getAllByText(
+              new RegExp(`page ${pageIndex + 2} of ${pageCount}`, "i"),
+            ).length,
+          ).toBeGreaterThan(0),
+        );
+      }
+    }
+    expect(seen.size).toBe(BUNDLED_DESIGN_SYSTEMS.length);
+
+    const search = screen.getByRole("textbox", {
+      name: "Search design systems",
+    });
+    await userEvent.clear(search);
+    await userEvent.type(search, "CASSette mechanical");
+    expect(
+      screen.getByRole("button", { name: /Cassette Futurism/i }),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: /CRT Terminal/i }),
+    ).not.toBeInTheDocument();
+
+    await userEvent.clear(search);
+    await userEvent.type(search, "磁带 机械");
+    expect(
+      screen.getByRole("button", { name: /Cassette Futurism/i }),
+    ).toBeVisible();
+
+    await userEvent.clear(search);
+    await userEvent.type(search, "quiet luxury");
+    expect(
+      screen.getByText("No design systems match this search."),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: /Cassette Futurism/i }),
+    ).not.toBeInTheDocument();
+
+    await userEvent.click(
+      screen.getAllByRole("button", { name: "Clear search" })[0],
+    );
+    await waitFor(() => expect(search).toHaveFocus());
+  });
+
+  it("orders user sources after built-ins and clamps the last page when they shrink", async () => {
+    const storage = new MemoryDesignSystemStorage();
+    const registry = new DesignSystemRegistry(storage);
+    await registry.confirmImport(
+      (await designPackage("custom-alpha", "Alpha Custom", "custom")).package,
+    );
+    await registry.confirmImport(
+      (await designPackage("imported-beta", "Beta Imported", "imported"))
+        .package,
+    );
+    useConversationStore.getState().createConversation();
+    const { rerender } = render(
+      <TooltipProvider>
+        <DesignSystemPanel
+          open
+          onOpenChange={vi.fn()}
+          onApply={vi.fn()}
+          isGenerating={false}
+          registry={registry}
+        />
+      </TooltipProvider>,
+    );
+
+    const search = await screen.findByRole("textbox", {
+      name: "Search design systems",
+    });
+    const body = screen.getByTestId("design-system-scroll-region");
+    await userEvent.type(search, "a");
+    await userEvent.click(screen.getByRole("button", { name: "Next page" }));
+    await waitFor(() =>
+      expect(screen.getAllByText(/Page 2 of 5/i).length).toBeGreaterThan(0),
+    );
+    body.scrollTop = 73;
+    await userEvent.click(screen.getByRole("button", { name: /New custom/i }));
+    await userEvent.click(
+      screen.getByRole("button", { name: /Back to systems/i }),
+    );
+    await new Promise<void>((resolve) =>
+      requestAnimationFrame(() => resolve()),
+    );
+    expect(
+      screen.getByRole("textbox", { name: "Search design systems" }),
+    ).toHaveValue("a");
+    expect(screen.getAllByText(/Page 2 of 5/i).length).toBeGreaterThan(0);
+    expect(screen.getByTestId("design-system-scroll-region")).toBe(body);
+
+    rerender(
+      <TooltipProvider>
+        <DesignSystemPanel
+          open={false}
+          onOpenChange={vi.fn()}
+          onApply={vi.fn()}
+          isGenerating={false}
+          registry={registry}
+        />
+      </TooltipProvider>,
+    );
+    rerender(
+      <TooltipProvider>
+        <DesignSystemPanel
+          open
+          onOpenChange={vi.fn()}
+          onApply={vi.fn()}
+          isGenerating={false}
+          registry={registry}
+        />
+      </TooltipProvider>,
+    );
+    const reopenedSearch = await screen.findByRole("textbox", {
+      name: "Search design systems",
+    });
+    expect(reopenedSearch).toHaveValue("");
+    useConversationStore.getState().createConversation();
+    await userEvent.type(reopenedSearch, "a");
+    useConversationStore.getState().createConversation();
+    await waitFor(() => expect(reopenedSearch).toHaveValue(""));
+
+    for (let pageIndex = 1; pageIndex < 5; pageIndex += 1) {
+      await userEvent.click(screen.getByRole("button", { name: "Next page" }));
+      await waitFor(() =>
+        expect(
+          screen.getAllByText(new RegExp(`Page ${pageIndex + 1} of 5`, "i"))
+            .length,
+        ).toBeGreaterThan(0),
+      );
+    }
+    const customHeading = screen.getByRole("heading", {
+      name: "Custom systems",
+    });
+    const importedHeading = screen.getByRole("heading", {
+      name: "Imported systems",
+    });
+    expect(
+      customHeading.compareDocumentPosition(importedHeading) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
+    await registry.clearImported();
+    const refreshedRegistry = new DesignSystemRegistry(storage);
+    rerender(
+      <TooltipProvider>
+        <DesignSystemPanel
+          open
+          onOpenChange={vi.fn()}
+          onApply={vi.fn()}
+          isGenerating={false}
+          registry={refreshedRegistry}
+        />
+      </TooltipProvider>,
+    );
+    await waitFor(() =>
+      expect(screen.getAllByText(/Page 4 of 4/i).length).toBeGreaterThan(0),
+    );
   });
 
   it("switches to an inline custom view, preserves selection on return, and creates a validated system", async () => {
@@ -462,6 +708,7 @@ describe("DesignSystemPanel", () => {
     expect(
       screen.getByRole("heading", { name: "Design systems" }),
     ).toBeVisible();
+    await findCatalogSystem("Quiet Workshop");
     expect(
       document.querySelector('img[src="/design-systems/previews/custom.webp"]'),
     ).not.toBeNull();

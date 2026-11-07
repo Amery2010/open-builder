@@ -6,7 +6,7 @@ import {
   readEditableTokenValues,
   sameDesignSystemReference,
 } from "./tokens";
-import type { DesignContract } from "./run-contract";
+import type { DesignRunContext } from "./design-run";
 import type { DesignPreviewSemanticSnapshot } from "./preview-bridge";
 
 export type DesignAdherenceSeverity = "error" | "warning";
@@ -46,7 +46,7 @@ export interface DesignAdherenceReport {
 export interface DesignAdherenceInput {
   files: ProjectFiles;
   designState?: ConversationDesignState;
-  contract?: DesignContract | null;
+  contract?: DesignRunContext | null;
   beforeFiles?: ProjectFiles;
   changedPaths?: readonly string[];
   runtimeSnapshots?: readonly DesignPreviewSemanticSnapshot[];

@@ -4,6 +4,7 @@ import type { ProjectFiles } from "../../types";
 import { createSkillActiveContext } from "../skills/active-context";
 import type { ToolExecutionContext } from "../ai/generator-types";
 import { TOOL_FETCH_TIMEOUT_MS } from "./network-guard";
+import { DESIGN_HOST_TOOLS, HOST_TOOL_CATALOG } from "../ai/tools-schema";
 
 vi.mock("../skills/fs", () => ({ isSkillsAvailable: () => false }));
 vi.mock("../skills/instance", () => ({ getSkillRegistry: vi.fn() }));
@@ -234,14 +235,14 @@ describe("buildToolHandlers Design diagnostics", () => {
       },
     };
 
-    const unsupported = await built.combinedToolHandler(
+    const plainProject = await built.combinedToolHandler(
       "update_project_design",
       { document },
     );
-    expect(unsupported).toMatchObject({ isError: true });
-    expect((unsupported as { text: string }).text).toContain(
-      "complete prototype starter",
-    );
+    expect(plainProject).toMatchObject({
+      structuredContent: { ok: true, revision: 1 },
+    });
+    onProjectDesignUpdated.mockClear();
 
     files = {
       "package.json": JSON.stringify({
@@ -249,17 +250,18 @@ describe("buildToolHandlers Design diagnostics", () => {
       }),
     };
     const unchangedFiles = files;
-    const missingResponsibility = {
+    const unsafePage = {
       ...document,
-      pages: document.pages.map(
-        ({ responsibility: _responsibility, ...page }) => page,
-      ),
+      pages: document.pages.map((page) => ({
+        ...page,
+        filePaths: ["../outside.tsx"],
+      })),
     };
     const rejected = await built.combinedToolHandler("update_project_design", {
-      document: missingResponsibility,
+      document: unsafePage,
     });
     expect(rejected).toMatchObject({ isError: true });
-    expect((rejected as { text: string }).text).toContain("responsibility");
+    expect((rejected as { text: string }).text).toContain("path");
     expect(files).toBe(unchangedFiles);
     expect(onProjectDesignUpdated).not.toHaveBeenCalled();
     const created = await built.combinedToolHandler("update_project_design", {
@@ -270,6 +272,70 @@ describe("buildToolHandlers Design diagnostics", () => {
     });
     expect(files["design-project.json"]).toContain('"revision": 1');
     expect(onProjectDesignUpdated).toHaveBeenLastCalledWith(files);
+
+    const createdFiles = files;
+    const hostRun = HOST_TOOL_CATALOG.openRun({
+      tools: { update_project_design: DESIGN_HOST_TOOLS.update_project_design },
+      profile: "design",
+      context: {
+        runId: "blueprint-patch",
+        mode: "chat",
+        platform: "web",
+        runtime: "api",
+        allowedMcpAliases: new Set(),
+        activeSkillIds: new Set(),
+        approvedSkillScriptHashes: new Set(),
+        policyVersion: "test",
+      },
+      hostDispatcher: ({ name, input }) =>
+        built.combinedToolHandler(name, input),
+    });
+    const dispatch = (input: unknown) =>
+      hostRun.dispatch({ name: "update_project_design", input });
+    const partial = await dispatch({
+      expected_revision: 1,
+      patch: {
+        buildProgress: { percent: 10 },
+        pages: [{ id: "dashboard", name: "Updated dashboard" }],
+      },
+    });
+    expect(partial).toMatchObject({
+      structuredContent: { ok: true, revision: 2, pages: 1 },
+    });
+    expect(JSON.parse(files["design-project.json"])).toMatchObject({
+      productGoal: document.productGoal,
+      buildProgress: { status: "not-started", percent: 10 },
+    });
+    files = createdFiles;
+
+    const recovered = await dispatch({
+      expected_revision: 1,
+      document: {
+        revision: 2,
+        pages: document.pages.map((page) => ({
+          ...page,
+          flowIds: [...page.flowIds, "wantlist"],
+        })),
+      },
+    });
+    expect(recovered).toMatchObject({
+      structuredContent: {
+        ok: true,
+        flows: 1,
+        warnings: expect.arrayContaining([expect.stringContaining("wantlist")]),
+      },
+    });
+    files = createdFiles;
+
+    const previousNotifications = onProjectDesignUpdated.mock.calls.length;
+    const summary = await dispatch({
+      expected_revision: 1,
+      document: { revision: 2, pageCount: 1, flowCount: 1, scenarioCount: 1 },
+    });
+    expect(summary).toMatchObject({ isError: true });
+    expect((summary as { text: string }).text).toContain("summary");
+    expect(files).toBe(createdFiles);
+    expect(onProjectDesignUpdated).toHaveBeenCalledTimes(previousNotifications);
 
     const stale = await built.combinedToolHandler("update_project_design", {
       document: { ...document, revision: 2 },

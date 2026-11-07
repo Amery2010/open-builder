@@ -14,6 +14,33 @@ describe("ViewToolbar preview availability", () => {
     }));
   });
 
+  it("chooses a capture region before opening the annotation editor", async () => {
+    const onAnnotate = vi.fn();
+    render(
+      <TooltipProvider>
+        <ViewToolbar
+          viewMode="preview"
+          onViewModeChange={vi.fn()}
+          deviceSize="desktop"
+          onDeviceSizeChange={vi.fn()}
+          files={{ "index.html": "<body />" }}
+          onAnnotate={onAnnotate}
+        />
+      </TooltipProvider>,
+    );
+    const camera = screen.getByRole("button", { name: "Annotate preview" });
+    expect(camera.querySelector("svg")).toHaveClass("lucide-camera");
+    await userEvent.click(camera);
+    expect(onAnnotate).not.toHaveBeenCalled();
+    await userEvent.click(
+      screen.getByRole("menuitem", { name: "Current viewport" }),
+    );
+    expect(onAnnotate).toHaveBeenLastCalledWith("viewport");
+    await userEvent.click(camera);
+    await userEvent.click(screen.getByRole("menuitem", { name: "Full page" }));
+    expect(onAnnotate).toHaveBeenLastCalledWith("full-page");
+  });
+
   it("keeps code actions but removes preview controls in code-only mode", () => {
     render(
       <TooltipProvider>
@@ -36,7 +63,7 @@ describe("ViewToolbar preview availability", () => {
       screen.queryByRole("button", { name: "Web" }),
     ).not.toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Download" }),
+      screen.getByRole("button", { name: "Download project" }),
     ).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Reload preview" })).toBeNull();
   });
@@ -240,10 +267,9 @@ describe("ViewToolbar preview availability", () => {
       </TooltipProvider>,
     );
 
-    expect(screen.getByRole("button", { name: "Download" })).toHaveAttribute(
-      "data-variant",
-      "ghost",
-    );
+    expect(
+      screen.getByRole("button", { name: "Download project" }),
+    ).toHaveAttribute("data-variant", "ghost");
     expect(
       screen.getByRole("button", { name: "Export to a new directory" }),
     ).toHaveAttribute("data-variant", "ghost");

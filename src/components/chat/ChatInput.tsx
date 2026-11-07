@@ -18,10 +18,6 @@ import { useSettingsStore } from "../../store/settings";
 import type { Attachment } from "../../types";
 import type { Message } from "../../lib/ai/generator-types";
 import {
-  compressLocalImage,
-  type ImageCompressionSettings,
-} from "../../lib/images";
-import {
   SLASH_COMMANDS,
   SlashCommandMenu,
   type SlashCommand,
@@ -30,17 +26,9 @@ import { AttachmentPreview } from "./chat-input/AttachmentPreview";
 import { ChatInputToolbar } from "./chat-input/ChatInputToolbar";
 import { isSkillsAvailable } from "../../lib/skills/fs";
 import { getSkillRegistry } from "../../lib/skills/instance";
-import {
-  formatAttachmentBytes,
-  isAcceptedFileMime,
-  isImageMime,
-  validateAttachmentFile,
-} from "../../lib/utils/attachments";
-import {
-  deleteAttachment,
-  storeAttachmentFile,
-} from "../../lib/attachments/store";
-import type { Translations } from "../../i18n";
+import { isAcceptedFileMime, isImageMime } from "../../lib/utils/attachments";
+import { deleteAttachment } from "../../lib/attachments/store";
+import { useAttachmentIntake } from "./chat-input/useAttachmentIntake";
 import type {
   ProjectImportCommitResult,
   StagedProjectImport,
@@ -90,7 +78,6 @@ type SelectionDisplayContext = {
 
 const SAFE_SELECTION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 const SAFE_SELECTION_TAG_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;
-const UNMOUNTED_IMAGE_SESSION = Symbol("unmounted-image-session");
 
 function formatSelectionReference(selection: SelectionDisplayContext): string {
   if (selection.idSource !== "runtime") return selection.elementId;
@@ -134,6 +121,7 @@ interface ChatInputProps {
   onAttachmentsChange: (attachments: Attachment[]) => void;
   onImportProject: (
     project: StagedProjectImport,
+    signal?: AbortSignal,
   ) => Promise<ProjectImportCommitResult> | ProjectImportCommitResult;
   hasExistingProject: boolean;
   onSlashCommand: (cmd: string) => void;
@@ -143,59 +131,6 @@ interface ChatInputProps {
   onCompileDesignSystem?: (
     draft: CustomDesignSystemDraft,
   ) => Promise<StagedDesignSystemImport>;
-}
-
-function formatAttachmentError(
-  validation: Extract<ReturnType<typeof validateAttachmentFile>, { ok: false }>,
-  t: Translations,
-): string {
-  switch (validation.code) {
-    case "max_count":
-      return t.chat.attachmentErrors.maxCount.replace(
-        "{count}",
-        String(validation.limit ?? ""),
-      );
-    case "max_total_size":
-      return t.chat.attachmentErrors.maxTotalSize.replace(
-        "{size}",
-        formatAttachmentBytes(validation.limit ?? 0),
-      );
-    case "max_image_size":
-      return t.chat.attachmentErrors.maxImageSize.replace(
-        "{size}",
-        formatAttachmentBytes(validation.limit ?? 0),
-      );
-    case "max_file_size":
-      return t.chat.attachmentErrors.maxFileSize.replace(
-        "{size}",
-        formatAttachmentBytes(validation.limit ?? 0),
-      );
-    case "unsupported_type":
-      return t.chat.attachmentErrors.unsupportedType.replace(
-        "{name}",
-        validation.name ?? "unknown",
-      );
-    default:
-      return validation.reason;
-  }
-}
-
-function isAbortError(error: unknown): boolean {
-  return (
-    (error instanceof DOMException && error.name === "AbortError") ||
-    (error instanceof Error && error.name === "AbortError")
-  );
-}
-
-async function releaseStoredAttachments(
-  attachments: readonly Attachment[],
-): Promise<void> {
-  await Promise.allSettled(
-    attachments.map(async (attachment) => {
-      if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
-      await deleteAttachment(attachment.id);
-    }),
-  );
 }
 
 export function ChatInput({
@@ -227,9 +162,6 @@ export function ChatInput({
   const imageCompressionEnabled = useSettingsStore(
     (state) => state.system.imageCompressionEnabled,
   );
-  const imageCompressionQuality = useSettingsStore(
-    (state) => state.system.imageCompressionQuality,
-  );
   const setWorkspaceMode = useConversationStore(
     (state) => state.setWorkspaceMode,
   );
@@ -255,8 +187,15 @@ export function ChatInput({
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [mcpOpen, setMcpOpen] = useState(false);
   const [skillsInitializing, setSkillsInitializing] = useState(false);
-  const [attachmentError, setAttachmentError] = useState<string | null>(null);
-  const [isProcessingImages, setIsProcessingImages] = useState(false);
+  const {
+    intake: processFiles,
+    busy: isProcessingImages,
+    error: attachmentError,
+  } = useAttachmentIntake({
+    attachments,
+    onAttachmentsChange,
+    disabled: isQuestionnairePending || isSubmitting,
+  });
   const [projectImportOpen, setProjectImportOpen] = useState(false);
   const [designSystemsOpen, setDesignSystemsOpen] = useState(false);
   const skillsAvailable = isSkillsAvailable();
@@ -311,26 +250,6 @@ export function ChatInput({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const slashMenuRef = useRef<HTMLDivElement>(null);
   const dragCounterRef = useRef(0);
-  const imageProcessingAbortRef = useRef<AbortController | null>(null);
-  const imageProcessingSessionRef = useRef<
-    string | null | typeof UNMOUNTED_IMAGE_SESSION
-  >(activeId);
-
-  useEffect(() => {
-    imageProcessingAbortRef.current?.abort();
-    imageProcessingAbortRef.current = null;
-    imageProcessingSessionRef.current = activeId;
-    setIsProcessingImages(false);
-  }, [activeId]);
-
-  useEffect(
-    () => () => {
-      imageProcessingSessionRef.current = UNMOUNTED_IMAGE_SESSION;
-      imageProcessingAbortRef.current?.abort();
-    },
-    [],
-  );
-
   useEffect(() => {
     if (questionnaireWasPendingRef.current && !isQuestionnairePending) {
       textareaRef.current?.focus();
@@ -421,126 +340,6 @@ export function ChatInput({
       if (form) form.requestSubmit();
     }
   };
-
-  const processFiles = useCallback(
-    async (files: File[]) => {
-      if (
-        isQuestionnairePending ||
-        files.length === 0 ||
-        imageProcessingAbortRef.current
-      ) {
-        return;
-      }
-      const controller = new AbortController();
-      const sessionId = activeId;
-      const compressionSettings: ImageCompressionSettings = {
-        enabled: imageCompressionEnabled,
-        quality: imageCompressionQuality,
-      };
-      imageProcessingAbortRef.current = controller;
-      setIsProcessingImages(true);
-      let validationNext = [...attachments];
-      const accepted: Attachment[] = [];
-      const errors: string[] = [];
-
-      try {
-        for (const file of files) {
-          if (controller.signal.aborted) {
-            throw new DOMException(
-              "Image processing was aborted.",
-              "AbortError",
-            );
-          }
-          const validation = validateAttachmentFile(file, validationNext);
-          if (!validation.ok) {
-            errors.push(formatAttachmentError(validation, t));
-            continue;
-          }
-          try {
-            const image = isImageMime(file.type);
-            let storedFile = file;
-            if (image) {
-              try {
-                storedFile = await compressLocalImage(
-                  file,
-                  compressionSettings,
-                  controller.signal,
-                );
-              } catch (error) {
-                if (isAbortError(error)) throw error;
-                // Compression is an optimization. If the image capability
-                // fails unexpectedly, retain the validated original bytes.
-              }
-            }
-            if (
-              controller.signal.aborted ||
-              imageProcessingSessionRef.current !== sessionId
-            ) {
-              throw new DOMException(
-                "Image processing was aborted.",
-                "AbortError",
-              );
-            }
-            const attachment = await storeAttachmentFile(
-              storedFile,
-              image ? "image" : "file",
-            );
-            accepted.push(attachment);
-            // Keep validation based on original input bytes. The stored
-            // attachment may be smaller after compression.
-            validationNext = [
-              ...validationNext,
-              { ...attachment, size: file.size },
-            ];
-          } catch (error) {
-            if (isAbortError(error)) throw error;
-            errors.push(
-              t.chat.attachmentErrors.readFailed.replace(
-                "{name}",
-                file.name || "file",
-              ),
-            );
-          }
-        }
-
-        if (
-          imageProcessingSessionRef.current !== sessionId ||
-          controller.signal.aborted
-        ) {
-          await releaseStoredAttachments(accepted);
-          return;
-        }
-        if (accepted.length > 0) {
-          onAttachmentsChange([...attachments, ...accepted]);
-        }
-        setAttachmentError(errors[0] ?? null);
-      } catch (error) {
-        await releaseStoredAttachments(accepted);
-        if (!isAbortError(error)) {
-          setAttachmentError(
-            errors[0] ??
-              t.chat.attachmentErrors.readFailed.replace("{name}", "file"),
-          );
-        }
-      } finally {
-        if (imageProcessingAbortRef.current === controller) {
-          imageProcessingAbortRef.current = null;
-        }
-        if (imageProcessingSessionRef.current === sessionId) {
-          setIsProcessingImages(false);
-        }
-      }
-    },
-    [
-      activeId,
-      attachments,
-      imageCompressionEnabled,
-      imageCompressionQuality,
-      isQuestionnairePending,
-      onAttachmentsChange,
-      t,
-    ],
-  );
 
   const handlePaste = (e: React.ClipboardEvent) => {
     if (isQuestionnairePending || isProcessingImages) {

@@ -3,22 +3,28 @@ import type { ProjectFiles } from "../../types";
 import { normalizeProjectPath } from "../tools/fs-tools";
 import { isSensitiveProjectPath } from "../utils/project-file-policy";
 import { validateProjectFiles } from "../utils/project-files";
+import { type PrototypePreviewTarget } from "./preview-runtime";
 import {
-  isSafePrototypePreviewRoute,
-  type PrototypePreviewTarget,
-} from "./preview-runtime";
+  PROTOTYPE_ROUTE_MAX_LENGTH,
+  normalizePrototypeRoute,
+  resolvePrototypeRoute,
+  resolveObservedPrototypeRoute,
+  type PrototypeRouteResolution,
+} from "./prototype-route";
 
 /** The only ProjectFiles path that can carry a project design contract. */
 export const PROJECT_DESIGN_PATH = "design-project.json" as const;
 export const PROJECT_DESIGN_FILE = PROJECT_DESIGN_PATH;
 export const PROJECT_DESIGN_SCHEMA_VERSION =
+  "open-builder-design-project/v2" as const;
+export const LEGACY_PROJECT_DESIGN_SCHEMA_VERSION =
   "open-builder-design-project/v1" as const;
 
 /** Bounds protect parsers and derived indexes from untrusted project content. */
 export const PROJECT_DESIGN_LIMITS = Object.freeze({
   maxJsonBytes: 512 * 1024,
   maxIdChars: 80,
-  maxRouteChars: 240,
+  maxRouteChars: PROTOTYPE_ROUTE_MAX_LENGTH,
   maxTextChars: 2_000,
   maxPages: 200,
   maxLayouts: 100,
@@ -140,42 +146,15 @@ const revisionSchema: z.ZodType<ProjectDesignRevision> = z.union([
 const routeSchema = z
   .string()
   .trim()
-  .min(1)
   .max(PROJECT_DESIGN_LIMITS.maxRouteChars)
-  .superRefine((route, ctx) => {
-    if (!route.startsWith("/")) {
-      ctx.addIssue({ code: "custom", message: "must start with /" });
-      return;
-    }
-    if (!isSafePrototypePreviewRoute(`#${route}?scenario=default`)) {
-      ctx.addIssue({
-        code: "custom",
-        message: "must resolve to a safe HashRouter preview route",
-      });
-      return;
-    }
-    if (
-      route.includes("\\") ||
-      route.includes("?") ||
-      route.includes("#") ||
-      route.includes("//") ||
-      (route.length > 1 && route.endsWith("/")) ||
-      route.split("/").some((segment) => segment === "." || segment === "..")
-    ) {
-      ctx.addIssue({
-        code: "custom",
-        message:
-          "must be a canonical path without query, hash, or trailing slash",
-      });
-      return;
-    }
-    if (!/^\/[A-Za-z0-9._~!$&'()*+,;=:@%\x5b\]/-]*$/u.test(route)) {
-      ctx.addIssue({
-        code: "custom",
-        message: "contains unsupported route characters",
-      });
-    }
+  .transform((value) => {
+    const normalized = normalizePrototypeRoute(value);
+    return normalized.ok ? normalized.route : value;
   });
+const draftTextSchema = z
+  .string()
+  .trim()
+  .max(PROJECT_DESIGN_LIMITS.maxTextChars);
 
 const filePathSchema = z
   .string()
@@ -243,21 +222,23 @@ const scenarioSchema = z
   })
   .strict();
 
+const pageShape = {
+  id: stableIdSchema,
+  name: textSchema.optional(),
+  responsibility: draftTextSchema.optional(),
+  route: routeSchema.optional(),
+  previewPath: routeSchema.optional(),
+  kind: z.enum(PAGE_KINDS).optional(),
+  defaultScenario: stableIdSchema.optional(),
+  parentId: stableIdSchema.nullable().optional(),
+  layoutId: stableIdSchema.nullable().optional(),
+  filePaths: filePathListSchema,
+  sharedUiRefs: idListSchema,
+  flowIds: idListSchema,
+  scenarioIds: idListSchema,
+};
 const pageSchema = z
-  .object({
-    id: stableIdSchema,
-    name: textSchema.optional(),
-    responsibility: textSchema,
-    route: routeSchema,
-    kind: z.enum(PAGE_KINDS),
-    defaultScenario: stableIdSchema,
-    parentId: stableIdSchema.nullable().optional(),
-    layoutId: stableIdSchema.nullable().optional(),
-    filePaths: filePathListSchema,
-    sharedUiRefs: idListSchema,
-    flowIds: idListSchema,
-    scenarioIds: idListSchema,
-  })
+  .object(pageShape)
   .strict()
   .transform((page) => ({
     ...page,
@@ -297,7 +278,7 @@ const flowSchema = z
 
 const buildCheckpointSchema = z
   .object({
-    phase: z.enum(PROJECT_DESIGN_BATCH_PHASES),
+    phase: textSchema,
     status: z.enum(["completed", "failed"]),
     pageIds: idListSchema,
     flowIds: idListSchema,
@@ -316,38 +297,210 @@ const buildProgressSchema = z
   .object({
     status: z
       .union([z.enum(BUILD_PROGRESS_STATUSES), z.literal("planned")])
-      .transform((status) => (status === "planned" ? "not-started" : status)),
-    percent: z.number().int().min(0).max(100),
+      .transform((status) => (status === "planned" ? "not-started" : status))
+      .default("not-started"),
+    percent: z.number().int().min(0).max(100).default(0),
     completedPageIds: idListSchema,
     completedFlowIds: idListSchema,
     checkpoints: z.array(buildCheckpointSchema).max(50).default([]),
   })
   .strict();
 
+const taskSchema = z
+  .object({
+    id: stableIdSchema,
+    description: draftTextSchema.optional(),
+    requestId: z.string().min(1).max(200).optional(),
+    pageIds: idListSchema.removeDefault().optional(),
+    filePaths: filePathListSchema.removeDefault().optional(),
+    status: z.enum([
+      "pending",
+      "running",
+      "done",
+      "needs-information",
+      "failed",
+    ]),
+  })
+  .strict();
+const journalEntrySchema = z
+  .object({
+    operationId: z.string().min(1).max(200),
+    requestId: z.string().min(1).max(200),
+    changedPaths: z
+      .array(filePathSchema)
+      .max(PROJECT_DESIGN_LIMITS.maxChangedIds),
+    recordedAt: z.string().datetime({ offset: true }),
+  })
+  .strict();
+export type ProjectDesignTask = z.output<typeof taskSchema>;
+export type ProjectDesignJournalEntry = z.output<typeof journalEntrySchema>;
+
 const rawProjectDesignSchema = z
   .object({
     schemaVersion: z.union([
       z.literal(PROJECT_DESIGN_SCHEMA_VERSION),
+      z.literal(LEGACY_PROJECT_DESIGN_SCHEMA_VERSION),
       // Accept the compact v1 marker when reading older generated files; all
       // writes use the namespaced marker above.
       z.literal(1),
     ]),
-    productGoal: textSchema,
-    audience: textSchema,
+    productGoal: draftTextSchema.optional(),
+    audience: draftTextSchema.optional(),
     revision: revisionSchema,
-    pages: z.array(pageSchema).min(1).max(PROJECT_DESIGN_LIMITS.maxPages),
-    layouts: z.array(layoutSchema).max(PROJECT_DESIGN_LIMITS.maxLayouts),
+    pages: z.array(pageSchema).max(PROJECT_DESIGN_LIMITS.maxPages).default([]),
+    layouts: z
+      .array(layoutSchema)
+      .max(PROJECT_DESIGN_LIMITS.maxLayouts)
+      .default([]),
     sharedUiRefs: z
       .array(sharedUiRefSchema)
-      .max(PROJECT_DESIGN_LIMITS.maxSharedUiRefs),
-    flows: z.array(flowSchema).max(PROJECT_DESIGN_LIMITS.maxFlows),
+      .max(PROJECT_DESIGN_LIMITS.maxSharedUiRefs)
+      .default([]),
+    flows: z.array(flowSchema).max(PROJECT_DESIGN_LIMITS.maxFlows).default([]),
     scenarios: z
       .array(scenarioSchema)
-      .min(1)
-      .max(PROJECT_DESIGN_LIMITS.maxScenarios),
-    buildProgress: buildProgressSchema,
+      .max(PROJECT_DESIGN_LIMITS.maxScenarios)
+      .default([]),
+    buildProgress: buildProgressSchema.prefault({}),
+    tasks: z.array(taskSchema).max(200).optional(),
+    journal: z.array(journalEntrySchema).optional(),
   })
   .strict();
+
+/** Input schemas deliberately omit read-time defaults so omission preserves data. */
+const progressPatchSchema = z
+  .object({
+    status: buildProgressSchema.shape.status.removeDefault().optional(),
+    percent: buildProgressSchema.shape.percent.removeDefault().optional(),
+    completedPageIds: idListSchema.removeDefault().optional(),
+    completedFlowIds: idListSchema.removeDefault().optional(),
+    checkpoints: buildProgressSchema.shape.checkpoints
+      .removeDefault()
+      .optional(),
+  })
+  .strict();
+export const projectDesignUpdateSchema = rawProjectDesignSchema
+  .omit({
+    buildProgress: true,
+    pages: true,
+    layouts: true,
+    sharedUiRefs: true,
+    flows: true,
+    scenarios: true,
+    journal: true,
+  })
+  .partial()
+  .extend({
+    pages: rawProjectDesignSchema.shape.pages.removeDefault().optional(),
+    layouts: rawProjectDesignSchema.shape.layouts.removeDefault().optional(),
+    sharedUiRefs: rawProjectDesignSchema.shape.sharedUiRefs
+      .removeDefault()
+      .optional(),
+    flows: rawProjectDesignSchema.shape.flows.removeDefault().optional(),
+    scenarios: rawProjectDesignSchema.shape.scenarios
+      .removeDefault()
+      .optional(),
+    buildProgress: progressPatchSchema.optional(),
+    journal: rawProjectDesignSchema.shape.journal,
+    pageCount: z.number().int().nonnegative().optional(),
+    flowCount: z.number().int().nonnegative().optional(),
+    scenarioCount: z.number().int().nonnegative().optional(),
+  });
+const pagePatchSchema = z
+  .object({
+    ...pageShape,
+    filePaths: filePathListSchema.removeDefault(),
+    sharedUiRefs: idListSchema.removeDefault(),
+    flowIds: idListSchema.removeDefault(),
+    scenarioIds: idListSchema.removeDefault(),
+  })
+  .partial()
+  .required({ id: true })
+  .strict();
+// Nested defaults must also stay absent when an entity is patched by ID.
+const layoutPatchSchema = layoutSchema
+  .extend({
+    filePaths: filePathListSchema.removeDefault(),
+    pageIds: idListSchema.removeDefault(),
+    sharedUiRefs: idListSchema.removeDefault(),
+  })
+  .partial()
+  .required({ id: true });
+const sharedUiPatchSchema = sharedUiRefSchema
+  .extend({ filePaths: filePathListSchema.removeDefault() })
+  .partial()
+  .required({ id: true });
+const flowPatchSchema = flowSchema
+  .extend({
+    pageIds: idListSchema.removeDefault(),
+    scenarioIds: idListSchema.removeDefault(),
+  })
+  .partial()
+  .required({ id: true });
+export const projectDesignPatchSchema = projectDesignUpdateSchema.extend({
+  pages: z
+    .array(pagePatchSchema)
+    .max(PROJECT_DESIGN_LIMITS.maxPages)
+    .optional(),
+  layouts: z
+    .array(layoutPatchSchema)
+    .max(PROJECT_DESIGN_LIMITS.maxLayouts)
+    .optional(),
+  sharedUiRefs: z
+    .array(sharedUiPatchSchema)
+    .max(PROJECT_DESIGN_LIMITS.maxSharedUiRefs)
+    .optional(),
+  flows: z
+    .array(flowPatchSchema)
+    .max(PROJECT_DESIGN_LIMITS.maxFlows)
+    .optional(),
+  scenarios: z
+    .array(scenarioSchema.partial().required({ id: true }))
+    .max(PROJECT_DESIGN_LIMITS.maxScenarios)
+    .optional(),
+  tasks: z
+    .array(taskSchema.partial().required({ id: true }))
+    .max(200)
+    .optional(),
+});
+const entityCollections = [
+  "pages",
+  "layouts",
+  "sharedUiRefs",
+  "flows",
+  "scenarios",
+  "tasks",
+] as const;
+export const projectDesignRemoveSchema = z
+  .object({
+    pages: idListSchema.removeDefault().optional(),
+    layouts: idListSchema.removeDefault().optional(),
+    sharedUiRefs: idListSchema.removeDefault().optional(),
+    flows: idListSchema.removeDefault().optional(),
+    scenarios: idListSchema.removeDefault().optional(),
+    tasks: idListSchema.removeDefault().optional(),
+  })
+  .strict();
+export const projectDesignToolInputSchema = z
+  .object({
+    patch: projectDesignPatchSchema.optional(),
+    document: projectDesignUpdateSchema.optional(),
+    remove: projectDesignRemoveSchema.optional(),
+    expected_revision: revisionSchema.optional(),
+  })
+  .strict()
+  .superRefine((input, ctx) => {
+    if ((input.patch === undefined) === (input.document === undefined))
+      ctx.addIssue({
+        code: "custom",
+        message: "Provide exactly one of patch or document.",
+      });
+    if (input.document && input.remove)
+      ctx.addIssue({
+        code: "custom",
+        message: "remove is only supported with patch.",
+      });
+  });
 
 export type ProjectDesignPage = z.output<typeof pageSchema>;
 export type ProjectDesignLayout = z.infer<typeof layoutSchema>;
@@ -363,7 +516,9 @@ export interface ProjectDesign extends Omit<
   z.output<typeof rawProjectDesignSchema>,
   "schemaVersion"
 > {
-  schemaVersion: typeof PROJECT_DESIGN_SCHEMA_VERSION;
+  schemaVersion:
+    | typeof PROJECT_DESIGN_SCHEMA_VERSION
+    | typeof LEGACY_PROJECT_DESIGN_SCHEMA_VERSION;
 }
 
 function addDuplicateIssues<T extends { id: string }>(
@@ -414,16 +569,32 @@ function hasCycle(pages: readonly ProjectDesignPage[]): string | undefined {
   return undefined;
 }
 
+function validateStructure(
+  design: z.output<typeof rawProjectDesignSchema>,
+  ctx: z.RefinementCtx,
+): void {
+  for (const key of entityCollections)
+    addDuplicateIssues<{ id: string }>(design[key] ?? [], key, ctx);
+  const cycle = hasCycle(design.pages);
+  if (cycle) ctx.addIssue({ code: "custom", message: cycle, path: ["pages"] });
+}
+
 function validateReferences(
   design: z.output<typeof rawProjectDesignSchema>,
   ctx: z.RefinementCtx,
 ): void {
-  addDuplicateIssues(design.pages, "pages", ctx);
-  addDuplicateIssues(design.layouts, "layouts", ctx);
-  addDuplicateIssues(design.sharedUiRefs, "sharedUiRefs", ctx);
-  addDuplicateIssues(design.flows, "flows", ctx);
-  addDuplicateIssues(design.scenarios, "scenarios", ctx);
-
+  if (!design.productGoal)
+    ctx.addIssue({
+      code: "custom",
+      message: "Product goal is not defined yet.",
+      path: ["productGoal"],
+    });
+  if (!design.audience)
+    ctx.addIssue({
+      code: "custom",
+      message: "Audience is not defined yet.",
+      path: ["audience"],
+    });
   const pageIds = new Set(design.pages.map((page) => page.id));
   const layoutIds = new Set(design.layouts.map((layout) => layout.id));
   const sharedUiIds = new Set(design.sharedUiRefs.map((ref) => ref.id));
@@ -447,6 +618,12 @@ function validateReferences(
   };
 
   design.pages.forEach((page, index) => {
+    if (!page.responsibility)
+      ctx.addIssue({
+        code: "custom",
+        message: "Page responsibility is not defined yet.",
+        path: ["pages", index, "responsibility"],
+      });
     if (page.parentId && !pageIds.has(page.parentId)) {
       ctx.addIssue({
         code: "custom",
@@ -461,7 +638,7 @@ function validateReferences(
         path: ["pages", index, "layoutId"],
       });
     }
-    if (!scenarioIds.has(page.defaultScenario)) {
+    if (page.defaultScenario && !scenarioIds.has(page.defaultScenario)) {
       ctx.addIssue({
         code: "custom",
         message: `unknown default scenario "${page.defaultScenario}"`,
@@ -512,6 +689,7 @@ function validateReferences(
 
   const routes = new Set<string>();
   design.pages.forEach((page, index) => {
+    if (!page.route) return;
     if (routes.has(page.route)) {
       ctx.addIssue({
         code: "custom",
@@ -521,60 +699,47 @@ function validateReferences(
     }
     routes.add(page.route);
   });
-
-  const cycle = hasCycle(design.pages);
-  if (cycle) ctx.addIssue({ code: "custom", message: cycle, path: ["pages"] });
-
-  if (
-    design.buildProgress.status === "complete" &&
-    design.buildProgress.percent !== 100
-  ) {
-    ctx.addIssue({
-      code: "custom",
-      message: "complete build progress must have percent 100",
-      path: ["buildProgress", "percent"],
-    });
-  }
-  if (design.buildProgress.status === "complete") {
-    const completedPhases = new Set(
-      design.buildProgress.checkpoints
-        .filter(
-          (checkpoint) =>
-            checkpoint.status === "completed" &&
-            checkpoint.validation.status === "passed",
-        )
-        .map((checkpoint) => checkpoint.phase),
-    );
-    const missingPhases = PROJECT_DESIGN_BATCH_PHASES.filter(
-      (phase) => !completedPhases.has(phase),
-    );
-    if (missingPhases.length > 0) {
-      ctx.addIssue({
-        code: "custom",
-        message: `complete build progress is missing passed checkpoints: ${missingPhases.join(", ")}`,
-        path: ["buildProgress", "checkpoints"],
-      });
-    }
-    if (
-      design.buildProgress.completedPageIds.length !== design.pages.length ||
-      design.buildProgress.completedFlowIds.length !== design.flows.length
-    ) {
-      ctx.addIssue({
-        code: "custom",
-        message: "complete build progress must include every page and flow",
-        path: ["buildProgress"],
-      });
-    }
-  }
 }
 
-/** The validated v1 schema. It rejects unknown keys at every level. */
+/** Structurally validated draft; semantic completeness is reported separately. */
 export const projectDesignSchema = rawProjectDesignSchema
-  .superRefine(validateReferences)
+  .superRefine(validateStructure)
   .transform((design): ProjectDesign => ({
     ...design,
     schemaVersion: PROJECT_DESIGN_SCHEMA_VERSION,
   }));
+
+export interface ProjectDesignDiagnostic {
+  path: string;
+  message: string;
+  pageId?: string;
+}
+export function getProjectDesignDiagnostics(
+  design: ProjectDesign,
+): readonly ProjectDesignDiagnostic[] {
+  const result = rawProjectDesignSchema
+    .superRefine(validateReferences)
+    .safeParse(design);
+  const diagnostics: ProjectDesignDiagnostic[] = result.success
+    ? []
+    : result.error.issues.map((issue) => ({
+        path: issue.path.join("."),
+        message: issue.message,
+        ...(issue.path[0] === "pages" && typeof issue.path[1] === "number"
+          ? { pageId: design.pages[issue.path[1]]?.id }
+          : {}),
+      }));
+  for (const page of design.pages) {
+    const resolution = resolvePrototypeRoute(design, page.id);
+    if (resolution.status === "unavailable")
+      diagnostics.push({
+        path: `pages.${page.id}.route`,
+        pageId: page.id,
+        message: resolution.message,
+      });
+  }
+  return diagnostics;
+}
 
 /** Alias retained for callers that use the noun-first name. */
 export const designProjectSchema = projectDesignSchema;
@@ -762,6 +927,9 @@ function canonicalDesign(design: ProjectDesign): ProjectDesign {
       name: page.name,
       responsibility: page.responsibility,
       route: page.route,
+      ...(page.previewPath !== undefined
+        ? { previewPath: page.previewPath }
+        : {}),
       kind: page.kind,
       defaultScenario: page.defaultScenario,
       parentId: page.parentId,
@@ -796,6 +964,8 @@ function canonicalDesign(design: ProjectDesign): ProjectDesign {
       name: scenario.name,
       kind: scenario.kind,
     })),
+    ...(design.tasks ? { tasks: sortedById(design.tasks) } : {}),
+    ...(design.journal ? { journal: design.journal } : {}),
     buildProgress: {
       status: design.buildProgress.status,
       percent: design.buildProgress.percent,
@@ -818,6 +988,58 @@ function canonicalDesign(design: ProjectDesign): ProjectDesign {
         })),
     },
   };
+}
+
+/** Stable identity for affected targets; progress and prose do not change visuals. */
+export function getProjectDesignStructureFingerprint(
+  design: ProjectDesign,
+): string {
+  const canonical = canonicalDesign(design);
+  return JSON.stringify({
+    pages: canonical.pages.map(
+      ({
+        id,
+        route,
+        previewPath,
+        parentId,
+        layoutId,
+        filePaths,
+        sharedUiRefs,
+        flowIds,
+        scenarioIds,
+        defaultScenario,
+      }) => ({
+        id,
+        route,
+        previewPath,
+        parentId,
+        layoutId,
+        filePaths,
+        sharedUiRefs,
+        flowIds,
+        scenarioIds,
+        defaultScenario,
+      }),
+    ),
+    layouts: canonical.layouts.map(
+      ({ id, filePaths, pageIds, sharedUiRefs }) => ({
+        id,
+        filePaths,
+        pageIds,
+        sharedUiRefs,
+      }),
+    ),
+    sharedUiRefs: canonical.sharedUiRefs.map(({ id, filePaths }) => ({
+      id,
+      filePaths,
+    })),
+    flows: canonical.flows.map(({ id, pageIds, scenarioIds }) => ({
+      id,
+      pageIds,
+      scenarioIds,
+    })),
+    scenarios: canonical.scenarios.map(({ id, kind }) => ({ id, kind })),
+  });
 }
 
 function validatedDesign(input: unknown): ProjectDesign {
@@ -946,6 +1168,156 @@ export function applyProjectDesignUpdate(
   };
 }
 
+function nextDesignRevision(
+  previous?: ProjectDesignRevision,
+): ProjectDesignRevision {
+  return typeof previous === "number" && previous < Number.MAX_SAFE_INTEGER
+    ? previous + 1
+    : previous === undefined
+      ? 1
+      : crypto.randomUUID();
+}
+
+/** Legacy document inputs retain whole-collection replacement semantics. */
+export function applyProjectDesignToolUpdate(
+  files: ProjectFiles,
+  input: unknown,
+  expectedRevision?: ProjectDesignRevision,
+): ProjectDesignUpdateResult & { warnings?: readonly string[] } {
+  return applyProjectDesignToolRequest(files, {
+    document: input,
+    expected_revision: expectedRevision,
+  });
+}
+
+/** One tool transaction: merge first, validate structure, then compare and swap. */
+export function applyProjectDesignToolRequest(
+  files: ProjectFiles,
+  input: unknown,
+): ProjectDesignUpdateResult & { warnings?: readonly string[] } {
+  const parsed = projectDesignToolInputSchema.safeParse(input);
+  if (!parsed.success) {
+    const issues = formatZodIssues(parsed.error);
+    return {
+      ok: false,
+      error: issues[0] ?? "Invalid blueprint update",
+      issues,
+    };
+  }
+  const request = parsed.data;
+  const {
+    pageCount,
+    flowCount,
+    scenarioCount,
+    journal: echoedJournal,
+    ...changes
+  } = request.patch ?? request.document!;
+  const removals = request.remove;
+  const hasChanges =
+    Object.entries(changes).some(([key, value]) =>
+      key === "buildProgress"
+        ? value && Object.values(value).some((field) => field !== undefined)
+        : key !== "schemaVersion" && key !== "revision" && value !== undefined,
+    ) || Object.values(removals ?? {}).some((ids) => ids.length > 0);
+  if (!hasChanges)
+    return {
+      ok: false,
+      error:
+        "The input contains only a summary or revision metadata. Send actual fields in patch; summary counts cannot replace a blueprint. No files were changed.",
+    };
+  const current = readProjectDesign(files);
+  const previous = current.status === "ready" ? current.design : undefined;
+  if (current.status === "invalid" && request.patch)
+    return {
+      ok: false,
+      error:
+        "The blueprint JSON is invalid. Use document to replace it explicitly; a patch cannot recover unreadable data.",
+    };
+  const document: Record<string, unknown> = {
+    ...previous,
+    ...changes,
+    schemaVersion: PROJECT_DESIGN_SCHEMA_VERSION,
+    revision: changes.revision ?? nextDesignRevision(previous?.revision),
+    buildProgress: { ...previous?.buildProgress, ...changes.buildProgress },
+  };
+  if (request.patch) {
+    for (const key of entityCollections) {
+      const updates = request.patch[key];
+      const removed = new Set(removals?.[key] ?? []);
+      if (updates === undefined && removed.size === 0) continue;
+      const existing = new Map<string, Record<string, unknown>>(
+        (previous?.[key] ?? []).map((entry) => [entry.id, { ...entry }]),
+      );
+      const seen = new Set<string>();
+      for (const update of updates ?? []) {
+        if (seen.has(update.id) || removed.has(update.id))
+          return {
+            ok: false,
+            error: `Conflicting ${key} update for "${update.id}".`,
+          };
+        seen.add(update.id);
+        const supplied = Object.fromEntries(
+          Object.entries(update).filter(([, value]) => value !== undefined),
+        );
+        existing.set(update.id, { ...existing.get(update.id), ...supplied });
+      }
+      for (const id of removed) existing.delete(id);
+      document[key] = [...existing.values()];
+    }
+  }
+  const updated = applyProjectDesignUpdate(
+    files,
+    document,
+    request.expected_revision ?? previous?.revision,
+  );
+  if (!updated.ok) return updated;
+  const warnings = getProjectDesignDiagnostics(updated.design).map(
+    (issue) => `${issue.path}: ${issue.message}`,
+  );
+  if (echoedJournal !== undefined)
+    warnings.unshift(
+      "Ignored supplied journal; recovery records are maintained by the Host.",
+    );
+  if (
+    [pageCount, flowCount, scenarioCount].some((count) => count !== undefined)
+  )
+    warnings.unshift(
+      "Ignored summary counts; counts are derived from blueprint entities.",
+    );
+  return { ...updated, warnings };
+}
+
+/** Append recovery information before the same source-file transaction commits. */
+export function appendProjectDesignJournal(
+  files: ProjectFiles,
+  entry: ProjectDesignJournalEntry,
+  previousFiles: ProjectFiles = files,
+): ProjectFiles {
+  const current = readProjectDesign(files);
+  if (current.status !== "ready") return files;
+  const checked = journalEntrySchema.parse(entry);
+  const journal = current.design.journal ?? [];
+  if (
+    journal.some(
+      (item) =>
+        item.operationId === checked.operationId &&
+        item.requestId === checked.requestId,
+    )
+  )
+    return files;
+  const previous = readProjectDesign(previousFiles);
+  const revision =
+    previous.status === "ready" &&
+    Object.is(previous.design.revision, current.design.revision)
+      ? nextDesignRevision(current.design.revision)
+      : current.design.revision;
+  return upsertProjectDesign(files, {
+    ...current.design,
+    revision,
+    journal: [...journal, checked],
+  });
+}
+
 export interface ProjectPageTreeNode extends ProjectDesignPage {
   children: ProjectPageTreeNode[];
 }
@@ -962,7 +1334,8 @@ export function derivePageTree(
   const roots: ProjectPageTreeNode[] = [];
   for (const page of sortedById(design.pages)) {
     const node = nodes.get(page.id)!;
-    if (page.parentId) nodes.get(page.parentId)!.children.push(node);
+    const parent = page.parentId ? nodes.get(page.parentId) : undefined;
+    if (parent) parent.children.push(node);
     else roots.push(node);
   }
   return roots;
@@ -1060,7 +1433,8 @@ export function deriveImpactPages(
       changedIdsSet.has(page.id) ||
       page.filePaths.some((path) => changedPaths.has(path.toLowerCase())) ||
       (page.layoutId !== null && changedLayoutIds.has(page.layoutId)) ||
-      changedScenarioIds.has(page.defaultScenario) ||
+      (page.defaultScenario !== undefined &&
+        changedScenarioIds.has(page.defaultScenario)) ||
       page.sharedUiRefs.some((id) => changedSharedUiIds.has(id)) ||
       page.flowIds.some((id) => changedFlowIds.has(id)) ||
       page.scenarioIds.some((id) => changedScenarioIds.has(id))
@@ -1101,64 +1475,50 @@ export interface ProjectDesignCoverageTarget {
   scenarioId: string;
 }
 
-/** Derive one stable route/scenario target for each page scenario. */
+/** Usable coverage only; callers surface unavailable page/scenario diagnostics. */
 export function deriveCoverageTargets(
   input: ProjectDesign,
 ): readonly ProjectDesignCoverageTarget[] {
   const design = validatedDesign(input);
   const targets: ProjectDesignCoverageTarget[] = [];
   for (const page of sortedById(design.pages)) {
-    const scenarioIds = new Set([page.defaultScenario, ...page.scenarioIds]);
-    for (const scenarioId of sortedIds([...scenarioIds])) {
-      targets.push({
-        id: `${page.id}:${scenarioId}`,
-        pageId: page.id,
-        route: page.route,
-        scenarioId,
-      });
+    for (const scenarioId of sortedIds([
+      ...new Set([page.defaultScenario ?? "default", ...page.scenarioIds]),
+    ])) {
+      const resolution = resolvePrototypeRoute(design, page.id, scenarioId);
+      if (resolution.status === "ready")
+        targets.push({
+          id: `${page.id}:${scenarioId}`,
+          pageId: page.id,
+          route: page.route ?? "",
+          scenarioId,
+        });
     }
   }
   return targets;
 }
 
-/** Resolve one declared page/scenario pair to its only executable preview target. */
+export function resolveProjectDesignPreview(
+  input: ProjectDesign,
+  pageId: string,
+  scenarioId?: string,
+): PrototypeRouteResolution {
+  return resolvePrototypeRoute(input, pageId, scenarioId);
+}
 export function resolveProjectDesignPreviewTarget(
   input: ProjectDesign,
   pageId: string,
-  scenarioId: string,
+  scenarioId?: string,
 ): PrototypePreviewTarget | null {
-  const design = validatedDesign(input);
-  const page = design.pages.find((candidate) => candidate.id === pageId);
-  if (
-    !page ||
-    !new Set([page.defaultScenario, ...page.scenarioIds]).has(scenarioId)
-  ) {
-    return null;
-  }
-  return {
-    pageId,
-    route: `#${page.route}?scenario=${encodeURIComponent(scenarioId)}`,
-    scenarioId,
-  };
+  const result = resolveProjectDesignPreview(input, pageId, scenarioId);
+  return result.status === "ready" ? result.target : null;
 }
-
-/** Resolve an observed HashRouter location back to one declared target. */
 export function resolveProjectDesignPreviewRoute(
   input: ProjectDesign,
   route: string,
 ): PrototypePreviewTarget | null {
-  const design = validatedDesign(input);
-  const hashRoute = route.startsWith("#/");
-  if (hashRoute && !isSafePrototypePreviewRoute(route)) return null;
-  const routeValue = hashRoute ? route.slice(1) : route;
-  if (!routeValue.startsWith("/") || routeValue.startsWith("//")) return null;
-  const [path, query = ""] = routeValue.split("?", 2);
-  const page = design.pages.find((candidate) => candidate.route === path);
-  if (!page) return null;
-  const scenarioId =
-    new URLSearchParams(query).get("scenario") ?? page.defaultScenario;
-  const target = resolveProjectDesignPreviewTarget(design, page.id, scenarioId);
-  return target;
+  const result = resolveObservedPrototypeRoute(input, route);
+  return result.status === "ready" ? result.target : null;
 }
 
 export interface IncompleteBuildProgress {
@@ -1177,18 +1537,6 @@ export function getIncompleteBuildProgress(
   const design = validatedDesign(input);
   const completedPages = new Set(design.buildProgress.completedPageIds);
   const completedFlows = new Set(design.buildProgress.completedFlowIds);
-  const completedPhases = new Set(
-    design.buildProgress.checkpoints
-      .filter(
-        (checkpoint) =>
-          checkpoint.status === "completed" &&
-          checkpoint.validation.status === "passed",
-      )
-      .map((checkpoint) => checkpoint.phase),
-  );
-  const phaseIds = PROJECT_DESIGN_BATCH_PHASES.filter(
-    (phase) => !completedPhases.has(phase),
-  );
   return {
     status: design.buildProgress.status,
     percent: design.buildProgress.percent,
@@ -1202,8 +1550,7 @@ export function getIncompleteBuildProgress(
         .filter((flow) => !completedFlows.has(flow.id))
         .map((flow) => flow.id),
     ),
-    phaseIds,
-    ...(phaseIds[0] ? { nextPhase: phaseIds[0] } : {}),
+    phaseIds: [],
   };
 }
 

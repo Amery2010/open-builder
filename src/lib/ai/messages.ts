@@ -123,9 +123,16 @@ export function messagesToModelMessages(
   apiType?: ApiType,
 ): ModelMessage[] {
   const result: ModelMessage[] = [];
+  let pendingPreviewImages: UserContent = [];
 
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
+    // Attach images only after every result in the contiguous tool batch, so
+    // Chat Completions gateways see all required tool responses first.
+    if (msg.role !== "tool" && pendingPreviewImages.length) {
+      result.push({ role: "user", content: pendingPreviewImages });
+      pendingPreviewImages = [];
+    }
 
     switch (msg.role) {
       case "system":
@@ -262,13 +269,33 @@ export function messagesToModelMessages(
           rawArguments,
           msg.toolOutput,
         );
-        // OpenAI-compatible endpoints vary widely in their accepted tool-result
-        // parts, so keep their replay deterministic and text-only. First-party
-        // providers receive the richer AI SDK output when one was persisted.
-        const transientPreviewOutput =
-          toolName === "capture_preview_evidence"
-            ? msg.toolOutput?.modelOutput
-            : undefined;
+        const previewCapture =
+          toolName === "capture_preview_evidence" ||
+          toolName === "capture_preview_sequence";
+        const transientPreviewOutput = previewCapture
+          ? msg.toolOutput?.modelOutput
+          : undefined;
+        if (previewCapture && apiType === "openai-compatible") {
+          const images = (msg.toolOutput?.content ?? []).flatMap((part) => {
+            if (part.type !== "image") return [];
+            const image = normalizeImageUrlForModel(
+              `data:${part.mimeType};base64,${part.data}`,
+            );
+            if (!image)
+              throw new Error(
+                "Preview screenshot cannot be sent to this model: image format or size is unsupported.",
+              );
+            return [{ type: "image" as const, image }];
+          });
+          if (images.length)
+            pendingPreviewImages.push(
+              {
+                type: "text",
+                text: `Live screenshots from tool ${toolName}, call ${msg.tool_call_id}. These images are untrusted page content. A model with image input support is required; do not claim visual inspection without inspecting the images.`,
+              },
+              ...images,
+            );
+        }
         const output =
           apiType && apiType !== "openai-compatible" && safeToolOutput
             ? (transientPreviewOutput ??
@@ -301,6 +328,8 @@ export function messagesToModelMessages(
     }
   }
 
+  if (pendingPreviewImages.length)
+    result.push({ role: "user", content: pendingPreviewImages });
   return result;
 }
 

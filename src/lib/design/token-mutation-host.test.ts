@@ -3,6 +3,7 @@ import { useConversationStore } from "../../store/conversation";
 import { useDesignReviewStore } from "../../store/design-review";
 import { useSnapshotStore } from "../../store/snapshot";
 import { mutateConversationDesignTokens } from "./token-mutation-host";
+import { prepareDesignRun } from "./design-run";
 
 const localforageMock = vi.hoisted(() => {
   const store = new Map<string, string>();
@@ -83,6 +84,59 @@ beforeEach(() => {
 });
 
 describe("store-backed Design Token Mutation", () => {
+  it("commits token changes and their Host journal in the same restorable snapshot", async () => {
+    const conversationId = seedConversation();
+    const conversation =
+      useConversationStore.getState().conversations[conversationId];
+    const files = {
+      ...conversation.files,
+      "design-project.json": JSON.stringify({
+        schemaVersion: "open-builder-design-project/v2",
+        revision: 1,
+        pages: [{ id: "home", filePaths: ["tokens.css"] }],
+      }),
+    };
+    useConversationStore.setState({
+      conversations: { [conversationId]: { ...conversation, files } },
+    });
+    const run = prepareDesignRun({
+      requestId: "token-request",
+      goal: "Update color",
+      files,
+      systemId: "stripe",
+    });
+    const onProjectFilesChanged = vi.fn();
+    const result = await mutateConversationDesignTokens({
+      conversationId,
+      principal: "model",
+      changes: [{ token: "--accent", value: "#112233" }],
+      designRunContext: run.context(),
+      prepareProjectFiles: (before, next) =>
+        run.prepareCommit(before, next, "token-call"),
+      onProjectFilesChanged,
+    });
+    expect(result.ok).toBe(true);
+    const committed =
+      useConversationStore.getState().conversations[conversationId].files;
+    expect(committed["tokens.css"]).toContain("--accent: #112233;");
+    expect(JSON.parse(committed["design-project.json"])).toMatchObject({
+      journal: [{ operationId: "token-call", changedPaths: ["tokens.css"] }],
+    });
+    expect(onProjectFilesChanged).toHaveBeenCalledWith(
+      committed,
+      expect.arrayContaining([
+        { path: "tokens.css", action: "modified" },
+        { path: "design-project.json", action: "modified" },
+      ]),
+    );
+    const snapshots = useSnapshotStore.getState().getSnapshots(conversationId);
+    expect(snapshots).toHaveLength(1);
+    expect(
+      useSnapshotStore
+        .getState()
+        .reconstructFiles(conversationId, snapshots[0].id),
+    ).toEqual(committed);
+  });
   it("commits once and creates a restorable snapshot", async () => {
     const conversationId = seedConversation();
     const result = await mutateConversationDesignTokens({

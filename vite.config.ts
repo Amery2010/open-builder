@@ -1,14 +1,40 @@
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import path from "path";
+import { readFileSync } from "node:fs";
+import type { Plugin } from "vite";
 import { configDefaults, defineConfig } from "vitest/config";
 
 const host = process.env.TAURI_DEV_HOST;
+const bundledDesignSkills: Plugin = {
+  name: "bundled-design-skills",
+  resolveId(id) {
+    return id === "virtual:bundled-design-skills"
+      ? "\0bundled-design-skills"
+      : null;
+  },
+  load(id) {
+    if (id !== "\0bundled-design-skills") return null;
+    const skills = Object.fromEntries(
+      ["design-product-ui", "art-direct-web"].map((name) => {
+        const file = path.resolve(
+          import.meta.dirname,
+          "public/skills",
+          name,
+          "SKILL.md",
+        );
+        this.addWatchFile(file);
+        return [name, readFileSync(file, "utf8")];
+      }),
+    );
+    return `export default ${JSON.stringify(skills)};`;
+  },
+};
 
 export default defineConfig(() => {
   return {
     base: process.env.VITE_BASE_PATH ?? "/",
-    plugins: [react(), tailwindcss()],
+    plugins: [react(), tailwindcss(), bundledDesignSkills],
     resolve: {
       alias: {
         "@": path.resolve(import.meta.dirname, "./src"),

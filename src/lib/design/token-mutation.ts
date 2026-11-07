@@ -1,4 +1,4 @@
-import { designContractSchema, type DesignContract } from "./run-contract";
+import type { DesignRunContext } from "./design-run";
 import {
   EDITABLE_DESIGN_TOKENS,
   inspectDesignTokenContract,
@@ -23,8 +23,14 @@ export interface DesignTokenMutationInput {
   conversationId: string;
   expectedRevision: DesignTokenRevision;
   changes: readonly DesignTokenChange[];
-  /** Model calls require the run-local contract accepted by submit_design_contract. */
-  acceptedDesignContract?: DesignContract | unknown;
+  /** Trusted context prepared by the Host, never a model-supplied permission. */
+  designRunContext?: DesignRunContext;
+  /** Legacy Host adapter input. */
+  acceptedDesignContract?: unknown;
+  prepareProjectFiles?: (
+    before: ProjectFiles,
+    proposed: ProjectFiles,
+  ) => ProjectFiles;
   /** Direct user edits use the same mutation transaction without model authority. */
   principal?: "model" | "user";
 }
@@ -104,8 +110,8 @@ export interface DesignTokenMutationAdapters {
 
 export type DesignTokenMutationErrorCode =
   | "invalid_input"
-  | "design_contract_required"
-  | "design_contract_mismatch"
+  | "design_context_unavailable"
+  | "design_context_mismatch"
   | "token_contract_not_ready"
   | "stale_revision"
   | "snapshot_prepare_failed"
@@ -272,12 +278,17 @@ export async function mutateDesignTokens(
   }
 
   const principal = input.principal ?? "model";
-  const contract = designContractSchema.safeParse(input.acceptedDesignContract);
-  if (principal === "model" && !contract.success) {
+  const context = input.designRunContext ?? input.acceptedDesignContract;
+  const hasContext =
+    !!context &&
+    typeof context === "object" &&
+    "system_id" in context &&
+    (context.system_id === null || typeof context.system_id === "string");
+  if (principal === "model" && !hasContext) {
     return failure(
       conversationId,
-      "design_contract_required",
-      "The dedicated update_design_tokens tool requires an accepted Design contract. Load the required Design Skill and call submit_design_contract first.",
+      "design_context_unavailable",
+      "The current Design run context is unavailable. Restart this task from the current project state.",
     );
   }
 
@@ -332,13 +343,14 @@ export async function mutateDesignTokens(
   }
   if (
     principal === "model" &&
-    contract.success &&
-    contract.data.system_id !== inspection.appliedSystem.id
+    hasContext &&
+    (context as { system_id: string | null }).system_id !==
+      inspection.appliedSystem.id
   ) {
     return failure(
       conversationId,
-      "design_contract_mismatch",
-      "The accepted Design contract no longer matches the applied Design system.",
+      "design_context_mismatch",
+      "The current Design run no longer matches the applied Design system.",
     );
   }
 
@@ -372,8 +384,18 @@ export async function mutateDesignTokens(
     };
   }
 
-  const nextFiles = cloneFiles(project.files);
+  let nextFiles = cloneFiles(project.files);
   nextFiles[inspection.path] = nextTokens;
+  try {
+    nextFiles =
+      input.prepareProjectFiles?.(project.files, nextFiles) ?? nextFiles;
+  } catch (error) {
+    return failure(
+      conversationId,
+      "project_commit_failed",
+      describeError(error),
+    );
+  }
   const request: DesignTokenSnapshotRequest = {
     conversationId,
     previousFiles: cloneFiles(project.files),

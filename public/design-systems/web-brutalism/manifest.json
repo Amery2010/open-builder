@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "open-builder-design-system/v1",
+  "id": "web-brutalism",
+  "name": "Web Brutalism",
+  "category": "mixed",
+  "description": "Exposed web structure, black rules, blue links, oversized direct headings and unapologetic rectangular geometry. The roughness is intentional hierarchy, not broken alignment or missing interaction states.",
+  "files": {
+    "design": "DESIGN.md",
+    "tokens": "tokens.css"
+  }
+}

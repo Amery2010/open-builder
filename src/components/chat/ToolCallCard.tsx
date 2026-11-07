@@ -15,6 +15,7 @@ import { useT } from "../../i18n";
 import type { ToolBlock } from "../../types";
 import { TOOL_METADATA } from "../../lib/ai/tool-metadata";
 import { getAttachmentBlob } from "../../lib/attachments/store";
+import { CANCELLED_TOOL_OUTPUT_KIND } from "../../lib/ai/run-guard";
 import {
   Collapsible,
   CollapsibleContent,
@@ -222,7 +223,23 @@ export function parseConsoleIssues(
     }));
 }
 
-export type ToolCardStatus = "running" | "completed" | "failed" | "attention";
+export type ToolCardStatus =
+  "running" | "completed" | "failed" | "attention" | "aborted";
+
+function cancelledToolReason(output?: ToolBlock["toolOutput"]) {
+  const data = output?.structuredContent;
+  if (
+    !data ||
+    typeof data !== "object" ||
+    !("kind" in data) ||
+    data.kind !== CANCELLED_TOOL_OUTPUT_KIND
+  )
+    return undefined;
+  const reason = "reason" in data ? data.reason : undefined;
+  return reason === "user-stopped" || reason === "conversation-switched"
+    ? reason
+    : "interrupted";
+}
 
 export function classifyToolCardStatus(
   toolName: string,
@@ -230,6 +247,7 @@ export function classifyToolCardStatus(
   toolOutput?: ToolBlock["toolOutput"],
   skillLoads?: ToolBlock["skillLoads"],
 ): ToolCardStatus {
+  if (cancelledToolReason(toolOutput)) return "aborted";
   if (skillLoads && skillLoads.length > 0) {
     if (skillLoads.every((skill) => skill.status === "failed")) return "failed";
     if (
@@ -312,7 +330,10 @@ export const ToolCallCard = memo(function ToolCallCard({
             rawArgs.reference_path.trim()
               ? { referencePaths: [rawArgs.reference_path.trim()] }
               : {}),
-            status: directSkillStatus,
+            status:
+              directSkillStatus === "aborted"
+                ? ("attention" as const)
+                : directSkillStatus,
             ...(directSkillStatus === "failed" && result
               ? { error: result }
               : {}),
@@ -342,7 +363,11 @@ export const ToolCallCard = memo(function ToolCallCard({
     result || toolOutput || visibleSkillLoads?.length || status !== "running",
   );
   const statusLabel =
-    status === "aborted" ? t.subagent.aborted : t.tool.status[status];
+    status === "aborted"
+      ? t.tool.cancelledReasons[
+          cancelledToolReason(toolOutput) ?? "interrupted"
+        ]
+      : t.tool.status[status];
 
   const searchSummary =
     toolName === "web_search" && result
@@ -459,7 +484,13 @@ export const ToolCallCard = memo(function ToolCallCard({
           )}
           aria-hidden="true"
         />
-        <span className="sr-only">{statusLabel}</span>
+        <span
+          className={
+            status === "aborted" ? "text-xs text-muted-foreground" : "sr-only"
+          }
+        >
+          {statusLabel}
+        </span>
         <ChevronRight
           size={13}
           className={cn(
@@ -472,7 +503,9 @@ export const ToolCallCard = memo(function ToolCallCard({
       {hasDetails && (
         <CollapsibleContent>
           <div className="px-3 py-2 border-t border-border/60 bg-muted/20">
-            {emptyResult ? (
+            {status === "aborted" ? (
+              <p className="text-xs text-muted-foreground">{statusLabel}</p>
+            ) : emptyResult ? (
               <p className="text-xs text-muted-foreground">
                 {status === "completed" ? t.tool.emptyResult : statusLabel}
               </p>

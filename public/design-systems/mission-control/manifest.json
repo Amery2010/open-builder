@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "open-builder-design-system/v1",
+  "id": "mission-control",
+  "name": "Mission Control",
+  "category": "product",
+  "description": "Dark slate instrument bays with amber operational signals, warm ivory readouts and precise module boundaries. Use physical-console discipline and stable grids; every lamp or meter should describe actual state.",
+  "files": {
+    "design": "DESIGN.md",
+    "tokens": "tokens.css"
+  }
+}

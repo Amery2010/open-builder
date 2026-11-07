@@ -1991,6 +1991,9 @@ export function createLocalAgentGenerator(
   extras?: Pick<
     GeneratorOptions,
     | "tools"
+    | "subagentWritePaths"
+    | "getCurrentProjectFiles"
+    | "commitDelegatedProjectFiles"
     | "userInstructions"
     | "localToolAnnotations"
     | "askUserQuestion"
@@ -2006,6 +2009,7 @@ export function createLocalAgentGenerator(
     | "systemPrompt"
     | "maxIterations"
     | "prepareInitializedProject"
+    | "prepareProjectCommit"
     | "authorizeToolCall"
     | "projectPermissionSession"
     | "onProjectPermissionAuthorityChange"

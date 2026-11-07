@@ -8,6 +8,7 @@ import { ExternalLink, Globe2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { AppLayout } from "./components/AppLayout";
 import { ChatInterface } from "./components/ChatInterface";
+import { AttachmentIntakeProvider } from "./components/chat/chat-input/AttachmentIntakeContext";
 import { CommandPalette } from "./components/command-palette/CommandPalette";
 import { useAppLayout } from "./hooks/useAppLayout";
 import { useAppState } from "./hooks/useAppState";
@@ -19,15 +20,9 @@ import { useConversationStore } from "./store/conversation";
 import { useSettingsStore } from "./store/settings";
 import { useProjectTemplateLibraryUi } from "./store/project-template-library-ui";
 import { useT } from "./i18n";
-import {
-  discardPendingSandpackFileChanges,
-  type ProjectFileChangeGuard,
-} from "./components/code-viewer/sandpack-file-changes";
+import { type ProjectFileChangeGuard } from "./components/code-viewer/sandpack-file-changes";
 import type { StagedProjectImport } from "./lib/utils/project-import";
-import {
-  materializeStagedProjectAssets,
-  releaseMaterializedProjectAssets,
-} from "./lib/project-assets";
+import { commitImportedProject } from "./lib/utils/project-import-commit";
 import type {
   Attachment,
   DesignRecommendation,
@@ -70,7 +65,6 @@ export default function App() {
   const setFilesForConversation = useConversationStore(
     (s) => s.setFilesForConversation,
   );
-  const replaceProject = useConversationStore((s) => s.replaceProject);
   const migrateLegacyPlanMode = useConversationStore(
     (s) => s.migrateLegacyPlanMode,
   );
@@ -255,58 +249,34 @@ export default function App() {
   );
 
   const handleImportProject = useCallback(
-    async (project: StagedProjectImport) => {
+    async (project: StagedProjectImport, signal?: AbortSignal) => {
       if (!activeId)
         return { ok: false as const, error: "No active conversation." };
-      if (isGenerating) {
+      if (isGenerating)
         return {
           ok: false as const,
           error: "Stop generation before importing a project.",
         };
-      }
-      const importConversation =
-        useConversationStore.getState().conversations[activeId];
-      const importIdentity = captureConversationIdentity(importConversation);
-      const materialized = await materializeStagedProjectAssets(
-        project.assets ?? [],
-        project.files,
+      const identity = captureConversationIdentity(
+        useConversationStore.getState().conversations[activeId],
       );
-      if (
-        useConversationStore.getState().activeId !== activeId ||
-        !isConversationIdentityCurrent(
-          importIdentity,
-          useConversationStore.getState().conversations[activeId],
-        )
-      ) {
-        await releaseMaterializedProjectAssets(materialized.assets);
-        return {
-          ok: false as const,
-          error: "The active conversation changed while importing the project.",
-        };
-      }
-      discardPendingSandpackFileChanges(activeId);
-      const result = replaceProject({
-        files: materialized.files,
-        assets: materialized.assets,
-        template: project.template,
-        previewMode: project.previewMode,
-        activeFile: project.activeFile,
+      const result = await commitImportedProject(project, {
+        signal,
+        isCurrent: () => {
+          const state = useConversationStore.getState();
+          return (
+            state.activeId === activeId &&
+            isConversationIdentityCurrent(
+              identity,
+              state.conversations[activeId],
+            )
+          );
+        },
       });
-      if (!result.ok) {
-        await releaseMaterializedProjectAssets(materialized.assets);
-      }
-      if (!result.ok) return result;
-      invalidateGenerator();
-      restartSandpack();
+      if (result.ok) invalidateGenerator();
       return result;
     },
-    [
-      activeId,
-      invalidateGenerator,
-      isGenerating,
-      replaceProject,
-      restartSandpack,
-    ],
+    [activeId, invalidateGenerator, isGenerating],
   );
 
   useEffect(() => {
@@ -709,40 +679,6 @@ export default function App() {
     );
   }
 
-  const chatInterface = (
-    <ChatInterface
-      messages={messages}
-      isGenerating={isGenerating}
-      isThinkingStreaming={isThinkingStreaming}
-      runtimeWaitMessage={runtimeWaitMessage}
-      hasConfiguredModelRuntime={hasConfiguredModelRuntime}
-      localCliStatusNotice={localCliStatusNotice}
-      onGenerate={handleGenerate}
-      onEnqueueInstruction={enqueueInstruction}
-      onStop={stop}
-      onOpenSettings={() => setIsSettingsOpen(true)}
-      onSetFiles={(nextFiles) => setFiles(nextFiles)}
-      onImportProject={handleImportProject}
-      files={files}
-      template={template}
-      previewMode={previewMode}
-      sandpackKey={sandpackKey}
-      onReloadPreview={restartSandpack}
-      isProjectInitialized={isProjectInitialized}
-      showInlinePreview={isMobile}
-      onCompressContext={compressContext}
-      onRetry={retry}
-      onContinue={continueTask}
-      onReview={review}
-      onHealthCheck={healthCheck}
-      onApplyDesignSystem={handleApplyDesignSystem}
-      onCompileDesignSystem={handleCompileDesignSystem}
-      onContextClear={invalidateGenerator}
-      onProjectReset={invalidateGenerator}
-      onWithdrawLastMessage={withdrawLastUserMessage}
-    />
-  );
-
   const projectWorkspace = isProjectInitialized ? (
     <Suspense
       fallback={
@@ -849,8 +785,43 @@ export default function App() {
     </div>
   );
 
+  const chatInterface = (
+    <ChatInterface
+      messages={messages}
+      isGenerating={isGenerating}
+      isThinkingStreaming={isThinkingStreaming}
+      runtimeWaitMessage={runtimeWaitMessage}
+      hasConfiguredModelRuntime={hasConfiguredModelRuntime}
+      localCliStatusNotice={localCliStatusNotice}
+      onGenerate={handleGenerate}
+      onEnqueueInstruction={enqueueInstruction}
+      onStop={stop}
+      onOpenSettings={() => setIsSettingsOpen(true)}
+      onSetFiles={(nextFiles) => setFiles(nextFiles)}
+      onImportProject={handleImportProject}
+      files={files}
+      template={template}
+      previewMode={previewMode}
+      sandpackKey={sandpackKey}
+      onReloadPreview={restartSandpack}
+      isProjectInitialized={isProjectInitialized}
+      showInlinePreview={isMobile}
+      inlineWorkspace={projectWorkspace}
+      onCompressContext={compressContext}
+      onRetry={retry}
+      onContinue={continueTask}
+      onReview={review}
+      onHealthCheck={healthCheck}
+      onApplyDesignSystem={handleApplyDesignSystem}
+      onCompileDesignSystem={handleCompileDesignSystem}
+      onContextClear={invalidateGenerator}
+      onProjectReset={invalidateGenerator}
+      onWithdrawLastMessage={withdrawLastUserMessage}
+    />
+  );
+
   return (
-    <>
+    <AttachmentIntakeProvider>
       <AppLayout
         layout={layout}
         chat={chatInterface}
@@ -881,6 +852,6 @@ export default function App() {
           />
         </Suspense>
       )}
-    </>
+    </AttachmentIntakeProvider>
   );
 }

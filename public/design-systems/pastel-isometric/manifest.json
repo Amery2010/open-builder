@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "open-builder-design-system/v1",
+  "id": "pastel-isometric",
+  "name": "Pastel Isometric",
+  "category": "mixed",
+  "description": "Pastel architectural blocks on a shared isometric plane, with warm cream facades and pale blue air. Depth and location can express real grouping; do not make ordinary information depend on navigating a 3D world.",
+  "files": {
+    "design": "DESIGN.md",
+    "tokens": "tokens.css"
+  }
+}

@@ -12,6 +12,7 @@ const importMocks = vi.hoisted(() => ({
   stageFileList: vi.fn(),
   stageTauriDirectory: vi.fn(),
   stageZip: vi.fn(),
+  validate: vi.fn(),
 }));
 
 vi.mock("../../lib/utils/project-import", async (importOriginal) => {
@@ -25,6 +26,10 @@ vi.mock("../../lib/utils/project-import", async (importOriginal) => {
     stageProjectFromZip: importMocks.stageZip,
   };
 });
+
+vi.mock("../../lib/project-runtime/validation", () => ({
+  validateProjectRuntime: importMocks.validate,
+}));
 
 const stagedProject: StagedProjectImport = {
   name: "sample-project",
@@ -46,6 +51,12 @@ const stagedProject: StagedProjectImport = {
 describe("ProjectImportDialog", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    importMocks.validate.mockResolvedValue({
+      digest: "verified-digest",
+      template: "vite",
+      previewMode: "sandpack",
+      capabilities: { preview: { supported: true } },
+    });
     useSettingsStore.setState((state) => ({
       system: { ...state.system, language: "en" },
     }));
@@ -79,7 +90,7 @@ describe("ProjectImportDialog", () => {
     expect(body).toHaveClass("min-h-0", "flex-1", "overflow-y-auto");
   });
 
-  it("stages a File System Access folder, reports filtering, and confirms replacement", async () => {
+  it("stages a File System Access folder, verifies compilation and imports into a new conversation", async () => {
     const user = userEvent.setup();
     const directoryHandle = { kind: "directory", name: "sample-project" };
     const picker = vi.fn(async () => directoryHandle);
@@ -111,16 +122,26 @@ describe("ProjectImportDialog", () => {
     expect(await screen.findByText("sample-project")).toBeInTheDocument();
     expect(screen.getByText(/2 files · 72 B/)).toBeInTheDocument();
     expect(screen.getByText(/ignored 3/i)).toBeInTheDocument();
-    expect(screen.getByText(/already has files/i)).toBeInTheDocument();
-
-    await user.click(
-      screen.getByRole("button", { name: /replace and import/i }),
+    expect(screen.getByText(/keeps your current project/i)).toBeInTheDocument();
+    expect(importMocks.validate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        files: stagedProject.files,
+        signal: expect.any(AbortSignal),
+      }),
     );
-    expect(onImport).toHaveBeenCalledWith(stagedProject);
+
+    await user.click(screen.getByRole("button", { name: /^import project$/i }));
+    expect(onImport).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ...stagedProject,
+        validation: expect.objectContaining({ digest: "verified-digest" }),
+      }),
+      expect.any(AbortSignal),
+    );
     expect(onClose).toHaveBeenCalledOnce();
   });
 
-  it("stages ZIP files and shows the code-only fallback", async () => {
+  it("rejects an unsupported ZIP instead of allowing a code-only import", async () => {
     const user = userEvent.setup();
     const codeOnlyProject: StagedProjectImport = {
       ...stagedProject,
@@ -129,6 +150,9 @@ describe("ProjectImportDialog", () => {
       previewMode: "code-only",
     };
     importMocks.stageZip.mockResolvedValue(codeOnlyProject);
+    importMocks.validate.mockRejectedValue(
+      new Error("Unsupported project version."),
+    );
     render(
       <ProjectImportDialog
         open
@@ -153,7 +177,15 @@ describe("ProjectImportDialog", () => {
 
     expect(importMocks.stageZip).toHaveBeenCalledWith(zip);
     expect(await screen.findByText("source-only")).toBeInTheDocument();
-    expect(screen.getByText(/code-only mode/i)).toBeInTheDocument();
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Unsupported project version",
+    );
+    expect(
+      screen.getByRole("button", { name: /^import project$/i }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: /retry verification/i }),
+    ).toBeEnabled();
   });
 
   it("disables both sources during generation and closes with Escape", async () => {

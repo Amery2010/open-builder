@@ -7,6 +7,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useConversationStore } from "../store/conversation";
 import { useInteractiveStore } from "../store/interactive";
 import { useDesignReviewStore } from "../store/design-review";
+import { useProjectDesignWorkspaceStore } from "../store/project-design-workspace";
 import { useSettingsStore } from "../store/settings";
 import { createSkillActiveContext } from "../lib/skills/active-context";
 import type { SkillEntry } from "../lib/skills/types";
@@ -26,10 +27,6 @@ import type {
   RuntimePlatform,
   ToolRunContext,
 } from "../lib/ai/tools-schema";
-import type {
-  DesignChangeMode,
-  DesignContract,
-} from "../lib/design/run-contract";
 import { useGenerator } from "./useGenerator";
 import { getT } from "../i18n";
 import { SAAS_PROTOTYPE_BLUEPRINT_FIXTURE } from "../lib/design/fixtures/saas-prototype";
@@ -107,7 +104,6 @@ const ART_DIRECT_SKILL: SkillEntry = {
 };
 
 const records: BackendRecord[] = [];
-let seedContractForNextGeneration: DesignContract | undefined;
 let retryGateForNextBackend: Deferred<GenerateResult> | undefined;
 let generateActionForNextBackend:
   ((backend: FakeBackend) => Promise<GenerateResult>) | undefined;
@@ -276,22 +272,6 @@ class FakeBackend implements GenerationBackend {
     _attachments?: ResolvedAttachment[],
     _context?: GenerationRequestContext,
   ): Promise<GenerateResult> {
-    if (seedContractForNextGeneration) {
-      const contract = seedContractForNextGeneration;
-      seedContractForNextGeneration = undefined;
-      this.skillContext.activate(ART_DIRECT_SKILL);
-      this.seedSubmission = await this.customToolHandler?.(
-        "submit_design_contract",
-        contract,
-        toolContextFor(this),
-      );
-      if (
-        typeof this.seedSubmission === "string" &&
-        this.seedSubmission.startsWith("Error")
-      ) {
-        throw new Error(this.seedSubmission);
-      }
-    }
     return this.generateAction ? this.generateAction(this) : resultFor(this);
   }
 }
@@ -310,25 +290,6 @@ function toolContextFor(backend: FakeBackend): ToolExecutionContext {
     toolCallId: "test-tool-call",
     run: backend.getRunContext(),
     skillContext: backend.getSkillContext(),
-  };
-}
-
-function contractFor(changeMode: DesignChangeMode): DesignContract {
-  return {
-    surface_mode: "read",
-    change_mode: changeMode,
-    target: "Current interface",
-    audience: "Test users",
-    primary_goal: "Make the requested change",
-    concept: "Clear and focused",
-    system_id: null,
-    translation: {
-      foundations: "Semantic roles",
-      composition: "Clear hierarchy",
-      components: "Shared controls",
-    },
-    preserve: ["Existing behavior"],
-    acceptance: ["The change is testable"],
   };
 }
 
@@ -420,7 +381,6 @@ describe("useGenerator retry Design policy", () => {
   beforeEach(() => {
     Object.values(runtimeMocks).forEach((mock) => mock.mockReset());
     records.length = 0;
-    seedContractForNextGeneration = undefined;
     retryGateForNextBackend = undefined;
     generateActionForNextBackend = undefined;
     configureRuntimeMocks();
@@ -438,10 +398,11 @@ describe("useGenerator retry Design policy", () => {
       },
     }));
     useInteractiveStore.setState({ pending: [] });
+    useProjectDesignWorkspaceStore.setState({ selections: {} });
   });
 
   it.each(["generate", "continueTask"] as const)(
-    "continues prototype batches past the old limit through %s",
+    "does not manufacture tasks from unfinished blueprint progress through %s",
     async (entry) => {
       useConversationStore.getState().createConversation();
       useConversationStore.getState().setFiles(prototypeFiles(0));
@@ -465,17 +426,17 @@ describe("useGenerator retry Design policy", () => {
         else await hook.result.current.continueTask();
       });
 
-      expect(calls).toBe(6);
+      expect(calls).toBe(1);
       expect(
         JSON.parse(records[0].backend.getFiles()["design-project.json"])
           .buildProgress.status,
-      ).toBe("complete");
+      ).toBe("in-progress");
       expect(hook.result.current.isGenerating).toBe(false);
     },
   );
 
   it.each(["generate", "continueTask"] as const)(
-    "reports an unchanged prototype checkpoint instead of repeatedly requesting %s",
+    "stops normally when a draft has no explicit tasks through %s",
     async (entry) => {
       const conversationId = useConversationStore
         .getState()
@@ -498,10 +459,8 @@ describe("useGenerator retry Design policy", () => {
         else await hook.result.current.continueTask();
       });
 
-      expect(calls).toBe(2);
-      expect(hook.result.current.lastError?.message).toContain(
-        getT().message.prototypeNoProgress,
-      );
+      expect(calls).toBe(1);
+      expect(hook.result.current.lastError).toBeNull();
       expect(
         useConversationStore.getState().conversations[conversationId].files,
       ).toEqual(prototypeFiles(0));
@@ -516,7 +475,7 @@ describe("useGenerator retry Design policy", () => {
       let calls = 0;
       generateActionForNextBackend = async (backend) => {
         calls += 1;
-        return { ...resultFor(backend), [outcome]: calls === 2 };
+        return { ...resultFor(backend), [outcome]: true };
       };
       const hook = renderGenerator();
 
@@ -527,7 +486,7 @@ describe("useGenerator retry Design policy", () => {
         });
       });
 
-      expect(calls).toBe(2);
+      expect(calls).toBe(1);
       expect(hook.result.current.lastError).toBeNull();
     },
   );
@@ -564,7 +523,6 @@ describe("useGenerator retry Design policy", () => {
       .getState()
       .setFiles({ "src/App.tsx": "export const App = () => 'before';" });
     const hook = renderGenerator();
-    seedContractForNextGeneration = contractFor("migrate");
 
     await act(async () => {
       await hook.result.current.generate("Build the interface", undefined, {
@@ -577,7 +535,7 @@ describe("useGenerator retry Design policy", () => {
       useConversationStore.getState().conversations[conversationId].messages[0];
     expect(request.metadata?.designExpectedChangeModes).toEqual(["migrate"]);
     expect(records).toHaveLength(1);
-    expect(records[0].backend.seedSubmission).toBe('{"accepted":true}');
+    expect(records[0].backend.seedSubmission).toBeUndefined();
 
     const currentFiles = {
       "src/App.tsx": "export const App = () => 'current';",
@@ -587,7 +545,6 @@ describe("useGenerator retry Design policy", () => {
 
     const record = records[0];
     let beforeContract: string | void | undefined = undefined;
-    let rejectedCreate: unknown;
     let afterContract: string | void | undefined = undefined;
     record.backend.retryAction = async (backend) => {
       // The selector remains interactive during a run. Changing it must not
@@ -598,22 +555,6 @@ describe("useGenerator retry Design policy", () => {
         { path: "src/App.tsx", content: "changed" },
         toolContextFor(backend),
       );
-      backend.getSkillContext().activate(ART_DIRECT_SKILL);
-      try {
-        rejectedCreate = await record.customToolHandler?.(
-          "submit_design_contract",
-          contractFor("create"),
-          toolContextFor(backend),
-        );
-      } catch (error) {
-        rejectedCreate = error instanceof Error ? error.message : String(error);
-      }
-      const accepted = await record.customToolHandler?.(
-        "submit_design_contract",
-        contractFor("migrate"),
-        toolContextFor(backend),
-      );
-      expect(accepted).toBe('{"accepted":true}');
       afterContract = await record.extras.authorizeToolCall?.(
         "write_file",
         { path: "src/App.tsx", content: "changed" },
@@ -632,12 +573,14 @@ describe("useGenerator retry Design policy", () => {
         .workspaceMode,
     ).toBe("auto");
     expect(beforeContract).toBeUndefined();
-    expect(rejectedCreate).toContain("change_mode must be one of: migrate");
+    expect(hook.result.current.getDesignContract()?.change_mode).toBe(
+      "migrate",
+    );
     expect(afterContract).toBeUndefined();
     expect(record.backend.retryCalls).toBe(1);
   });
 
-  it("allows the first ordinary Design patch without scheduling a contractless review", async () => {
+  it("prepares Design writes and schedules an advisory review without submission", async () => {
     const conversationId = useConversationStore.getState().createConversation();
     useConversationStore.getState().setWorkspaceMode("design");
     const initialFiles = {
@@ -674,8 +617,8 @@ describe("useGenerator retry Design policy", () => {
         await hook.result.current.generate("Update the heading");
       });
       expect(patchAuthorization).toBeUndefined();
-      expect(tokenAuthorization).toContain("Design contract required");
-      expect(capture).not.toHaveBeenCalled();
+      expect(tokenAuthorization).toBeUndefined();
+      expect(capture).toHaveBeenCalledOnce();
       expect(
         useConversationStore.getState().conversations[conversationId].files[
           "src/App.tsx"
@@ -692,7 +635,7 @@ describe("useGenerator retry Design policy", () => {
     "blueprint",
     "invalid-blueprint",
   ] as const)(
-    "requires a contract after detecting %s and cannot downgrade within the run",
+    "allows Design preparation without contract submission for %s",
     async (kind) => {
       useConversationStore.getState().createConversation();
       useConversationStore.getState().setWorkspaceMode("design");
@@ -740,76 +683,60 @@ describe("useGenerator retry Design policy", () => {
         expect(authorizations.shift()).toBeUndefined();
       expect(authorizations).toHaveLength(2);
       for (const authorization of authorizations) {
-        expect(authorization).toContain("Design contract required");
+        expect(authorization).toBeUndefined();
       }
     },
   );
 
-  it("binds an imported blueprint's write scope without a prototype package marker", async () => {
-    useConversationStore.getState().createConversation();
-    useConversationStore.getState().setWorkspaceMode("design");
-    const files = prototypeFiles(0);
-    delete files["package.json"];
-    useConversationStore.getState().setFiles(files);
-    const fixture = SAAS_PROTOTYPE_BLUEPRINT_FIXTURE;
-    const selectedPage = fixture.pages[0];
-    let missingScope: unknown;
-    let accepted: unknown;
-    let selectedWrite: string | void = undefined;
-    let otherWrite: string | void = undefined;
-    generateActionForNextBackend = async (backend) => {
-      backend.getSkillContext().activate(ART_DIRECT_SKILL);
-      const context = toolContextFor(backend);
-      try {
-        missingScope = await backend.customToolHandler?.(
-          "submit_design_contract",
-          contractFor("extend"),
+  it.each([true, false])(
+    "binds imported page scope only for explicit navigation (%s)",
+    async (explicit) => {
+      useConversationStore.getState().createConversation();
+      useConversationStore.getState().setWorkspaceMode("design");
+      const files = prototypeFiles(0);
+      delete files["package.json"];
+      useConversationStore.getState().setFiles(files);
+      const fixture = SAAS_PROTOTYPE_BLUEPRINT_FIXTURE;
+      const selectedPage = fixture.pages[0];
+      useProjectDesignWorkspaceStore
+        .getState()
+        .setSelection(useConversationStore.getState().activeId!, {
+          pageId: selectedPage.id,
+          scenarioId: "default",
+          explicit,
+        });
+      let selectedWrite: string | void = undefined;
+      let otherWrite: string | void = undefined;
+      generateActionForNextBackend = async (backend) => {
+        const context = toolContextFor(backend);
+        const { extras } = records.at(-1)!;
+        selectedWrite = await extras.authorizeToolCall?.(
+          "patch_file",
+          { path: selectedPage.filePaths[0] },
           context,
         );
-      } catch (error) {
-        missingScope = error instanceof Error ? error.message : String(error);
-      }
-      accepted = await backend.customToolHandler?.(
-        "submit_design_contract",
-        {
-          ...contractFor("extend"),
-          blueprint: {
-            revision: fixture.revision,
-            target_page_ids: [selectedPage.id],
-            shared_scope: { file_paths: [], ui_ids: [] },
-            batch_phase: "core_flow",
+        otherWrite = await extras.authorizeToolCall?.(
+          "patch_file",
+          { path: fixture.pages[1].filePaths[0] },
+          context,
+        );
+        return resultFor(backend);
+      };
+      const hook = renderGenerator();
+      await act(async () => {
+        await hook.result.current.generate(
+          "Update the selected page",
+          undefined,
+          {
+            skipAutomaticDesignReview: true,
           },
-        },
-        context,
-      );
-      const { extras } = records.at(-1)!;
-      selectedWrite = await extras.authorizeToolCall?.(
-        "patch_file",
-        { path: selectedPage.filePaths[0] },
-        context,
-      );
-      otherWrite = await extras.authorizeToolCall?.(
-        "patch_file",
-        { path: fixture.pages[1].filePaths[0] },
-        context,
-      );
-      return resultFor(backend);
-    };
-    const hook = renderGenerator();
-    await act(async () => {
-      await hook.result.current.generate(
-        "Update the selected page",
-        undefined,
-        {
-          skipAutomaticDesignReview: true,
-        },
-      );
-    });
-    expect(missingScope).toContain("blueprint scope is required");
-    expect(accepted).toBe('{"accepted":true}');
-    expect(selectedWrite).toBeUndefined();
-    expect(otherWrite).toContain("outside the selected page files");
-  });
+        );
+      });
+      expect(selectedWrite).toBeUndefined();
+      if (explicit) expect(otherWrite).toContain("selected design scope");
+      else expect(otherWrite).toBeUndefined();
+    },
+  );
 
   it("keeps the request-start Design profile across asynchronous preparation", async () => {
     useConversationStore.getState().createConversation();
@@ -819,7 +746,6 @@ describe("useGenerator retry Design policy", () => {
       .setFiles({ "src/App.tsx": "export const App = () => 'design';" });
     const hook = renderGenerator();
     const preparation = deferred<void>();
-    seedContractForNextGeneration = contractFor("extend");
     let generation!: Promise<void>;
 
     await act(async () => {
@@ -838,7 +764,7 @@ describe("useGenerator retry Design policy", () => {
     await act(async () => generation);
 
     expect(records).toHaveLength(1);
-    expect(records[0].backend.seedSubmission).toBe('{"accepted":true}');
+    expect(records[0].backend.seedSubmission).toBeUndefined();
     expect(records[0].backend.systemPromptSuffix).toContain("<design_mode>");
     expect(runtimeMocks.buildToolSetForRun).toHaveBeenCalledWith(
       expect.objectContaining({ profile: "design", mode: "chat" }),
@@ -884,7 +810,6 @@ describe("useGenerator retry Design policy", () => {
 
     await act(async () => {
       await hook.result.current.generate("Repair reviewed issue", undefined, {
-        reusableDesignContract: contractFor("extend"),
         messageOrigin: "design_auto_fix",
         expectedConversationId: conversationId,
         expectedProjectSource: {

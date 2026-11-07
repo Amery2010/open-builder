@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { BUNDLED_DESIGN_SYSTEMS } from "./catalog";
 import { loadBundledDesignSystem } from "./bundled";
+import { applyDesignSystemPackage } from "./apply";
 import {
   DESIGN_SYSTEM_LIMITS,
   validateDesignSystemPackage,
@@ -57,8 +58,15 @@ function declaredTokenNames(css: string): string[] {
 }
 
 describe("Design system validation", () => {
-  it("validates all 12 pinned bundled packages and their digests", async () => {
-    expect(BUNDLED_DESIGN_SYSTEMS).toHaveLength(12);
+  it("validates all 36 pinned bundled packages and their digests", async () => {
+    expect(BUNDLED_DESIGN_SYSTEMS).toHaveLength(36);
+    expect(new Set(BUNDLED_DESIGN_SYSTEMS.map((entry) => entry.id)).size).toBe(
+      36,
+    );
+    const runtimeCatalog = JSON.parse(await fetchLocalText("catalog.json"));
+    expect(runtimeCatalog.map((entry: { id: string }) => entry.id)).toEqual(
+      BUNDLED_DESIGN_SYSTEMS.map((entry) => entry.id),
+    );
     for (const entry of BUNDLED_DESIGN_SYSTEMS) {
       expect((await readdir(path.join(publicRoot, entry.id))).sort()).toEqual([
         "DESIGN.md",
@@ -66,12 +74,41 @@ describe("Design system validation", () => {
         "tokens.css",
       ]);
       const pkg = await loadBundledDesignSystem(entry.id, fetchLocalText);
+      expect(Object.keys(JSON.parse(pkg.manifestText))).toEqual([
+        "schemaVersion",
+        "id",
+        "name",
+        "category",
+        "description",
+        "files",
+      ]);
       expect(pkg.reference).toMatchObject({
         id: entry.id,
         name: entry.name,
         source: "builtin",
       });
       expect(pkg.digest).toMatch(/^[a-f0-9]{64}$/);
+    }
+  });
+
+  it("loads each curated source as a local package and applies its verified reference", async () => {
+    const additions = BUNDLED_DESIGN_SYSTEMS.slice(12);
+    expect(additions).toHaveLength(24);
+    for (const entry of additions) {
+      const pkg = await loadBundledDesignSystem(entry.id, fetchLocalText);
+      expect(entry.id).not.toMatch(/^designmd-/);
+      expect(pkg.manifest).not.toHaveProperty("source");
+      expect(pkg.manifest).not.toHaveProperty("notice");
+      expect(entry.tags.some((tag) => /[\u4e00-\u9fff]/.test(tag))).toBe(true);
+      expect(pkg.design).toContain("reduced motion");
+      const files = { "src/App.tsx": "export default () => null" };
+      const applied = applyDesignSystemPackage(files, pkg);
+      expect(applied.files["DESIGN.md"]).toBe(pkg.design);
+      expect(applied.files["tokens.css"]).toContain(pkg.tokens);
+      expect(applied.files["tokens.css"]).toContain(
+        `sha256 ${pkg.reference.digest}`,
+      );
+      expect(files).toEqual({ "src/App.tsx": "export default () => null" });
     }
   });
 

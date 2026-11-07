@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "open-builder-design-system/v1",
+  "id": "pixel-arcade",
+  "name": "Pixel Arcade",
+  "category": "mixed",
+  "description": "Chunky pixel edges, dark violet cabinet panels and warm arcade lamps. Use a deliberate low-resolution ornament language while keeping body text and essential controls comfortably readable.",
+  "files": {
+    "design": "DESIGN.md",
+    "tokens": "tokens.css"
+  }
+}

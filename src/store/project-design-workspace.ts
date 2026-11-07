@@ -3,6 +3,8 @@ import { create } from "zustand";
 export interface ProjectDesignWorkspaceSelection {
   pageId: string;
   scenarioId: string;
+  /** Only a deliberate page/scenario choice may restrict the next Design run. */
+  explicit?: boolean;
 }
 
 interface ProjectDesignWorkspaceState {

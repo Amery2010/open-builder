@@ -1,0 +1,61 @@
+:root {
+  --bg: #0c0f14;
+  --surface: #141922;
+  --surface-warm: #11161d;
+  --fg: #e8dcc8;
+  --fg-2: #d3c8b7;
+  --muted: #beb5a7;
+  --meta: #b5ada0;
+  --border: #656361;
+  --border-soft: #3e4043;
+  --accent: #ffb347;
+  --accent-on: #17120b;
+  --accent-hover: #fcb856;
+  --accent-active: #f9bd66;
+  --success: #88d6a5;
+  --warn: #f1c16f;
+  --danger: #ffabb1;
+  --font-display:
+    ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  --font-body:
+    ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  --font-mono:
+    ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  --text-xs: 12px;
+  --text-sm: 14px;
+  --text-base: 16px;
+  --text-lg: 20px;
+  --text-xl: 26px;
+  --text-2xl: 36px;
+  --text-3xl: 48px;
+  --text-4xl: 64px;
+  --leading-body: 1.6;
+  --leading-tight: 1.12;
+  --tracking-display: 0em;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+  --section-y-desktop: 64px;
+  --section-y-tablet: 48px;
+  --section-y-phone: 32px;
+  --radius-sm: 4px;
+  --radius-md: 4px;
+  --radius-lg: 8px;
+  --radius-pill: 9999px;
+  --elev-flat: none;
+  --elev-ring: 0 0 0 1px #656361;
+  --elev-raised: 0 8px 24px #090b0e40;
+  --focus-ring: 0 0 0 3px #ffb347;
+  --motion-fast: 120ms;
+  --motion-base: 220ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --container-max: 1280px;
+  --container-gutter-desktop: 32px;
+  --container-gutter-tablet: 24px;
+  --container-gutter-phone: 18px;
+}

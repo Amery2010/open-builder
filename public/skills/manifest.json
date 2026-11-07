@@ -41,7 +41,7 @@
       "id": "art-direct-web",
       "name": "art-direct-web",
       "description": "Art-direct marketing sites, landing pages, portfolios, editorial pages, and campaign experiences from a concrete brief. Use when visual narrative, composition, typography, imagery, and motion are central; use design-product-ui instead for routine application workflows.",
-      "version": "2.0.0",
+      "version": "2.1.0",
       "tags": ["frontend", "art-direction", "marketing", "editorial"],
       "entry": "art-direct-web/SKILL.md",
       "files": ["art-direct-web/SKILL.md"]
@@ -50,7 +50,7 @@
       "id": "design-product-ui",
       "name": "design-product-ui",
       "description": "Design and implement product interfaces such as dashboards, settings, forms, data views, and multi-step workflows. Use for hierarchy, density, navigation, interaction states, responsive behavior, and accessible product UI; use art-direct-web for marketing-led experiences.",
-      "version": "2.0.0",
+      "version": "2.1.0",
       "tags": ["frontend", "product-ui", "interaction", "accessibility"],
       "entry": "design-product-ui/SKILL.md",
       "files": ["design-product-ui/SKILL.md"]

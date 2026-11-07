@@ -109,6 +109,47 @@ export function detectProjectAssetMimeType(
   if (isPng(bytes)) return "image/png";
   if (isJpeg(bytes)) return "image/jpeg";
   if (isWebp(bytes)) return "image/webp";
+  const signature = String.fromCharCode(...bytes.subarray(0, 6));
+  if (signature === "GIF87a" || signature === "GIF89a") return "image/gif";
+  if (
+    bytes.length >= 6 &&
+    bytes[0] === 0 &&
+    bytes[1] === 0 &&
+    bytes[2] === 1 &&
+    bytes[3] === 0 &&
+    (bytes[4] !== 0 || bytes[5] !== 0)
+  )
+    return "image/x-icon";
+  if (
+    bytes.length >= 16 &&
+    String.fromCharCode(...bytes.subarray(4, 8)) === "ftyp"
+  ) {
+    const boxSize = new DataView(
+      bytes.buffer,
+      bytes.byteOffset,
+      bytes.byteLength,
+    ).getUint32(0);
+    if (boxSize >= 16 && boxSize <= bytes.length) {
+      for (let offset = 8; offset + 4 <= boxSize; offset += 4) {
+        if (offset === 12) continue;
+        const brand = String.fromCharCode(
+          ...bytes.subarray(offset, offset + 4),
+        );
+        if (brand === "avif" || brand === "avis") return "image/avif";
+      }
+    }
+  }
+  if (bytes.length >= 12) {
+    const fontSignature = signature.slice(0, 4);
+    if (fontSignature === "wOFF" && bytes.length >= 44) return "font/woff";
+    if (fontSignature === "wOF2" && bytes.length >= 48) return "font/woff2";
+    if (fontSignature === "OTTO") return "font/otf";
+    if (
+      fontSignature === "true" ||
+      (bytes[0] === 0 && bytes[1] === 1 && bytes[2] === 0 && bytes[3] === 0)
+    )
+      return "font/ttf";
+  }
   return null;
 }
 
@@ -119,6 +160,13 @@ export function projectAssetMimeTypeForPath(
   if (extension === "png") return "image/png";
   if (extension === "jpg" || extension === "jpeg") return "image/jpeg";
   if (extension === "webp") return "image/webp";
+  if (extension === "gif") return "image/gif";
+  if (extension === "ico") return "image/x-icon";
+  if (extension === "avif") return "image/avif";
+  if (extension === "woff") return "font/woff";
+  if (extension === "woff2") return "font/woff2";
+  if (extension === "ttf") return "font/ttf";
+  if (extension === "otf") return "font/otf";
   return null;
 }
 
@@ -138,7 +186,9 @@ export function normalizeProjectAssetPath(path: string): string {
     throw new Error(`Unsafe project asset path: "${path}".`);
   }
   if (!projectAssetMimeTypeForPath(normalized)) {
-    throw new Error("Project assets must use a PNG, JPEG, or WebP file name.");
+    throw new Error(
+      "Project asset must use a supported image or web font file name.",
+    );
   }
   return normalized;
 }
@@ -290,7 +340,7 @@ export async function stageProjectAsset(
   const pathMimeType = projectAssetMimeTypeForPath(normalizedPath);
   if (!detectedMimeType || detectedMimeType !== pathMimeType) {
     throw new Error(
-      `Project asset "${normalizedPath}" does not match its image file type.`,
+      `Project asset "${normalizedPath}" does not match its file type.`,
     );
   }
   if (
@@ -883,6 +933,9 @@ function projectSourceForPreview(
 export async function projectFilesForSandpack(
   files: ProjectFiles,
   assets: ProjectAssets,
+  readBytes: (
+    asset: ProjectAsset,
+  ) => Promise<Uint8Array> = readProjectAssetBytes,
 ): Promise<ProjectFiles> {
   const validation = validateProjectAssets(assets);
   if (!validation.ok) throw new Error(validation.error);
@@ -894,7 +947,7 @@ export async function projectFilesForSandpack(
       );
       let dataUrl = dataUrls.get(cacheKey);
       if (!dataUrl) {
-        dataUrl = readProjectAssetBytes(asset).then((bytes) =>
+        dataUrl = readBytes(asset).then((bytes) =>
           blobToDataUrl(
             new Blob([Uint8Array.from(bytes).buffer], {
               type: asset.mimeType,

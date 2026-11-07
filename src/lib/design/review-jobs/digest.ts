@@ -1,4 +1,9 @@
 import type { ProjectFiles } from "../../ai/generator-types";
+import {
+  getProjectDesignStructureFingerprint,
+  PROJECT_DESIGN_PATH,
+  readProjectDesign,
+} from "../project-design";
 
 export interface DesignReviewSource {
   files: ProjectFiles;
@@ -20,11 +25,45 @@ function canonicalize(value: unknown): unknown {
 export function serializeDesignReviewSource(
   source: DesignReviewSource,
 ): string {
+  const blueprint = readProjectDesign(source.files);
+  // If runtime code consumes the blueprint, even its metadata can change pixels.
+  const runtimeReadsBlueprint = Object.entries(source.files).some(
+    ([path, content]) =>
+      path !== PROJECT_DESIGN_PATH &&
+      /\.(?:[cm]?[jt]sx?|html|vue|svelte)$/i.test(path) &&
+      content.includes(PROJECT_DESIGN_PATH),
+  );
+  const files =
+    blueprint.status === "ready" && !runtimeReadsBlueprint
+      ? {
+          ...source.files,
+          [PROJECT_DESIGN_PATH]: getProjectDesignStructureFingerprint(
+            blueprint.design,
+          ),
+        }
+      : source.files;
+  const context = source.designContract;
+  const designContext =
+    context && typeof context === "object" && "blueprint" in context
+      ? {
+          ...context,
+          blueprint: (() => {
+            const binding = context.blueprint;
+            if (!binding || typeof binding !== "object") return binding;
+            const {
+              revision: _revision,
+              batch_phase: _phase,
+              ...scope
+            } = binding as Record<string, unknown>;
+            return scope;
+          })(),
+        }
+      : context;
   return JSON.stringify(
     canonicalize({
-      files: source.files,
+      files,
       designSystem: source.designSystem ?? null,
-      designContract: source.designContract ?? null,
+      designContract: designContext ?? null,
     }),
   );
 }

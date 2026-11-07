@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "open-builder-design-system/v1",
+  "id": "kinetic-typography",
+  "name": "Kinetic Typography",
+  "category": "marketing",
+  "description": "Typography behaves like a stage object: oversized cropped forms, a paper-and-ink palette and a decisive vermilion cue. Use weight, scale and directional composition before adding extra illustration.",
+  "files": {
+    "design": "DESIGN.md",
+    "tokens": "tokens.css"
+  }
+}

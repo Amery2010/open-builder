@@ -35,13 +35,13 @@ export function ProjectDesignOutlineDialog({
   onSave,
 }: ProjectDesignOutlineDialogProps) {
   const t = useT();
-  const [productGoal, setProductGoal] = useState(design.productGoal);
-  const [audience, setAudience] = useState(design.audience);
+  const [productGoal, setProductGoal] = useState(design.productGoal ?? "");
+  const [audience, setAudience] = useState(design.audience ?? "");
   const [pages, setPages] = useState(() =>
     design.pages.map((page) => ({
       id: page.id,
       name: page.name,
-      responsibility: page.responsibility,
+      responsibility: page.responsibility ?? "",
     })),
   );
   const [saving, setSaving] = useState(false);
@@ -49,13 +49,13 @@ export function ProjectDesignOutlineDialog({
 
   useEffect(() => {
     if (!open) return;
-    setProductGoal(design.productGoal);
-    setAudience(design.audience);
+    setProductGoal(design.productGoal ?? "");
+    setAudience(design.audience ?? "");
     setPages(
       design.pages.map((page) => ({
         id: page.id,
         name: page.name,
-        responsibility: page.responsibility,
+        responsibility: page.responsibility ?? "",
       })),
     );
     setError(undefined);
@@ -67,13 +67,17 @@ export function ProjectDesignOutlineDialog({
     try {
       await onSave({
         ...design,
-        productGoal,
-        audience,
+        productGoal: productGoal.trim() || undefined,
+        audience: audience.trim() || undefined,
         revision: nextUiRevision(design.revision),
         pages: design.pages.map((page) => {
           const edit = pages.find((candidate) => candidate.id === page.id);
           return edit
-            ? { ...page, name: edit.name, responsibility: edit.responsibility }
+            ? {
+                ...page,
+                name: edit.name || page.id,
+                responsibility: edit.responsibility.trim() || undefined,
+              }
             : page;
         }),
       });

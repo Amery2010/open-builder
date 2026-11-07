@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "open-builder-design-system/v1",
+  "id": "analog-synth",
+  "name": "Analog Synth",
+  "category": "product",
+  "description": "Cream equipment panels in a dark wooden rack, dark technical labels, round knobs and color-coded patch points. The visual metaphor should clarify parameter relationships instead of decorating arbitrary forms with cables.",
+  "files": {
+    "design": "DESIGN.md",
+    "tokens": "tokens.css"
+  }
+}

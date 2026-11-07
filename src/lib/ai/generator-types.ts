@@ -332,6 +332,20 @@ export interface UserInstructionSource {
 }
 
 export interface GeneratorOptions {
+  /** Prepare source and Host recovery metadata in one validated mutation. */
+  prepareProjectCommit?: (
+    before: ProjectFiles,
+    proposed: ProjectFiles,
+    operationId: string,
+  ) => ProjectFiles;
+  /** Host-owned write scope for an isolated developer subagent. */
+  subagentWritePaths?: readonly string[];
+  getCurrentProjectFiles?: () => ProjectFiles;
+  /** Synchronous compare-and-set into canonical Conversation files. */
+  commitDelegatedProjectFiles?: (
+    expected: ProjectFiles,
+    next: ProjectFiles,
+  ) => boolean;
   userInstructions?: UserInstructionSource;
   /** Conversation that owns this generator and its permission activity. */
   conversationId?: string;
@@ -406,6 +420,8 @@ export interface GeneratorOptions {
     signal: AbortSignal,
     toolCallId: string,
     conversationId?: string,
+    writePaths?: readonly string[],
+    authorizeWrite?: (name: string, args: unknown) => Promise<void>,
   ) => Promise<DispatchSubagentResult>;
   /** Run-scoped, trusted transformation applied after init_project creates a
    * template and before that file tree becomes authoritative. */
@@ -418,14 +434,12 @@ export interface GeneratorOptions {
     | Promise<InitializedProjectPreparation | void>;
 }
 
-/** Result of a subagent dispatch.
- *  `text` is the JSON-serialized SubagentToolResult that flows back into the
- *  parent's tool_result message. `files` is set only when the subagent was
- *  allowed to modify files; the parent generator overwrites its current file
- *  tree with it. */
+/** Run-local edits are merged by the parent; only text is persisted. */
 export interface DispatchSubagentResult {
   text: string;
-  files?: ProjectFiles;
+  edits?: import("./subagents/delegated-edits").DelegatedEdit[];
+  /** Settles live progress only after the parent accepts or rejects the edits. */
+  complete?: (error?: string) => string;
 }
 
 /** Event callbacks */

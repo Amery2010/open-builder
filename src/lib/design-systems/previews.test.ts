@@ -22,8 +22,8 @@ function readLosslessWebpHeader(publicPath: string) {
 describe("design-system preview assets", () => {
   it("maps every bundled system to a unique 640x480 WebP", () => {
     const paths = BUNDLED_DESIGN_SYSTEMS.map((entry) => entry.previewPath);
-    expect(paths).toHaveLength(12);
-    expect(new Set(paths).size).toBe(12);
+    expect(paths).toHaveLength(36);
+    expect(new Set(paths).size).toBe(36);
 
     for (const path of [...paths, CUSTOM_DESIGN_SYSTEM_PREVIEW_PATH]) {
       expect(path).toMatch(/^\/design-systems\/previews\/.+\.webp$/);

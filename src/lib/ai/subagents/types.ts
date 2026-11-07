@@ -17,11 +17,8 @@ export interface SubagentDefinition {
   maxIterations?: number;
   /** Truncate the subagent text result to this many chars before returning (default 4000). */
   maxResultLength?: number;
-  /** Whether the subagent can modify project files. Defaults to "readonly":
-   *  write tools are stripped from the whitelist and any attempt to call them
-   *  is rejected at the tool-handler layer. "fullWrite" subagents may modify
-   *  files; the resulting file map is written back to the parent. */
-  writePolicy?: "readonly" | "fullWrite";
+  /** Development roles edit only their immutable, host-assigned file scope. */
+  writePolicy?: "readonly" | "scopedWrite";
 }
 
 export type SubagentToolStatus = "running" | "completed" | "failed" | "aborted";

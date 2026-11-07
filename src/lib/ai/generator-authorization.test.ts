@@ -17,8 +17,7 @@ import type {
   ToolExecutionContext,
 } from "./generator-types";
 import type { SkillEntry } from "../skills/types";
-import { createDesignContractController } from "../design/run-contract";
-import { SUBMIT_DESIGN_CONTRACT_TOOL } from "../design/run-contract-tool";
+import { prepareDesignRun } from "../design/design-run";
 import { SCRIPT_SKILL_TOOL } from "../skills/tools";
 import { SEARCH_TOOLS } from "../tools/search";
 import { ASSET_SEARCH_TOOLS } from "../tools/asset-search";
@@ -80,6 +79,7 @@ function createGenerator(
     ) => Promise<{ approved: boolean; feedback?: string }>;
     onPlanApproved?: () => ToolSet | void | Promise<ToolSet | void>;
     prepareInitializedProject?: GeneratorOptions["prepareInitializedProject"];
+    prepareProjectCommit?: GeneratorOptions["prepareProjectCommit"];
     authorizeToolCall?: GeneratorOptions["authorizeToolCall"];
     projectPermissionSession?: ProjectPermissionSession;
     toolRuntime?: GeneratorOptions["toolRuntime"];
@@ -798,8 +798,12 @@ describe("generator execution authorization", () => {
   });
 
   it("allows a registered read-only subagent before the Design contract while writes stay blocked", async () => {
-    const controller = createDesignContractController();
-    controller.reset({ enabled: true });
+    const designRun = prepareDesignRun({
+      requestId: "test",
+      goal: "Inspect",
+      files: {},
+      filePaths: ["src/Selected.tsx"],
+    });
     const subagentResult = JSON.stringify({
       ok: true,
       subagent: "code-explorer",
@@ -818,8 +822,7 @@ describe("generator execution authorization", () => {
       vi.fn(),
       {
         dispatchSubagent,
-        authorizeToolCall: (name, args) =>
-          controller.authorizeProjectWrite(name, args),
+        authorizeToolCall: (name, args) => designRun.authorize(name, args, {}),
       },
     );
     const harness = generator as unknown as ToolInvoker;
@@ -842,80 +845,85 @@ describe("generator execution authorization", () => {
     expect(dispatched.result.isError).not.toBe(true);
     expect(dispatched.hadSideEffect).toBe(true);
     expect(written.result).toMatchObject({ isError: true });
-    expect(written.result.text).toContain("Design contract required");
+    expect(written.result.text).toContain("selected design scope");
     expect(written.hadSideEffect).toBe(false);
     expect(generator.getFiles()).toEqual({});
   });
 
-  it("unlocks Design writes only after the structured contract tool succeeds", async () => {
-    const controller = createDesignContractController();
-    controller.reset({ enabled: true, expectedSystemId: "graphite" });
-    const handler = vi.fn(
-      async (name: string, args: unknown, context?: ToolExecutionContext) => {
-        if (name !== "submit_design_contract" || !context) return "unknown";
-        controller.submit(args, {
-          expectedSystemId: "graphite",
-          skillContext: context.skillContext,
-        });
-        return JSON.stringify({ accepted: true });
-      },
-    );
-    const { generator } = createGenerator(
-      {
-        write_file: BUILTIN_TOOLS.write_file,
-        ...SUBMIT_DESIGN_CONTRACT_TOOL,
-      },
-      handler,
-      {
-        authorizeToolCall: (name) => controller.authorizeProjectWrite(name),
-      },
-    );
-    generator.getSkillContext().activate({
-      id: "design-product-ui",
-      name: "design-product-ui",
-      description: "Product UI",
-      version: "1.0.0",
-      autoEnabled: true,
-      source: "builtin",
-      installedAt: 0,
+  it("writes through a Host prepared Design run without a contract tool", async () => {
+    const designRun = prepareDesignRun({
+      requestId: "request",
+      goal: "Build",
+      files: {},
     });
-    const harness = generator as unknown as ToolInvoker;
-
-    expect(
-      (
-        await harness.executeTool(
-          call("write_file", { path: "src/App.tsx", content: "blocked" }),
-        )
-      ).result.text,
-    ).toContain("Design contract required");
-
-    const submitted = await harness.executeTool(
-      call("submit_design_contract", {
-        surface_mode: "operate",
-        change_mode: "extend",
-        target: "Settings workspace",
-        audience: "Administrators",
-        primary_goal: "Configure safely",
-        concept: "A precise operations bench",
-        system_id: "graphite",
-        translation: {
-          foundations: "Semantic roles",
-          composition: "Clear hierarchy",
-          components: "Shared controls",
-        },
-        preserve: ["Routes and behavior"],
-        acceptance: ["Runtime Token consumption"],
-      }),
+    const { generator } = createGenerator(
+      { write_file: BUILTIN_TOOLS.write_file },
+      vi.fn(),
+      {
+        authorizeToolCall: (name, args) =>
+          designRun.authorize(name, args, generator.getFiles()),
+        prepareProjectCommit: (before, next, id) =>
+          designRun.prepareCommit(before, next, id),
+      },
     );
-    expect(submitted.result.isError).not.toBe(true);
-
-    const written = await harness.executeTool(
+    const outcome = await (generator as unknown as ToolInvoker).executeTool(
       call("write_file", { path: "src/App.tsx", content: "allowed" }),
     );
-    expect(written.result.isError).not.toBe(true);
-    expect(written.hadSideEffect).toBe(true);
+    expect(outcome.result.isError).not.toBe(true);
     expect(generator.getFiles()["src/App.tsx"]).toBe("allowed");
   });
+
+  it.each(["api", "local_cli"] as const)(
+    "commits source and recovery data through the shared %s Host seam",
+    async (toolRuntime) => {
+      const initialFiles = {
+        "design-project.json": JSON.stringify({
+          schemaVersion: "open-builder-design-project/v2",
+          revision: 1,
+          pages: [{ id: "home", filePaths: ["src/Home.tsx"] }],
+        }),
+      };
+      const designRun = prepareDesignRun({
+        requestId: "request",
+        goal: "Build home",
+        files: initialFiles,
+      });
+      const { generator } = createGenerator(
+        { write_file: BUILTIN_TOOLS.write_file },
+        vi.fn(),
+        {
+          initialFiles,
+          toolRuntime,
+          prepareProjectCommit: (before, next, id) =>
+            designRun.prepareCommit(before, next, id),
+        },
+      );
+      const result = await (generator as unknown as ToolInvoker).executeTool(
+        call(
+          "write_file",
+          { path: "src/Home.tsx", content: "created" },
+          "source-write",
+        ),
+      );
+      expect(result.result.isError).not.toBe(true);
+      const saved = generator.getFiles();
+      expect(saved["src/Home.tsx"]).toBe("created");
+      expect(JSON.parse(saved["design-project.json"])).toMatchObject({
+        revision: 2,
+        journal: [
+          {
+            operationId: "source-write",
+            requestId: "request",
+            changedPaths: ["src/Home.tsx"],
+          },
+        ],
+      });
+      generator.setFiles({ ...saved, "src/Home.tsx": "hydrated" });
+      expect(
+        JSON.parse(generator.getFiles()["design-project.json"]).journal,
+      ).toHaveLength(1);
+    },
+  );
 
   it("prepares an initialized project before publishing its file tree", async () => {
     const onCommitted = vi.fn();

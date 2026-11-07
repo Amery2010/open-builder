@@ -1,7 +1,7 @@
 ---
 name: design-product-ui
 description: Design and implement product interfaces such as dashboards, settings, forms, data views, and multi-step workflows. Use for hierarchy, density, navigation, interaction states, responsive behavior, and accessible product UI; use art-direct-web for marketing-led experiences.
-version: 2.0.0
+version: 2.1.0
 tags:
   - frontend
   - product-ui
@@ -11,11 +11,22 @@ tags:
 
 # Design product UI
 
+## Shared visual principles
+
+Use these defaults when the task involves planning, implementing, or reviewing a UI. They do not change the existing instruction precedence, the user's direction, the applied Design system, project permissions, product contracts, or required output format. An applied system may intentionally use gradients, pixel type, glass, maximalism, texture, or skeuomorphic material; preserve those defining traits when they serve the task. Do not impose a universal 44px target size. Judge controls by context, density, and operability. These principles are adapted from the [design principles reference](https://github.com/jiji262/claude-design-skill/blob/main/references/design-principles.md).
+
+- Read the relevant screens, data, tokens, assets, and interaction states before extending them. Identify the task, primary action, information hierarchy, density, responsive constraints, and existing visual vocabulary.
+- Commit to a small visual system before polishing. Reuse semantic roles for typography, color, spacing, shape, elevation, and motion; derive states from those roles instead of introducing unrelated literals.
+- Use content and task frequency to choose layout and density. Prefer hierarchy, alignment, whitespace, and meaningful dividers before adding nested cards, icon bullets, or decorative containers.
+- Keep content and evidence truthful. Do not fabricate metrics, charts, customer proof, product screenshots, or unavailable assets. Do not use an SVG illustration or CSS ornament as a substitute for a real product photo, screenshot, portrait, or 3D asset. Distinguish loading, empty, no-results, permission, error, partial, and success states.
+- Make interaction complete: default, hover, active, focus, disabled, loading, and recovery states where they apply. Preserve native semantics, keyboard paths, visible focus, responsive order, and reduced-motion behavior.
+- Before finishing, remove controls and decoration that do not support the user's task. Verify the changed surface consumes the applied semantic tokens and remains coherent at the project's supported widths and languages.
+
 Build application interfaces that help people complete real tasks with low ambiguity. This skill covers dashboards, editors, settings, forms, search, data views, administration, navigation, and multi-step workflows. Their page-level task mode is `operate`. Use `art-direct-web` for `persuade`, `read`, or `experience` surfaces; load both for a genuinely mixed target.
 
-For a new complete product prototype, use the validated root `design-project.json` as the product blueprint. Keep page IDs, routes, shared layouts, shared UI references, flows, scenarios, and build progress current as each batch completes. Record each batch as a checkpoint with actual artifacts and validation outcome; only a passed checkpoint counts as complete. The blueprint describes product structure and delivery state; `DESIGN.md` and `tokens.css` remain the visual authority.
+For a complete product prototype, maintain root `design-project.json` as a progressive blueprint. Save known pages, routes, shared references, flows, and concrete tasks. Unknown details remain pending and only affect the corresponding preview or check. Use a concrete `previewPath` for a dynamic route when a real sample is known. The host records committed changes; implementation progress and validation results remain distinct. The blueprint describes product structure and delivery state; `DESIGN.md` and `tokens.css` remain the visual authority.
 
-Before the first UI write in Design mode, inspect the active project and submit the run-local Design contract. Distinguish `create` (a new product surface), `extend` (a bounded addition within the current visual language), and `migrate` (the applied Design system replaces conflicting visual Tokens, styles, component grammar, and layout expression inside the named target). An applied Design system is visually authoritative in that target. A selected-but-unapplied system is reference only and cannot authorize a restyle.
+In Design mode, the host prepares the Design run context and activates this built-in skill automatically. Inspect the active project and implement the current user request within its selected scope. Distinguish `create` (a new product surface), `extend` (a bounded addition within the current visual language), and `migrate` (the applied Design system replaces conflicting visual Tokens, styles, component grammar, and layout expression inside the named target). An applied Design system is visually authoritative in that target. A selected-but-unapplied system is reference only and cannot authorize a restyle.
 
 In every change mode, preserve product truth: routes, data and state ownership, information architecture, content contracts, permissions, analytics hooks, integration selectors, accessibility semantics, and working behavior unless the user's request independently changes them. Migration is visual-system work, not permission to rebuild the product model.
 
@@ -102,4 +113,4 @@ Implement real interactions and data flow. Do not ship inert controls, fake char
 
 Add or update tests for the state and interaction contract, especially selection, submission, cancellation, duplicate prevention, and error recovery. Run relevant static, component, type, and build checks. Browser or device evidence must be explicitly authorized and accurately reported.
 
-Before finishing, run the project health check and fix every `design_system` error. Confirm the primary task is obvious, density fits usage, controls use familiar semantics, every async state has feedback, responsive layouts protect the work, accessibility behavior is preserved, the changed runtime consumes the applied semantic Tokens, and the diff contains no unrelated redesign. The host may follow with one automatic visual review and one bounded repair; reuse the accepted contract instead of inventing a new direction.
+Before finishing, run the project health check and report build/runtime and `design_system` findings with their actual evidence. Fix in-scope implementation errors; visual findings do not block saving or further editing. Confirm the primary task is obvious, density fits usage, controls use familiar semantics, every async state has feedback, responsive layouts protect the work, accessibility behavior is preserved, the changed runtime consumes the applied semantic Tokens, and the diff contains no unrelated redesign. The host may follow with a non-blocking visual report. Apply review fixes when the user requests them, using the current project and the reported scope.

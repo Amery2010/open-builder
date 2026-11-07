@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "open-builder-design-system/v1",
+  "id": "neon-noir",
+  "name": "Neon Noir",
+  "category": "mixed",
+  "description": "Dark workshop walls, bent light-tube contours and pink or cyan glow kept around a few meaningful objects. Use a solid luminous core with a restrained halo so body copy remains sharp and contrast is dependable.",
+  "files": {
+    "design": "DESIGN.md",
+    "tokens": "tokens.css"
+  }
+}

@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { SUBMIT_DESIGN_CONTRACT_TOOL } from "../design/run-contract-tool";
-import { BUILTIN_TOOLS } from "./tools-schema";
+import { BUILTIN_TOOLS, DESIGN_HOST_TOOLS } from "./tools-schema";
 import { DISPATCH_SUBAGENT_TOOL } from "../tools/subagent-tool";
 
 const { streamTextMock } = vi.hoisted(() => ({
@@ -397,49 +396,32 @@ describe("WebAppGenerator streaming failures", () => {
     );
     const onError = vi.fn();
     const onToolResult = vi.fn();
-    const invalidInput = {
-      surface_mode: "operate",
-      change_mode: "create",
-      audience: "Weather app users",
-      primary_goal: "Show the forecast",
-      concept: "A compact weather interface",
-      system_id: "graphite",
-      translation: {
-        foundations: "Semantic tokens",
-        composition: "Responsive grid",
-        components: "Forecast cards",
-      },
-      acceptance: ["Seven days are visible"],
-    };
-    const correctedInput = {
-      ...invalidInput,
-      target: "Weather forecast pages",
-      preserve: ["Existing routes and accessibility"],
-    };
+    const invalidInput = { patch: { pages: [{ id: 123 }] } };
+    const correctedInput = { patch: { pages: [{ id: "home" }] } };
     streamTextMock
       .mockReturnValueOnce(
         streamParts([
           {
             type: "tool-input-start",
             id: "contract-1",
-            toolName: "submit_design_contract",
+            toolName: "update_project_design",
           },
           {
             type: "tool-call",
             toolCallId: "contract-1",
-            toolName: "submit_design_contract",
+            toolName: "update_project_design",
             input: invalidInput,
             dynamic: true,
             invalid: true,
-            error: new Error("target and preserve are required"),
+            error: new Error("page id must be a string"),
           },
           {
             type: "tool-error",
             toolCallId: "contract-1",
-            toolName: "submit_design_contract",
+            toolName: "update_project_design",
             input: invalidInput,
             dynamic: true,
-            error: new Error("target and preserve are required"),
+            error: new Error("page id must be a string"),
           },
         ]),
       )
@@ -448,24 +430,24 @@ describe("WebAppGenerator streaming failures", () => {
           {
             type: "tool-input-start",
             id: "contract-2",
-            toolName: "submit_design_contract",
+            toolName: "update_project_design",
           },
           {
             type: "tool-call",
             toolCallId: "contract-2",
-            toolName: "submit_design_contract",
+            toolName: "update_project_design",
             input: invalidInput,
             dynamic: true,
             invalid: true,
-            error: new Error("target and preserve are required"),
+            error: new Error("page id must be a string"),
           },
           {
             type: "tool-error",
             toolCallId: "contract-2",
-            toolName: "submit_design_contract",
+            toolName: "update_project_design",
             input: invalidInput,
             dynamic: true,
-            error: new Error("target and preserve are required"),
+            error: new Error("page id must be a string"),
           },
         ]),
       )
@@ -474,12 +456,12 @@ describe("WebAppGenerator streaming failures", () => {
           {
             type: "tool-input-start",
             id: "contract-3",
-            toolName: "submit_design_contract",
+            toolName: "update_project_design",
           },
           {
             type: "tool-call",
             toolCallId: "contract-3",
-            toolName: "submit_design_contract",
+            toolName: "update_project_design",
             input: correctedInput,
           },
         ]),
@@ -490,7 +472,9 @@ describe("WebAppGenerator streaming failures", () => {
 
     const result = await createGenerator(
       {
-        tools: SUBMIT_DESIGN_CONTRACT_TOOL,
+        tools: {
+          update_project_design: DESIGN_HOST_TOOLS.update_project_design,
+        },
         customToolHandler,
       },
       { onError, onToolResult },
@@ -500,15 +484,15 @@ describe("WebAppGenerator streaming failures", () => {
     expect(result.files).toEqual({});
     expect(customToolHandler).toHaveBeenCalledOnce();
     expect(customToolHandler).toHaveBeenCalledWith(
-      "submit_design_contract",
+      "update_project_design",
       correctedInput,
       expect.any(Object),
     );
     expect(onError).not.toHaveBeenCalled();
     expect(onToolResult).toHaveBeenCalledWith(
-      "submit_design_contract",
+      "update_project_design",
       invalidInput,
-      expect.stringContaining('Invalid arguments for "submit_design_contract"'),
+      expect.stringContaining('Invalid arguments for "update_project_design"'),
       "contract-1",
       expect.objectContaining({ isError: true }),
     );
@@ -517,8 +501,7 @@ describe("WebAppGenerator streaming failures", () => {
       streamTextMock.mock.calls[1][0].messages,
     );
     expect(retryMessages).toContain("Invalid arguments");
-    expect(retryMessages).toContain("target");
-    expect(retryMessages).toContain("preserve");
+    expect(retryMessages).toContain("id");
     expect(JSON.stringify(streamTextMock.mock.calls[2][0].messages)).toContain(
       "contract-2",
     );
@@ -701,7 +684,7 @@ describe("WebAppGenerator streaming failures", () => {
       createGenerator(
         {
           tools: {
-            provider_tool: SUBMIT_DESIGN_CONTRACT_TOOL.submit_design_contract,
+            provider_tool: BUILTIN_TOOLS.list_files,
           },
           providerToolNames: ["provider_tool"],
         },

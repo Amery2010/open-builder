@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "open-builder-design-system/v1",
+  "id": "claymorphism",
+  "name": "Claymorphism",
+  "category": "product",
+  "description": "Buttercream, pistachio and strawberry clay forms with soft internal shading and tactile volume. Distinguish active controls from decorative clay objects, and use dark readable labels on pastel materials.",
+  "files": {
+    "design": "DESIGN.md",
+    "tokens": "tokens.css"
+  }
+}

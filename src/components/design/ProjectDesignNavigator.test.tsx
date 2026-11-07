@@ -60,6 +60,28 @@ function renderNavigator(
 }
 
 describe("ProjectDesignNavigator", () => {
+  it("keeps a draft page selectable while explaining unavailable preview", async () => {
+    const user = userEvent.setup();
+    const onPageSelect = vi.fn();
+    renderNavigator(
+      {
+        blueprint: { status: "ready" },
+        pages: [
+          {
+            ...baseModel.pages[0],
+            responsibility: "Details pending",
+            previewIssue: "Add a route to preview this page.",
+          },
+        ],
+      },
+      { onPageSelect },
+    );
+    const page = screen.getByRole("treeitem", { name: /^Home\./ });
+    expect(page).toHaveAttribute("data-preview-available", "false");
+    await user.click(page);
+    expect(onPageSelect).toHaveBeenCalledWith("home");
+    expect(screen.getByText("Add a route to preview this page.")).toBeVisible();
+  });
   it("selects a page and scene from the accessible page tree", async () => {
     const user = userEvent.setup();
     const onPageSelect = vi.fn();
@@ -182,5 +204,20 @@ describe("ProjectDesignNavigator", () => {
     expect(screen.getByTestId("project-design-sidebar")).toHaveClass(
       "md:translate-x-0",
     );
+  });
+
+  it("keeps empty-blueprint guidance accessible across collapse and expansion", async () => {
+    const user = userEvent.setup();
+    renderNavigator({ blueprint: { status: "ready" }, pages: [] });
+    const state = screen.getByRole("status");
+    expect(state).toHaveAttribute("data-blueprint-status", "empty");
+    await user.click(screen.getByTestId("project-design-collapse"));
+    expect(state).toHaveAttribute("title", "No pages in the blueprint");
+    expect(state).toHaveTextContent(
+      "Add a page to the blueprint to start designing.",
+    );
+    await user.click(screen.getByTestId("project-design-collapse"));
+    expect(state).not.toHaveAttribute("title");
+    expect(state).toHaveTextContent("No pages in the blueprint");
   });
 });

@@ -426,7 +426,13 @@ describe("capture runtime script entry", () => {
 
 type ImageBehavior =
   "success" | "load-error" | "decode-error" | "load-timeout" | "decode-timeout";
-function canvasRuntime(behaviors: ImageBehavior[]) {
+function canvasRuntime(
+  behaviors: ImageBehavior[],
+  html2canvas?: (
+    node: unknown,
+    options: Record<string, unknown>,
+  ) => Promise<unknown>,
+) {
   const events: string[] = [];
   const images: FakeImage[] = [];
   let active = 0;
@@ -500,9 +506,10 @@ function canvasRuntime(behaviors: ImageBehavior[]) {
     ),
   };
   runInNewContext(
-    `${captureCanvasAdapterSource.replace(/^export default /m, "")}\ninstallCaptureCanvasAdapter(runtime);`,
+    `${captureCanvasAdapterSource.replace(/^export default /m, "")}\ninstallCaptureCanvasAdapter(runtime, html2canvas);`,
     {
       runtime,
+      html2canvas,
       Image: FakeImage,
       document: { createElement: () => canvas },
       setTimeout,
@@ -615,5 +622,145 @@ describe("controlled SVG image loading", () => {
     expect(fixture.images).toHaveLength(1);
     expect(fixture.active()).toBe(0);
     expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe("html2canvas primary rendering", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+  const options = {
+    canvasWidth: 100,
+    canvasHeight: 50,
+    pixelRatio: 1,
+    windowWidth: 1000,
+    windowHeight: 500,
+    region: { x: 0, y: 400, width: 1000, height: 500 },
+    scale: 0.1,
+  };
+  it("preserves viewport geometry and removes the exact clone after rendering", async () => {
+    const remove = vi.fn();
+    const canvas = { width: 100, height: 50, getContext: () => ({}) };
+    const html2canvas = vi.fn(async (_node, config) => {
+      config.onclone({ defaultView: { frameElement: { remove } } });
+      return canvas;
+    });
+    const fixture = canvasRuntime([], html2canvas);
+    await expect(
+      fixture.runtime.toCanvas({} as HTMLElement, options),
+    ).resolves.toBe(canvas);
+    expect(html2canvas).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        windowWidth: 1000,
+        windowHeight: 500,
+        scrollY: 400,
+        y: 400,
+        width: 1000,
+        height: 500,
+        scale: 0.1,
+        allowTaint: false,
+        useCORS: true,
+      }),
+    );
+    expect(remove).toHaveBeenCalledOnce();
+    expect(fixture.runtime.toSvg).not.toHaveBeenCalled();
+  });
+  it("falls back after unsupported colors with the same output dimensions", async () => {
+    const remove = vi.fn();
+    const html2canvas = vi.fn(async (_node, config) => {
+      config.onclone({ defaultView: { frameElement: { remove } } });
+      throw new Error(
+        'Attempting to parse an unsupported color function "oklch"',
+      );
+    });
+    const fixture = canvasRuntime(["success"], html2canvas);
+    await expect(
+      fixture.runtime.toCanvas({} as HTMLElement, options),
+    ).resolves.toBe(fixture.canvas);
+    expect(remove).toHaveBeenCalledOnce();
+    expect(fixture.canvas).toMatchObject({ width: 100, height: 50 });
+    expect(fixture.runtime.toSvg).toHaveBeenCalledWith(
+      expect.anything(),
+      options,
+    );
+  });
+  it("cleans only its own iframe when cloning fails before onclone", async () => {
+    const previous = { remove: vi.fn() };
+    const own = { remove: vi.fn() };
+    const querySelectorAll = vi
+      .fn()
+      .mockReturnValueOnce([previous])
+      .mockReturnValue([previous, own]);
+    const html2canvas = vi.fn(async () => {
+      throw new Error("Clone fonts failed");
+    });
+    const fixture = canvasRuntime(["success"], html2canvas);
+    const node = {
+      ownerDocument: { querySelectorAll },
+    } as unknown as HTMLElement;
+    await fixture.runtime.toCanvas(node, options);
+    expect(own.remove).toHaveBeenCalledOnce();
+    expect(previous.remove).not.toHaveBeenCalled();
+  });
+
+  it("removes its tracked iframe when aborted before onclone while rendering never settles", async () => {
+    const previous = { remove: vi.fn() };
+    const own = { remove: vi.fn() };
+    const querySelectorAll = vi
+      .fn()
+      .mockReturnValueOnce([previous])
+      .mockReturnValue([previous, own]);
+    const html2canvas = vi.fn(() => new Promise<HTMLCanvasElement>(() => {}));
+    const fixture = canvasRuntime([], html2canvas);
+    const controller = new AbortController();
+    const pending = fixture.runtime.toCanvas(
+      { ownerDocument: { querySelectorAll } } as unknown as HTMLElement,
+      {
+        ...options,
+        signal: controller.signal,
+      },
+    );
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(own.remove).toHaveBeenCalledOnce();
+    expect(previous.remove).not.toHaveBeenCalled();
+  });
+  it("detaches the clone immediately on cancellation and releases the late canvas", async () => {
+    const remove = vi.fn();
+    const canvas = { width: 100, height: 50, getContext: () => ({}) };
+    let settle!: (value: typeof canvas) => void;
+    const html2canvas = vi.fn(async (_node, config) => {
+      config.onclone({ defaultView: { frameElement: { remove } } });
+      return new Promise<typeof canvas>((resolve) => {
+        settle = resolve;
+      });
+    });
+    const fixture = canvasRuntime([], html2canvas);
+    const controller = new AbortController();
+    const pending = fixture.runtime.toCanvas({} as HTMLElement, {
+      ...options,
+      signal: controller.signal,
+    });
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(remove).toHaveBeenCalledOnce();
+    settle(canvas);
+    await vi.waitFor(() => expect(canvas.width).toBe(0));
+    expect(remove).toHaveBeenCalledOnce();
+    expect(fixture.runtime.toSvg).not.toHaveBeenCalled();
+  });
+  it("does not apply evidence pixel limits to an annotation fallback", async () => {
+    const fixture = canvasRuntime(["success"]);
+    const annotationOptions = {
+      ...options,
+      canvasWidth: 1440,
+      canvasHeight: 10000,
+      output: "annotation",
+    };
+    await expect(
+      fixture.runtime.toCanvas({} as HTMLElement, annotationOptions),
+    ).resolves.toBe(fixture.canvas);
+    expect(fixture.canvas).toMatchObject({ width: 1440, height: 10000 });
   });
 });

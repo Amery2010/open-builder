@@ -4,6 +4,7 @@ import {
   capturePreviewEvidence,
   isPreviewEvidenceSummary,
   PREVIEW_EVIDENCE_KIND,
+  summarizeCapture,
 } from "./preview-evidence";
 import { registerPreviewRuntime } from "./preview-runtime";
 import type {
@@ -37,6 +38,9 @@ function webpDataUrl(width: number, height: number): string {
   write(0, "RIFF");
   write(8, "WEBP");
   write(12, "VP8X");
+  const view = new DataView(bytes.buffer);
+  view.setUint32(4, bytes.length - 8, true);
+  view.setUint32(16, 10, true);
   bytes[24] = (width - 1) & 0xff;
   bytes[25] = ((width - 1) >> 8) & 0xff;
   bytes[26] = ((width - 1) >> 16) & 0xff;
@@ -94,6 +98,64 @@ const project = {
 };
 
 describe("preview evidence tool output", () => {
+  it("keeps complete long-page coverage separate from encoded image resolution", async () => {
+    const item = await summarizeCapture({
+      ...capture("desktop"),
+      dataUrl: webpDataUrl(576, 4000),
+      capture: {
+        scope: "full-page",
+        region: { x: 0, y: 0, width: 1440, height: 10000 },
+        scale: 0.4,
+      },
+      viewport: {
+        name: "desktop",
+        width: 1440,
+        height: 900,
+        capturedHeight: 10000,
+        fullHeight: 10000,
+        truncated: false,
+      },
+    });
+    const summary = {
+      kind: PREVIEW_EVIDENCE_KIND,
+      status: "complete",
+      generation: "a".repeat(64),
+      evidence: [item],
+      errors: [],
+      placeholder: "run only",
+    };
+    expect(item.image).toMatchObject({ width: 576, height: 4000 });
+    expect(isPreviewEvidenceSummary(summary)).toBe(true);
+    expect(
+      isPreviewEvidenceSummary({
+        ...summary,
+        evidence: [
+          {
+            ...item,
+            capture: {
+              ...item.capture!,
+              region: { ...item.capture!.region, width: 1200 },
+            },
+            image: { ...item.image, width: 480 },
+          },
+        ],
+      }),
+    ).toBe(false);
+    expect(
+      isPreviewEvidenceSummary({
+        ...summary,
+        evidence: [{ ...item, image: { ...item.image, height: 3999 } }],
+      }),
+    ).toBe(false);
+    expect(
+      isPreviewEvidenceSummary({
+        ...summary,
+        evidence: [
+          { ...item, viewport: { ...item.viewport, truncated: true } },
+        ],
+      }),
+    ).toBe(false);
+  });
   it("returns rich ordered evidence with a persistable metadata summary", async () => {
     let currentGeneration: string | undefined;
     unregisters.push(
@@ -200,55 +262,58 @@ describe("preview evidence tool output", () => {
     ).rejects.toThrow("Duplicate preview viewport");
   });
 
-  it("persists the requested page and scenario with every capture", async () => {
-    const target: PrototypePreviewTarget = {
-      pageId: "dashboard",
-      route: "#/dashboard",
-      scenarioId: "populated",
-    };
-    let currentGeneration: string | undefined;
-    unregisters.push(
-      registerPreviewRuntime("conversation-target", {
-        getGeneration: () => currentGeneration,
-        prepare: async (generation) => {
-          currentGeneration = generation;
-        },
-        capture: async (viewports, generation, _signal, requestedTarget) => ({
-          generation,
-          target: requestedTarget,
-          captures: viewports.map((view) => ({
-            ...capture(view, requestedTarget),
-            generation,
-          })),
-          errors: [],
-        }),
-      }),
-    );
-
-    const output = await capturePreviewEvidence({
-      conversationId: "conversation-target",
-      ...project,
-      target,
-      viewports: ["desktop"],
-    });
-    expect(output.structuredContent).toMatchObject({
-      kind: PREVIEW_EVIDENCE_KIND,
-      target,
-      evidence: [
-        {
-          semantic: {
-            route: target.route,
-            prototypeIdentity: target,
+  it.each(["#/dashboard", "#/dashboard?filter=" + "a".repeat(500)])(
+    "persists the requested page and scenario with every capture (%s)",
+    async (route) => {
+      const target: PrototypePreviewTarget = {
+        pageId: "dashboard",
+        route,
+        scenarioId: "populated",
+      };
+      let currentGeneration: string | undefined;
+      unregisters.push(
+        registerPreviewRuntime("conversation-target", {
+          getGeneration: () => currentGeneration,
+          prepare: async (generation) => {
+            currentGeneration = generation;
           },
-        },
-      ],
-    });
-    expect(isPreviewEvidenceSummary(output.structuredContent)).toBe(true);
-    expect(output.content?.[0]).toMatchObject({
-      type: "text",
-      text: expect.stringContaining('"prototypeIdentity"'),
-    });
-  });
+          capture: async (viewports, generation, _signal, requestedTarget) => ({
+            generation,
+            target: requestedTarget,
+            captures: viewports.map((view) => ({
+              ...capture(view, requestedTarget),
+              generation,
+            })),
+            errors: [],
+          }),
+        }),
+      );
+
+      const output = await capturePreviewEvidence({
+        conversationId: "conversation-target",
+        ...project,
+        target,
+        viewports: ["desktop"],
+      });
+      expect(output.structuredContent).toMatchObject({
+        kind: PREVIEW_EVIDENCE_KIND,
+        target,
+        evidence: [
+          {
+            semantic: {
+              route: target.route,
+              prototypeIdentity: target,
+            },
+          },
+        ],
+      });
+      expect(isPreviewEvidenceSummary(output.structuredContent)).toBe(true);
+      expect(output.content?.[0]).toMatchObject({
+        type: "text",
+        text: expect.stringContaining('"prototypeIdentity"'),
+      });
+    },
+  );
 
   it("returns a target identity error when an adapter reports another scenario", async () => {
     const target: PrototypePreviewTarget = {

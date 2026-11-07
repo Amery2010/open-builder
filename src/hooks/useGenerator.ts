@@ -1,6 +1,7 @@
 import { useRef, useCallback, useEffect, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import type { ToolSet } from "ai";
+import bundledDesignSkills from "virtual:bundled-design-skills";
 import type {
   GenerateResult,
   GenerationBackend,
@@ -91,6 +92,11 @@ import { PLAN_MODE_SYSTEM_SUFFIX } from "../lib/ai/plan-mode";
 import { buildRunSystemPromptSuffix } from "../lib/ai/run-system-prompt";
 import { buildCustomSystemPromptSection } from "../lib/ai/custom-system-prompt";
 import { appendBufferedAssistantOutput } from "../lib/utils/stream-output";
+import { flushPendingSandpackFileChanges } from "../components/code-viewer/sandpack-file-changes";
+import {
+  createAdaptiveOutputScheduler,
+  type AdaptiveOutputScheduler,
+} from "../lib/utils/adaptive-output";
 import {
   DESIGN_MODE_SYSTEM_SUFFIX,
   loadDesignSystemContext,
@@ -104,7 +110,6 @@ import {
 import { useDesignReviewStore } from "../store/design-review";
 import { useProjectDesignWorkspaceStore } from "../store/project-design-workspace";
 import { computeDesignReviewSourceDigest } from "../lib/design/review-jobs/digest";
-import { createDesignReviewLogEntry } from "../lib/design/review-jobs/logs";
 import {
   isDesignReviewRunActive,
   isDesignReviewTerminalStatus,
@@ -117,19 +122,23 @@ import {
   registerAgnesRunAttachments,
 } from "../lib/mcp/agnes/attachments";
 import {
-  createDesignContractController,
   DESIGN_CHANGE_MODES,
-  type DesignBlueprintScopeBindings,
   type DesignChangeMode,
   type DesignContract,
 } from "../lib/design/run-contract";
 import {
   deriveImpactPages,
-  getIncompleteBuildProgress,
   PROJECT_DESIGN_PATH,
   readProjectDesign,
   resolveProjectDesignPreviewTarget,
+  resolveProjectDesignPreview,
+  resolveProjectDesignPreviewRoute,
 } from "../lib/design/project-design";
+import {
+  prepareDesignRun,
+  designRunSkillIds,
+  type DesignRun,
+} from "../lib/design/design-run";
 import type { PrototypePreviewTarget } from "../lib/design/preview-runtime";
 import { isPrototypeProject } from "../lib/design/prototype-starter";
 import {
@@ -137,13 +146,8 @@ import {
   runDesignSystemAdherenceCheck,
 } from "../lib/design/adherence";
 import {
-  buildAutomaticDesignRepairPrompt,
-  canEnterAutomaticDesignRepair,
   hasRemainingAutomaticDesignIssues,
-  requiredSkillsForContract,
-  selectAutomaticDesignRepairScope,
   shouldRequestAutomaticDesignReview,
-  shouldRunAutomaticDesignRepair,
   type AutomaticDesignReviewEvidence,
   type AutomaticDesignReviewPhase,
 } from "../lib/design/automatic-review";
@@ -345,7 +349,6 @@ interface GenerateRunOptions {
   forcedSkillIds?: string[];
   designSelection?: DesignSelectionContext;
   designExpectedChangeModes?: readonly DesignChangeMode[];
-  reusableDesignContract?: DesignContract;
   automaticDesignReviewPhase?: AutomaticDesignReviewPhase;
   automaticDesignOriginalRequest?: string;
   automaticDesignReviewActivityId?: string;
@@ -395,98 +398,6 @@ function isDesignRepairProjectSourceCurrent(
   );
 }
 
-function designBlueprintBindings(
-  files: ProjectFiles,
-): DesignBlueprintScopeBindings | undefined {
-  const result = readProjectDesign(files);
-  if (result.status !== "ready") return undefined;
-  const design = result.design;
-  return {
-    expectedRevision: design.revision,
-    knownPageIds: design.pages.map((page) => page.id),
-    knownSharedUiIds: design.sharedUiRefs.map((ref) => ref.id),
-    knownSharedFilePaths: [
-      ...design.layouts.flatMap((layout) => layout.filePaths),
-      ...design.sharedUiRefs.flatMap((ref) => ref.filePaths),
-    ],
-    knownPageFilePaths: Object.fromEntries(
-      design.pages.map((page) => [page.id, page.filePaths]),
-    ),
-  };
-}
-
-function designBlueprintRunPolicy(files: ProjectFiles) {
-  const result = readProjectDesign(files);
-  if (result.status === "ready") {
-    return { blueprint: designBlueprintBindings(files) };
-  }
-  if (result.status === "invalid") {
-    return { allowProjectDesignRepair: true as const };
-  }
-  return {};
-}
-
-function hasIncompletePrototypeBuild(files: ProjectFiles): boolean {
-  if (!isPrototypeProject(files)) return false;
-  const result = readProjectDesign(files);
-  if (result.status !== "ready") return true;
-  const progress = getIncompleteBuildProgress(result.design);
-  return (
-    progress.status !== "complete" ||
-    progress.pageIds.length > 0 ||
-    progress.flowIds.length > 0 ||
-    progress.phaseIds.length > 0
-  );
-}
-
-function assertPrototypeBatchProgress(
-  before: ProjectFiles,
-  after: ProjectFiles,
-): void {
-  if (
-    hasIncompletePrototypeBuild(after) &&
-    Object.keys(before).length === Object.keys(after).length &&
-    Object.entries(before).every(([path, content]) => after[path] === content)
-  ) {
-    throw new Error(getT().message.prototypeNoProgress);
-  }
-}
-
-function bindReviewContractToCurrentBlueprint(
-  contract: DesignContract,
-  files: ProjectFiles,
-  affectedPageIds?: readonly string[],
-): DesignContract | null {
-  const result = readProjectDesign(files);
-  if (result.status !== "ready") {
-    return contract.blueprint ? null : contract;
-  }
-  const knownPageIds = new Set(result.design.pages.map((page) => page.id));
-  const targetPageIds = (affectedPageIds ?? []).filter((pageId) =>
-    knownPageIds.has(pageId),
-  );
-  return {
-    ...contract,
-    blueprint: {
-      revision: result.design.revision,
-      target_page_ids:
-        targetPageIds.length > 0
-          ? targetPageIds
-          : result.design.pages.map((page) => page.id),
-      shared_scope: {
-        file_paths: [
-          ...new Set([
-            ...result.design.layouts.flatMap((layout) => layout.filePaths),
-            ...result.design.sharedUiRefs.flatMap((ref) => ref.filePaths),
-          ]),
-        ],
-        ui_ids: result.design.sharedUiRefs.map((ref) => ref.id),
-      },
-      batch_phase: "final_review",
-    },
-  };
-}
-
 function projectDesignWorkspaceContext(
   conversationId: string | undefined,
   files: ProjectFiles,
@@ -497,15 +408,11 @@ function projectDesignWorkspaceContext(
     useProjectDesignWorkspaceStore.getState().selections[conversationId];
   const blueprint = readProjectDesign(files);
   if (!selection || blueprint.status !== "ready") return "";
-  const target = resolveProjectDesignPreviewTarget(
-    blueprint.design,
-    selection.pageId,
-    selection.scenarioId,
-  );
-  if (!target) return "";
+  if (!blueprint.design.pages.some((page) => page.id === selection.pageId))
+    return "";
   return `
 <project_design_workspace>
-The current trusted workspace selection is page_id "${target.pageId}" and scenario_id "${target.scenarioId}". For a local or deictic request such as "this page", default target_page_ids to this page only. Add shared_scope entries only when the requested change truly modifies a declared shared layout or shared UI.
+The current trusted workspace selection is page_id "${selection.pageId}" and scenario_id "${selection.scenarioId}". For a local or deictic request such as "this page", default target_page_ids to this page only. Add shared_scope entries only when the requested change truly modifies a declared shared layout or shared UI.
 </project_design_workspace>
 `;
 }
@@ -524,7 +431,7 @@ function expectedPrototypeReviewCoverage(
     .filter((page) => !affected || affected.has(page.id))
     .flatMap((page) => {
       const scenarios = [
-        ...new Set([page.defaultScenario, ...page.scenarioIds]),
+        ...new Set([page.defaultScenario ?? "default", ...page.scenarioIds]),
       ];
       return scenarios.flatMap((scenarioId) => {
         const target = resolveProjectDesignPreviewTarget(
@@ -544,7 +451,7 @@ function expectedPrototypeReviewCoverage(
 }
 
 const AUTOMATIC_PROTOTYPE_BATCH_PROMPT =
-  "Continue the next incomplete prototype batch automatically. Read design-project.json, do not repeat completed pages or flows, load the required Design Skill, submit a contract bound to the current blueprint revision and batch scope, implement one coherent batch, update build progress and revision, run project_health_check, then stop this batch.";
+  "Continue only the explicitly pending tasks for the current user request. Preserve completed work. Update task status and report missing information; do not add tasks just to fill blueprint fields.";
 
 export interface WithdrawnUserDraft {
   content: string;
@@ -938,12 +845,7 @@ export function useGenerator({
     (state) => state._hasHydratedRuns,
   );
   const prevActiveIdRef = useRef(activeCheckoutKey);
-  const textBufferRef = useRef("");
-  const thinkingBufferRef = useRef("");
-  const typewriterTimerRef = useRef<number | null>(null);
-  const thinkingTimerRef = useRef<number | null>(null);
-  const lastCharTimeRef = useRef(0);
-  const lastThinkingTimeRef = useRef(0);
+  const outputSchedulerRef = useRef<AdaptiveOutputScheduler | null>(null);
   const runConversationIdRef = useRef<string | null>(null);
   const runIdentityRef = useRef<ConversationIdentity | null>(null);
   const generationRunEpochRef = useRef(0);
@@ -966,9 +868,7 @@ export function useGenerator({
   const providerToolNamesRef = useRef<string[]>([]);
   const mcpRuntimeRef = useRef<McpRuntimeBundle | null>(null);
   const activeToolProfileRef = useRef<ToolProfile>("default");
-  const designContractControllerRef = useRef(createDesignContractController());
-  const designRunRequiresContractRef = useRef(true);
-  const lastAcceptedDesignContractRef = useRef<DesignContract | null>(null);
+  const designRunRef = useRef<DesignRun | null>(null);
   const designRunInitialFilesRef = useRef<ProjectFiles>({});
   const designRunExpectedChangeModesRef = useRef<
     readonly DesignChangeMode[] | undefined
@@ -982,9 +882,8 @@ export function useGenerator({
       conversation: Conversation | undefined,
       options: {
         expectedChangeModes?: readonly DesignChangeMode[];
-        reusableContract?: DesignContract;
         profile?: ToolProfile;
-        sealReusableContract?: boolean;
+        resume?: boolean;
       } = {},
     ) => {
       const files = conversation?.files ?? {};
@@ -993,43 +892,48 @@ export function useGenerator({
         options.expectedChangeModes ??
         (Object.keys(files).length === 0 ? (["create"] as const) : undefined);
       designRunInitialFilesRef.current = { ...files };
-      designRunRequiresContractRef.current =
-        options.sealReusableContract === true ||
-        isPrototypeProject(files) ||
-        readProjectDesign(files).status !== "missing";
       designRunExpectedChangeModesRef.current = expectedChangeModes
         ? [...expectedChangeModes]
         : undefined;
-      designContractControllerRef.current.reset(
-        {
-          enabled: (options.profile ?? workspace.profile) === "design",
-          expectedSystemId:
-            conversation?.designState?.appliedSystem?.id ?? null,
-          expectedChangeModes,
-          ...(options.sealReusableContract
-            ? { sealReusableContract: true }
-            : {}),
-          ...(conversation ? designBlueprintRunPolicy(files) : {}),
-        },
-        options.reusableContract,
-      );
-      lastAcceptedDesignContractRef.current =
-        designContractControllerRef.current.getContract();
+      const request = [...(conversation?.messages ?? [])]
+        .reverse()
+        .find(
+          (message) => message.role === "user" && !message.metadata?.origin,
+        );
+      const goal = typeof request?.content === "string" ? request.content : "";
+      const selection = conversation
+        ? useProjectDesignWorkspaceStore.getState().selections[conversation.id]
+        : undefined;
+      const blueprint = readProjectDesign(files);
+      const pointPage =
+        request?.metadata?.designSelection && blueprint.status === "ready"
+          ? resolveProjectDesignPreviewRoute(
+              blueprint.design,
+              request.metadata.designSelection.route,
+            )?.pageId
+          : undefined;
+      designRunRef.current =
+        (options.profile ?? workspace.profile) === "design"
+          ? prepareDesignRun({
+              requestId: logicalRunIdRef.current ?? crypto.randomUUID(),
+              goal,
+              files,
+              systemId: conversation?.designState?.appliedSystem?.id ?? null,
+              changeMode: expectedChangeModes?.[0],
+              pageIds: pointPage
+                ? [pointPage]
+                : selection?.explicit
+                  ? [selection.pageId]
+                  : undefined,
+              resume: options.resume,
+            })
+          : null;
     },
     [],
   );
 
   const clearOutputBuffers = useCallback(() => {
-    if (typewriterTimerRef.current) {
-      cancelAnimationFrame(typewriterTimerRef.current);
-      typewriterTimerRef.current = null;
-    }
-    if (thinkingTimerRef.current) {
-      cancelAnimationFrame(thinkingTimerRef.current);
-      thinkingTimerRef.current = null;
-    }
-    textBufferRef.current = "";
-    thinkingBufferRef.current = "";
+    outputSchedulerRef.current?.clear();
   }, []);
 
   const isCurrentGeneratorRun = useCallback(
@@ -1065,7 +969,7 @@ export function useGenerator({
       requestPromptContextRef.current = "";
       mcpRuntimeRef.current = null;
       activeToolProfileRef.current = "default";
-      designContractControllerRef.current.reset({ enabled: false });
+      designRunRef.current = null;
       designRunInitialFilesRef.current = {};
       designRunExpectedChangeModesRef.current = undefined;
       generatorRef.current?.abort();
@@ -1093,7 +997,7 @@ export function useGenerator({
     providerToolNamesRef.current = [];
     mcpRuntimeRef.current = null;
     activeToolProfileRef.current = "default";
-    designContractControllerRef.current.reset({ enabled: false });
+    designRunRef.current = null;
     designRunInitialFilesRef.current = {};
     designRunExpectedChangeModesRef.current = undefined;
     clearOutputBuffers();
@@ -1126,6 +1030,13 @@ export function useGenerator({
 
   useEffect(() => {
     if (prevActiveIdRef.current === activeCheckoutKey) return;
+    if (runConversationIdRef.current) {
+      useConversationStore
+        .getState()
+        .setMessagesForConversation(runConversationIdRef.current, (messages) =>
+          cancelPendingToolCalls(messages, "conversation-switched"),
+        );
+    }
     if (runConversationIdRef.current)
       useConversationStore
         .getState()
@@ -1145,7 +1056,7 @@ export function useGenerator({
     providerToolNamesRef.current = [];
     mcpRuntimeRef.current = null;
     activeToolProfileRef.current = "default";
-    designContractControllerRef.current.reset({ enabled: false });
+    designRunRef.current = null;
     designRunInitialFilesRef.current = {};
     designRunExpectedChangeModesRef.current = undefined;
     clearOutputBuffers();
@@ -1371,39 +1282,13 @@ export function useGenerator({
       settings.runtime === "localCli" ? generateLocalTitleText : undefined,
   });
 
-  /** Flush all remaining thinking buffer content at once */
   const flushThinkingBuffer = useCallback(() => {
-    if (thinkingTimerRef.current) {
-      cancelAnimationFrame(thinkingTimerRef.current);
-      thinkingTimerRef.current = null;
-    }
-    if (thinkingBufferRef.current) {
-      const remaining = thinkingBufferRef.current;
-      thinkingBufferRef.current = "";
-      setMessages((prev) =>
-        appendBufferedAssistantOutput(prev, { thinking: remaining }),
-      );
-    }
-  }, [setMessages]);
+    outputSchedulerRef.current?.flush("thinking");
+  }, []);
 
   const flushOutputBuffers = useCallback(() => {
-    if (thinkingTimerRef.current) {
-      cancelAnimationFrame(thinkingTimerRef.current);
-      thinkingTimerRef.current = null;
-    }
-    if (typewriterTimerRef.current) {
-      cancelAnimationFrame(typewriterTimerRef.current);
-      typewriterTimerRef.current = null;
-    }
-    const thinking = thinkingBufferRef.current;
-    const text = textBufferRef.current;
-    thinkingBufferRef.current = "";
-    textBufferRef.current = "";
-    if (!thinking && !text) return;
-    setMessages((prev) =>
-      appendBufferedAssistantOutput(prev, { thinking, text }),
-    );
-  }, [setMessages]);
+    outputSchedulerRef.current?.flush();
+  }, []);
 
   const appendGenerationError = useCallback(
     (
@@ -1908,9 +1793,16 @@ export function useGenerator({
                 }
               ).changes ?? [],
             principal: "model",
-            acceptedDesignContract:
-              designContractControllerRef.current.getContract(),
+            designRunContext: designRunRef.current?.context(
+              generatorRef.current?.getFiles(),
+            ),
             snapshotLabel: getT().designTokens.snapshotLabel,
+            prepareProjectFiles: (before, proposed) =>
+              designRunRef.current?.prepareCommit(
+                before,
+                proposed,
+                context.toolCallId,
+              ) ?? proposed,
             onProjectFilesChanged: (nextFiles) => {
               if (!isCurrentCandidate()) {
                 throw new DOMException("conversation switched", "AbortError");
@@ -1933,6 +1825,45 @@ export function useGenerator({
             structuredContent: summary,
             isError: !result.ok,
           };
+        },
+        capturePreviewSequence: async (_name, args, context) => {
+          if (
+            !context ||
+            context.run.conversationId !== generatorConversationId ||
+            !isCurrentCandidate()
+          ) {
+            throw new DOMException("conversation switched", "AbortError");
+          }
+          const conversation =
+            useConversationStore.getState().conversations[
+              generatorConversationId
+            ];
+          if (!conversation)
+            throw new DOMException("conversation switched", "AbortError");
+          const { capturePreviewSequence, createPreviewSequenceToolOutput } =
+            await import("../lib/design/preview-sequence");
+          const { computePreviewGeneration } =
+            await import("../lib/design/preview-runtime");
+          const expectedGeneration = await computePreviewGeneration({
+            files: conversation.files,
+            template: conversation.template,
+            previewMode: conversation.previewMode ?? "sandpack",
+          });
+          if (!isCurrentCandidate())
+            throw new DOMException("run stopped", "AbortError");
+          return createPreviewSequenceToolOutput(
+            await capturePreviewSequence({
+              conversationId: generatorConversationId,
+              atMs: (args as { atMs?: number[] }).atMs,
+              scope: (
+                args as {
+                  scope?: import("../lib/design/preview-runtime").PreviewCaptureScope;
+                }
+              ).scope,
+              expectedGeneration,
+              signal: context.signal,
+            }),
+          );
         },
         capturePreviewEvidence: async (_name, args, context) => {
           if (
@@ -1967,26 +1898,32 @@ export function useGenerator({
             if (
               blueprint.status !== "ready" ||
               typeof rawTarget.pageId !== "string" ||
-              typeof rawTarget.route !== "string" ||
-              typeof rawTarget.scenarioId !== "string"
+              (rawTarget.scenarioId !== undefined &&
+                typeof rawTarget.scenarioId !== "string")
             ) {
               return "Error: prototype preview targets require a valid design-project.json blueprint.";
             }
-            const resolved = resolveProjectDesignPreviewTarget(
+            const resolution = resolveProjectDesignPreview(
               blueprint.design,
               rawTarget.pageId,
-              rawTarget.scenarioId,
+              rawTarget.scenarioId as string | undefined,
             );
-            const page = blueprint.design.pages.find(
-              (candidate) => candidate.id === rawTarget.pageId,
-            );
-            if (
-              !resolved ||
-              !page ||
-              (rawTarget.route !== page.route &&
-                rawTarget.route !== resolved.route)
-            ) {
-              return "Error: preview target page, route, or scenario is not declared by design-project.json.";
+            if (resolution.status !== "ready")
+              return {
+                text: JSON.stringify(resolution),
+                isError: true,
+                structuredContent: resolution,
+              };
+            const resolved = resolution.target;
+            if (rawTarget.route !== undefined) {
+              const page = blueprint.design.pages.find(
+                (page) => page.id === rawTarget.pageId,
+              );
+              if (
+                rawTarget.route !== page?.route &&
+                rawTarget.route !== resolved.route
+              )
+                return "Error: legacy route does not match the resolved page target.";
             }
             target = resolved;
           }
@@ -1999,6 +1936,11 @@ export function useGenerator({
               (args as { viewports?: import("../types").PreviewView[] })
                 .viewports ?? [],
             target,
+            scope: (
+              args as {
+                scope?: import("../lib/design/preview-runtime").PreviewCaptureScope;
+              }
+            ).scope,
             signal: context.signal,
           });
         },
@@ -2029,7 +1971,10 @@ export function useGenerator({
               template: conversation.template,
               previewMode: conversation.previewMode ?? "sandpack",
               designState: conversation.designState,
-              contract: designContractControllerRef.current.getContract(),
+              contract:
+                designRunRef.current?.context(
+                  generatorRef.current?.getFiles(),
+                ) ?? null,
               history: conversation.messages,
               signal: context.signal,
             },
@@ -2039,46 +1984,6 @@ export function useGenerator({
           if (!isCurrentCandidate()) return;
           useDesignReviewStore.getState().complete(report);
         },
-        submitDesignContract: (args, context) => {
-          if (!isCurrentCandidate()) {
-            throw new DOMException("conversation switched", "AbortError");
-          }
-          const appliedSystem =
-            useConversationStore.getState().conversations[
-              generatorConversationId
-            ]?.designState?.appliedSystem;
-          const contract = designContractControllerRef.current.submit(args, {
-            expectedSystemId: appliedSystem?.id ?? null,
-            skillContext: context.skillContext,
-            blueprint: designBlueprintBindings(candidate?.getFiles() ?? {}),
-          });
-          lastAcceptedDesignContractRef.current = contract;
-          const sourceConversation =
-            useConversationStore.getState().conversations[
-              generatorConversationId
-            ];
-          if (sourceConversation) {
-            void computeDesignReviewSourceDigest({
-              files: sourceConversation.files,
-              designSystem:
-                sourceConversation.designState?.appliedSystem ?? null,
-              designContract: contract,
-            })
-              .then((sourceDigest) => {
-                const runs =
-                  useDesignReviewStore.getState().runsByConversation[
-                    generatorConversationId
-                  ] ?? [];
-                for (const run of runs) {
-                  useDesignReviewStore
-                    .getState()
-                    .markRunFreshness(run.id, sourceDigest);
-                }
-              })
-              .catch(() => undefined);
-          }
-          return JSON.stringify({ accepted: true });
-        },
         getDesignHealthContext: () => {
           if (activeToolProfileRef.current !== "design") return undefined;
           const current =
@@ -2087,7 +1992,9 @@ export function useGenerator({
             ];
           return {
             designState: current?.designState,
-            contract: designContractControllerRef.current.getContract(),
+            contract:
+              designRunRef.current?.context(generatorRef.current?.getFiles()) ??
+              null,
             beforeFiles: designRunInitialFilesRef.current,
           };
         },
@@ -2095,7 +2002,15 @@ export function useGenerator({
           getFiles: () =>
             isCurrentCandidate() ? (candidate?.getFiles() ?? {}) : {},
           onFilesChanged: (newFiles, changes) => {
-            if (!isCurrentCandidate()) return;
+            if (!isCurrentCandidate())
+              throw new DOMException("conversation switched", "AbortError");
+            if (designRunRef.current) {
+              newFiles = designRunRef.current.prepareCommit(
+                candidate?.getFiles() ?? {},
+                newFiles,
+                crypto.randomUUID(),
+              );
+            }
             candidate?.setFiles(newFiles);
             setFiles(newFiles);
             const depsChanged = changes.some(
@@ -2106,27 +2021,7 @@ export function useGenerator({
           },
         },
         onProjectDesignUpdated: (nextFiles) => {
-          if (!isCurrentCandidate()) return;
-          designRunRequiresContractRef.current = true;
-          const currentConversation =
-            useConversationStore.getState().conversations[
-              generatorConversationId
-            ];
-          const reusableContract =
-            designContractControllerRef.current.isReusableContractSealed()
-              ? (designContractControllerRef.current.getContract() ?? undefined)
-              : undefined;
-          designContractControllerRef.current.reset(
-            {
-              enabled: true,
-              expectedSystemId:
-                currentConversation?.designState?.appliedSystem?.id ?? null,
-              expectedChangeModes: designRunExpectedChangeModesRef.current,
-              ...(reusableContract ? { sealReusableContract: true } : {}),
-              blueprint: designBlueprintBindings(nextFiles),
-            },
-            reusableContract,
-          );
+          if (isCurrentCandidate()) designRunRef.current?.context(nextFiles);
         },
       });
 
@@ -2181,6 +2076,8 @@ export function useGenerator({
                   allowedMcpAliases: options.allowedMcpAliases,
                   localToolAnnotations: options.localToolAnnotations,
                   initialSkillContext: options.initialSkillContext,
+                  subagentWritePaths: options.subagentWritePaths,
+                  authorizeToolCall: options.authorizeToolCall,
                   systemPrompt: options.systemPrompt,
                   maxIterations: options.maxIterations,
                 },
@@ -2207,6 +2104,14 @@ export function useGenerator({
             ?.files) ||
         {};
 
+      outputSchedulerRef.current?.clear();
+      outputSchedulerRef.current = createAdaptiveOutputScheduler({
+        isCurrent: isCurrentCandidate,
+        append: (output) =>
+          setMessages((previous) =>
+            appendBufferedAssistantOutput(previous, output),
+          ),
+      });
       const generatorEvents = {
         onText: (delta) => {
           if (!isCurrentCandidate()) return;
@@ -2214,84 +2119,14 @@ export function useGenerator({
           setRunState("streaming");
           setIsThinkingStreaming(false);
           flushThinkingBuffer();
-          textBufferRef.current += delta;
-          if (!typewriterTimerRef.current) {
-            const typeChar = (timestamp: number) => {
-              typewriterTimerRef.current = null;
-              if (!isCurrentCandidate()) {
-                textBufferRef.current = "";
-                return;
-              }
-              if (timestamp - lastCharTimeRef.current >= 20) {
-                if (textBufferRef.current.length > 0) {
-                  const char = textBufferRef.current[0];
-                  textBufferRef.current = textBufferRef.current.slice(1);
-                  setMessages((prev) => {
-                    const last = prev[prev.length - 1];
-                    if (last?.role === "assistant") {
-                      return [
-                        ...prev.slice(0, -1),
-                        {
-                          ...last,
-                          content:
-                            ((typeof last.content === "string"
-                              ? last.content
-                              : "") || "") + char,
-                        },
-                      ];
-                    }
-                    return [...prev, { role: "assistant", content: char }];
-                  });
-                  lastCharTimeRef.current = timestamp;
-                }
-              }
-              if (textBufferRef.current.length > 0) {
-                typewriterTimerRef.current = requestAnimationFrame(typeChar);
-              }
-            };
-            typewriterTimerRef.current = requestAnimationFrame(typeChar);
-          }
+          outputSchedulerRef.current?.push("text", delta);
         },
         onThinking: (delta) => {
           if (!isCurrentCandidate()) return;
           setRuntimeWaitMessage(null);
           setRunState("streaming");
           setIsThinkingStreaming(true);
-          thinkingBufferRef.current += delta;
-          if (!thinkingTimerRef.current) {
-            const typeThinking = (timestamp: number) => {
-              thinkingTimerRef.current = null;
-              if (!isCurrentCandidate()) {
-                thinkingBufferRef.current = "";
-                return;
-              }
-              if (timestamp - lastThinkingTimeRef.current >= 20) {
-                if (thinkingBufferRef.current.length > 0) {
-                  const char = thinkingBufferRef.current[0];
-                  thinkingBufferRef.current =
-                    thinkingBufferRef.current.slice(1);
-                  setMessages((prev) => {
-                    const last = prev[prev.length - 1];
-                    if (last?.role === "assistant") {
-                      return [
-                        ...prev.slice(0, -1),
-                        { ...last, thinking: (last.thinking || "") + char },
-                      ];
-                    }
-                    return [
-                      ...prev,
-                      { role: "assistant", content: null, thinking: char },
-                    ];
-                  });
-                  lastThinkingTimeRef.current = timestamp;
-                }
-              }
-              if (thinkingBufferRef.current.length > 0) {
-                thinkingTimerRef.current = requestAnimationFrame(typeThinking);
-              }
-            };
-            thinkingTimerRef.current = requestAnimationFrame(typeThinking);
-          }
+          outputSchedulerRef.current?.push("thinking", delta);
         },
         onToolCall: (name, id) => {
           if (!isCurrentCandidate()) return;
@@ -2436,6 +2271,7 @@ export function useGenerator({
         },
         onError: (error) => {
           if (!isCurrentCandidate()) return;
+          flushOutputBuffers();
           setIsThinkingStreaming(false);
           setLastError(classifyGenerationError(error));
           setRunState("error");
@@ -2511,6 +2347,35 @@ export function useGenerator({
         bypassEnabled: permissionBrokerBypassEnabled,
       });
       const generatorExtras = {
+        getCurrentProjectFiles: () => {
+          flushPendingSandpackFileChanges(generatorConversationId);
+          return (
+            useConversationStore.getState().conversations[
+              generatorConversationId
+            ]?.files ?? {}
+          );
+        },
+        commitDelegatedProjectFiles: (expected, next) => {
+          flushPendingSandpackFileChanges(generatorConversationId);
+          const state = useConversationStore.getState();
+          if (
+            !isCurrentCandidate() ||
+            state.conversations[generatorConversationId]?.files !== expected
+          )
+            return false;
+          state.setFilesForConversation(generatorConversationId, next);
+          const committed =
+            useConversationStore.getState().conversations[
+              generatorConversationId
+            ]?.files;
+          return (
+            !!committed &&
+            Object.keys(committed).length === Object.keys(next).length &&
+            Object.entries(next).every(
+              ([path, content]) => committed[path] === content,
+            )
+          );
+        },
         userInstructions: { prepare: prepareUserInstructions },
         conversationId: generatorConversationId,
         tools: initialTools,
@@ -2669,24 +2534,21 @@ export function useGenerator({
           // immutable tool authority. A workspace selector change cannot
           // loosen an already-running Design request.
           if (activeToolProfileRef.current !== "design") return;
-          const currentFiles = candidate?.getFiles() ?? {};
-          if (
-            isPrototypeProject(currentFiles) ||
-            readProjectDesign(currentFiles).status !== "missing" ||
-            (name === "init_project" &&
-              args !== null &&
-              typeof args === "object" &&
-              "template" in args &&
-              args.template === "vite-react-ts-prototype")
-          ) {
-            // Once this run enters a prototype batch, removing its marker or
-            // blueprint cannot turn later writes into ordinary file edits.
-            designRunRequiresContractRef.current = true;
-          }
-          return designContractControllerRef.current.authorizeProjectWrite(
+          return designRunRef.current?.authorize(
             name,
             args,
-            { allowMissingContract: !designRunRequiresContractRef.current },
+            candidate?.getFiles() ?? {},
+          );
+        },
+        prepareProjectCommit: (before, proposed, operationId) => {
+          if (!isCurrentCandidate())
+            throw new DOMException("conversation switched", "AbortError");
+          return (
+            designRunRef.current?.prepareCommit(
+              before,
+              proposed,
+              operationId,
+            ) ?? proposed
           );
         },
         projectPermissionSession,
@@ -2707,8 +2569,11 @@ export function useGenerator({
         | "onPlanApproved"
         | "dispatchSubagent"
         | "prepareInitializedProject"
+        | "prepareProjectCommit"
         | "authorizeToolCall"
         | "userInstructions"
+        | "getCurrentProjectFiles"
+        | "commitDelegatedProjectFiles"
         | "projectPermissionSession"
         | "onProjectPermissionAuthorityChange"
         | "onProjectPermissionRequestFinished"
@@ -2744,7 +2609,10 @@ export function useGenerator({
               forcedSkillIds: foregroundForcedSkillIdsRef.current,
               customSystemPrompt: customSystemPromptRef.current,
               expectedChangeModes: designRunExpectedChangeModesRef.current,
-              designContract: designContractControllerRef.current.getContract(),
+              designContract:
+                designRunRef.current?.context(
+                  generatorRef.current?.getFiles(),
+                ) ?? null,
               uiBaselineIds:
                 useConversationStore
                   .getState()
@@ -2803,8 +2671,7 @@ export function useGenerator({
                 profile: context.app.profile as ToolProfile,
                 expectedChangeModes: context.app.expectedChangeModes as
                   DesignChangeMode[] | undefined,
-                reusableContract: context.app.designContract as
-                  DesignContract | undefined,
+                resume: true,
               });
               recoveryToolOutputsRef.current = new Map(
                 conversation.messages
@@ -3066,6 +2933,10 @@ export function useGenerator({
         useSettingsStore.getState().system.customSystemPrompt;
       const skillContext = generator.getSkillContext();
       skillContext.clear();
+      const automaticSkillIds =
+        profile === "design"
+          ? designRunSkillIds(designRunRef.current?.context().surface_mode)
+          : [];
       let skillsSuffix = "";
       let forcedSkillsSuffix = "";
       if (
@@ -3078,7 +2949,12 @@ export function useGenerator({
         skillsSuffix = runtime.buildSkillsPromptSection(
           registry.getAutoEnabled(),
         );
-        const prepared = await registry.prepareForcedSkills(forcedSkillIds);
+        const explicit = await registry.prepareForcedSkills(forcedSkillIds);
+        const prepared = explicit.filter(
+          (skill) =>
+            skill.entry.source !== "builtin" ||
+            !automaticSkillIds.some((id) => id === skill.entry.id),
+        );
         assertCurrent();
         skillContext.activateMany(prepared.map((skill) => skill.entry));
         forcedSkillsSuffix = runtime.buildForcedSkillsPromptSection(prepared);
@@ -3086,6 +2962,23 @@ export function useGenerator({
         throw new Error(
           "Forced skills cannot be loaded because skill storage is unavailable.",
         );
+      }
+      if (automaticSkillIds.length) {
+        for (const id of automaticSkillIds) {
+          const content = bundledDesignSkills[id];
+          if (content) {
+            forcedSkillsSuffix += `\n<host_design_skill id="${id}">\n${content}\n</host_design_skill>\n`;
+            skillContext.activate({
+              id,
+              name: id,
+              source: "builtin",
+              version: "bundled",
+              description: "",
+              installedAt: 0,
+              autoEnabled: true,
+            });
+          }
+        }
       }
       const designState = conversationId
         ? useConversationStore.getState().conversations[conversationId]
@@ -3274,7 +3167,7 @@ export function useGenerator({
             return result;
           }
         }
-        if (autoQa && !hasIncompletePrototypeBuild(result.files)) {
+        if (autoQa) {
           const success = await runAutomaticQa(
             generator,
             result,
@@ -3308,16 +3201,7 @@ export function useGenerator({
         reviewedProjectDesign.status === "ready"
           ? deriveImpactPages(reviewedProjectDesign.design, changedUiPaths)
           : [];
-      const acceptedContract =
-        designContractControllerRef.current.getContract() ??
-        lastAcceptedDesignContractRef.current;
-      const contract = acceptedContract
-        ? bindReviewContractToCurrentBlueprint(
-            acceptedContract,
-            result.files,
-            affectedPageIds,
-          )
-        : null;
+      const contract = designRunRef.current?.context(result.files) ?? null;
       if (
         options.skipAutomaticDesignReview ||
         conversation?.workspaceMode !== "design" ||
@@ -3584,8 +3468,7 @@ export function useGenerator({
           profile,
           expectedChangeModes: run.context.app.expectedChangeModes as
             DesignChangeMode[] | undefined,
-          reusableContract: run.context.app.designContract as
-            DesignContract | undefined,
+          resume: true,
         });
         await generator.recover(run);
       } catch (error) {
@@ -3651,6 +3534,48 @@ export function useGenerator({
     settings.runtime,
     settings.localAgent.provider,
   ]);
+
+  const continueDesignTasks = useCallback(
+    async (
+      generator: GenerationBackend,
+      initial: GenerateResult,
+      current: () => boolean,
+    ) => {
+      let result = initial;
+      let before = designRunInitialFilesRef.current;
+      while (current() && designRunRef.current) {
+        const decision = designRunRef.current.finishPass(
+          before,
+          result.files,
+          result,
+        );
+        if (decision.status !== "continue") {
+          if (
+            decision.status === "needs-information" &&
+            decision.taskIds.length
+          ) {
+            setMessages((previous) => [
+              ...previous,
+              {
+                role: "assistant",
+                content: getT().message.designTasksPending.replace(
+                  "{tasks}",
+                  decision.taskIds.join(", "),
+                ),
+              },
+            ]);
+          }
+          break;
+        }
+        before = result.files;
+        result = await generator.generate(
+          `${AUTOMATIC_PROTOTYPE_BATCH_PROMPT} Pending task IDs: ${decision.taskIds.join(", ")}.`,
+        );
+      }
+      return result;
+    },
+    [setMessages],
+  );
 
   const generate = useCallback(
     async (
@@ -3822,7 +3747,7 @@ export function useGenerator({
 
       let clearAgnesAttachments = () => {};
       try {
-        designContractControllerRef.current.reset({ enabled: false });
+        designRunRef.current = null;
         await options.prepareRun?.();
         if (!isCurrentRun()) return;
         if (options.designExpectedChangeModes?.length) {
@@ -3851,11 +3776,7 @@ export function useGenerator({
           useConversationStore.getState().conversations[runConversationId];
         configureDesignRun(preparedConversation, {
           expectedChangeModes: options.designExpectedChangeModes,
-          reusableContract: options.reusableDesignContract,
           profile: runWorkspace.profile,
-          sealReusableContract:
-            options.messageOrigin === "design_auto_fix" &&
-            options.reusableDesignContract !== undefined,
         });
         const resolvedAttachments = attachments?.length
           ? await resolveAttachmentsForModel(attachments)
@@ -3899,29 +3820,7 @@ export function useGenerator({
             resolvedAttachments.length ? resolvedAttachments : undefined,
             { currentMessageIndex },
           );
-          while (
-            isCurrentRun() &&
-            !result.aborted &&
-            !result.maxIterationsReached &&
-            hasIncompletePrototypeBuild(result.files)
-          ) {
-            const currentConversation =
-              useConversationStore.getState().conversations[runConversationId];
-            designContractControllerRef.current.reset({
-              enabled: true,
-              expectedSystemId:
-                currentConversation?.designState?.appliedSystem?.id ?? null,
-              expectedChangeModes: ["create", "extend"],
-              ...designBlueprintRunPolicy(result.files),
-            });
-            designRunExpectedChangeModesRef.current = ["create", "extend"];
-            const beforeBatch = { ...result.files };
-            result = await generator.generate(AUTOMATIC_PROTOTYPE_BATCH_PROMPT);
-            if (!isCurrentRun()) return;
-            if (!result.aborted && !result.maxIterationsReached) {
-              assertPrototypeBatchProgress(beforeBatch, result.files);
-            }
-          }
+          result = await continueDesignTasks(generator, result, isCurrentRun);
           result = await settleUserInstructions(
             generator,
             result,
@@ -3930,17 +3829,12 @@ export function useGenerator({
             !options.skipAutoQa,
           );
           if (!isCurrentRun()) return;
-          const prototypeBuildIncomplete = hasIncompletePrototypeBuild(
-            result.files,
+          scheduleAutomaticDesignReview(
+            result,
+            runConversationId,
+            modelPrompt,
+            options,
           );
-          if (!prototypeBuildIncomplete) {
-            scheduleAutomaticDesignReview(
-              result,
-              runConversationId,
-              prompt,
-              options,
-            );
-          }
         }
       } catch (err: any) {
         if (!isCurrentRun()) return;
@@ -3978,6 +3872,7 @@ export function useGenerator({
       setMessages,
       applyDynamicGeneratorState,
       settleUserInstructions,
+      continueDesignTasks,
       scheduleAutomaticDesignReview,
       appendGenerationError,
       isCurrentGeneratorRun,
@@ -4012,9 +3907,8 @@ export function useGenerator({
     if (stoppedConversationId)
       useConversationStore
         .getState()
-        .setMessagesForConversation(
-          stoppedConversationId,
-          cancelPendingToolCalls,
+        .setMessagesForConversation(stoppedConversationId, (messages) =>
+          cancelPendingToolCalls(messages, "user-stopped"),
         );
     generatorRef.current?.abort();
     generatorRef.current = null;
@@ -4024,7 +3918,7 @@ export function useGenerator({
     requestPromptContextRef.current = "";
     runConversationIdRef.current = null;
     activeToolProfileRef.current = "default";
-    designContractControllerRef.current.reset({ enabled: false });
+    designRunRef.current = null;
     designRunInitialFilesRef.current = {};
     designRunExpectedChangeModesRef.current = undefined;
     useInteractiveStore.getState().rejectAllPending("user stopped");
@@ -4076,7 +3970,7 @@ export function useGenerator({
     providerToolNamesRef.current = [];
     mcpRuntimeRef.current = null;
     activeToolProfileRef.current = "default";
-    designContractControllerRef.current.reset({ enabled: false });
+    designRunRef.current = null;
     designRunInitialFilesRef.current = {};
     designRunExpectedChangeModesRef.current = undefined;
     clearOutputBuffers();
@@ -4334,7 +4228,8 @@ export function useGenerator({
         validateDesignReviewScreenshots(screenshots);
         const contract =
           options?.automaticEvidence?.contract ??
-          designContractControllerRef.current.getContract();
+          designRunRef.current?.context(generatorRef.current?.getFiles()) ??
+          null;
         const files = { ...conversation.files };
         const reviewedBlueprint = readProjectDesign(files);
         const [sourceDigest, sourceProjectDigest] = await Promise.all([
@@ -4707,240 +4602,28 @@ export function useGenerator({
         return;
       }
 
-      if (evidence.phase === "verify") {
-        if (
-          useDesignReviewStore.getState().automatic?.evidence.requestId ===
-          evidence.requestId
-        ) {
-          useDesignReviewStore
-            .getState()
-            .finishAutomatic(
-              hasRemainingAutomaticDesignIssues(enrichedEvidence, report)
-                ? "findings"
-                : "clean",
-            );
-        }
-        return;
-      }
-
-      const scope = selectAutomaticDesignRepairScope(enrichedEvidence, report);
-      if (!shouldRunAutomaticDesignRepair(evidence.phase, scope)) {
-        if (
-          useDesignReviewStore.getState().automatic?.evidence.requestId ===
-          evidence.requestId
-        ) {
-          useDesignReviewStore
-            .getState()
-            .finishAutomatic(
-              hasRemainingAutomaticDesignIssues(enrichedEvidence, report)
-                ? "findings"
-                : "clean",
-            );
-        }
-        return;
-      }
-      const safeToRepair = canEnterAutomaticDesignRepair({
-        fresh,
-        activeConversation:
-          postDigestState.activeId === evidence.conversationId,
-        currentReview:
-          useDesignReviewStore.getState().automatic?.evidence.requestId ===
-          evidence.requestId,
-        currentProject,
-        designMode: currentConversation?.workspaceMode === "design",
-        chatIdle: runConversationIdRef.current === null,
-        hasNewerUserRequest: hasNewerGenuineUserMessage(
-          evidence.conversationId,
-          completedRun.id,
-        ),
-      });
-      if (!safeToRepair || !currentConversation) {
-        if (
-          useDesignReviewStore.getState().automatic?.evidence.requestId ===
-          evidence.requestId
-        ) {
-          useDesignReviewStore.getState().finishAutomatic("superseded");
-        }
-        updateAutomaticReviewActivity(
-          evidence.conversationId,
-          completedRun.id,
-          { status: "superseded", stale: !fresh },
-        );
-        return;
-      }
-
-      updateAutomaticReviewActivity(evidence.conversationId, completedRun.id, {
-        status: "fixing",
-        findingCount: report.findings.length,
-      });
-      const trackFixingOnRun =
-        completedRun.status === "succeeded" &&
-        completedRun.report !== undefined;
-      if (trackFixingOnRun) {
+      if (
+        useDesignReviewStore.getState().automatic?.evidence.requestId ===
+        evidence.requestId
+      ) {
         useDesignReviewStore
           .getState()
-          .updateRunStatus(completedRun.id, "fixing");
-      }
-      useDesignReviewStore
-        .getState()
-        .appendRunLog(
-          completedRun.id,
-          createDesignReviewLogEntry(
-            "fixing",
-            "Automatic repair entered the foreground write queue.",
-            { level: "info" },
-          ),
-        );
-      useDesignReviewStore.getState().setAutomaticStage("fixing");
-      const repairConversationRevision =
-        useConversationStore.getState().conversations[evidence.conversationId];
-      if (!repairConversationRevision) {
-        useDesignReviewStore.getState().finishAutomatic("superseded");
-        return;
-      }
-      await generate(
-        buildAutomaticDesignRepairPrompt(enrichedEvidence, scope),
-        undefined,
-        {
-          skipAutoQa: true,
-          forcedSkillIds: requiredSkillsForContract(evidence.contract),
-          reusableDesignContract: evidence.contract,
-          automaticDesignReviewPhase: "verify",
-          automaticDesignOriginalRequest: evidence.originalRequest,
-          automaticDesignReviewActivityId: completedRun.id,
-          messageOrigin: "design_auto_fix",
-          expectedConversationId: evidence.conversationId,
-          expectedProjectSource: captureDesignRepairProjectSource(
-            repairConversationRevision,
-          ),
-        },
-      );
-      if (!reviewIsCurrent()) return;
-      if (trackFixingOnRun && completedRun.report) {
-        useDesignReviewStore
-          .getState()
-          .completeRun(completedRun.id, completedRun.report);
-      }
-      const activity = useConversationStore
-        .getState()
-        .conversations[evidence.conversationId]?.messages.find(
-          (message) => message.metadata?.reviewJobId === completedRun.id,
-        );
-      if (activity?.metadata?.reviewSummary?.status === "fixing") {
-        updateAutomaticReviewActivity(
-          evidence.conversationId,
-          completedRun.id,
-          { status: "interrupted" },
-        );
+          .finishAutomatic(
+            hasRemainingAutomaticDesignIssues(enrichedEvidence, report)
+              ? "findings"
+              : "clean",
+          );
       }
     },
-    [designReview, generate],
+    [designReview],
   );
 
   const automaticDesignReviewUnavailable = useCallback(
     async (evidence: AutomaticDesignReviewEvidence, message: string) => {
-      const initialState = useConversationStore.getState();
-      const conversation = initialState.conversations[evidence.conversationId];
-      if (!conversation) return;
-      const reviewIdentity = captureConversationIdentity(conversation);
-      const scope = selectAutomaticDesignRepairScope(evidence, {
-        overview: "Visual review unavailable.",
-        findings: [],
-      });
-      const currentDigest = await computeDesignReviewSourceDigest({
-        files: conversation.files,
-        designSystem: conversation.designState?.appliedSystem ?? null,
-        designContract: evidence.contract,
-      });
-      if (
-        !isConversationIdentityCurrent(
-          reviewIdentity,
-          useConversationStore.getState().conversations[
-            evidence.conversationId
-          ],
-        )
-      )
-        return;
-      const fresh = Boolean(
-        evidence.sourceDigest && currentDigest === evidence.sourceDigest,
-      );
-      const currentState = useConversationStore.getState();
-      const currentConversation =
-        currentState.conversations[evidence.conversationId];
-      const currentProject = isDesignRepairProjectSourceCurrent(
-        captureDesignRepairProjectSource(conversation),
-        currentConversation,
-      );
-      const safeToRepair = canEnterAutomaticDesignRepair({
-        fresh: fresh && currentProject,
-        activeConversation: currentState.activeId === evidence.conversationId,
-        currentReview:
-          useDesignReviewStore.getState().automatic?.evidence.requestId ===
-          evidence.requestId,
-        currentProject,
-        designMode: currentConversation?.workspaceMode === "design",
-        chatIdle: runConversationIdRef.current === null,
-        hasNewerUserRequest: hasNewerGenuineUserMessage(
-          evidence.conversationId,
-          evidence.requestId,
-        ),
-      });
-      const repairNeeded = shouldRunAutomaticDesignRepair(
-        evidence.phase,
-        scope,
-      );
-      if (repairNeeded && safeToRepair) {
-        updateAutomaticReviewActivity(
-          evidence.conversationId,
-          evidence.requestId,
-          { status: "fixing" },
-        );
-        useDesignReviewStore.getState().setAutomaticStage("fixing");
-        const repairConversationRevision =
-          useConversationStore.getState().conversations[
-            evidence.conversationId
-          ];
-        if (!repairConversationRevision) {
-          useDesignReviewStore.getState().finishAutomatic("superseded");
-          return;
-        }
-        await generate(
-          buildAutomaticDesignRepairPrompt(evidence, scope),
-          undefined,
-          {
-            skipAutoQa: true,
-            forcedSkillIds: requiredSkillsForContract(evidence.contract),
-            reusableDesignContract: evidence.contract,
-            automaticDesignReviewPhase: "verify",
-            automaticDesignOriginalRequest: evidence.originalRequest,
-            automaticDesignReviewActivityId: evidence.requestId,
-            messageOrigin: "design_auto_fix",
-            expectedConversationId: evidence.conversationId,
-            expectedProjectSource: captureDesignRepairProjectSource(
-              repairConversationRevision,
-            ),
-          },
-        );
-        return;
-      }
-      if (repairNeeded) {
-        updateAutomaticReviewActivity(
-          evidence.conversationId,
-          evidence.requestId,
-          { status: "superseded", stale: !fresh || !currentProject },
-        );
-        if (
-          useDesignReviewStore.getState().automatic?.evidence.requestId ===
-          evidence.requestId
-        ) {
-          useDesignReviewStore.getState().finishAutomatic("superseded");
-        }
-        return;
-      }
       updateAutomaticReviewActivity(
         evidence.conversationId,
         evidence.requestId,
-        { status: "failed", stale: !fresh || !currentProject },
+        { status: "failed" },
       );
       if (
         useDesignReviewStore.getState().automatic?.evidence.requestId ===
@@ -4949,7 +4632,7 @@ export function useGenerator({
         useDesignReviewStore.getState().failAutomatic(message);
       }
     },
-    [generate],
+    [],
   );
 
   const continueTask = useCallback(async () => {
@@ -5012,6 +4695,7 @@ export function useGenerator({
           generator.syncMessages(await getMessagesForAPI(activeConv));
           generator.setFiles(activeConv.files);
           configureDesignRun(activeConv, {
+            resume: true,
             profile: continueWorkspace.profile,
           });
         }
@@ -5030,30 +4714,7 @@ export function useGenerator({
         const continuePrompt =
           "Continue from the current design-project.json checkpoint. Do not repeat completed prototype pages, flows, or batches. Complete the next unfinished task and update the blueprint checkpoint.";
         let result = await generator.generate(continuePrompt);
-        while (
-          isCurrentRun() &&
-          !result.aborted &&
-          !result.maxIterationsReached &&
-          hasIncompletePrototypeBuild(result.files)
-        ) {
-          if (!isCurrentRun()) return;
-          const currentConversation =
-            useConversationStore.getState().conversations[runConversationId];
-          designContractControllerRef.current.reset({
-            enabled: true,
-            expectedSystemId:
-              currentConversation?.designState?.appliedSystem?.id ?? null,
-            expectedChangeModes: ["create", "extend"],
-            ...designBlueprintRunPolicy(result.files),
-          });
-          designRunExpectedChangeModesRef.current = ["create", "extend"];
-          const beforeBatch = { ...result.files };
-          result = await generator.generate(AUTOMATIC_PROTOTYPE_BATCH_PROMPT);
-          if (!isCurrentRun()) return;
-          if (!result.aborted && !result.maxIterationsReached) {
-            assertPrototypeBatchProgress(beforeBatch, result.files);
-          }
-        }
+        result = await continueDesignTasks(generator, result, isCurrentRun);
         result = await settleUserInstructions(
           generator,
           result,
@@ -5062,15 +4723,12 @@ export function useGenerator({
           true,
         );
         if (!isCurrentRun()) return;
-        const incomplete = hasIncompletePrototypeBuild(result.files);
-        if (!incomplete) {
-          scheduleAutomaticDesignReview(
-            result,
-            runConversationId,
-            continuePrompt,
-            {},
-          );
-        }
+        scheduleAutomaticDesignReview(
+          result,
+          runConversationId,
+          continuePrompt,
+          {},
+        );
       }
     } catch (err: any) {
       if (!isCurrentRun()) return;
@@ -5104,6 +4762,7 @@ export function useGenerator({
     appendGenerationError,
     isCurrentGeneratorRun,
     settleUserInstructions,
+    continueDesignTasks,
     scheduleAutomaticDesignReview,
   ]);
 
@@ -5130,6 +4789,7 @@ export function useGenerator({
     isThinkingStreaming,
     runtimeWaitMessage,
     generateUtilityText,
-    getDesignContract: () => designContractControllerRef.current.getContract(),
+    getDesignContract: () =>
+      designRunRef.current?.context(generatorRef.current?.getFiles()) ?? null,
   };
 }

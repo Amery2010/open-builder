@@ -252,6 +252,12 @@ export class HostToolCatalog {
     const modelTools: ToolSet = {};
 
     for (const [name, definition] of Object.entries(options.tools)) {
+      if (
+        options.context.mode === "subagent" &&
+        (name === "write_file" || name === "patch_file") &&
+        !options.context.subagentWritePaths?.length
+      )
+        continue;
       const staticRecord = this.records.get(name);
       let record = staticRecord;
       if (staticRecord) {

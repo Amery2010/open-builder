@@ -1,7 +1,7 @@
 ---
 name: art-direct-web
 description: Art-direct marketing sites, landing pages, portfolios, editorial pages, and campaign experiences from a concrete brief. Use when visual narrative, composition, typography, imagery, and motion are central; use design-product-ui instead for routine application workflows.
-version: 2.0.0
+version: 2.1.0
 tags:
   - frontend
   - art-direction
@@ -11,9 +11,20 @@ tags:
 
 # Art-direct the web
 
+## Shared visual principles
+
+Use these defaults when the task involves planning, implementing, or reviewing a UI. They do not change the existing instruction precedence, the user's direction, the applied Design system, project permissions, product contracts, or required output format. An applied system may intentionally use gradients, pixel type, glass, maximalism, texture, or skeuomorphic material; preserve those defining traits when they serve the brief. Do not impose a universal 44px target size. Judge controls by context, density, and operability. These principles are adapted from the [design principles reference](https://github.com/jiji262/claude-design-skill/blob/main/references/design-principles.md).
+
+- Read the existing surface, content, tokens, assets, and interaction patterns before extending them. Record the observed type hierarchy, color roles, spacing rhythm, shape language, density, and motion language.
+- Commit to a small visual system before placing pixels. Reuse semantic roles for typography, color, spacing, shape, elevation, and motion instead of inventing one-off decoration.
+- Let the user's content and communication goal choose the composition. Give every section and visual a job; do not pad a page with repeated card grids, icon bullets, decorative numbers, or invented proof.
+- Use real, specific copy and project-owned assets. When a meaningful image, logo, chart, screenshot, or testimonial is unavailable, mark the gap honestly instead of fabricating one. Do not use an SVG illustration or CSS ornament as a substitute for a real product photo, screenshot, portrait, or 3D asset.
+- Give motion a clear narrative or feedback purpose. Keep navigation and actions operable without hover or animation, preserve content when motion is disabled, and respect reduced-motion preferences.
+- Before finishing, remove anything added only because the page felt sparse. Check the result as a coherent authored system rather than a collection of familiar landing-page patterns.
+
 Create a coherent visual experience for `persuade`, `read`, and `experience` surfaces: marketing, portfolio, editorial, cultural, or campaign work. Start from the user's content, audience, brand, conversion goal, and existing project—not from a generic visual trend. Use `design-product-ui` for `operate` surfaces such as dashboards, settings, forms, and multi-step workflows; load both for a genuinely mixed target.
 
-Before the first UI write in Design mode, inspect the active project and submit the run-local Design contract. Distinguish `create` (a new surface), `extend` (a bounded addition within the current visual language), and `migrate` (the applied Design system replaces conflicting visual Tokens, styles, component grammar, and layout expression inside the named target). An applied Design system is visually authoritative in that target. A selected-but-unapplied system is reference only and cannot authorize a restyle.
+In Design mode, the host prepares the Design run context and activates this built-in skill automatically. Inspect the active project and implement the current user request within its selected scope. Distinguish `create` (a new surface), `extend` (a bounded addition within the current visual language), and `migrate` (the applied Design system replaces conflicting visual Tokens, styles, component grammar, and layout expression inside the named target). An applied Design system is visually authoritative in that target. A selected-but-unapplied system is reference only and cannot authorize a restyle.
 
 In every change mode, preserve product truth: routes, data and state ownership, information architecture, content, permissions, analytics hooks, integration selectors, accessibility semantics, and working interactions unless the user's request independently changes them. Migration replaces the visual world, not the product contract.
 
@@ -105,4 +116,4 @@ Before finishing, verify:
 8. no asset, dependency, or external action was invented or added without need;
 9. checks and preview evidence reported were actually run.
 
-Run the project health check and fix every `design_system` error. Trace root `tokens.css` into the active runtime style entry and prove that changed UI consumes semantic color, typography, shape, and layout roles; use motion and easing roles when interaction or animation is present. Use browser or screenshot validation only when it is available and authorized, and distinguish it from source-based review. The host may follow with one automatic visual review and one bounded repair; reuse the accepted contract instead of inventing a new direction.
+Run the project health check and report build/runtime and `design_system` findings with their actual evidence. Fix in-scope implementation errors; a visual check is advisory and does not block saving or further editing. Trace root `tokens.css` into the active runtime style entry and prove that changed UI consumes semantic color, typography, shape, and layout roles; use motion and easing roles when interaction or animation is present. Use browser or screenshot validation only when it is available and authorized, and distinguish it from source-based review. The host may follow with a non-blocking visual report. Apply review fixes when the user requests them, using the current project and the reported scope.

@@ -318,7 +318,7 @@ export const SubagentCallCard = memo(function SubagentCallCard({
                 variant="outline"
                 className="h-5 border-violet-300/50 px-1.5 text-xs text-muted-foreground dark:border-violet-400/30"
               >
-                {writePolicy === "fullWrite"
+                {writePolicy === "scopedWrite"
                   ? t.subagent.policyFullWrite
                   : t.subagent.policyReadonly}
               </Badge>

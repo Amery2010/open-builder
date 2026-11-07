@@ -179,6 +179,20 @@ describe("ToolCallCard result guards", () => {
   });
 
   it("classifies text, structured and diagnostic tool outcomes", () => {
+    expect(
+      classifyToolCardStatus(
+        "update_project_design",
+        "Tool execution was cancelled",
+        {
+          text: "Tool execution was cancelled",
+          isError: true,
+          structuredContent: {
+            kind: "open_builder_cancelled_tool_v1",
+            reason: "user-stopped",
+          },
+        },
+      ),
+    ).toBe("aborted");
     expect(classifyToolCardStatus("write_file", "")).toBe("running");
     expect(classifyToolCardStatus("write_file", "OK — written")).toBe(
       "completed",

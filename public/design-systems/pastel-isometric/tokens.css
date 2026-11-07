@@ -1,0 +1,61 @@
+:root {
+  --bg: #dff3f1;
+  --surface: #fdf1e3;
+  --surface-warm: #f2f2e8;
+  --fg: #253e4b;
+  --fg-2: #3b505a;
+  --muted: #506269;
+  --meta: #59696f;
+  --border: #abada9;
+  --border-soft: #d2cdc5;
+  --accent: #346879;
+  --accent-on: #fffaf4;
+  --accent-hover: #326373;
+  --accent-active: #305e6e;
+  --success: #28643d;
+  --warn: #815413;
+  --danger: #a62b3a;
+  --font-display: "Arial Rounded MT Bold", "Trebuchet MS", sans-serif;
+  --font-body:
+    ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+  --font-mono:
+    ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  --text-xs: 12px;
+  --text-sm: 14px;
+  --text-base: 16px;
+  --text-lg: 20px;
+  --text-xl: 26px;
+  --text-2xl: 36px;
+  --text-3xl: 48px;
+  --text-4xl: 64px;
+  --leading-body: 1.6;
+  --leading-tight: 1.12;
+  --tracking-display: 0em;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+  --section-y-desktop: 96px;
+  --section-y-tablet: 64px;
+  --section-y-phone: 48px;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 24px;
+  --radius-pill: 9999px;
+  --elev-flat: none;
+  --elev-ring: 0 0 0 1px #abada9;
+  --elev-raised: 0 8px 24px #a1afae40;
+  --focus-ring: 0 0 0 3px #346879;
+  --motion-fast: 120ms;
+  --motion-base: 220ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --container-max: 1180px;
+  --container-gutter-desktop: 32px;
+  --container-gutter-tablet: 24px;
+  --container-gutter-phone: 18px;
+}

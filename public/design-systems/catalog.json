@@ -13,7 +13,7 @@
       "en": "Playful consumer campaigns or warm editorial stories",
       "zh": "活泼消费活动或温暖叙事型编辑内容"
     },
-    "digest": "8b15d1d7b7a0145bd5988655dc57a8b449063b5eddd32ba32696a4c41946f6e9",
+    "digest": "0cc9ad9f9c4533b6e54a9ce07fd89bf83d84f673c987836a919d54e46d7dd691",
     "version": "2.0.0",
     "files": {
       "manifest": "linear/manifest.json",
@@ -35,7 +35,7 @@
       "en": "Quiet editorial layouts or low-tech community products",
       "zh": "安静编辑布局或低技术感社区产品"
     },
-    "digest": "67ef6760a75ce868b496e6b2b2fa6520ddd2ea4cffd880e3338f387fde6cc94e",
+    "digest": "d35503b379d80b3a5084c052fb1682302c6872a50319c622fdd4870a4711f10b",
     "version": "2.0.0",
     "files": {
       "manifest": "stripe/manifest.json",
@@ -57,7 +57,7 @@
       "en": "High-energy entertainment or neon gaming interfaces",
       "zh": "高能娱乐或霓虹游戏界面"
     },
-    "digest": "9bb5287881baa20c66604a97b850ac91091fabea75fb27c00d1c50ca62a2f5e3",
+    "digest": "3a3c17cb0cbbf3150a43e7f87245c98dcda10bc1c8b690120e28962e56a43023",
     "version": "2.0.0",
     "files": {
       "manifest": "claude/manifest.json",
@@ -79,7 +79,7 @@
       "en": "Luxury storytelling or image-led campaigns",
       "zh": "奢华叙事或图片主导的活动页"
     },
-    "digest": "294a107ade908223056a51f97a75b76cdd68761449a5820b60681809af3f40b7",
+    "digest": "4f911ed6061b9c147f978a1d9f14ae3fa99574d3599b859ce7d864a3fc6bfee5",
     "version": "2.0.0",
     "files": {
       "manifest": "github/manifest.json",
@@ -101,7 +101,7 @@
       "en": "Soft lifestyle brands or whimsical portfolios",
       "zh": "柔和生活方式品牌或奇趣作品集"
     },
-    "digest": "dd623d275f10efb62c14ea30ed4e25c7e402c9aff7d3ca5e2371911ac1b9288c",
+    "digest": "66c1cc47df7752bca8c07d8f7bb9bd638895329e193ee90874e5c3e41d4c5431",
     "version": "2.0.0",
     "files": {
       "manifest": "ibm/manifest.json",
@@ -123,7 +123,7 @@
       "en": "Conservative finance or formal government services",
       "zh": "保守金融或正式政务服务"
     },
-    "digest": "2f84b516f90cc9a2b724546b40e5bbb09f0984a772ed448db517e0665afaab2f",
+    "digest": "58bdb8c49f41bc419f207fd4033f17272894015436b4bddba6875c3e5750c856",
     "version": "2.0.0",
     "files": {
       "manifest": "figma/manifest.json",
@@ -145,7 +145,7 @@
       "en": "Cinematic launches or highly expressive retail",
       "zh": "电影感发布页或高度表现型零售页面"
     },
-    "digest": "0cb024d30defdb5a00dcec82ac569ad1d918980c315ea699a1da362a82f1b36a",
+    "digest": "73e5ebb857f771e56b14fe2f8374affbf5ecb576b3e6e1b8b34ccd4d64c055d0",
     "version": "2.0.0",
     "files": {
       "manifest": "notion/manifest.json",
@@ -167,7 +167,7 @@
       "en": "Experimental art sites or austere developer consoles",
       "zh": "实验艺术网站或冷峻开发者控制台"
     },
-    "digest": "6cfa3d0b719dc580f76ecef43639a9fee59a8e7710380c35bad5573e07e617fd",
+    "digest": "09cf4b830b108834de0c885f636da207769ca1437a8859e142f0baae1b527aac",
     "version": "2.0.0",
     "files": {
       "manifest": "shopify/manifest.json",
@@ -189,7 +189,7 @@
       "en": "Dense admin tools or information-heavy portals",
       "zh": "密集后台工具或信息量大的门户"
     },
-    "digest": "722c4ca539cd6c64d2356782ecc230a50511228222f518f1ec99d2ac7b04d8fb",
+    "digest": "f7cb47b4a114b750d6fa5e9377c813c7f66e4cf1df8ea7f0afc6217223c6eca2",
     "version": "2.0.0",
     "files": {
       "manifest": "apple/manifest.json",
@@ -211,7 +211,7 @@
       "en": "Formal enterprise workflows or restrained finance",
       "zh": "正式企业流程或克制金融产品"
     },
-    "digest": "94fa07d02837b6d188acd766224f71850ccc4af19806d20c80ae8cf8c566943a",
+    "digest": "4a8aacc626044c96ee18bfb393177aac95c80f89592146cf68740110a55093bb",
     "version": "2.0.0",
     "files": {
       "manifest": "spotify/manifest.json",
@@ -233,7 +233,7 @@
       "en": "Quiet productivity tools or compliance-heavy software",
       "zh": "安静效率工具或重合规软件"
     },
-    "digest": "0e378d3807f448044e3c678a5082b0058d3c388a72d17564d9d97a2bed77833f",
+    "digest": "c49d527ed57f1078b7205a0a1673266d349988bca56f8715166bc42f3bdac2cf",
     "version": "2.0.0",
     "files": {
       "manifest": "the-verge/manifest.json",
@@ -255,12 +255,636 @@
       "en": "Luxury campaigns or experimental typography",
       "zh": "奢华活动页或实验性字体设计"
     },
-    "digest": "fdd89c8ec0005700fd45d8c67f6c4e80671b37160fd1d3ced9761c6e4b95543d",
+    "digest": "5ebd8473ea86e7926f778eb1b7f71bfe92f613da13a87e486f1ea03a3185b900",
     "version": "2.0.0",
     "files": {
       "manifest": "wechat/manifest.json",
       "design": "wechat/DESIGN.md",
       "tokens": "wechat/tokens.css"
+    }
+  },
+  {
+    "id": "cassette-futurism",
+    "name": "Cassette Futurism",
+    "previewPath": "/design-systems/previews/cassette-futurism.webp",
+    "category": "mixed",
+    "tags": [
+      "retro",
+      "analog",
+      "mechanical",
+      "cassette",
+      "磁带",
+      "复古",
+      "机械"
+    ],
+    "bestFor": {
+      "en": "Analog-inspired tools, media players, retro technical portfolios",
+      "zh": "模拟仪器工具、媒体播放器、复古科技作品集"
+    },
+    "avoidFor": {
+      "en": "Quiet luxury editorial or conservative enterprise forms",
+      "zh": "安静奢华的编辑内容或保守企业表单"
+    },
+    "digest": "fb2acfd810d87dd6b892627b196e36059f67b5b7ec13688b122096bb00b726cb",
+    "version": "2.0.0",
+    "files": {
+      "manifest": "cassette-futurism/manifest.json",
+      "design": "cassette-futurism/DESIGN.md",
+      "tokens": "cassette-futurism/tokens.css"
+    }
+  },
+  {
+    "id": "crt-terminal",
+    "name": "CRT Terminal",
+    "previewPath": "/design-systems/previews/crt-terminal.webp",
+    "category": "product",
+    "tags": [
+      "terminal",
+      "crt",
+      "monospace",
+      "hacker",
+      "命令行",
+      "终端",
+      "黑客"
+    ],
+    "bestFor": {
+      "en": "Command tools, technical diagnostics, terminal-inspired portfolios",
+      "zh": "命令工具、技术诊断、终端式作品集"
+    },
+    "avoidFor": {
+      "en": "Long-form reading, clinical workflows or photo-led retail",
+      "zh": "长篇阅读、临床工作流或摄影主导的零售"
+    },
+    "digest": "961b191c19f3b815e91a948a2fb3d99fcbd0dfda60aeb86bd310257eba52be61",
+    "version": "2.0.0",
+    "files": {
+      "manifest": "crt-terminal/manifest.json",
+      "design": "crt-terminal/DESIGN.md",
+      "tokens": "crt-terminal/tokens.css"
+    }
+  },
+  {
+    "id": "pixel-arcade",
+    "name": "Pixel Arcade",
+    "previewPath": "/design-systems/previews/pixel-arcade.webp",
+    "category": "mixed",
+    "tags": ["pixel", "arcade", "8-bit", "game", "像素", "街机", "游戏"],
+    "bestFor": {
+      "en": "Playful game portals, retro portfolios, gamified learning",
+      "zh": "趣味游戏入口、复古作品集、游戏化学习"
+    },
+    "avoidFor": {
+      "en": "Dense business tables or formal regulated services",
+      "zh": "密集业务表格或正式受监管服务"
+    },
+    "digest": "fee4d9c9d4ab20dd8a1f5287a7c17cdc3aa40df9cfec6f1cbe51a8e3a4ed0676",
+    "version": "2.0.0",
+    "files": {
+      "manifest": "pixel-arcade/manifest.json",
+      "design": "pixel-arcade/DESIGN.md",
+      "tokens": "pixel-arcade/tokens.css"
+    }
+  },
+  {
+    "id": "split-flap",
+    "name": "Split-Flap Display",
+    "previewPath": "/design-systems/previews/split-flap.webp",
+    "category": "product",
+    "tags": [
+      "split-flap",
+      "departures",
+      "mechanical",
+      "status",
+      "翻牌",
+      "航班",
+      "看板"
+    ],
+    "bestFor": {
+      "en": "Schedules, live status boards, event and transport information",
+      "zh": "时刻表、实时状态看板、活动与交通信息"
+    },
+    "avoidFor": {
+      "en": "Image-heavy narratives or text that must animate continuously",
+      "zh": "图片密集叙事或需要持续动画的长文本"
+    },
+    "digest": "fcf42fb13f20a5c40b10d11b84041c4b9ede8d60338c7c249aa5922f3a2dc4f1",
+    "version": "2.0.0",
+    "files": {
+      "manifest": "split-flap/manifest.json",
+      "design": "split-flap/DESIGN.md",
+      "tokens": "split-flap/tokens.css"
+    }
+  },
+  {
+    "id": "web-brutalism",
+    "name": "Web Brutalism",
+    "previewPath": "/design-systems/previews/web-brutalism.webp",
+    "category": "mixed",
+    "tags": [
+      "brutalist",
+      "raw",
+      "native",
+      "high-contrast",
+      "粗野主义",
+      "原生",
+      "高对比"
+    ],
+    "bestFor": {
+      "en": "Independent publishing, provocative portfolios, direct link directories",
+      "zh": "独立出版、鲜明作品集、直接的链接目录"
+    },
+    "avoidFor": {
+      "en": "Soft lifestyle experiences or ornamental luxury campaigns",
+      "zh": "柔和生活方式体验或装饰性奢华活动"
+    },
+    "digest": "135cfae081778f7c1ea270d42dc0d606bc3d24e1671605bc3ba9c35f59f2389e",
+    "version": "2.0.0",
+    "files": {
+      "manifest": "web-brutalism/manifest.json",
+      "design": "web-brutalism/DESIGN.md",
+      "tokens": "web-brutalism/tokens.css"
+    }
+  },
+  {
+    "id": "kinetic-typography",
+    "name": "Kinetic Typography",
+    "previewPath": "/design-systems/previews/kinetic-typography.webp",
+    "category": "marketing",
+    "tags": [
+      "kinetic",
+      "typography",
+      "stage",
+      "motion",
+      "动态字体",
+      "排版",
+      "舞台"
+    ],
+    "bestFor": {
+      "en": "Creative events, type-led campaigns, expressive portfolios",
+      "zh": "创意活动、字体主导的宣传页、表现型作品集"
+    },
+    "avoidFor": {
+      "en": "Repetitive back-office workflows or dense reading interfaces",
+      "zh": "重复后台操作或密集阅读界面"
+    },
+    "digest": "15c679d300f1b497bf36ac3d584f8923267fc946096349fc63aa1922fb882573",
+    "version": "2.0.0",
+    "files": {
+      "manifest": "kinetic-typography/manifest.json",
+      "design": "kinetic-typography/DESIGN.md",
+      "tokens": "kinetic-typography/tokens.css"
+    }
+  },
+  {
+    "id": "risograph",
+    "name": "Risograph Print",
+    "previewPath": "/design-systems/previews/risograph.webp",
+    "category": "editorial",
+    "tags": ["risograph", "print", "duotone", "grain", "孔版", "双色", "印刷"],
+    "bestFor": {
+      "en": "Indie publishing, cultural events, poster and creative tools",
+      "zh": "独立出版、文化活动、海报与创意工具"
+    },
+    "avoidFor": {
+      "en": "Photographic color accuracy or minimal enterprise consoles",
+      "zh": "要求摄影色准的产品或极简企业控制台"
+    },
+    "digest": "bf7df735412ea0cd1d190b59897fd70134dc5ad5bc358d21aeaf61b56ba31aa9",
+    "version": "2.0.0",
+    "files": {
+      "manifest": "risograph/manifest.json",
+      "design": "risograph/DESIGN.md",
+      "tokens": "risograph/tokens.css"
+    }
+  },
+  {
+    "id": "paper-collage",
+    "name": "Paper Collage",
+    "previewPath": "/design-systems/previews/paper-collage.webp",
+    "category": "editorial",
+    "tags": ["collage", "paper", "zine", "handmade", "纸张", "拼贴", "杂志"],
+    "bestFor": {
+      "en": "Personal journals, art collections, independent magazines",
+      "zh": "个人日志、艺术收藏、独立杂志"
+    },
+    "avoidFor": {
+      "en": "Precision monitoring or high-density data entry",
+      "zh": "精密监控或高密度数据录入"
+    },
+    "digest": "18fa618603b8c1a19f66c355eecd7d85361a1cfe56f8e4ed3888a9b6042e2039",
+    "version": "2.0.0",
+    "files": {
+      "manifest": "paper-collage/manifest.json",
+      "design": "paper-collage/DESIGN.md",
+      "tokens": "paper-collage/tokens.css"
+    }
+  },
+  {
+    "id": "art-deco-noir",
+    "name": "Art Deco Noir",
+    "previewPath": "/design-systems/previews/art-deco-noir.webp",
+    "category": "marketing",
+    "tags": [
+      "art-deco",
+      "noir",
+      "geometric",
+      "gold",
+      "装饰艺术",
+      "黑金",
+      "几何"
+    ],
+    "bestFor": {
+      "en": "Cultural venues, premium events, hospitality and curated collections",
+      "zh": "文化场馆、高端活动、酒店与精选收藏"
+    },
+    "avoidFor": {
+      "en": "Casual social feeds or dense utilitarian workspaces",
+      "zh": "随意社交信息流或密集实用工作台"
+    },
+    "digest": "5d137ca2291a74583325451c620998f00562a0f71356a1fb0aa93c8094d4c9ae",
+    "version": "2.0.0",
+    "files": {
+      "manifest": "art-deco-noir/manifest.json",
+      "design": "art-deco-noir/DESIGN.md",
+      "tokens": "art-deco-noir/tokens.css"
+    }
+  },
+  {
+    "id": "sumi-e",
+    "name": "Sumi-e Ink Wash",
+    "previewPath": "/design-systems/previews/sumi-e.webp",
+    "category": "editorial",
+    "tags": [
+      "sumi-e",
+      "ink",
+      "rice-paper",
+      "asymmetric",
+      "水墨",
+      "宣纸",
+      "卷轴"
+    ],
+    "bestFor": {
+      "en": "Cultural narratives, reflective portfolios, quiet technical storytelling",
+      "zh": "文化叙事、沉静作品集、克制的技术故事"
+    },
+    "avoidFor": {
+      "en": "High-frequency trading or neon entertainment dashboards",
+      "zh": "高频交易或霓虹娱乐仪表盘"
+    },
+    "digest": "e6f16a7095d0e387d73ca5ef5d75a23e8e78b689b097ca58adac37c4f6b39300",
+    "version": "2.0.0",
+    "files": {
+      "manifest": "sumi-e/manifest.json",
+      "design": "sumi-e/DESIGN.md",
+      "tokens": "sumi-e/tokens.css"
+    }
+  },
+  {
+    "id": "ukiyo-e",
+    "name": "Ukiyo-e Woodblock",
+    "previewPath": "/design-systems/previews/ukiyo-e.webp",
+    "category": "editorial",
+    "tags": [
+      "ukiyo-e",
+      "woodblock",
+      "flat-ink",
+      "japanese",
+      "浮世绘",
+      "木刻",
+      "版画"
+    ],
+    "bestFor": {
+      "en": "Exhibitions, cultural tourism, illustrated stories and collections",
+      "zh": "展览、文化旅游、插画故事与收藏"
+    },
+    "avoidFor": {
+      "en": "Photorealistic product configurators or dense operational tools",
+      "zh": "写实产品配置器或密集操作工具"
+    },
+    "digest": "03ea752dafa4a20d399cd1194385a71cbfc921991779baa57861e990db494e1d",
+    "version": "2.0.0",
+    "files": {
+      "manifest": "ukiyo-e/manifest.json",
+      "design": "ukiyo-e/DESIGN.md",
+      "tokens": "ukiyo-e/tokens.css"
+    }
+  },
+  {
+    "id": "zen-garden",
+    "name": "Zen Garden",
+    "previewPath": "/design-systems/previews/zen-garden.webp",
+    "category": "mixed",
+    "tags": ["zen", "sand", "garden", "calm", "枯山水", "禅意", "庭院"],
+    "bestFor": {
+      "en": "Focus tools, contemplative collections, quiet wellness experiences",
+      "zh": "专注工具、沉静收藏、安静健康体验"
+    },
+    "avoidFor": {
+      "en": "Urgent operational monitoring or high-energy campaigns",
+      "zh": "紧急操作监控或高能活动宣传"
+    },
+    "digest": "db35475bd9d8073944e483a4a08c42f0c2be1014cceb43d56162f2394b92eade",
+    "version": "2.0.0",
+    "files": {
+      "manifest": "zen-garden/manifest.json",
+      "design": "zen-garden/DESIGN.md",
+      "tokens": "zen-garden/tokens.css"
+    }
+  },
+  {
+    "id": "felt-skeuomorphism",
+    "name": "Felt Skeuomorphism",
+    "previewPath": "/design-systems/previews/felt-skeuomorphism.webp",
+    "category": "product",
+    "tags": ["felt", "wool", "tactile", "neumorphic", "毛毡", "羊毛", "拟物"],
+    "bestFor": {
+      "en": "Small utilities, gentle learning tools, tactile personal apps",
+      "zh": "小型工具、温和学习工具、触感个人应用"
+    },
+    "avoidFor": {
+      "en": "Dense professional workbenches or flat corporate systems",
+      "zh": "密集专业工作台或扁平企业系统"
+    },
+    "digest": "bddf20abb2074d7580c0d49b22aa87c80c8390eac08ecb029d72e48432a96c4d",
+    "version": "2.0.0",
+    "files": {
+      "manifest": "felt-skeuomorphism/manifest.json",
+      "design": "felt-skeuomorphism/DESIGN.md",
+      "tokens": "felt-skeuomorphism/tokens.css"
+    }
+  },
+  {
+    "id": "claymorphism",
+    "name": "Claymorphism",
+    "previewPath": "/design-systems/previews/claymorphism.webp",
+    "category": "product",
+    "tags": ["clay", "pastel", "puffy", "timer", "黏土", "厨房", "柔软"],
+    "bestFor": {
+      "en": "Friendly timers, cooking utilities, playful family learning",
+      "zh": "友好计时器、烹饪工具、趣味家庭学习"
+    },
+    "avoidFor": {
+      "en": "Serious high-density analytics or austere developer tooling",
+      "zh": "严肃高密度分析或冷峻开发工具"
+    },
+    "digest": "33519e2ab59d9730cf3375e75a881b36a3a7fcab62be2c46348bfb6e9fe27dcf",
+    "version": "2.0.0",
+    "files": {
+      "manifest": "claymorphism/manifest.json",
+      "design": "claymorphism/DESIGN.md",
+      "tokens": "claymorphism/tokens.css"
+    }
+  },
+  {
+    "id": "liquid-glass",
+    "name": "Liquid Glass",
+    "previewPath": "/design-systems/previews/liquid-glass.webp",
+    "category": "mixed",
+    "tags": [
+      "liquid",
+      "glass",
+      "translucent",
+      "refraction",
+      "液态",
+      "玻璃",
+      "透明"
+    ],
+    "bestFor": {
+      "en": "Spatial media, premium creative tools, expressive product surfaces",
+      "zh": "空间媒体、高端创意工具、表现型产品界面"
+    },
+    "avoidFor": {
+      "en": "Low-powered devices or text-heavy dense operations",
+      "zh": "低性能设备或文字密集操作界面"
+    },
+    "digest": "91d1b4af048a754d7fe91ecc4b4b3a3056f3878c6c301b6e67846313675259a5",
+    "version": "2.0.0",
+    "files": {
+      "manifest": "liquid-glass/manifest.json",
+      "design": "liquid-glass/DESIGN.md",
+      "tokens": "liquid-glass/tokens.css"
+    }
+  },
+  {
+    "id": "pastel-isometric",
+    "name": "Pastel Isometric",
+    "previewPath": "/design-systems/previews/pastel-isometric.webp",
+    "category": "mixed",
+    "tags": ["isometric", "pastel", "spatial", "city", "等距", "粉彩", "城市"],
+    "bestFor": {
+      "en": "Educational explorers, spatial dashboards, playful creative portfolios",
+      "zh": "教育探索、空间仪表盘、趣味创意作品集"
+    },
+    "avoidFor": {
+      "en": "Dense text editing or workflows requiring a purely flat layout",
+      "zh": "密集文本编辑或必须纯平面的操作流程"
+    },
+    "digest": "85eee8b94f81d7850dcfebb91b3f135fe2d4c759b2b3b1ea9da28d00a6d13a9d",
+    "version": "2.0.0",
+    "files": {
+      "manifest": "pastel-isometric/manifest.json",
+      "design": "pastel-isometric/DESIGN.md",
+      "tokens": "pastel-isometric/tokens.css"
+    }
+  },
+  {
+    "id": "mission-control",
+    "name": "Mission Control",
+    "previewPath": "/design-systems/previews/mission-control.webp",
+    "category": "product",
+    "tags": [
+      "mission-control",
+      "instrument",
+      "amber",
+      "technical",
+      "任务控制",
+      "仪器",
+      "控制台"
+    ],
+    "bestFor": {
+      "en": "System monitoring, technical operations, engineering workspaces",
+      "zh": "系统监控、技术操作、工程工作区"
+    },
+    "avoidFor": {
+      "en": "Soft lifestyle stories or lighthearted retail campaigns",
+      "zh": "柔和生活叙事或轻松零售活动"
+    },
+    "digest": "ec32ccafb760564c3ff2d6013751e602343b296138f6c89bebd14675ce64a942",
+    "version": "2.0.0",
+    "files": {
+      "manifest": "mission-control/manifest.json",
+      "design": "mission-control/DESIGN.md",
+      "tokens": "mission-control/tokens.css"
+    }
+  },
+  {
+    "id": "analog-synth",
+    "name": "Analog Synth",
+    "previewPath": "/design-systems/previews/analog-synth.webp",
+    "category": "product",
+    "tags": ["synth", "audio", "patchbay", "knob", "合成器", "旋钮", "连线"],
+    "bestFor": {
+      "en": "Audio tools, modular editors, hands-on creative workbenches",
+      "zh": "音频工具、模块编辑器、动手创作工作台"
+    },
+    "avoidFor": {
+      "en": "Simple reading pages or workflows with no meaningful parameters",
+      "zh": "简单阅读页或没有实际参数的工作流"
+    },
+    "digest": "7359a3207c307e0bf280216f680919b9e861e25d2c0ba86b61befc84ccf911a6",
+    "version": "2.0.0",
+    "files": {
+      "manifest": "analog-synth/manifest.json",
+      "design": "analog-synth/DESIGN.md",
+      "tokens": "analog-synth/tokens.css"
+    }
+  },
+  {
+    "id": "architectural-drafting",
+    "name": "Architectural Drafting",
+    "previewPath": "/design-systems/previews/architectural-drafting.webp",
+    "category": "product",
+    "tags": [
+      "drafting",
+      "architecture",
+      "blueprint",
+      "paper",
+      "建筑",
+      "制图",
+      "蓝图"
+    ],
+    "bestFor": {
+      "en": "Architecture portfolios, diagram tools, technical planning",
+      "zh": "建筑作品集、图表工具、技术规划"
+    },
+    "avoidFor": {
+      "en": "Soft consumer media feeds or photoreal luxury campaigns",
+      "zh": "柔和消费媒体信息流或写实奢华活动"
+    },
+    "digest": "53126e9950c05640f7a74793ee9401df1a6f98eb4810594f9f35150adf0b4cd6",
+    "version": "2.0.0",
+    "files": {
+      "manifest": "architectural-drafting/manifest.json",
+      "design": "architectural-drafting/DESIGN.md",
+      "tokens": "architectural-drafting/tokens.css"
+    }
+  },
+  {
+    "id": "circuit-lab",
+    "name": "Circuit Lab",
+    "previewPath": "/design-systems/previews/circuit-lab.webp",
+    "category": "product",
+    "tags": ["logic", "circuit", "node", "industrial", "逻辑", "电路", "节点"],
+    "bestFor": {
+      "en": "Visual programming, technical education, connected workflow editors",
+      "zh": "可视化编程、技术教育、连接式流程编辑器"
+    },
+    "avoidFor": {
+      "en": "Lifestyle storytelling or simple brochure pages",
+      "zh": "生活方式叙事或简单展示页"
+    },
+    "digest": "60ddde7693e7c2b83e4993b7750c4c46335264e2a200c42d2e61d7f643fa948d",
+    "version": "2.0.0",
+    "files": {
+      "manifest": "circuit-lab/manifest.json",
+      "design": "circuit-lab/DESIGN.md",
+      "tokens": "circuit-lab/tokens.css"
+    }
+  },
+  {
+    "id": "color-laboratory",
+    "name": "Color Laboratory",
+    "previewPath": "/design-systems/previews/color-laboratory.webp",
+    "category": "product",
+    "tags": [
+      "color",
+      "mixer",
+      "scientific",
+      "swatch",
+      "色彩",
+      "调色",
+      "实验室"
+    ],
+    "bestFor": {
+      "en": "Creative parameter tools, color education, visual comparison",
+      "zh": "创意参数工具、色彩教育、视觉对比"
+    },
+    "avoidFor": {
+      "en": "Products where color changes could obscure critical status",
+      "zh": "色彩变化可能遮蔽关键状态的产品"
+    },
+    "digest": "6737d130ef552be34b4df6feef9e2958e306bdffeef1c82cf6c4d1730f08ebe8",
+    "version": "2.0.0",
+    "files": {
+      "manifest": "color-laboratory/manifest.json",
+      "design": "color-laboratory/DESIGN.md",
+      "tokens": "color-laboratory/tokens.css"
+    }
+  },
+  {
+    "id": "neon-noir",
+    "name": "Neon Noir",
+    "previewPath": "/design-systems/previews/neon-noir.webp",
+    "category": "mixed",
+    "tags": ["neon", "sign", "glow", "cyberpunk", "霓虹", "招牌", "发光"],
+    "bestFor": {
+      "en": "Nightlife, expressive creative tools, music and event campaigns",
+      "zh": "夜生活、表现型创意工具、音乐与活动宣传"
+    },
+    "avoidFor": {
+      "en": "Long reading sessions or conservative administrative workflows",
+      "zh": "长时间阅读或保守行政流程"
+    },
+    "digest": "8004ae74308453f7b67096ab0a6cf402a915bc51e39506804b30e25602ee6cc5",
+    "version": "2.0.0",
+    "files": {
+      "manifest": "neon-noir/manifest.json",
+      "design": "neon-noir/DESIGN.md",
+      "tokens": "neon-noir/tokens.css"
+    }
+  },
+  {
+    "id": "prism-optics",
+    "name": "Prism Optics",
+    "previewPath": "/design-systems/previews/prism-optics.webp",
+    "category": "mixed",
+    "tags": ["prism", "optics", "light", "puzzle", "棱镜", "光学", "折射"],
+    "bestFor": {
+      "en": "Interactive science, visual explainers, precise experimental tools",
+      "zh": "交互科学、视觉讲解、精密实验工具"
+    },
+    "avoidFor": {
+      "en": "Plain business forms or photography-first publishing",
+      "zh": "普通业务表单或摄影主导出版"
+    },
+    "digest": "d27448ebddf9af5917e07e189a73bde9fa0f923e80bbacb5f8008a81f8c64002",
+    "version": "2.0.0",
+    "files": {
+      "manifest": "prism-optics/manifest.json",
+      "design": "prism-optics/DESIGN.md",
+      "tokens": "prism-optics/tokens.css"
+    }
+  },
+  {
+    "id": "organic-tidepool",
+    "name": "Organic Tidepool",
+    "previewPath": "/design-systems/previews/organic-tidepool.webp",
+    "category": "mixed",
+    "tags": ["tidepool", "nature", "water", "organic", "潮池", "海水", "自然"],
+    "bestFor": {
+      "en": "Nature education, calm exploration, organic creative collections",
+      "zh": "自然教育、安静探索、有机创意收藏"
+    },
+    "avoidFor": {
+      "en": "Urgent transaction tools or dense technical administration",
+      "zh": "紧急交易工具或密集技术管理"
+    },
+    "digest": "de507a2d4cb2d727fa9018de05164886f841cba0c35c799266d28ae0e5c0920a",
+    "version": "2.0.0",
+    "files": {
+      "manifest": "organic-tidepool/manifest.json",
+      "design": "organic-tidepool/DESIGN.md",
+      "tokens": "organic-tidepool/tokens.css"
     }
   }
 ]

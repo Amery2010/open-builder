@@ -1,5 +1,5 @@
 // Kept as raw ES2017 source: the desktop Parcel parser does not support newer syntax.
-export default function installCaptureCanvasAdapter(runtime) {
+export default function installCaptureCanvasAdapter(runtime, html2canvas) {
   const toSvg = runtime.toSvg;
   function abortReason(signal) {
     return signal.reason !== null && signal.reason !== undefined
@@ -118,14 +118,14 @@ export default function installCaptureCanvasAdapter(runtime) {
       }
     });
   }
-  runtime.toCanvas = async (node, options) => {
+  const fallbackCanvas = async (node, options) => {
     const { canvasWidth: width, canvasHeight: height, signal } = options;
     if (
       !Number.isInteger(width) ||
       !Number.isInteger(height) ||
       width < 1 ||
       height < 1 ||
-      width * height > 6000000 ||
+      (options.output !== "annotation" && width * height > 6000000) ||
       options.pixelRatio !== 1
     ) {
       throw new Error("Screenshot canvas dimensions are invalid.");
@@ -162,5 +162,96 @@ export default function installCaptureCanvasAdapter(runtime) {
     } finally {
       loaded.release();
     }
+  };
+
+  runtime.toCanvas = async (node, options) => {
+    if (typeof html2canvas !== "function" || !options.region) {
+      return fallbackCanvas(node, options);
+    }
+    const signal = options.signal;
+    if (signal && signal.aborted) throw abortReason(signal);
+    let container;
+    let canvas;
+    function cleanup() {
+      if (container) container.remove();
+      container = undefined;
+    }
+    async function render() {
+      try {
+        const region = options.region;
+        const ownerDocument = node.ownerDocument;
+        const previousContainers = ownerDocument
+          ? Array.from(
+              ownerDocument.querySelectorAll("iframe.html2canvas-container"),
+            )
+          : [];
+        const rendering = html2canvas(node, {
+          windowWidth: options.windowWidth,
+          windowHeight: options.windowHeight,
+          scrollX: region.x,
+          scrollY: region.y,
+          x: region.x,
+          y: region.y,
+          width: region.width,
+          height: region.height,
+          scale: options.scale,
+          useCORS: true,
+          allowTaint: false,
+          logging: false,
+          removeContainer: false,
+          ignoreElements: (element) =>
+            element.hasAttribute("data-ob-design-overlay"),
+          onclone: (clonedDocument) => {
+            container = clonedDocument.defaultView.frameElement;
+            if (signal && signal.aborted) throw abortReason(signal);
+          },
+        });
+        // The library appends its iframe synchronously before returning its
+        // promise. Remember it even when fonts fail before onclone runs.
+        if (!container && ownerDocument) {
+          const added = Array.from(
+            ownerDocument.querySelectorAll("iframe.html2canvas-container"),
+          ).filter((frame) => previousContainers.indexOf(frame) < 0);
+          if (added.length === 1) container = added[0];
+        }
+        canvas = await rendering;
+        if (signal && signal.aborted) {
+          canvas.width = 0;
+          canvas.height = 0;
+          throw abortReason(signal);
+        }
+        if (
+          canvas.width !== options.canvasWidth ||
+          canvas.height !== options.canvasHeight ||
+          !canvas.getContext("2d")
+        ) {
+          canvas.width = 0;
+          canvas.height = 0;
+          throw new Error("Screenshot canvas allocation failed.");
+        }
+        return canvas;
+      } catch (error) {
+        if (signal && signal.aborted) throw abortReason(signal);
+        cleanup();
+        return fallbackCanvas(node, options);
+      } finally {
+        cleanup();
+      }
+    }
+    // html2canvas has no abort API. Detach its clone on abort and release any
+    // late canvas after rendering settles.
+    return new Promise((resolve, reject) => {
+      function abort() {
+        cleanup();
+        if (signal) signal.removeEventListener("abort", abort);
+        reject(abortReason(signal));
+      }
+      if (signal) signal.addEventListener("abort", abort, { once: true });
+      render()
+        .then(resolve, reject)
+        .finally(() => {
+          if (signal) signal.removeEventListener("abort", abort);
+        });
+    });
   };
 }

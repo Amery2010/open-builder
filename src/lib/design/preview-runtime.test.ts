@@ -228,7 +228,7 @@ describe("preview runtime registry", () => {
         generation: "generation-a",
         target: {
           pageId: "home",
-          route: "#/" + "a".repeat(256),
+          route: "#/" + "a".repeat(2048),
           scenarioId: "default",
         },
         viewports: ["desktop"],

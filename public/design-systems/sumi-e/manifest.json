@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "open-builder-design-system/v1",
+  "id": "sumi-e",
+  "name": "Sumi-e Ink Wash",
+  "category": "editorial",
+  "description": "Diluted ink, warm rice paper and one vermilion seal-like accent. Let asymmetry, breathing space and a few brush gestures carry the composition instead of turning every component into calligraphy.",
+  "files": {
+    "design": "DESIGN.md",
+    "tokens": "tokens.css"
+  }
+}

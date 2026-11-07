@@ -1,5 +1,10 @@
+import {
+  PROTOTYPE_ROUTE_MAX_LENGTH,
+  isSafePrototypeHashRoute,
+} from "../design/prototype-route";
 import { isCompressibleImageMimeType } from "../images/formats";
 import { isPreviewViewportSize } from "../design/preview-bridge";
+import { sanitizePreviewCaptureGeometry } from "../design/preview-runtime";
 import type { ToolExecutionOutput } from "../ai/generator-types";
 import {
   ASK_USER_ANSWERS_KIND,
@@ -41,25 +46,29 @@ function parseArguments(raw: string | unknown): unknown {
 function summarizeProjectDesignArguments(
   value: Record<string, unknown>,
 ): Record<string, unknown> {
+  const key = value.patch !== undefined ? "patch" : "document";
+  const supplied = value[key];
   const document =
-    value.document &&
-    typeof value.document === "object" &&
-    !Array.isArray(value.document)
-      ? (value.document as Record<string, unknown>)
+    supplied && typeof supplied === "object" && !Array.isArray(supplied)
+      ? (supplied as Record<string, unknown>)
       : undefined;
   return {
     ...(value.expected_revision !== undefined
       ? { expected_revision: value.expected_revision }
       : {}),
-    document: document
+    [key]: document
       ? {
           schemaVersion: document.schemaVersion,
           revision: document.revision,
-          pageCount: Array.isArray(document.pages) ? document.pages.length : 0,
-          flowCount: Array.isArray(document.flows) ? document.flows.length : 0,
-          scenarioCount: Array.isArray(document.scenarios)
-            ? document.scenarios.length
-            : 0,
+          ...(Array.isArray(document.pages)
+            ? { pageCount: document.pages.length }
+            : {}),
+          ...(Array.isArray(document.flows)
+            ? { flowCount: document.flows.length }
+            : {}),
+          ...(Array.isArray(document.scenarios)
+            ? { scenarioCount: document.scenarios.length }
+            : {}),
         }
       : {},
   };
@@ -102,17 +111,7 @@ function sanitizePrototypeTargetMetadata(
     typeof target.scenarioId !== "string" ||
     !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(target.scenarioId) ||
     typeof target.route !== "string" ||
-    target.route.length > 256 ||
-    !/^#\/(?:[A-Za-z0-9._~!$&'()*+,;=:@/?]|%[0-9A-Fa-f]{2})*$/.test(
-      target.route,
-    ) ||
-    target.route.includes("//") ||
-    target.route
-      .slice(2)
-      .split("?", 1)[0]
-      .split("/")
-      .some((segment) => segment === "." || segment === "..") ||
-    /(?:javascript|data|vbscript)\s*:/i.test(target.route)
+    !isSafePrototypeHashRoute(target.route)
   ) {
     return undefined;
   }
@@ -250,14 +249,50 @@ function sanitizePreviewEvidenceStructuredContent(
     const image = item.image as Record<string, unknown> | undefined;
     const viewport = item.viewport as Record<string, unknown> | undefined;
     const semantic = item.semantic as Record<string, unknown> | undefined;
+    const geometry =
+      item.capture === undefined
+        ? undefined
+        : sanitizePreviewCaptureGeometry(item.capture);
+    if (item.capture !== undefined && !geometry) return [];
     const prototypeIdentity = sanitizePrototypeTargetMetadata(
       semantic?.prototypeIdentity,
     );
     const bytes = boundedNumber(image?.bytes, 1, 1_500 * 1024);
     const width = boundedNumber(viewport?.width, 1, 2_000);
     const height = boundedNumber(viewport?.height, 1, 2_000);
-    const capturedHeight = boundedNumber(viewport?.capturedHeight, 1, 4_096);
+    const capturedHeight = boundedNumber(
+      viewport?.capturedHeight,
+      1,
+      geometry ? 1_000_000 : 4_096,
+    );
     const fullHeight = boundedNumber(viewport?.fullHeight, 1, 1_000_000);
+    const imageWidth = boundedNumber(image?.width, 1, 2_000);
+    const imageHeight = boundedNumber(image?.height, 1, 4_096);
+    const hasImageSize =
+      image?.width !== undefined || image?.height !== undefined;
+    if (
+      (geometry && !hasImageSize) ||
+      (hasImageSize &&
+        (!Number.isInteger(imageWidth) ||
+          !Number.isInteger(imageHeight) ||
+          imageWidth! * imageHeight! > 6_000_000)) ||
+      (geometry &&
+        (imageWidth !==
+          Math.max(1, Math.floor(geometry.region.width * geometry.scale)) ||
+          imageHeight !==
+            Math.max(1, Math.floor(geometry.region.height * geometry.scale)) ||
+          capturedHeight !== geometry.region.height ||
+          (geometry.scope === "full-page" &&
+            (geometry.region.x !== 0 ||
+              geometry.region.y !== 0 ||
+              geometry.region.width < width! ||
+              geometry.region.height < height! ||
+              geometry.region.height !== fullHeight)) ||
+          (geometry.scope === "viewport" &&
+            (geometry.region.width !== width ||
+              geometry.region.height !== height))))
+    )
+      return [];
     const elementCount = boundedNumber(semantic?.elementCount, 0, 120);
     if (
       typeof image?.mimeType !== "string" ||
@@ -272,7 +307,14 @@ function sanitizePreviewEvidenceStructuredContent(
       !fullHeight ||
       !isPreviewViewportSize(item.view, width, height) ||
       capturedHeight > fullHeight ||
-      viewport.truncated !== capturedHeight < fullHeight ||
+      (geometry
+        ? geometry.scope === "full-page"
+          ? viewport.truncated !== false
+          : (geometry.region.x > 0 ||
+              geometry.region.y > 0 ||
+              capturedHeight < fullHeight) &&
+            viewport.truncated !== true
+        : viewport.truncated !== capturedHeight < fullHeight) ||
       typeof viewport.truncated !== "boolean" ||
       typeof semantic?.route !== "string" ||
       typeof semantic.horizontalOverflow !== "boolean" ||
@@ -286,7 +328,13 @@ function sanitizePreviewEvidenceStructuredContent(
     return [
       {
         view: item.view,
-        image: { mimeType: image.mimeType, bytes, digest: image.digest },
+        image: {
+          mimeType: image.mimeType,
+          bytes,
+          digest: image.digest,
+          ...(hasImageSize ? { width: imageWidth, height: imageHeight } : {}),
+        },
+        ...(geometry ? { capture: geometry } : {}),
         viewport: {
           name: item.view,
           width,
@@ -296,7 +344,10 @@ function sanitizePreviewEvidenceStructuredContent(
           truncated: viewport.truncated,
         },
         semantic: {
-          route: redactSensitiveText(semantic.route).slice(0, 256),
+          route: redactSensitiveText(semantic.route).slice(
+            0,
+            PROTOTYPE_ROUTE_MAX_LENGTH,
+          ),
           ...(prototypeIdentity ? { prototypeIdentity } : {}),
           ...(typeof semantic.title === "string"
             ? { title: redactSensitiveText(semantic.title).slice(0, 200) }
@@ -329,6 +380,79 @@ function sanitizePreviewEvidenceStructuredContent(
   };
 }
 
+function sanitizePreviewSequenceStructuredContent(
+  value: unknown,
+): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return;
+  const raw = value as Record<string, unknown>;
+  if (
+    raw.kind !== "preview_sequence_v1" ||
+    !["complete", "partial", "error"].includes(String(raw.status)) ||
+    typeof raw.generation !== "string" ||
+    (raw.generation !== "" && !/^[a-f0-9]{64}$/.test(raw.generation)) ||
+    !Array.isArray(raw.frames) ||
+    raw.frames.length > 5 ||
+    !Array.isArray(raw.errors)
+  )
+    return;
+  const frames = raw.frames.flatMap((value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+    const frame = value as Record<string, unknown>;
+    const scheduledAtMs = boundedNumber(frame.scheduledAtMs, 0, 30_000);
+    const startedAtMs = boundedNumber(
+      frame.startedAtMs,
+      0,
+      Number.MAX_SAFE_INTEGER,
+    );
+    const durationMs = boundedNumber(
+      frame.durationMs,
+      0,
+      Number.MAX_SAFE_INTEGER,
+    );
+    if (
+      scheduledAtMs === undefined ||
+      startedAtMs === undefined ||
+      durationMs === undefined
+    )
+      return [];
+    const evidenceSummary = frame.evidence
+      ? sanitizePreviewEvidenceStructuredContent({
+          kind: "preview_evidence_v1",
+          status: "complete",
+          generation: raw.generation,
+          evidence: [frame.evidence],
+          errors: [],
+        })
+      : undefined;
+    const evidence = (evidenceSummary?.evidence as unknown[] | undefined)?.[0];
+    return [
+      {
+        scheduledAtMs,
+        startedAtMs,
+        durationMs,
+        ...(evidence ? { evidence } : {}),
+        ...(typeof frame.error === "string"
+          ? { error: redactSensitiveText(frame.error).slice(0, 400) }
+          : {}),
+      },
+    ];
+  });
+  return {
+    kind: "preview_sequence_v1",
+    generation: raw.generation,
+    status: raw.status,
+    frames,
+    errors: raw.errors
+      .filter((error): error is string => typeof error === "string")
+      .slice(0, 5)
+      .map((error) => redactSensitiveText(error).slice(0, 400)),
+    ...(typeof raw.errorCode === "string"
+      ? { errorCode: raw.errorCode.replace(/[^a-z0-9_-]/gi, "").slice(0, 64) }
+      : {}),
+    placeholder: PREVIEW_EVIDENCE_PLACEHOLDER,
+  };
+}
+
 export function sanitizeToolExecutionOutputForHistory(
   toolName: string,
   rawArguments: string | unknown,
@@ -336,6 +460,20 @@ export function sanitizeToolExecutionOutputForHistory(
 ): ToolExecutionOutput | undefined {
   if (!output) return undefined;
   const { retention = "full", ...persistableOutput } = output;
+  if (toolName === "capture_preview_sequence") {
+    const structuredContent = sanitizePreviewSequenceStructuredContent(
+      output.structuredContent,
+    );
+    const text = structuredContent
+      ? JSON.stringify(structuredContent)
+      : PREVIEW_EVIDENCE_PLACEHOLDER;
+    return {
+      text,
+      isError: output.isError,
+      ...(structuredContent ? { structuredContent } : {}),
+      modelOutput: { type: "text", value: text },
+    };
+  }
   if (toolName === "capture_preview_evidence") {
     const structuredContent = sanitizePreviewEvidenceStructuredContent(
       output.structuredContent,

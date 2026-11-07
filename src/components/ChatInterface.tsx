@@ -7,6 +7,7 @@ import {
   useEffect,
   useMemo,
   useCallback,
+  type ReactNode,
 } from "react";
 import { ChatHeader } from "./chat/ChatHeader";
 import { ChatInput } from "./chat/ChatInput";
@@ -123,6 +124,7 @@ interface ChatInterfaceProps {
   onSetFiles: (files: ProjectFiles) => void;
   onImportProject: (
     project: StagedProjectImport,
+    signal?: AbortSignal,
   ) => Promise<ProjectImportCommitResult> | ProjectImportCommitResult;
   files: ProjectFiles;
   template: string;
@@ -131,6 +133,7 @@ interface ChatInterfaceProps {
   onReloadPreview: () => void;
   isProjectInitialized: boolean;
   showInlinePreview: boolean;
+  inlineWorkspace?: ReactNode;
   onCompressContext: () => Promise<void>;
   onRetry: () => Promise<void>;
   onContinue: () => Promise<void>;
@@ -203,6 +206,7 @@ export function ChatInterface({
   onReloadPreview,
   isProjectInitialized,
   showInlinePreview,
+  inlineWorkspace,
   onCompressContext,
   onRetry,
   onContinue,
@@ -887,25 +891,31 @@ export function ChatInterface({
           {showInlinePreview &&
             previewMode !== "code-only" &&
             isProjectInitialized &&
-            !isGenerating && (
-              <Suspense
-                fallback={
-                  <div className="flex min-h-40 items-center justify-center rounded-lg border bg-muted/30">
-                    <p className="text-sm text-muted-foreground">
-                      {t.app.loading}
-                    </p>
-                  </div>
-                }
-              >
-                <MobilePreview
-                  key={`${activeConversation?.activeBranchId}:${activeConversation?.checkoutEpoch}`}
-                  files={files}
-                  template={template}
-                  sandpackKey={sandpackKey}
-                  onReloadPreview={onReloadPreview}
-                />
-              </Suspense>
-            )}
+            (inlineWorkspace ? (
+              <div className="h-160 shrink-0 overflow-hidden rounded-lg border bg-background">
+                {inlineWorkspace}
+              </div>
+            ) : (
+              !isGenerating && (
+                <Suspense
+                  fallback={
+                    <div className="flex min-h-40 items-center justify-center rounded-lg border bg-muted/30">
+                      <p className="text-sm text-muted-foreground">
+                        {t.app.loading}
+                      </p>
+                    </div>
+                  }
+                >
+                  <MobilePreview
+                    key={`${activeConversation?.activeBranchId}:${activeConversation?.checkoutEpoch}`}
+                    files={files}
+                    template={template}
+                    sandpackKey={sandpackKey}
+                    onReloadPreview={onReloadPreview}
+                  />
+                </Suspense>
+              )
+            ))}
 
           {activeId &&
             snapshots

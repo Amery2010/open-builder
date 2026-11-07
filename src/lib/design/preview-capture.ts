@@ -229,16 +229,21 @@ let captureRuntimePromise: Promise<string> | null = null;
 export function loadDesignCaptureRuntimeSource(): Promise<string> {
   captureRuntimePromise ??= Promise.all([
     import("html-to-image/dist/html-to-image.js?raw"),
+    import("html2canvas/dist/html2canvas.min.js?raw"),
     import("./capture-canvas-adapter.js?raw"),
   ])
     .then(
-      ([module, adapter]) => `;(function () {
+      ([module, html2canvas, adapter]) => `;(function () {
   var captureExports = {};
   (function (exports, module, define) {
 ${module.default.replace(/\n?\/\/# sourceMappingURL=.*$/m, "")}
   })(captureExports, { exports: captureExports }, undefined);
+  var canvasModule = { exports: {} };
+  (function (exports, module, define) {
+${html2canvas.default.replace(/\n?\/\/# sourceMappingURL=.*$/m, "")}
+  })(canvasModule.exports, canvasModule, undefined);
 ${adapter.default.replace(/^export default /m, "")}
-  installCaptureCanvasAdapter(captureExports);
+  installCaptureCanvasAdapter(captureExports, canvasModule.exports);
   globalThis[${JSON.stringify(DESIGN_CAPTURE_RUNTIME_GLOBAL)}] = captureExports;
   if (typeof globalThis.dispatchEvent === "function") {
     globalThis.dispatchEvent(new Event("open-builder:capture-runtime-ready"));

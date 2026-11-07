@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "open-builder-design-system/v1",
+  "id": "risograph",
+  "name": "Risograph Print",
+  "category": "editorial",
+  "description": "Two ink colors on uncoated paper, visible grain and a slight registration offset on decorative shapes. Preserve crisp content text while using overprint, halftone and imperfect edges to give imagery a printed character.",
+  "files": {
+    "design": "DESIGN.md",
+    "tokens": "tokens.css"
+  }
+}

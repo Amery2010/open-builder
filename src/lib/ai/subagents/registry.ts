@@ -6,6 +6,15 @@ const READ_BUILTIN_TOOLS = ["list_files", "read_files", "search_in_files"];
 
 export const SUBAGENT_REGISTRY: SubagentDefinition[] = [
   {
+    name: "code-writer",
+    description:
+      "Implements a bounded development task in an isolated project snapshot. Requires explicit writePaths; the parent merges successful changes after conflict checks.",
+    systemPrompt:
+      "You are a development subagent. Implement only the assigned task in the exact files listed in writePaths. Read relevant files, use write_file or patch_file, and summarize changes and checks. Other agents work independently: never edit unassigned files. Do not delete, move, edit dependencies or shared configuration, change Design authority files, run scripts, or dispatch agents. Report any required out-of-scope changes to the parent. Your changes are provisional until the parent merges them.",
+    toolWhitelist: [...READ_BUILTIN_TOOLS, "write_file", "patch_file"],
+    writePolicy: "scopedWrite",
+  },
+  {
     name: "code-explorer",
     description:
       "Explores project structure, explains architecture, and summarizes what each file or module does. Use this when you need to understand the existing codebase before planning or implementing a change.",
@@ -105,10 +114,12 @@ export const SUBAGENT_REGISTRY: SubagentDefinition[] = [
   },
 ];
 
-/** Read-only builtin tools that may be exposed to subagents (subset of BUILTIN_TOOLS). */
-export const SUBAGENT_BUILTIN_TOOL_NAMES: ReadonlySet<string> = new Set(
-  READ_BUILTIN_TOOLS,
-);
+/** Builtins available to subagents; each role and immutable run further restricts this set. */
+export const SUBAGENT_BUILTIN_TOOL_NAMES: ReadonlySet<string> = new Set([
+  ...READ_BUILTIN_TOOLS,
+  "write_file",
+  "patch_file",
+]);
 
 export function getSubagentByName(name: string): SubagentDefinition | null {
   return SUBAGENT_REGISTRY.find((s) => s.name === name) ?? null;

@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { parseProjectDesign } from "./project-design";
-import { buildPrototypeReviewCapturePlan } from "./prototype-review-plan";
+import {
+  buildPrototypeReviewCapturePlan,
+  buildPrototypeReviewCaptureReport,
+} from "./prototype-review-plan";
 
 const blueprint = {
   schemaVersion: "open-builder-design-project/v1",
@@ -50,6 +53,37 @@ const blueprint = {
 };
 
 describe("prototype review plan", () => {
+  it("reports incomplete targets while capturing independent draft pages", () => {
+    const parsed = parseProjectDesign({
+      schemaVersion: "open-builder-design-project/v2",
+      revision: 1,
+      pages: [
+        { id: "draft" },
+        { id: "dynamic", route: "/items/:id" },
+        { id: "ready", route: "/home" },
+      ],
+    });
+    expect(parsed.status).toBe("ready");
+    if (parsed.status !== "ready") return;
+    const report = buildPrototypeReviewCaptureReport(parsed.design);
+    expect(report.targets).toHaveLength(3);
+    expect(
+      report.targets.every(
+        (item) =>
+          item.target.pageId === "ready" &&
+          item.target.scenarioId === "default",
+      ),
+    ).toBe(true);
+    expect(report.skipped).toMatchObject([
+      { pageId: "draft", reason: "missing-route" },
+      { pageId: "dynamic", reason: "missing-example" },
+    ]);
+    expect(buildPrototypeReviewCaptureReport(parsed.design, [])).toEqual({
+      targets: [],
+      skipped: [],
+    });
+  });
+
   it("prioritizes every affected default and critical state before responsive repeats", () => {
     const parsed = parseProjectDesign(blueprint);
     expect(parsed.status).toBe("ready");

@@ -20,7 +20,7 @@ import type {
   LocalAgentProvider,
 } from "./providers";
 import { buildCustomSystemPromptSection } from "../ai/custom-system-prompt";
-import { createDesignContractController } from "../design/run-contract";
+import { prepareDesignRun } from "../design/design-run";
 import {
   createProjectPermissionBroker,
   type ProjectPermissionDecision,
@@ -141,7 +141,8 @@ function generator(
     requestPlanApproval?: () => Promise<{ approved: boolean }>;
     onPlanApproved?: () => ToolSet;
     authorizeToolCall?: (name: string, args: unknown) => string | undefined;
-    executionMode?: "chat" | "plan";
+    executionMode?: "chat" | "plan" | "subagent";
+    subagentWritePaths?: readonly string[];
     nativeSearch?: boolean;
     provider?: LocalAgentProvider;
     onFileChange?: NonNullable<GeneratorEvents["onFileChange"]>;
@@ -187,6 +188,7 @@ function generator(
     {
       tools,
       executionMode: options.executionMode ?? "chat",
+      subagentWritePaths: options.subagentWritePaths,
       runtimePlatform: "desktop",
       systemPrompt: "Open Builder system",
       maxIterations: options.maxIterations,
@@ -574,6 +576,55 @@ describe("LocalAgentGenerator", () => {
     },
   );
 
+  it("projects scoped writer authority to the Local CLI and rejects unowned targets", async () => {
+    localAgentMocks.start.mockImplementation(
+      async (
+        request: LocalAgentStartRequest,
+        onEvent: (event: LocalAgentEvent) => void,
+      ) => {
+        expect(request.mode).toBe("subagent");
+        expect(request.scope.kind).toBe("utility");
+        expect(request.tools.map((tool) => tool.name)).toContain("write_file");
+        expect(request.tools.map((tool) => tool.name)).not.toContain(
+          "delete_file",
+        );
+        queueMicrotask(() => {
+          onEvent({
+            type: "toolRequest",
+            runId: "scoped-cli",
+            callId: "allowed",
+            name: "write_file",
+            arguments: { path: "src/owned.ts", content: "owned" },
+          });
+          onEvent({
+            type: "toolRequest",
+            runId: "scoped-cli",
+            callId: "denied",
+            name: "write_file",
+            arguments: { path: "src/other.ts", content: "bad" },
+          });
+          onEvent({ type: "done", aborted: false });
+        });
+        return "scoped-cli";
+      },
+    );
+    const { instance } = generator(baseConversation(), vi.fn(), vi.fn(), {
+      executionMode: "subagent",
+      subagentWritePaths: ["src/owned.ts"],
+      tools: {
+        write_file: BUILTIN_TOOLS.write_file,
+        delete_file: BUILTIN_TOOLS.delete_file,
+      },
+    });
+    await instance.generate("Implement scoped work");
+    expect(instance.getFiles()).toEqual({ "src/owned.ts": "owned" });
+    expect(localAgentMocks.resolve).toHaveBeenCalledWith(
+      "scoped-cli",
+      "denied",
+      expect.objectContaining({ isError: true }),
+    );
+  });
+
   it("writes project files through the Host bridge and reports FileChange", async () => {
     const onFileChange = vi.fn();
     localAgentMocks.start.mockImplementation(
@@ -850,8 +901,11 @@ describe("LocalAgentGenerator", () => {
   });
 
   it("dispatches a registered read-only subagent before a Design contract", async () => {
-    const controller = createDesignContractController();
-    controller.reset({ enabled: true });
+    const designRun = prepareDesignRun({
+      requestId: "test",
+      goal: "Inspect",
+      files: {},
+    });
     const dispatch = vi.fn(async () => ({
       text: JSON.stringify({
         ok: true,
@@ -887,8 +941,7 @@ describe("LocalAgentGenerator", () => {
     const { instance } = generator(baseConversation(), vi.fn(), vi.fn(), {
       tools: DISPATCH_SUBAGENT_TOOL,
       dispatchSubagent: dispatch,
-      authorizeToolCall: (name, args) =>
-        controller.authorizeProjectWrite(name, args),
+      authorizeToolCall: (name, args) => designRun.authorize(name, args, {}),
     });
 
     await expect(instance.generate("Delegate inspection")).resolves.toEqual(
@@ -971,6 +1024,10 @@ describe("LocalAgentGenerator", () => {
     await instance.generate("Build it");
 
     expect(request?.systemPrompt).toContain("[custom-local-cli]");
+    expect(request?.systemPrompt).toContain("<ui_design_principles>");
+    expect(request?.systemPrompt).toContain(
+      "Do not use an SVG illustration or CSS ornament",
+    );
     expect(request?.systemPrompt).toContain("not the user's ProjectFiles");
     expect(request?.systemPrompt).toContain(
       "does not make the Open Builder project read-only",

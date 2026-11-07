@@ -2,11 +2,15 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft,
   Check,
+  ChevronLeft,
+  ChevronRight,
   FolderUp,
   Loader2,
   PackageOpen,
   Plus,
+  Search,
   Sparkles,
+  X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -72,6 +76,46 @@ const EMPTY_CUSTOM_DRAFT: CustomDesignSystemDraft = {
   composition: "",
 };
 
+const DESIGN_SYSTEM_PAGE_SIZE = 9;
+
+type CatalogEntry =
+  | { source: "builtin"; entry: BundledDesignSystemEntry }
+  | {
+      source: "custom" | "imported";
+      reference: DesignSystemRef;
+    };
+
+function searchTerms(value: string): string[] {
+  return value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+}
+
+function catalogEntrySearchText(entry: CatalogEntry): string {
+  if (entry.source === "builtin") {
+    return [
+      entry.entry.id,
+      entry.entry.name,
+      ...entry.entry.tags,
+      entry.entry.bestFor.en,
+      entry.entry.bestFor.zh,
+    ]
+      .join(" ")
+      .toLowerCase();
+  }
+  return [entry.reference.id, entry.reference.name].join(" ").toLowerCase();
+}
+
+function filterCatalogEntries(
+  entries: readonly CatalogEntry[],
+  query: string,
+): CatalogEntry[] {
+  const terms = searchTerms(query);
+  if (terms.length === 0) return [...entries];
+  return entries.filter((entry) => {
+    const text = catalogEntrySearchText(entry);
+    return terms.every((term) => text.includes(term));
+  });
+}
+
 function rulesLength(draft: CustomDesignSystemDraft): number {
   return (
     draft.visualDirection.length +
@@ -98,6 +142,7 @@ export function DesignSystemPanel({
       !navigator.language.startsWith("zh"))
       ? "en"
       : "zh";
+  const activeConversationId = useConversationStore((state) => state.activeId);
   const designState = useConversationStore((state) =>
     state.activeId
       ? state.conversations[state.activeId]?.designState
@@ -120,8 +165,11 @@ export function DesignSystemPanel({
   const [error, setError] = useState<string | null>(null);
   const [customDraft, setCustomDraft] =
     useState<CustomDesignSystemDraft>(EMPTY_CUSTOM_DRAFT);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [page, setPage] = useState(1);
   const bodyRef = useRef<HTMLDivElement>(null);
   const catalogScrollRef = useRef(0);
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const zipInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
 
@@ -131,6 +179,11 @@ export function DesignSystemPanel({
     setError(null);
     setStaged(null);
   }, [open]);
+
+  useEffect(() => {
+    setSearchQuery("");
+    setPage(1);
+  }, [open, activeConversationId]);
 
   useEffect(() => {
     if (!open) return;
@@ -380,18 +433,74 @@ export function DesignSystemPanel({
   const applied =
     tokenContract.status === "ready" ? tokenContract.appliedSystem : undefined;
   const customRulesLength = rulesLength(customDraft);
-  const userSystemGroups = [
+
+  const catalogEntries = useMemo<CatalogEntry[]>(
+    () => [
+      ...BUNDLED_DESIGN_SYSTEMS.map((entry) => ({
+        source: "builtin" as const,
+        entry,
+      })),
+      ...imported
+        .filter((reference) => reference.source === "custom")
+        .map((reference) => ({ source: "custom" as const, reference })),
+      ...imported
+        .filter((reference) => reference.source === "imported")
+        .map((reference) => ({ source: "imported" as const, reference })),
+    ],
+    [imported],
+  );
+  const filteredCatalogEntries = useMemo(
+    () => filterCatalogEntries(catalogEntries, searchQuery),
+    [catalogEntries, searchQuery],
+  );
+  const totalPages = Math.max(
+    1,
+    Math.ceil(filteredCatalogEntries.length / DESIGN_SYSTEM_PAGE_SIZE),
+  );
+  const currentPage = Math.min(page, totalPages);
+  const pagedCatalogEntries = filteredCatalogEntries.slice(
+    (currentPage - 1) * DESIGN_SYSTEM_PAGE_SIZE,
+    currentPage * DESIGN_SYSTEM_PAGE_SIZE,
+  );
+  const visibleBuiltins = pagedCatalogEntries.flatMap((item) =>
+    item.source === "builtin" ? [item.entry] : [],
+  );
+  const visibleUserGroups = [
     {
       source: "custom" as const,
       label: t.designSystems.custom,
-      systems: imported.filter((item) => item.source === "custom"),
+      systems: pagedCatalogEntries.flatMap((item) =>
+        item.source === "custom" ? [item.reference] : [],
+      ),
     },
     {
       source: "imported" as const,
       label: t.designSystems.imported,
-      systems: imported.filter((item) => item.source === "imported"),
+      systems: pagedCatalogEntries.flatMap((item) =>
+        item.source === "imported" ? [item.reference] : [],
+      ),
     },
   ].filter((group) => group.systems.length > 0);
+
+  useEffect(() => {
+    if (page > totalPages) setPage(totalPages);
+  }, [page, totalPages]);
+
+  const changePage = (nextPage: number) => {
+    const boundedPage = Math.max(1, Math.min(nextPage, totalPages));
+    setPage(boundedPage);
+    requestAnimationFrame(() => {
+      if (bodyRef.current) bodyRef.current.scrollTop = 0;
+    });
+  };
+
+  const updateSearchQuery = (value: string) => {
+    setSearchQuery(value);
+    setPage(1);
+    if (value === "") {
+      requestAnimationFrame(() => searchInputRef.current?.focus());
+    }
+  };
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -408,6 +517,48 @@ export function DesignSystemPanel({
               : t.designSystems.description}
           </DialogDescription>
         </DialogHeader>
+
+        {view === "catalog" && (
+          <div className="shrink-0 border-b px-4 py-3 sm:px-6">
+            <label htmlFor="design-system-search" className="sr-only">
+              {t.designSystems.searchLabel}
+            </label>
+            <div className="relative">
+              <Search
+                size={15}
+                aria-hidden="true"
+                className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground"
+              />
+              <Input
+                ref={searchInputRef}
+                id="design-system-search"
+                value={searchQuery}
+                onChange={(event) => updateSearchQuery(event.target.value)}
+                placeholder={t.designSystems.searchPlaceholder}
+                className="pl-9 pr-9"
+              />
+              {searchQuery && (
+                <button
+                  type="button"
+                  aria-label={t.designSystems.clearSearch}
+                  onClick={() => updateSearchQuery("")}
+                  className="absolute right-2 top-1/2 inline-flex size-7 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  <X size={14} aria-hidden="true" />
+                </button>
+              )}
+            </div>
+            <p
+              aria-live="polite"
+              className="mt-2 text-xs text-muted-foreground"
+            >
+              {t.designSystems.searchResults
+                .replace("{count}", String(filteredCatalogEntries.length))
+                .replace("{page}", String(currentPage))
+                .replace("{pages}", String(totalPages))}
+            </p>
+          </div>
+        )}
 
         <div
           ref={bodyRef}
@@ -638,8 +789,13 @@ export function DesignSystemPanel({
                 </p>
               )}
 
+              {visibleBuiltins.length > 0 && (
+                <h3 className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                  {t.designSystems.builtin}
+                </h3>
+              )}
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                {BUNDLED_DESIGN_SYSTEMS.map((entry) => {
+                {visibleBuiltins.map((entry) => {
                   const isSelected = selected?.id === entry.id;
                   const isApplied = applied?.id === entry.id;
                   const isRecommended =
@@ -699,7 +855,7 @@ export function DesignSystemPanel({
                 })}
               </div>
 
-              {userSystemGroups.map((group) => (
+              {visibleUserGroups.map((group) => (
                 <div key={group.source} className="mt-6">
                   <h3 className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
                     {group.label}
@@ -744,12 +900,70 @@ export function DesignSystemPanel({
                 </div>
               ))}
 
+              {filteredCatalogEntries.length === 0 && (
+                <div className="rounded-xl border border-dashed p-8 text-center">
+                  <p className="text-sm text-muted-foreground">
+                    {t.designSystems.searchNoResults}
+                  </p>
+                  {searchQuery && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="mt-2"
+                      onClick={() => updateSearchQuery("")}
+                    >
+                      {t.designSystems.clearSearch}
+                    </Button>
+                  )}
+                </div>
+              )}
+
               <p className="mt-4 text-[11px] leading-relaxed text-muted-foreground">
                 {t.designSystems.sourceNotice}
               </p>
             </>
           )}
         </div>
+
+        {view === "catalog" && filteredCatalogEntries.length > 0 && (
+          <nav
+            aria-label={t.designSystems.paginationLabel}
+            className="shrink-0 flex items-center justify-between gap-3 border-t bg-background/95 px-4 py-3 backdrop-blur sm:px-6"
+          >
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              aria-label={t.designSystems.previousPage}
+              onClick={() => changePage(currentPage - 1)}
+              disabled={currentPage <= 1}
+            >
+              <ChevronLeft size={14} aria-hidden="true" />
+              <span className="sr-only sm:not-sr-only">
+                {t.designSystems.previousPage}
+              </span>
+            </Button>
+            <span className="text-xs text-muted-foreground">
+              {t.designSystems.pageIndicator
+                .replace("{page}", String(currentPage))
+                .replace("{pages}", String(totalPages))}
+            </span>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              aria-label={t.designSystems.nextPage}
+              onClick={() => changePage(currentPage + 1)}
+              disabled={currentPage >= totalPages}
+            >
+              <span className="sr-only sm:not-sr-only">
+                {t.designSystems.nextPage}
+              </span>
+              <ChevronRight size={14} aria-hidden="true" />
+            </Button>
+          </nav>
+        )}
 
         {view === "custom" && (
           <DialogFooter className="shrink-0 border-t bg-muted/20 px-4 py-4 sm:px-6">

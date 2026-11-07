@@ -110,8 +110,10 @@ describe("project import staging", () => {
         JSON.stringify({
           dependencies: { react: "19.0.0" },
           devDependencies: { vite: "4.2.0", typescript: "5.0.0" },
+          scripts: { dev: "vite" },
         }),
       ),
+      sourceFile("demo/index.html", "<main />"),
       sourceFile("demo/.gitignore", "node_modules\n"),
       sourceFile("demo/.env", "API_KEY=secret-sentinel-456"),
       sourceFile("demo/.env.example", "API_KEY="),
@@ -129,6 +131,7 @@ describe("project import staging", () => {
     expect(Object.keys(staged.files).sort()).toEqual([
       ".env.example",
       ".gitignore",
+      "index.html",
       "package.json",
       "src/App.tsx",
     ]);
@@ -139,7 +142,7 @@ describe("project import staging", () => {
     );
     expect(staged.report).toMatchObject({
       redactedFiles: 1,
-      importedFiles: 5,
+      importedFiles: 6,
       skipped: { ignored: 2, sensitive: 1, binary: 0, symlink: 0 },
     });
     expect(staged.assets).toHaveLength(1);
@@ -197,76 +200,50 @@ describe("project import staging", () => {
     expect(dependencyGetFile).not.toHaveBeenCalled();
   });
 
-  it("stages compressed project asset bytes and their final digest", async () => {
-    const sourceBytes = new Uint8Array([
+  it("preserves project image bytes regardless of attachment compression settings", async () => {
+    const bytes = new Uint8Array([
       0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2,
     ]);
-    const compressedBytes = sourceBytes.subarray(0, 8);
-    useSettingsStore.setState((state) => ({
-      system: {
-        ...state.system,
-        imageCompressionQuality: 0.42,
-      },
-    }));
-    compressionMocks.compress.mockImplementation(
-      async (file: File) =>
-        new File([compressedBytes], file.name, {
-          type: file.type,
-          lastModified: file.lastModified,
-        }),
-    );
-
     const staged = await stageProjectFromFileList([
       sourceFile("demo/index.html", "<main />"),
-      sourceFile("demo/public/hero.png", sourceBytes, 123),
+      sourceFile("demo/public/hero.png", bytes, 123),
     ]);
-
-    expect(compressionMocks.compress).toHaveBeenCalledOnce();
-    expect(compressionMocks.compress).toHaveBeenCalledWith(
-      expect.objectContaining({
-        name: "hero.png",
-        type: "image/png",
-        size: sourceBytes.byteLength,
-        lastModified: 123,
-      }),
-      { enabled: true, quality: 0.42 },
-    );
+    expect(compressionMocks.compress).not.toHaveBeenCalled();
     expect(staged.assets?.[0]).toMatchObject({
       path: "public/hero.png",
       mimeType: "image/png",
-      size: compressedBytes.byteLength,
-      digest: await sha256(compressedBytes),
+      size: bytes.length,
+      digest: await sha256(bytes),
     });
+    expect(new Uint8Array(await staged.assets![0].blob.arrayBuffer())).toEqual(
+      bytes,
+    );
     expect(staged.report.totalBytes).toBe(
-      encoder.encode("<main />").byteLength + compressedBytes.byteLength,
+      encoder.encode("<main />").byteLength + bytes.length,
     );
   });
 
-  it("passes disabled compression settings while preserving project asset bytes", async () => {
-    const sourceBytes = new Uint8Array([
-      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1,
-    ]);
-    useSettingsStore.setState((state) => ({
-      system: {
-        ...state.system,
-        imageCompressionEnabled: false,
-        imageCompressionQuality: 0.37,
-      },
-    }));
-
+  it("stages fonts and animated images without decoding or altering their bytes", async () => {
+    const font = new Uint8Array(48);
+    font.set(encoder.encode("wOF2"));
+    const gif = encoder.encode("GIF89a-test-image");
     const staged = await stageProjectFromFileList([
-      sourceFile("demo/index.html", "<main />"),
-      sourceFile("demo/public/logo.png", sourceBytes),
+      sourceFile(
+        "demo/index.html",
+        '<style>@font-face{font-family:demo;src:url(/demo.woff2)}</style><img src="/animation.gif">',
+      ),
+      sourceFile("demo/public/demo.woff2", font),
+      sourceFile("demo/public/animation.gif", gif),
     ]);
-
-    expect(compressionMocks.compress).toHaveBeenCalledWith(
-      expect.objectContaining({ size: sourceBytes.byteLength }),
-      { enabled: false, quality: 0.37 },
+    expect(staged.assets?.map((asset) => asset.mimeType)).toEqual([
+      "font/woff2",
+      "image/gif",
+    ]);
+    expect(staged.report.skipped.binary).toBe(0);
+    expect(new Uint8Array(await staged.assets![0].blob.arrayBuffer())).toEqual(
+      font,
     );
-    expect(staged.assets?.[0]).toMatchObject({
-      size: sourceBytes.byteLength,
-      digest: await sha256(sourceBytes),
-    });
+    expect(compressionMocks.compress).not.toHaveBeenCalled();
   });
 
   it("strips a ZIP root folder and rejects unsafe paths and compression bombs", async () => {
@@ -417,11 +394,15 @@ describe("project preview inference", () => {
     [{ devDependencies: { vite: "4.2.0" } }, {}, "vite"],
     [{ main: "index.js" }, { "index.js": "" }, "node"],
   ])(
-    "detects a supported Sandpack stack as %s",
+    "detects a supported Sandpack stack with a runnable entry as %s",
     (packageJson, files, template) => {
       expect(
         inferProjectPreview({
-          "package.json": JSON.stringify(packageJson),
+          "package.json": JSON.stringify({
+            scripts: { dev: "preview" },
+            ...packageJson,
+          }),
+          "index.html": "<main />",
           ...files,
         }),
       ).toEqual({ template, previewMode: "sandpack" });

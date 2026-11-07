@@ -29,7 +29,7 @@ const tools: ToolSet = {
 };
 
 describe("local Host Tool Authority", () => {
-  it("exposes and enforces complete blueprint pages for API and Local CLI tools", async () => {
+  it("shares tolerant draft and patch schemas across API and Local CLI tools", async () => {
     const apiSchema = asSchema(
       DESIGN_HOST_TOOLS.update_project_design.inputSchema,
     );
@@ -38,49 +38,44 @@ describe("local Host Tool Authority", () => {
       mode: "chat",
       platform: "desktop",
     });
-    const jsonSchema = await apiSchema.jsonSchema;
-    expect(jsonSchema).toMatchObject({
-      properties: {
-        document: {
-          properties: {
-            pages: {
-              items: {
-                properties: {
-                  responsibility: { type: "string", minLength: 1 },
-                },
-                required: expect.arrayContaining(["responsibility"]),
-              },
-            },
-          },
+    expect(local.get("update_project_design")?.spec.inputSchema).toEqual(
+      await apiSchema.jsonSchema,
+    );
+    for (const input of [
+      { patch: { pages: [{ id: "home" }] } },
+      {
+        patch: {
+          pages: [
+            { id: "detail", route: "#/商品/[id]", flowIds: ["undefined-flow"] },
+          ],
         },
       },
+      { expected_revision: 1, document: { buildProgress: { percent: 20 } } },
+      { document: { pageCount: 1, flowCount: 2, scenarioCount: 1 } },
+      {
+        patch: { pages: [{ id: "home", name: "Updated" }] },
+        remove: { pages: ["old"] },
+      },
+    ]) {
+      const api = await apiSchema.validate?.(input);
+      expect(api).toMatchObject({ success: true });
+      expect(await local.validate("update_project_design", input)).toEqual(api);
+    }
+    const patch = {
+      patch: {
+        pages: [{ id: "home", name: "New" }],
+        buildProgress: { percent: 20 },
+      },
+    };
+    expect(await apiSchema.validate?.(patch)).toEqual({
+      success: true,
+      value: patch,
     });
-    expect(local.get("update_project_design")?.spec.inputSchema).toEqual(
-      jsonSchema,
-    );
-
-    const page = {
-      id: "home",
-      route: "/",
-      kind: "home",
-      defaultScenario: "default",
-    };
-    const document = {
-      schemaVersion: 1,
-      productGoal: "Introduce the product",
-      audience: "New customers",
-      revision: 1,
-      pages: [page],
-      layouts: [],
-      sharedUiRefs: [],
-      flows: [],
-      scenarios: [{ id: "default", name: "Default", kind: "default" }],
-      buildProgress: { status: "planned", percent: 0 },
-    };
-    for (const responsibility of [undefined, ""]) {
-      const input = {
-        document: { ...document, pages: [{ ...page, responsibility }] },
-      };
+    for (const input of [
+      { patch: { pages: [{ id: "home", filePaths: ["../escape.tsx"] }] } },
+      { patch: { pages: [{ id: "home", responsibility: 42 }] } },
+      { patch: {}, document: {} },
+    ]) {
       expect(await apiSchema.validate?.(input)).toMatchObject({
         success: false,
       });
@@ -88,26 +83,6 @@ describe("local Host Tool Authority", () => {
         await local.validate("update_project_design", input),
       ).toMatchObject({ success: false });
     }
-    const valid = {
-      document: {
-        ...document,
-        pages: [
-          { ...page, responsibility: "Explain the product and next step" },
-        ],
-      },
-    };
-    expect(await apiSchema.validate?.(valid)).toMatchObject({
-      success: true,
-      value: {
-        document: {
-          schemaVersion: "open-builder-design-project/v1",
-          buildProgress: { status: "not-started" },
-        },
-      },
-    });
-    expect(await local.validate("update_project_design", valid)).toMatchObject({
-      success: true,
-    });
   });
 
   it("serializes the exact Web Host run authority", async () => {

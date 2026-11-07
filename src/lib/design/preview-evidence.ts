@@ -1,3 +1,4 @@
+import { PROTOTYPE_ROUTE_MAX_LENGTH } from "./prototype-route";
 import { isCompressibleImageMimeType } from "../images/formats";
 import { prepareScreenshot, readScreenshotImage } from "../images/screenshot";
 import type {
@@ -14,6 +15,9 @@ import {
   isSafePrototypePreviewRoute,
   sanitizePrototypePreviewTarget,
   prototypePreviewTargetsEqual,
+  sanitizePreviewCaptureGeometry,
+  type PreviewCaptureGeometry,
+  type PreviewCaptureScope,
 } from "./preview-runtime";
 import type {
   DesignBridgeCaptureResult,
@@ -21,7 +25,7 @@ import type {
 } from "./preview-bridge";
 import type { PrototypePreviewTarget } from "./preview-runtime";
 
-import { isPreviewViewportSize } from "./preview-bridge";
+import { captureImageMetadata, isPreviewViewportSize } from "./preview-bridge";
 
 export const PREVIEW_EVIDENCE_KIND = "preview_evidence_v1" as const;
 
@@ -31,7 +35,10 @@ export interface PreviewEvidenceSummaryItem {
     mimeType: DesignBridgeCaptureResult["mimeType"];
     bytes: number;
     digest: string;
+    width?: number;
+    height?: number;
   };
+  capture?: PreviewCaptureGeometry;
   viewport: DesignBridgeCaptureResult["viewport"];
   semantic: {
     route: string;
@@ -136,6 +143,41 @@ export function isPreviewEvidenceSummary(
     ) {
       return false;
     }
+    const geometry =
+      entry.capture === undefined
+        ? undefined
+        : sanitizePreviewCaptureGeometry(entry.capture);
+    if (entry.capture !== undefined && !geometry) return false;
+    const hasImageSize =
+      entry.image?.width !== undefined || entry.image?.height !== undefined;
+    if (
+      (geometry && !hasImageSize) ||
+      (hasImageSize &&
+        (!Number.isInteger(entry.image.width) ||
+          !Number.isInteger(entry.image.height) ||
+          entry.image.width! < 1 ||
+          entry.image.width! > 2_000 ||
+          entry.image.height! < 1 ||
+          entry.image.height! > 4_096 ||
+          entry.image.width! * entry.image.height! > 6_000_000)) ||
+      (geometry &&
+        (entry.image.width !==
+          Math.max(1, Math.floor(geometry.region.width * geometry.scale)) ||
+          entry.image.height !==
+            Math.max(1, Math.floor(geometry.region.height * geometry.scale)) ||
+          entry.viewport?.capturedHeight !== geometry.region.height ||
+          (geometry.scope === "full-page" &&
+            (geometry.region.x !== 0 ||
+              geometry.region.y !== 0 ||
+              geometry.region.width < entry.viewport.width ||
+              geometry.region.height < entry.viewport.height ||
+              geometry.region.height !== entry.viewport.fullHeight)) ||
+          (geometry.scope === "viewport" &&
+            (geometry.region.width !== entry.viewport.width ||
+              geometry.region.height !== entry.viewport.height))))
+    ) {
+      return false;
+    }
     return (
       typeof entry.image?.mimeType === "string" &&
       isCompressibleImageMimeType(entry.image.mimeType) &&
@@ -152,17 +194,26 @@ export function isPreviewEvidenceSummary(
       ) &&
       Number.isInteger(entry.viewport.capturedHeight) &&
       entry.viewport.capturedHeight >= 1 &&
-      entry.viewport.capturedHeight <= 4_096 &&
+      entry.viewport.capturedHeight <= (geometry ? 1_000_000 : 4_096) &&
       Number.isInteger(entry.viewport.fullHeight) &&
       entry.viewport.fullHeight >= entry.viewport.capturedHeight &&
       entry.viewport.fullHeight <= 1_000_000 &&
-      entry.viewport.truncated ===
-        entry.viewport.capturedHeight < entry.viewport.fullHeight &&
+      typeof entry.viewport.truncated === "boolean" &&
+      (geometry
+        ? geometry.scope === "full-page"
+          ? entry.viewport.truncated === false
+          : !(
+              geometry.region.x > 0 ||
+              geometry.region.y > 0 ||
+              geometry.region.height < entry.viewport.fullHeight
+            ) || entry.viewport.truncated
+        : entry.viewport.truncated ===
+          entry.viewport.capturedHeight < entry.viewport.fullHeight) &&
       typeof entry.semantic?.route === "string" &&
       ((entry.semantic.route.startsWith("/") &&
         !entry.semantic.route.startsWith("//")) ||
         isSafePrototypePreviewRoute(entry.semantic.route)) &&
-      entry.semantic.route.length <= 256 &&
+      entry.semantic.route.length <= PROTOTYPE_ROUTE_MAX_LENGTH &&
       (entry.semantic.prototypeIdentity === undefined ||
         (target !== undefined &&
           sanitizePrototypePreviewTarget(entry.semantic.prototypeIdentity) !==
@@ -199,6 +250,7 @@ export interface CapturePreviewEvidenceInput {
   previewMode: ProjectPreviewMode;
   viewports: readonly PreviewView[];
   target?: PrototypePreviewTarget;
+  scope?: PreviewCaptureScope;
   signal?: AbortSignal;
 }
 
@@ -244,17 +296,20 @@ async function sha256Base64(base64: string): Promise<string> {
   ).join("");
 }
 
-async function summarizeCapture(
+export async function summarizeCapture(
   capture: DesignBridgeCaptureResult,
 ): Promise<PreviewEvidenceSummaryItem> {
   const base64 = imageBase64(capture.dataUrl);
+  const image = captureImageMetadata(capture.dataUrl);
   return {
     view: capture.viewport.name,
     image: {
       mimeType: capture.mimeType,
       bytes: decodedByteLength(base64),
       digest: await sha256Base64(base64),
+      ...(image ? { width: image.width, height: image.height } : {}),
     },
+    ...(capture.capture ? { capture: capture.capture } : {}),
     viewport: { ...capture.viewport },
     semantic: {
       route: capture.semanticSnapshot.route,
@@ -334,6 +389,7 @@ export async function capturePreviewEvidence(
       generation,
       viewports,
       target,
+      scope: input.scope ?? "full-page",
       signal: input.signal,
     });
     const captures: DesignBridgeCaptureResult[] = [];

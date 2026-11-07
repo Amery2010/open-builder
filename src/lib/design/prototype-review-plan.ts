@@ -1,50 +1,57 @@
 import type { ProjectDesign } from "./project-design";
-import { deriveCoverageTargets } from "./project-design";
 import { DESIGN_REVIEW_VIEWPORTS } from "./preview-capture";
 import type { DesignReviewViewport } from "./preview-capture";
 import type { PrototypePreviewTarget } from "./preview-runtime";
+import {
+  resolvePrototypeRoute,
+  type PrototypeRouteResolution,
+} from "./prototype-route";
 import { MAX_DESIGN_REVIEW_SCREENSHOTS } from "./review";
 
 export interface PrototypeReviewCapturePlanItem {
   target: PrototypePreviewTarget;
   viewport: DesignReviewViewport;
 }
-
-function target(
-  pageId: string,
-  route: string,
-  scenarioId: string,
-): PrototypePreviewTarget {
-  return { pageId, route: `#${route}?scenario=${scenarioId}`, scenarioId };
+export type PrototypeReviewSkippedTarget = Extract<
+  PrototypeRouteResolution,
+  { status: "unavailable" }
+> & { pageId: string };
+export interface PrototypeReviewCaptureReport {
+  targets: PrototypeReviewCapturePlanItem[];
+  skipped: PrototypeReviewSkippedTarget[];
 }
 
-/** Build a stable, priority-ordered plan. Missing overflow remains unreviewed. */
-export function buildPrototypeReviewCapturePlan(
+/** Missing information skips only that target, without claiming a successful check. */
+export function buildPrototypeReviewCaptureReport(
   design: ProjectDesign,
   affectedPageIds?: readonly string[],
-): PrototypeReviewCapturePlanItem[] {
-  const viewports = new Map(
-    DESIGN_REVIEW_VIEWPORTS.map((viewport) => [viewport.name, viewport]),
-  );
+): PrototypeReviewCaptureReport {
   const scenarios = new Map(
     design.scenarios.map((scenario) => [scenario.id, scenario]),
   );
-  const affected = affectedPageIds?.length
-    ? new Set(affectedPageIds)
-    : undefined;
+  const affected = affectedPageIds ? new Set(affectedPageIds) : undefined;
   const pages = design.pages.filter(
     (page) => !affected || affected.has(page.id),
   );
-  const defaultTargets = pages.map((page) =>
-    target(page.id, page.route, page.defaultScenario),
-  );
-  const criticalTargets = deriveCoverageTargets(design)
-    .filter((candidate) => {
-      const kind = scenarios.get(candidate.scenarioId)?.kind;
-      return (
-        candidate.scenarioId !==
-          pages.find((page) => page.id === candidate.pageId)?.defaultScenario &&
-        (!affected || affected.has(candidate.pageId)) &&
+  const defaults: PrototypePreviewTarget[] = [];
+  const critical: PrototypePreviewTarget[] = [];
+  const skipped: PrototypeReviewSkippedTarget[] = [];
+  const resolve = (
+    pageId: string,
+    scenarioId: string | undefined,
+    targets: PrototypePreviewTarget[],
+  ) => {
+    const result = resolvePrototypeRoute(design, pageId, scenarioId);
+    if (result.status === "ready") targets.push(result.target);
+    else skipped.push({ ...result, pageId, scenarioId });
+  };
+  for (const page of pages) {
+    resolve(page.id, page.defaultScenario, defaults);
+    for (const scenarioId of page.scenarioIds) {
+      if (scenarioId === (page.defaultScenario ?? "default")) continue;
+      const scenario = scenarios.get(scenarioId);
+      if (
+        !scenario ||
         [
           "empty",
           "loading",
@@ -52,24 +59,34 @@ export function buildPrototypeReviewCapturePlan(
           "success",
           "error",
           "failure",
-        ].includes(kind ?? "")
-      );
-    })
-    .map((candidate) =>
-      target(candidate.pageId, candidate.route, candidate.scenarioId),
-    );
-  const plan: PrototypeReviewCapturePlanItem[] = [];
+        ].includes(scenario.kind ?? "")
+      ) {
+        resolve(page.id, scenarioId, critical);
+      }
+    }
+  }
+  const targets: PrototypeReviewCapturePlanItem[] = [];
   const add = (
-    targets: readonly PrototypePreviewTarget[],
-    viewportName: "desktop" | "tablet" | "mobile",
+    items: readonly PrototypePreviewTarget[],
+    name: "desktop" | "tablet" | "mobile",
   ) => {
-    const viewport = viewports.get(viewportName);
-    if (!viewport) return;
-    for (const candidate of targets) plan.push({ target: candidate, viewport });
+    const viewport = DESIGN_REVIEW_VIEWPORTS.find(
+      (value) => value.name === name,
+    );
+    if (viewport)
+      for (const target of items) targets.push({ target, viewport });
   };
-  add(defaultTargets, "desktop");
-  add(criticalTargets, "desktop");
-  add(defaultTargets, "tablet");
-  add(defaultTargets, "mobile");
-  return plan.slice(0, MAX_DESIGN_REVIEW_SCREENSHOTS);
+  add(defaults, "desktop");
+  add(critical, "desktop");
+  add(defaults, "tablet");
+  add(defaults, "mobile");
+  return { targets: targets.slice(0, MAX_DESIGN_REVIEW_SCREENSHOTS), skipped };
+}
+
+/** Compatibility adapter for callers that only consume executable targets. */
+export function buildPrototypeReviewCapturePlan(
+  design: ProjectDesign,
+  affectedPageIds?: readonly string[],
+): PrototypeReviewCapturePlanItem[] {
+  return buildPrototypeReviewCaptureReport(design, affectedPageIds).targets;
 }

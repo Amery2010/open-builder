@@ -54,6 +54,7 @@ import { detectRuntimePlatform } from "../runtime/platform";
 import {
   DESIGN_DIAGNOSTIC_TOOLS,
   DESIGN_HOST_TOOLS,
+  PREVIEW_CAPTURE_TOOLS,
   type RuntimePlatform,
 } from "../ai/tools-schema";
 import type { DesignDiagnosticToolName } from "../design/diagnostics";
@@ -62,13 +63,11 @@ import {
   type DesignReviewReport,
 } from "../design/review";
 import { SUBMIT_DESIGN_REVIEW_TOOL } from "../design/review-tool";
-import { SUBMIT_DESIGN_CONTRACT_TOOL } from "../design/run-contract-tool";
 import type { DesignAdherenceInput } from "../design/adherence";
 import {
-  applyProjectDesignUpdate,
+  applyProjectDesignToolRequest,
   PROJECT_DESIGN_PATH,
 } from "../design/project-design";
-import { isPrototypeProject } from "../design/prototype-starter";
 
 export interface ToolFeatures {
   builtinSearch: boolean;
@@ -104,16 +103,13 @@ export interface BuildToolHandlersArgs {
     context: ToolExecutionContext,
   ) => Promise<boolean>;
   onDesignReviewSubmitted?: (report: DesignReviewReport) => void;
-  submitDesignContract?: (
-    args: unknown,
-    context: ToolExecutionContext,
-  ) => string;
   getDesignHealthContext?: () =>
     Omit<DesignAdherenceInput, "files"> | undefined;
   setDefaultPreviewView?: NonNullable<GeneratorOptions["customToolHandler"]>;
   updateDesignTokens?: NonNullable<GeneratorOptions["customToolHandler"]>;
   onProjectDesignUpdated?: (files: ProjectFiles) => void;
   capturePreviewEvidence?: NonNullable<GeneratorOptions["customToolHandler"]>;
+  capturePreviewSequence?: NonNullable<GeneratorOptions["customToolHandler"]>;
   designDiagnostics?: NonNullable<GeneratorOptions["customToolHandler"]>;
 }
 
@@ -138,12 +134,12 @@ export async function buildToolHandlers(
     developerSkillScriptsEnabled,
     requestRegistryOriginApproval,
     onDesignReviewSubmitted,
-    submitDesignContract,
     getDesignHealthContext,
     setDefaultPreviewView,
     updateDesignTokens,
     onProjectDesignUpdated,
     capturePreviewEvidence,
+    capturePreviewSequence,
     designDiagnostics,
   } = args;
   const runtimePlatform = await detectRuntimePlatform();
@@ -203,25 +199,10 @@ export async function buildToolHandlers(
     : null;
   const updateProjectDesignHandler = guardedFilesBridge
     ? (handlerArgs: unknown): ToolExecutionOutput => {
-        const input = handlerArgs as {
-          document?: unknown;
-          expected_revision?: string | number;
-        };
         const currentFiles = guardedFilesBridge.getFiles();
-        if (!isPrototypeProject(currentFiles)) {
-          return {
-            text: JSON.stringify({
-              ok: false,
-              error:
-                "Project Design is available only after initializing the complete prototype starter.",
-            }),
-            isError: true,
-          };
-        }
-        const updated = applyProjectDesignUpdate(
+        const updated = applyProjectDesignToolRequest(
           currentFiles,
-          input.document,
-          input.expected_revision,
+          handlerArgs,
         );
         if (!updated.ok) {
           return {
@@ -247,6 +228,7 @@ export async function buildToolHandlers(
           pages: updated.design.pages.length,
           flows: updated.design.flows.length,
           progress: updated.design.buildProgress,
+          warnings: updated.warnings,
         };
         return { text: JSON.stringify(result), structuredContent: result };
       }
@@ -326,13 +308,7 @@ export async function buildToolHandlers(
       submitDesignReviewHandler("submit_design_review", handlerArgs),
     );
   }
-  if (submitDesignContract) {
-    runtimeHandlers.set("submit_design_contract", (handlerArgs, context) =>
-      context
-        ? submitDesignContract(handlerArgs, context)
-        : "Error: submit_design_contract is unavailable outside a Host run.",
-    );
-  }
+
   if (assetSearchHandler) {
     runtimeHandlers.set("image_search", (handlerArgs, context) =>
       assetSearchHandler("image_search", handlerArgs, context?.signal),
@@ -363,6 +339,11 @@ export async function buildToolHandlers(
   if (updateProjectDesignHandler) {
     runtimeHandlers.set("update_project_design", (handlerArgs) =>
       updateProjectDesignHandler(handlerArgs),
+    );
+  }
+  if (capturePreviewSequence) {
+    runtimeHandlers.set("capture_preview_sequence", (handlerArgs, context) =>
+      capturePreviewSequence("capture_preview_sequence", handlerArgs, context),
     );
   }
   if (capturePreviewEvidence) {
@@ -400,7 +381,6 @@ export async function buildToolHandlers(
     ...MEMORY_TOOLS,
     ...DISPATCH_SUBAGENT_TOOL,
     ...(onDesignReviewSubmitted ? SUBMIT_DESIGN_REVIEW_TOOL : {}),
-    ...(submitDesignContract ? SUBMIT_DESIGN_CONTRACT_TOOL : {}),
     ...(setDefaultPreviewView
       ? {
           set_default_preview_view: DESIGN_HOST_TOOLS.set_default_preview_view,
@@ -412,6 +392,7 @@ export async function buildToolHandlers(
     ...(updateProjectDesignHandler
       ? { update_project_design: DESIGN_HOST_TOOLS.update_project_design }
       : {}),
+    ...(capturePreviewSequence ? PREVIEW_CAPTURE_TOOLS : {}),
     ...(capturePreviewEvidence
       ? {
           capture_preview_evidence: DESIGN_HOST_TOOLS.capture_preview_evidence,

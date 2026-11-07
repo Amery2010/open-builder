@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "open-builder-design-system/v1",
+  "id": "cassette-futurism",
+  "name": "Cassette Futurism",
+  "category": "mixed",
+  "description": "An imagined analog future: graphite equipment, cream faceplates, amber signal lamps, recessed tracks and physically separated switches. Let labels, screws and grooves explain the controls rather than decorate unrelated content.",
+  "files": {
+    "design": "DESIGN.md",
+    "tokens": "tokens.css"
+  }
+}

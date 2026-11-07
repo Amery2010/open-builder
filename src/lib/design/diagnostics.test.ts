@@ -13,7 +13,10 @@ import type {
   DesignBridgeCaptureResult,
   DesignPreviewSemanticElement,
 } from "./preview-bridge";
-import { registerPreviewRuntime } from "./preview-runtime";
+import {
+  registerPreviewRuntime,
+  type PreviewCaptureScope,
+} from "./preview-runtime";
 import type { PreviewEvidenceSummary } from "./preview-evidence";
 import type { DesignContract } from "./run-contract";
 
@@ -160,19 +163,26 @@ function context(overrides: Partial<DesignDiagnosticContext> = {}) {
 
 function registerRuntime(elements: DesignPreviewSemanticElement[] = []) {
   let currentGeneration: string | undefined;
+  const scopes: (PreviewCaptureScope | undefined)[] = [];
   unregisters.push(
     registerPreviewRuntime("conversation-a", {
       getGeneration: () => currentGeneration,
       prepare: async (generation) => {
         currentGeneration = generation;
       },
-      capture: async (viewports, generation) => ({
-        generation,
-        captures: viewports.map((view) => capture(view, generation, elements)),
-        errors: [],
-      }),
+      capture: async (viewports, generation, _signal, _target, options) => {
+        scopes.push(options?.scope);
+        return {
+          generation,
+          captures: viewports.map((view) =>
+            capture(view, generation, elements),
+          ),
+          errors: [],
+        };
+      },
     }),
   );
+  return scopes;
 }
 
 describe("Design diagnostics", () => {
@@ -193,7 +203,7 @@ describe("Design diagnostics", () => {
         },
       },
       tokenContract: { status: "ready", path: "tokens.css" },
-      acceptedRunContract: {
+      designRunContext: {
         surfaceMode: "operate",
         changeMode: "extend",
       },
@@ -336,88 +346,99 @@ describe("Design diagnostics", () => {
     expect(accessibility.text).not.toContain("data:image");
   });
 
-  it("compares current evidence with a persisted Conversation baseline", async () => {
-    registerRuntime();
-    const baseline: PreviewEvidenceSummary = {
-      kind: "preview_evidence_v1",
-      status: "complete",
-      generation: "b".repeat(64),
-      evidence: [
-        {
-          view: "mobile",
-          image: {
-            mimeType: "image/webp",
-            bytes: 30,
-            digest: "c".repeat(64),
-          },
-          viewport: {
-            name: "mobile",
-            width: 375,
-            height: 667,
-            capturedHeight: 667,
-            fullHeight: 667,
-            truncated: false,
-          },
-          semantic: {
-            route: "/before",
-            horizontalOverflow: false,
-            fonts: "ready",
-            elementCount: 0,
-          },
-        },
-      ],
-      errors: [],
-      placeholder: "run only",
-    };
-    const history: Message[] = [
-      {
-        role: "assistant",
-        content: null,
-        tool_calls: [
+  it.each(["viewport", "full-page"] as const)(
+    "compares current evidence using the persisted %s baseline scope",
+    async (scope) => {
+      const scopes = registerRuntime();
+      const baseline: PreviewEvidenceSummary = {
+        kind: "preview_evidence_v1",
+        status: "complete",
+        generation: "b".repeat(64),
+        evidence: [
           {
-            id: "baseline-call",
-            type: "function",
-            function: {
-              name: "capture_preview_evidence",
-              arguments: '{"viewports":["mobile"]}',
+            view: "mobile",
+            image: {
+              mimeType: "image/webp",
+              bytes: 30,
+              digest: "c".repeat(64),
+              width: 375,
+              height: 667,
+            },
+            capture: {
+              scope,
+              region: { x: 0, y: 0, width: 375, height: 667 },
+              scale: 1,
+            },
+            viewport: {
+              name: "mobile",
+              width: 375,
+              height: 667,
+              capturedHeight: 667,
+              fullHeight: 667,
+              truncated: false,
+            },
+            semantic: {
+              route: "/before",
+              horizontalOverflow: false,
+              fonts: "ready",
+              elementCount: 0,
             },
           },
         ],
-      },
-      {
-        role: "tool",
-        content: JSON.stringify(baseline),
-        tool_call_id: "baseline-call",
-        toolOutput: {
-          text: JSON.stringify(baseline),
-          structuredContent: baseline,
-        },
-      },
-    ];
-
-    const result = await executeDesignDiagnostic(
-      "compare_preview_states",
-      { viewports: ["mobile"] },
-      context({ history }),
-    );
-
-    expect(result.structuredContent).toMatchObject({
-      kind: "preview_comparison_v1",
-      status: "changed",
-      baselineGeneration: baseline.generation,
-      comparisons: [
+        errors: [],
+        placeholder: "run only",
+      };
+      const history: Message[] = [
         {
-          view: "mobile",
-          status: "changed",
-          changes: {
-            imageDigestChanged: true,
-            horizontalOverflowChanged: true,
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id: "baseline-call",
+              type: "function",
+              function: {
+                name: "capture_preview_evidence",
+                arguments: '{"viewports":["mobile"]}',
+              },
+            },
+          ],
+        },
+        {
+          role: "tool",
+          content: JSON.stringify(baseline),
+          tool_call_id: "baseline-call",
+          toolOutput: {
+            text: JSON.stringify(baseline),
+            structuredContent: baseline,
           },
         },
-      ],
-    });
-    expect(result.text).not.toContain("data:image");
-  });
+      ];
+
+      const result = await executeDesignDiagnostic(
+        "compare_preview_states",
+        { viewports: ["mobile"] },
+        context({ history }),
+      );
+      expect(scopes).toEqual([scope]);
+
+      expect(result.structuredContent).toMatchObject({
+        kind: "preview_comparison_v1",
+        status: "changed",
+        baselineGeneration: baseline.generation,
+        comparisons: [
+          {
+            view: "mobile",
+            status: "changed",
+            changes: {
+              imageDigestChanged: true,
+              horizontalOverflowChanged: true,
+            },
+          },
+        ],
+      });
+      expect(result.text).not.toContain("data:image");
+    },
+  );
 
   it("keeps static consistency available while runtime diagnostics fail closed", async () => {
     const codeOnly = context({ previewMode: "code-only" });

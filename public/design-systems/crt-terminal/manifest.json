@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "open-builder-design-system/v1",
+  "id": "crt-terminal",
+  "name": "CRT Terminal",
+  "category": "product",
+  "description": "A phosphor terminal with green command text, sparse amber warnings and sober black space. Monospace alignment, command prompts and a restrained scanline texture create the identity; readable text stays sharp.",
+  "files": {
+    "design": "DESIGN.md",
+    "tokens": "tokens.css"
+  }
+}

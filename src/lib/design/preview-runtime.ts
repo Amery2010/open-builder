@@ -1,11 +1,79 @@
+import {
+  PROTOTYPE_ROUTE_MAX_LENGTH,
+  isSafePrototypeHashRoute,
+} from "./prototype-route";
 import type {
   ProjectFiles,
   ProjectPreviewMode,
   PreviewView,
 } from "../../types";
-import type { DesignBridgeCaptureResult } from "./preview-bridge";
+import type {
+  DesignBridgeCaptureResult,
+  DesignBridgeAnnotationCaptureResult,
+} from "./preview-bridge";
 
-export type PreviewCaptureOwner = "tool" | "manual-review" | "automatic-review";
+export type PreviewCaptureScope = "viewport" | "full-page";
+
+export interface PreviewCaptureOptions {
+  scope?: PreviewCaptureScope;
+  output?: "evidence" | "annotation";
+}
+
+export interface PreviewCaptureGeometry {
+  scope: PreviewCaptureScope;
+  region: { x: number; y: number; width: number; height: number };
+  scale: number;
+}
+
+/** Geometry stays in CSS pixels even when the encoded evidence is scaled. */
+export function sanitizePreviewCaptureGeometry(
+  value: unknown,
+): PreviewCaptureGeometry | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  if (raw.scope !== "viewport" && raw.scope !== "full-page") return null;
+  if (
+    !raw.region ||
+    typeof raw.region !== "object" ||
+    Array.isArray(raw.region)
+  )
+    return null;
+  const region = raw.region as Record<string, unknown>;
+  for (const key of ["x", "y", "width", "height"] as const) {
+    const number = region[key];
+    if (
+      typeof number !== "number" ||
+      !Number.isFinite(number) ||
+      number < (key === "x" || key === "y" ? 0 : 1) ||
+      number > 1_000_000
+    )
+      return null;
+    if ((key === "width" || key === "height") && !Number.isInteger(number))
+      return null;
+  }
+  if (
+    typeof raw.scale !== "number" ||
+    !Number.isFinite(raw.scale) ||
+    raw.scale <= 0 ||
+    raw.scale > 1
+  )
+    return null;
+  if (raw.scope === "full-page" && (region.x !== 0 || region.y !== 0))
+    return null;
+  return {
+    scope: raw.scope,
+    region: {
+      x: region.x as number,
+      y: region.y as number,
+      width: region.width as number,
+      height: region.height as number,
+    },
+    scale: raw.scale,
+  };
+}
+
+export type PreviewCaptureOwner =
+  "tool" | "manual-review" | "automatic-review" | "annotation";
 
 /**
  * Declarative identity for one page and one named prototype scenario.
@@ -21,30 +89,10 @@ export interface PrototypePreviewTarget {
 
 export type PrototypePreviewIdentity = PrototypePreviewTarget;
 
-export const PROTOTYPE_PREVIEW_ROUTE_MAX_LENGTH = 256;
+export const PROTOTYPE_PREVIEW_ROUTE_MAX_LENGTH = PROTOTYPE_ROUTE_MAX_LENGTH;
 export const PROTOTYPE_PREVIEW_ID_MAX_LENGTH = 128;
-
 const PROTOTYPE_PREVIEW_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
-const SAFE_HASH_ROUTE_PATTERN =
-  /^#\/(?:[A-Za-z0-9._~!$&'()*+,;=:@/?]|%[0-9A-Fa-f]{2})*$/;
-
-/** Returns true only for a bounded, same-document HashRouter route. */
-export function isSafePrototypePreviewRoute(value: unknown): boolean {
-  if (
-    typeof value === "string" &&
-    value.length > 0 &&
-    value.length <= PROTOTYPE_PREVIEW_ROUTE_MAX_LENGTH &&
-    !/(?:javascript|data|vbscript)\s*:/i.test(value) &&
-    SAFE_HASH_ROUTE_PATTERN.test(value)
-  ) {
-    const path = value.slice(2).split("?", 1)[0] ?? "";
-    return (
-      !value.includes("//") &&
-      !path.split("/").some((segment) => segment === "." || segment === "..")
-    );
-  }
-  return false;
-}
+export const isSafePrototypePreviewRoute = isSafePrototypeHashRoute;
 
 function isSafePrototypePreviewId(value: unknown): value is string {
   return (
@@ -143,12 +191,27 @@ export interface PreviewRuntimeAdapter {
     generation: string,
     signal: AbortSignal,
   ) => Promise<void | PrototypePreviewTarget>;
+  /** Wait for the existing mounted page without refresh, navigation, or resizing. */
+  prepareCurrent?: (generation: string, signal: AbortSignal) => Promise<void>;
+  /** Capture the selected region of the mounted page without changing its state. */
+  captureCurrent?: (
+    generation: string,
+    signal: AbortSignal,
+    options?: PreviewCaptureOptions,
+  ) => Promise<DesignBridgeCaptureResult>;
+  /** Natural-size frozen image for the annotation editor. */
+  captureAnnotation?: (
+    generation: string,
+    signal: AbortSignal,
+    scope: PreviewCaptureScope,
+  ) => Promise<DesignBridgeAnnotationCaptureResult>;
   /** Capture only the requested viewports, preserving their order. */
   capture: (
     viewports: readonly PreviewView[],
     generation: string,
     signal: AbortSignal,
     target?: PrototypePreviewTarget,
+    options?: PreviewCaptureOptions,
   ) => Promise<PreviewCaptureCollection>;
 }
 
@@ -255,6 +318,7 @@ export async function captureRegisteredPreview(input: {
   conversationId: string;
   generation: string;
   viewports: readonly PreviewView[];
+  scope?: PreviewCaptureScope;
   target?: PrototypePreviewTarget;
   signal?: AbortSignal;
 }): Promise<PreviewCaptureCollection> {
@@ -304,14 +368,23 @@ export async function captureRegisteredPreview(input: {
           "The project changed while the preview was preparing evidence.",
         );
       }
-      const result = target
-        ? await adapter.capture(
-            input.viewports,
-            input.generation,
-            signal,
-            target,
-          )
-        : await adapter.capture(input.viewports, input.generation, signal);
+      const result =
+        input.scope !== undefined
+          ? await adapter.capture(
+              input.viewports,
+              input.generation,
+              signal,
+              target ?? undefined,
+              { scope: input.scope },
+            )
+          : target
+            ? await adapter.capture(
+                input.viewports,
+                input.generation,
+                signal,
+                target,
+              )
+            : await adapter.capture(input.viewports, input.generation, signal);
       if (
         result.generation !== input.generation ||
         adapter.getGeneration() !== input.generation

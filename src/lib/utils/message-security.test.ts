@@ -7,6 +7,88 @@ import {
 } from "./message-security";
 
 describe("message security", () => {
+  it("retains validated long-page geometry and excludes untrusted capture fields", () => {
+    const structuredContent = {
+      kind: "preview_evidence_v1",
+      status: "complete",
+      generation: "a".repeat(64),
+      errors: [],
+      evidence: [
+        {
+          view: "desktop",
+          image: {
+            mimeType: "image/png",
+            bytes: 100,
+            digest: "b".repeat(64),
+            width: 576,
+            height: 4000,
+          },
+          viewport: {
+            name: "desktop",
+            width: 1440,
+            height: 900,
+            capturedHeight: 10000,
+            fullHeight: 10000,
+            truncated: false,
+          },
+          capture: {
+            scope: "full-page",
+            region: {
+              x: 0,
+              y: 0,
+              width: 1440,
+              height: 10000,
+              dataUrl: "private-image",
+            },
+            scale: 0.4,
+            dataUrl: "private-image",
+          },
+          semantic: {
+            route: "/",
+            horizontalOverflow: false,
+            fonts: "ready",
+            elementCount: 0,
+          },
+        },
+      ],
+    };
+    const output = sanitizeToolExecutionOutputForHistory(
+      "capture_preview_evidence",
+      {},
+      { text: JSON.stringify(structuredContent), structuredContent },
+    );
+    expect(output?.structuredContent).toMatchObject({
+      evidence: [
+        {
+          capture: {
+            scope: "full-page",
+            region: { height: 10000 },
+            scale: 0.4,
+          },
+          image: { width: 576, height: 4000 },
+          viewport: { capturedHeight: 10000 },
+        },
+      ],
+    });
+    expect(JSON.stringify(output)).not.toContain("private-image");
+    structuredContent.evidence[0].capture.region.width = 1200;
+    structuredContent.evidence[0].image.width = 480;
+    const cropped = sanitizeToolExecutionOutputForHistory(
+      "capture_preview_evidence",
+      {},
+      { text: JSON.stringify(structuredContent), structuredContent },
+    );
+    expect(cropped?.structuredContent).toMatchObject({ evidence: [] });
+    structuredContent.evidence[0].capture.region.width = 1440;
+    structuredContent.evidence[0].image.width = 576;
+    structuredContent.evidence[0].image.height = 3999;
+    const malformed = sanitizeToolExecutionOutputForHistory(
+      "capture_preview_evidence",
+      {},
+      { text: JSON.stringify(structuredContent), structuredContent },
+    );
+    expect(malformed?.structuredContent).toMatchObject({ evidence: [] });
+  });
   it("redacts common credential forms without retaining their values", () => {
     const sentinel = "sentinel-secret-value";
     const text = redactSensitiveText(
@@ -58,6 +140,31 @@ describe("message security", () => {
     });
   });
 
+  it("does not report omitted blueprint patch collections as empty", () => {
+    const serialized = serializeToolArgumentsForHistory(
+      "update_project_design",
+      {
+        expected_revision: 3,
+        document: { revision: 4, buildProgress: { percent: 20 } },
+      },
+    );
+    expect(JSON.parse(serialized)).toEqual({
+      expected_revision: 3,
+      document: { revision: 4 },
+    });
+  });
+
+  it("summarizes incremental blueprint patches without retaining private product details", () => {
+    const result = serializeToolArgumentsForHistory("update_project_design", {
+      patch: {
+        productGoal: "Private product details",
+        pages: [{ id: "home" }],
+      },
+    });
+    expect(JSON.parse(result)).toEqual({ patch: { pageCount: 1 } });
+    expect(result).not.toContain("Private product details");
+  });
+
   it("omits legacy reads of protected project files", () => {
     const sentinel = "sentinel-secret-value";
     const result = sanitizeToolResultForHistory(
@@ -104,6 +211,7 @@ describe("message security", () => {
     "persists %s preview evidence metadata without images or element text",
     (mimeType) => {
       const sentinel = "private-preview-element-text";
+      const route = "#/pricing?scenario=default&filter=" + "a".repeat(500);
       const generation = "a".repeat(64);
       const imageDigest = "b".repeat(64);
       const structuredContent = {
@@ -112,7 +220,7 @@ describe("message security", () => {
         generation,
         target: {
           pageId: "pricing",
-          route: "#/pricing?scenario=default",
+          route,
           scenarioId: "default",
         },
         evidence: [
@@ -128,10 +236,10 @@ describe("message security", () => {
               truncated: false,
             },
             semantic: {
-              route: "#/pricing?scenario=default",
+              route,
               prototypeIdentity: {
                 pageId: "pricing",
-                route: "#/pricing?scenario=default",
+                route,
                 scenarioId: "default",
               },
               horizontalOverflow: false,
@@ -169,13 +277,16 @@ describe("message security", () => {
       expect(output?.structuredContent).toMatchObject({
         kind: "preview_evidence_v1",
         generation,
-        target: { pageId: "pricing", scenarioId: "default" },
+        target: { pageId: "pricing", scenarioId: "default", route },
         evidence: [
           {
             view: "mobile",
             image: { mimeType, digest: imageDigest },
             viewport: { width: 390, height: 844 },
-            semantic: { prototypeIdentity: { pageId: "pricing" } },
+            semantic: {
+              route,
+              prototypeIdentity: { pageId: "pricing", route },
+            },
           },
         ],
       });
@@ -209,5 +320,58 @@ describe("message security", () => {
       type: "text",
       value: output?.text,
     });
+  });
+});
+
+describe("preview sequence retention", () => {
+  it("keeps timing and errors while stripping pixels and arbitrary embedded state", () => {
+    const output = sanitizeToolExecutionOutputForHistory(
+      "capture_preview_sequence",
+      {},
+      {
+        text: "raw",
+        structuredContent: {
+          kind: "preview_sequence_v1",
+          generation: "a".repeat(64),
+          status: "partial",
+          frames: [
+            {
+              scheduledAtMs: 0,
+              startedAtMs: 12,
+              durationMs: 23,
+              error: "Frame failed",
+              dataUrl: "secret pixels",
+              dom: "private form state",
+            },
+          ],
+          errors: ["Stopped"],
+          arbitrary: "private state",
+        },
+        content: [{ type: "image", mimeType: "image/png", data: "pixels" }],
+        modelOutput: {
+          type: "content",
+          value: [
+            {
+              type: "file",
+              mediaType: "image/png",
+              data: { type: "data", data: "pixels" },
+            },
+          ],
+        },
+      },
+    );
+    expect(output?.structuredContent).toMatchObject({
+      frames: [
+        {
+          scheduledAtMs: 0,
+          startedAtMs: 12,
+          durationMs: 23,
+          error: "Frame failed",
+        },
+      ],
+      errors: ["Stopped"],
+    });
+    expect(JSON.stringify(output)).not.toMatch(/pixels|private|dataUrl/);
+    expect(output?.modelOutput?.type).toBe("text");
   });
 });

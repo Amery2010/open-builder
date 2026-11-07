@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "open-builder-design-system/v1",
+  "id": "ukiyo-e",
+  "name": "Ukiyo-e Woodblock",
+  "category": "editorial",
+  "description": "Prussian blue, vermilion and ochre on warm washi, with flat color fields, bold contour lines and a visible carved print edge. Use illustrative framing and deliberate layered planes instead of synthetic 3D volume.",
+  "files": {
+    "design": "DESIGN.md",
+    "tokens": "tokens.css"
+  }
+}

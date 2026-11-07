@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "open-builder-design-system/v1",
+  "id": "art-deco-noir",
+  "name": "Art Deco Noir",
+  "category": "marketing",
+  "description": "Deep noir green, champagne gold, symmetrical geometry and slender stepped frames. Luxury comes from proportion and material restraint, with fans or radial lines used as a limited visual signature.",
+  "files": {
+    "design": "DESIGN.md",
+    "tokens": "tokens.css"
+  }
+}

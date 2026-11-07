@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "open-builder-design-system/v1",
+  "id": "organic-tidepool",
+  "name": "Organic Tidepool",
+  "category": "mixed",
+  "description": "Sea-glass greens, dark tidal rock, layered translucent water and irregular rounded boundaries. Natural material variation supports the content, with solid light reading surfaces and a clearly marked active object.",
+  "files": {
+    "design": "DESIGN.md",
+    "tokens": "tokens.css"
+  }
+}

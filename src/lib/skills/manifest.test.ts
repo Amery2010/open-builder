@@ -4,6 +4,7 @@ import { parseSkillMd } from "./parser";
 import type { SkillManifest } from "./types";
 import { resolvePublicSkillUrl } from "./manifest";
 import { FORCED_SKILLS_MAX_BYTES } from "./registry";
+import bundledDesignSkills from "virtual:bundled-design-skills";
 
 const publicRoot = new URL("../../../public/skills/", import.meta.url);
 const EXPECTED_IDS = [
@@ -26,6 +27,11 @@ function readManifest(): SkillManifest {
 }
 
 describe("public skills manifest", () => {
+  it("bundles the current trusted Design manuals from the shipped source", () => {
+    for (const id of ["design-product-ui", "art-direct-web"] as const) {
+      expect(bundledDesignSkills[id]).toBe(readPublic(`${id}/SKILL.md`));
+    }
+  });
   it("matches every shipped SKILL.md and declared file", () => {
     const manifest = readManifest();
     expect(manifest.schemaVersion).toBe(1);
@@ -63,7 +69,11 @@ describe("public skills manifest", () => {
     expect(manifest.skills.map((skill) => skill.id)).toEqual(EXPECTED_IDS);
     for (const skill of manifest.skills) {
       expect(skill.name).toBe(skill.id);
-      expect(skill.version).toBe("2.0.0");
+      expect(skill.version).toBe(
+        skill.id === "art-direct-web" || skill.id === "design-product-ui"
+          ? "2.1.0"
+          : "2.0.0",
+      );
       expect(skill.description.length).toBeGreaterThan(80);
       expect(skill.files).not.toEqual(
         expect.arrayContaining([
@@ -96,8 +106,14 @@ describe("public skills manifest", () => {
     expect(body("design-product-ui")).toContain("`art-direct-web`");
     expect(body("art-direct-web")).toContain("`create`");
     expect(body("art-direct-web")).toContain("selected-but-unapplied");
-    expect(body("design-product-ui")).toContain("run-local Design contract");
-    expect(body("design-product-ui")).toContain("`design_system` error");
+    expect(body("design-product-ui")).toContain(
+      "host prepares the Design run context",
+    );
+    expect(body("design-product-ui")).toContain("`design_system` findings");
+    for (const id of ["design-product-ui", "art-direct-web"] as const) {
+      expect(body(id)).not.toContain("submit the run-local Design contract");
+      expect(body(id)).toContain("non-blocking visual report");
+    }
     expect(body("review-code")).toContain("default deliverable is findings");
     expect(body("simplify-code")).toContain(
       "without altering observable behavior",

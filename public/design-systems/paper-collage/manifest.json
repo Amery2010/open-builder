@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "open-builder-design-system/v1",
+  "id": "paper-collage",
+  "name": "Paper Collage",
+  "category": "editorial",
+  "description": "Torn paper edges, overlapping clippings, tape marks and a mixture of editorial and annotation type. Create a handmade hierarchy with bounded variation, while keeping text on calm readable paper fields.",
+  "files": {
+    "design": "DESIGN.md",
+    "tokens": "tokens.css"
+  }
+}

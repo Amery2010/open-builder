@@ -28,6 +28,7 @@ import {
   type HostToolRun,
 } from "./host-tool-catalog";
 import { DEFAULT_SYSTEM_PROMPT } from "./system-prompt";
+import { UI_DESIGN_PRINCIPLES } from "./ui-design-principles";
 import { buildProjectGuidelinesSection } from "./project-guidelines";
 import { PLAN_APPROVED_PREFIX, PLAN_REJECTED_PREFIX } from "./plan-mode";
 import { dispatchFsTool } from "../tools/fs-tools";
@@ -40,10 +41,15 @@ import {
   buildProjectFilesPromptListing,
   validateProjectFiles,
 } from "../utils/project-files";
+import { projectFilesForModel } from "../utils/project-file-policy";
+import { getSubagentByName } from "./subagents/registry";
 import {
-  pickSensitiveProjectFiles,
-  projectFilesForModel,
-} from "../utils/project-file-policy";
+  DelegatedEditCoordinator,
+  collectDelegatedEdits,
+  delegatedWriteError,
+  mergeDelegatedEdits,
+  validateDelegatedWritePaths,
+} from "./subagents/delegated-edits";
 import { normalizeSubagentTask } from "./subagents/limits";
 import {
   activeSkillToolRestrictionError,
@@ -183,6 +189,11 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
   private readonly userInstructions?: GeneratorOptions["userInstructions"];
   private systemPromptSuffix: string = "";
   private untrustedReferenceContext: string = "";
+  private readonly subagentWritePaths: readonly string[];
+  private readonly getCurrentProjectFiles?: GeneratorOptions["getCurrentProjectFiles"];
+  private readonly prepareProjectCommit?: GeneratorOptions["prepareProjectCommit"];
+  private readonly commitDelegatedProjectFiles?: GeneratorOptions["commitDelegatedProjectFiles"];
+  private readonly delegatedEdits = new DelegatedEditCoordinator();
   private readOnlyMode = false;
   private executionMode: ExecutionMode;
   private readonly runtimePlatform: RuntimePlatform;
@@ -235,6 +246,20 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
     this.conversationId = options.conversationId;
     this.userInstructions = options.userInstructions;
     this.executionMode = options.executionMode ?? "chat";
+    this.subagentWritePaths = Object.freeze(
+      options.subagentWritePaths
+        ? validateDelegatedWritePaths(
+            [...options.subagentWritePaths],
+            options.initialFiles ?? {},
+          )
+        : [],
+    );
+    this.getCurrentProjectFiles = options.getCurrentProjectFiles;
+    this.commitDelegatedProjectFiles = options.commitDelegatedProjectFiles;
+    this.prepareProjectCommit = options.prepareProjectCommit;
+    this.readOnlyMode =
+      this.executionMode === "plan" ||
+      (this.executionMode === "subagent" && !this.subagentWritePaths.length);
     this.runtimePlatform = options.runtimePlatform ?? "web";
     this.toolRuntime = options.toolRuntime ?? "api";
     this.allowedMcpAliases = new Set(options.allowedMcpAliases ?? []);
@@ -317,7 +342,9 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
 
   setExecutionMode(mode: ExecutionMode): void {
     this.executionMode = mode;
-    this.readOnlyMode = mode === "plan" || mode === "subagent";
+    this.readOnlyMode =
+      mode === "plan" ||
+      (mode === "subagent" && !this.subagentWritePaths.length);
     this.rebuildToolRun();
   }
 
@@ -345,6 +372,8 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
       runId: this.runId,
       conversationId: this.conversationId,
       mode: this.executionMode,
+      subagentWritePaths:
+        this.executionMode === "subagent" ? this.subagentWritePaths : undefined,
       platform: this.runtimePlatform,
       runtime: this.toolRuntime,
       allowedMcpAliases: new Set(this.allowedMcpAliases),
@@ -491,7 +520,13 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
     );
   }
 
-  private commitProjectFiles(files: ProjectFiles): void {
+  private commitProjectFiles(files: ProjectFiles, operationId?: string): void {
+    if (operationId && this.prepareProjectCommit) {
+      this.ctrl?.signal.throwIfAborted();
+      files = this.prepareProjectCommit(this.files, files, operationId);
+      const validated = validateProjectFiles(files);
+      if (!validated.ok) throw new Error(validated.error);
+    }
     const currentPaths = Object.keys(this.files);
     const nextPaths = Object.keys(files);
     const unchanged =
@@ -1061,6 +1096,7 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
       : "";
     return (
       this.systemPrompt +
+      UI_DESIGN_PRINCIPLES +
       listing +
       guidelines +
       this.systemPromptSuffix +
@@ -1307,7 +1343,7 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
     if (
       Object.prototype.hasOwnProperty.call(
         this.tools,
-        "submit_design_contract",
+        "update_project_design",
       ) ||
       Object.prototype.hasOwnProperty.call(
         this.tools,
@@ -1343,6 +1379,21 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
             effect === "write_runtime" ||
             effect === "process",
         );
+        if (this.executionMode === "subagent" && hasWriteEffect) {
+          const error = delegatedWriteError(
+            call.name,
+            call.input,
+            this.subagentWritePaths,
+            this.files,
+          );
+          if (error) return error;
+        }
+        if (
+          call.name === "dispatch_subagent" &&
+          (call.input as { subagent?: string })?.subagent === "code-writer" &&
+          (this.executionMode !== "chat" || this.readOnlyMode)
+        )
+          return "Developer subagents require an approved chat run.";
         if (this.readOnlyMode && hasWriteEffect) {
           return (
             `Tool "${call.name}" is not available while Plan Mode is active. ` +
@@ -1741,7 +1792,19 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
         if (name === "init_project") {
           changes = diffProjectFiles(this.files, nextFiles);
         }
-        this.commitProjectFiles(nextFiles);
+        if (this.executionMode === "subagent") {
+          collectDelegatedEdits(this.files, nextFiles, this.subagentWritePaths);
+          const error = await this.authorizeToolCall?.(name, args, {
+            signal: this.ctrl!.signal,
+            toolCallId,
+            run: this.getRunContext(),
+            skillContext: this.skillContext,
+          });
+          if (error) throw new Error(error);
+          this.ctrl!.signal.throwIfAborted();
+        }
+        this.ctrl?.signal.throwIfAborted();
+        this.commitProjectFiles(nextFiles, toolCallId);
         onPreparedProjectCommitted?.();
       }
       if (fsOutcome.templateChange) {
@@ -1819,58 +1882,144 @@ export class WebAppGenerator implements GenerationBackend, AgentToolExecutor {
           result = `Error: ${checkedTask.error}`;
           break;
         }
-        try {
-          const dispatchSignal = this.ctrl!.signal;
-          const dispatched = await this.dispatchSubagent(
-            subagentName,
-            checkedTask.task,
-            projectFilesForModel(this.files),
-            dispatchSignal,
-            toolCall.id,
-            this.conversationId,
-          );
+        const writer =
+          getSubagentByName(subagentName)?.writePolicy === "scopedWrite";
+        const dispatchSignal = this.ctrl!.signal;
+        const parentRunId = this.runId;
+        const authorityEpoch = this.permissionAuthorityEpoch;
+        const assertCurrent = () => {
           dispatchSignal.throwIfAborted();
-          result = dispatched.text;
-          // A fullWrite subagent returns its inner file tree; reconcile by
-          // diffing against the parent's current state and emitting an
-          // onFileChange event with the resolved changes.
-          if (dispatched.files) {
-            const beforeFiles = this.files;
-            const afterFiles = {
-              ...dispatched.files,
-              // A subagent only sees the redacted projection. Preserve the
-              // original secret-bearing files instead of writing that
-              // projection back into the canonical project tree.
-              ...pickSensitiveProjectFiles(beforeFiles),
-            };
-            const validation = validateProjectFiles(afterFiles);
-            if (!validation.ok) {
-              result = `Error: subagent returned an invalid project: ${validation.error}`;
-              break;
-            }
-            const changes: FileChange[] = [];
-            for (const path of Object.keys(afterFiles)) {
-              if (!(path in beforeFiles)) {
-                changes.push({ path, action: "created" });
-              } else if (beforeFiles[path] !== afterFiles[path]) {
-                changes.push({ path, action: "modified" });
+          if (
+            this.runId !== parentRunId ||
+            this.permissionAuthorityEpoch !== authorityEpoch ||
+            (writer && (this.executionMode !== "chat" || this.readOnlyMode)) ||
+            this.projectPermissionSession?.authority().closed
+          )
+            throw new Error("The parent delegation authority changed.");
+        };
+        const authorizeWrite = async (name: string, input: unknown) => {
+          assertCurrent();
+          if (!this.toolRun.authority.has(name))
+            throw new Error(`Parent tool "${name}" is not authorized.`);
+          const skillError = activeSkillToolRestrictionError(
+            name,
+            this.skillContext.get(),
+          );
+          if (skillError) throw new Error(skillError);
+          const error = await this.authorizeToolCall?.(name, input, {
+            signal: dispatchSignal,
+            toolCallId: toolCall.id,
+            run: this.getRunContext(),
+            skillContext: this.skillContext,
+          });
+          assertCurrent();
+          if (error) throw new Error(error);
+        };
+        try {
+          const writePaths = writer
+            ? validateDelegatedWritePaths(
+                args.writePaths,
+                this.getCurrentProjectFiles?.() ?? this.files,
+              )
+            : [];
+          result = await this.delegatedEdits.run(
+            writePaths,
+            dispatchSignal,
+            async () => {
+              assertCurrent();
+              if (writer) await authorizeWrite("dispatch_subagent", args);
+              const baseline = {
+                ...(this.getCurrentProjectFiles?.() ?? this.files),
+              };
+              if (writer) validateDelegatedWritePaths(writePaths, baseline);
+              const dispatched = await this.dispatchSubagent!(
+                subagentName,
+                checkedTask.task,
+                projectFilesForModel(baseline),
+                dispatchSignal,
+                toolCall.id,
+                this.conversationId,
+                writer ? writePaths : undefined,
+                writer ? authorizeWrite : undefined,
+              );
+              try {
+                assertCurrent();
+                if (!writer) {
+                  if (dispatched.edits)
+                    throw new Error("Read-only subagents cannot return edits.");
+                  return dispatched.text;
+                }
+                const summary = JSON.parse(dispatched.text) as {
+                  ok?: boolean;
+                  status?: string;
+                };
+                if (!summary.ok || summary.status !== "done")
+                  return dispatched.text;
+                if (!dispatched.edits)
+                  throw new Error(
+                    "Developer subagent did not return validated edits.",
+                  );
+                return await this.delegatedEdits.commit(async () => {
+                  await authorizeWrite("dispatch_subagent", args);
+                  for (const edit of dispatched.edits!)
+                    await authorizeWrite("write_file", {
+                      path: edit.path,
+                      content: edit.content,
+                    });
+                  assertCurrent();
+                  const current = this.getCurrentProjectFiles?.() ?? this.files;
+                  let next = mergeDelegatedEdits(
+                    current,
+                    baseline,
+                    writePaths,
+                    dispatched.edits!,
+                  );
+                  const changes = diffProjectFiles(current, next);
+                  if (changes.length) {
+                    next =
+                      this.prepareProjectCommit?.(current, next, toolCallId) ??
+                      next;
+                    const validated = validateProjectFiles(next);
+                    if (!validated.ok) throw new Error(validated.error);
+                    assertCurrent();
+                    if (
+                      this.commitDelegatedProjectFiles &&
+                      !this.commitDelegatedProjectFiles(current, next)
+                    )
+                      throw new Error(
+                        "The project changed before delegated edits could commit.",
+                      );
+                    this.commitProjectFiles(next);
+                    if (!this.commitDelegatedProjectFiles)
+                      this.events.onFileChange?.(this.getFiles(), changes);
+                  }
+                  if (!changes.length) this.commitProjectFiles(next);
+                  return dispatched.complete?.() ?? dispatched.text;
+                });
+              } catch (error) {
+                const message =
+                  error instanceof Error ? error.message : String(error);
+                const failureText = dispatched.complete?.(message);
+                if (dispatchSignal.aborted) throw error;
+                if (failureText) return failureText;
+                throw error;
               }
-            }
-            for (const path of Object.keys(beforeFiles)) {
-              if (!(path in afterFiles)) {
-                changes.push({ path, action: "deleted" });
-              }
-            }
-            this.commitProjectFiles(afterFiles);
-            if (changes.length > 0) {
-              this.events.onFileChange?.(this.getFiles(), changes);
-            }
-          }
+            },
+          );
+          if (writer && JSON.parse(result).ok !== true)
+            result = { text: result, isError: true };
         } catch (err) {
-          if ((err as { name?: string })?.name === "AbortError") throw err;
+          if (
+            dispatchSignal.aborted ||
+            (err as { name?: string })?.name === "AbortError"
+          )
+            throw err;
           const message =
             (err as { message?: string })?.message ?? "Unknown error";
-          result = `Error dispatching subagent "${subagentName}": ${message}`;
+          result = {
+            text: `Error dispatching subagent "${subagentName}": ${message}`,
+            isError: true,
+          };
         }
         break;
       }

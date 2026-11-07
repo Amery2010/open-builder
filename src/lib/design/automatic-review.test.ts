@@ -1,15 +1,9 @@
 import { describe, expect, it } from "vitest";
-import type { DesignReviewReport } from "./review";
 import {
-  buildAutomaticDesignRepairPrompt,
   buildAutomaticDesignReviewContext,
   automaticDesignReviewStageForOutcome,
-  canEnterAutomaticDesignRepair,
   hasRemainingAutomaticDesignIssues,
-  requiredSkillsForContract,
-  selectAutomaticDesignRepairScope,
   shouldRequestAutomaticDesignReview,
-  shouldRunAutomaticDesignRepair,
   type AutomaticDesignReviewEvidence,
 } from "./automatic-review";
 
@@ -92,44 +86,6 @@ function evidence(): AutomaticDesignReviewEvidence {
   };
 }
 
-const report: DesignReviewReport = {
-  overview: "Review",
-  findings: [
-    {
-      id: "p1-hierarchy",
-      priority: "P1",
-      dimension: "visual_hierarchy",
-      title: "Weak hierarchy",
-      evidence: "The primary action is hard to find.",
-      recommendation: "Strengthen the primary action.",
-    },
-    {
-      id: "p2-system",
-      priority: "P2",
-      dimension: "system_consistency",
-      title: "Token drift",
-      evidence: "The card radius differs from the system.",
-      recommendation: "Use the semantic radius.",
-    },
-    {
-      id: "p2-copy",
-      priority: "P2",
-      dimension: "copy_specificity",
-      title: "Generic copy",
-      evidence: "The label is vague.",
-      recommendation: "Use a specific label.",
-    },
-    {
-      id: "p3-system",
-      priority: "P3",
-      dimension: "system_consistency",
-      title: "Minor drift",
-      evidence: "A secondary gap is slightly inconsistent.",
-      recommendation: "Align it later.",
-    },
-  ],
-};
-
 describe("automatic Design review policy", () => {
   it("maps explicit outcomes without conflating unavailable work with clean", () => {
     expect(automaticDesignReviewStageForOutcome("clean")).toBe("complete");
@@ -138,19 +94,6 @@ describe("automatic Design review policy", () => {
     expect(automaticDesignReviewStageForOutcome("superseded")).toBe(
       "superseded",
     );
-  });
-
-  it("selects every static issue, P0/P1, and non-P3 system consistency", () => {
-    const scope = selectAutomaticDesignRepairScope(evidence(), report);
-
-    expect(scope.staticIssues.map((issue) => issue.message)).toEqual([
-      "tokens.css is not loaded",
-      "Preview failed",
-    ]);
-    expect(scope.visualFindings.map((finding) => finding.id)).toEqual([
-      "p1-hierarchy",
-      "p2-system",
-    ]);
   });
 
   it("never treats a clean result without capture errors as remaining work", () => {
@@ -188,65 +131,22 @@ describe("automatic Design review policy", () => {
     ).toBe(true);
   });
 
-  it("builds a single bounded repair and reviewer context", () => {
+  it("builds advisory context from known intent without requiring complete metadata", () => {
     const current = evidence();
-    const scope = selectAutomaticDesignRepairScope(current, report);
-    const repair = buildAutomaticDesignRepairPrompt(current, scope);
+    current.contract.audience = "";
+    current.contract.concept = "";
+    current.contract.acceptance = [];
     const context = buildAutomaticDesignReviewContext(current);
-
-    expect(repair).toContain("the only repair pass");
-    expect(repair).toContain("Reuse the accepted Design contract");
-    expect(repair).toContain("p2-system");
-    expect(repair).not.toContain("p2-copy");
-    expect(context).toContain("automatic_design_review_context");
+    expect(context).toContain("host-prepared Design run context");
+    expect(context).toContain("Missing intent fields are unknown");
     expect(context).toContain('"digest":"aaaaaaaa');
-    expect(requiredSkillsForContract(current.contract)).toEqual([
-      "design-product-ui",
-    ]);
-    expect(
-      requiredSkillsForContract({
-        ...current.contract,
-        surface_mode: "mixed",
-      }),
-    ).toEqual(["design-product-ui", "art-direct-web"]);
   });
 
-  it("skips code-only turns and never repairs during verification", () => {
-    const scope = selectAutomaticDesignRepairScope(evidence(), report);
+  it("only schedules a report for changed UI or explicit verification", () => {
     expect(shouldRequestAutomaticDesignReview([], "initial")).toBe(false);
     expect(shouldRequestAutomaticDesignReview([], "verify")).toBe(true);
-    expect(shouldRunAutomaticDesignRepair("initial", scope)).toBe(true);
-    expect(shouldRunAutomaticDesignRepair("verify", scope)).toBe(false);
-  });
-
-  it("never enters the write queue while chat is busy or a newer request exists", () => {
-    const safe = {
-      fresh: true,
-      activeConversation: true,
-      currentReview: true,
-      currentProject: true,
-      designMode: true,
-      chatIdle: true,
-      hasNewerUserRequest: false,
-    };
-    expect(canEnterAutomaticDesignRepair(safe)).toBe(true);
-    expect(canEnterAutomaticDesignRepair({ ...safe, chatIdle: false })).toBe(
-      false,
-    );
-    expect(
-      canEnterAutomaticDesignRepair({
-        ...safe,
-        hasNewerUserRequest: true,
-      }),
-    ).toBe(false);
-    expect(canEnterAutomaticDesignRepair({ ...safe, fresh: false })).toBe(
-      false,
-    );
-    expect(
-      canEnterAutomaticDesignRepair({ ...safe, currentProject: false }),
-    ).toBe(false);
-    expect(canEnterAutomaticDesignRepair({ ...safe, designMode: false })).toBe(
-      false,
+    expect(shouldRequestAutomaticDesignReview(["App.tsx"], "initial")).toBe(
+      true,
     );
   });
 });

@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "open-builder-design-system/v1",
+  "id": "prism-optics",
+  "name": "Prism Optics",
+  "category": "mixed",
+  "description": "A dark optical bench, fine luminous rays, angular transparent prisms and restrained technical labels. Color splitting describes an optical event, while text and controls remain on calm opaque surfaces.",
+  "files": {
+    "design": "DESIGN.md",
+    "tokens": "tokens.css"
+  }
+}

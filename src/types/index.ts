@@ -399,7 +399,17 @@ export interface Conversation {
   updatedAt: number;
 }
 
-export type ProjectAssetMimeType = "image/png" | "image/jpeg" | "image/webp";
+export type ProjectAssetMimeType =
+  | "image/png"
+  | "image/jpeg"
+  | "image/webp"
+  | "image/gif"
+  | "image/x-icon"
+  | "image/avif"
+  | "font/woff"
+  | "font/woff2"
+  | "font/ttf"
+  | "font/otf";
 
 export interface ProjectAsset {
   /** Project-relative export path, for example public/generated/hero.png. */
@@ -408,7 +418,7 @@ export interface ProjectAsset {
   blobRef: string;
   mimeType: ProjectAssetMimeType;
   size: number;
-  /** Lower-case SHA-256 digest of the original image bytes. */
+  /** Lower-case SHA-256 digest of the original asset bytes. */
   digest: string;
   /** Managed text module that application source can import. */
   modulePath: string;

@@ -302,3 +302,66 @@ describe("messagesToModelMessages", () => {
     expect((compatible[1].content as any[])[0].output.type).toBe("text");
   });
 });
+
+describe("live sequence images", () => {
+  it("places compatible-provider images after the entire tool result batch and removes them from replay", () => {
+    const output = {
+      text: "sequence",
+      structuredContent: {
+        kind: "preview_sequence_v1",
+        generation: "a".repeat(64),
+        status: "complete",
+        frames: [],
+        errors: [],
+      },
+      content: [
+        { type: "image" as const, mimeType: "image/png", data: "aGVsbG8=" },
+      ],
+    };
+    const messages: Message[] = [
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "sequence",
+            type: "function",
+            function: { name: "capture_preview_sequence", arguments: "{}" },
+          },
+          {
+            id: "read",
+            type: "function",
+            function: { name: "read_files", arguments: "{}" },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        tool_call_id: "sequence",
+        content: output.text,
+        toolOutput: output,
+      },
+      { role: "tool", tool_call_id: "read", content: "done" },
+    ];
+    const result = messagesToModelMessages(messages, "openai-compatible");
+    expect(result.map((message) => message.role)).toEqual([
+      "assistant",
+      "tool",
+      "user",
+    ]);
+    expect(result[1].content).toHaveLength(2);
+    expect(result[2].content).toContainEqual({
+      type: "image",
+      image: "data:image/png;base64,aGVsbG8=",
+    });
+    const replay = messagesToModelMessages(
+      messages.map((message) =>
+        message.role === "tool"
+          ? { ...message, toolOutput: undefined }
+          : message,
+      ),
+      "openai-compatible",
+    );
+    expect(JSON.stringify(replay)).not.toContain("aGVsbG8");
+  });
+});

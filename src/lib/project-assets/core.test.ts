@@ -54,6 +54,68 @@ describe("project assets", () => {
     for (const store of stores.values()) store.clear();
   });
 
+  it.each([
+    ["gif", "image/gif", new TextEncoder().encode("GIF89a-content")],
+    ["ico", "image/x-icon", new Uint8Array([0, 0, 1, 0, 1, 0, 0, 0])],
+    [
+      "avif",
+      "image/avif",
+      new Uint8Array([
+        0, 0, 0, 20, 102, 116, 121, 112, 97, 118, 105, 102, 0, 0, 0, 0, 97, 118,
+        105, 102,
+      ]),
+    ],
+    [
+      "woff",
+      "font/woff",
+      Uint8Array.from({ length: 44 }, (_, i) => [119, 79, 70, 70][i] ?? 0),
+    ],
+    [
+      "woff2",
+      "font/woff2",
+      Uint8Array.from({ length: 48 }, (_, i) => [119, 79, 70, 50][i] ?? 0),
+    ],
+    [
+      "ttf",
+      "font/ttf",
+      Uint8Array.from({ length: 12 }, (_, i) => (i === 1 ? 1 : 0)),
+    ],
+    [
+      "otf",
+      "font/otf",
+      Uint8Array.from({ length: 12 }, (_, i) => [79, 84, 84, 79][i] ?? 0),
+    ],
+  ])(
+    "round trips %s resources into preview and source ZIP with intact bytes",
+    async (extension, mimeType, bytes) => {
+      const staged = await stageProjectAsset(
+        `public/resource.${extension}`,
+        new Blob([Uint8Array.from(bytes).buffer]),
+      );
+      expect(staged.mimeType).toBe(mimeType);
+      const asset = createProjectAssetRecord(
+        staged,
+        await storeStagedProjectAsset(staged),
+      );
+      const assets = { [asset.path]: asset };
+      const files = addProjectAssetModules(
+        { "style.css": `body{background:url(/resource.${extension})}` },
+        assets,
+      );
+      const projected = await projectFilesForSandpack(files, assets);
+      expect(projected["style.css"]).toContain(`data:${mimeType};base64,`);
+      const zip = await JSZip.loadAsync(
+        await (await buildProjectZip(files, assets)).arrayBuffer(),
+      );
+      expect(
+        Array.from(await zip.file(asset.path)!.async("uint8array")),
+      ).toEqual(Array.from(bytes));
+      expect(Array.from(await readProjectAssetBytes(asset))).toEqual(
+        Array.from(bytes),
+      );
+    },
+  );
+
   it("accepts matching PNG bytes and rejects a misleading extension", async () => {
     expect(detectProjectAssetMimeType(pngBytes)).toBe("image/png");
     await expect(

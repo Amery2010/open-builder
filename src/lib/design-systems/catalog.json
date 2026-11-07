@@ -178,5 +178,461 @@
       "en": "Luxury campaigns or experimental typography",
       "zh": "奢华活动页或实验性字体设计"
     }
+  },
+  {
+    "id": "cassette-futurism",
+    "name": "Cassette Futurism",
+    "previewPath": "/design-systems/previews/cassette-futurism.webp",
+    "category": "mixed",
+    "tags": [
+      "retro",
+      "analog",
+      "mechanical",
+      "cassette",
+      "磁带",
+      "复古",
+      "机械"
+    ],
+    "bestFor": {
+      "en": "Analog-inspired tools, media players, retro technical portfolios",
+      "zh": "模拟仪器工具、媒体播放器、复古科技作品集"
+    },
+    "avoidFor": {
+      "en": "Quiet luxury editorial or conservative enterprise forms",
+      "zh": "安静奢华的编辑内容或保守企业表单"
+    }
+  },
+  {
+    "id": "crt-terminal",
+    "name": "CRT Terminal",
+    "previewPath": "/design-systems/previews/crt-terminal.webp",
+    "category": "product",
+    "tags": [
+      "terminal",
+      "crt",
+      "monospace",
+      "hacker",
+      "命令行",
+      "终端",
+      "黑客"
+    ],
+    "bestFor": {
+      "en": "Command tools, technical diagnostics, terminal-inspired portfolios",
+      "zh": "命令工具、技术诊断、终端式作品集"
+    },
+    "avoidFor": {
+      "en": "Long-form reading, clinical workflows or photo-led retail",
+      "zh": "长篇阅读、临床工作流或摄影主导的零售"
+    }
+  },
+  {
+    "id": "pixel-arcade",
+    "name": "Pixel Arcade",
+    "previewPath": "/design-systems/previews/pixel-arcade.webp",
+    "category": "mixed",
+    "tags": ["pixel", "arcade", "8-bit", "game", "像素", "街机", "游戏"],
+    "bestFor": {
+      "en": "Playful game portals, retro portfolios, gamified learning",
+      "zh": "趣味游戏入口、复古作品集、游戏化学习"
+    },
+    "avoidFor": {
+      "en": "Dense business tables or formal regulated services",
+      "zh": "密集业务表格或正式受监管服务"
+    }
+  },
+  {
+    "id": "split-flap",
+    "name": "Split-Flap Display",
+    "previewPath": "/design-systems/previews/split-flap.webp",
+    "category": "product",
+    "tags": [
+      "split-flap",
+      "departures",
+      "mechanical",
+      "status",
+      "翻牌",
+      "航班",
+      "看板"
+    ],
+    "bestFor": {
+      "en": "Schedules, live status boards, event and transport information",
+      "zh": "时刻表、实时状态看板、活动与交通信息"
+    },
+    "avoidFor": {
+      "en": "Image-heavy narratives or text that must animate continuously",
+      "zh": "图片密集叙事或需要持续动画的长文本"
+    }
+  },
+  {
+    "id": "web-brutalism",
+    "name": "Web Brutalism",
+    "previewPath": "/design-systems/previews/web-brutalism.webp",
+    "category": "mixed",
+    "tags": [
+      "brutalist",
+      "raw",
+      "native",
+      "high-contrast",
+      "粗野主义",
+      "原生",
+      "高对比"
+    ],
+    "bestFor": {
+      "en": "Independent publishing, provocative portfolios, direct link directories",
+      "zh": "独立出版、鲜明作品集、直接的链接目录"
+    },
+    "avoidFor": {
+      "en": "Soft lifestyle experiences or ornamental luxury campaigns",
+      "zh": "柔和生活方式体验或装饰性奢华活动"
+    }
+  },
+  {
+    "id": "kinetic-typography",
+    "name": "Kinetic Typography",
+    "previewPath": "/design-systems/previews/kinetic-typography.webp",
+    "category": "marketing",
+    "tags": [
+      "kinetic",
+      "typography",
+      "stage",
+      "motion",
+      "动态字体",
+      "排版",
+      "舞台"
+    ],
+    "bestFor": {
+      "en": "Creative events, type-led campaigns, expressive portfolios",
+      "zh": "创意活动、字体主导的宣传页、表现型作品集"
+    },
+    "avoidFor": {
+      "en": "Repetitive back-office workflows or dense reading interfaces",
+      "zh": "重复后台操作或密集阅读界面"
+    }
+  },
+  {
+    "id": "risograph",
+    "name": "Risograph Print",
+    "previewPath": "/design-systems/previews/risograph.webp",
+    "category": "editorial",
+    "tags": ["risograph", "print", "duotone", "grain", "孔版", "双色", "印刷"],
+    "bestFor": {
+      "en": "Indie publishing, cultural events, poster and creative tools",
+      "zh": "独立出版、文化活动、海报与创意工具"
+    },
+    "avoidFor": {
+      "en": "Photographic color accuracy or minimal enterprise consoles",
+      "zh": "要求摄影色准的产品或极简企业控制台"
+    }
+  },
+  {
+    "id": "paper-collage",
+    "name": "Paper Collage",
+    "previewPath": "/design-systems/previews/paper-collage.webp",
+    "category": "editorial",
+    "tags": ["collage", "paper", "zine", "handmade", "纸张", "拼贴", "杂志"],
+    "bestFor": {
+      "en": "Personal journals, art collections, independent magazines",
+      "zh": "个人日志、艺术收藏、独立杂志"
+    },
+    "avoidFor": {
+      "en": "Precision monitoring or high-density data entry",
+      "zh": "精密监控或高密度数据录入"
+    }
+  },
+  {
+    "id": "art-deco-noir",
+    "name": "Art Deco Noir",
+    "previewPath": "/design-systems/previews/art-deco-noir.webp",
+    "category": "marketing",
+    "tags": [
+      "art-deco",
+      "noir",
+      "geometric",
+      "gold",
+      "装饰艺术",
+      "黑金",
+      "几何"
+    ],
+    "bestFor": {
+      "en": "Cultural venues, premium events, hospitality and curated collections",
+      "zh": "文化场馆、高端活动、酒店与精选收藏"
+    },
+    "avoidFor": {
+      "en": "Casual social feeds or dense utilitarian workspaces",
+      "zh": "随意社交信息流或密集实用工作台"
+    }
+  },
+  {
+    "id": "sumi-e",
+    "name": "Sumi-e Ink Wash",
+    "previewPath": "/design-systems/previews/sumi-e.webp",
+    "category": "editorial",
+    "tags": [
+      "sumi-e",
+      "ink",
+      "rice-paper",
+      "asymmetric",
+      "水墨",
+      "宣纸",
+      "卷轴"
+    ],
+    "bestFor": {
+      "en": "Cultural narratives, reflective portfolios, quiet technical storytelling",
+      "zh": "文化叙事、沉静作品集、克制的技术故事"
+    },
+    "avoidFor": {
+      "en": "High-frequency trading or neon entertainment dashboards",
+      "zh": "高频交易或霓虹娱乐仪表盘"
+    }
+  },
+  {
+    "id": "ukiyo-e",
+    "name": "Ukiyo-e Woodblock",
+    "previewPath": "/design-systems/previews/ukiyo-e.webp",
+    "category": "editorial",
+    "tags": [
+      "ukiyo-e",
+      "woodblock",
+      "flat-ink",
+      "japanese",
+      "浮世绘",
+      "木刻",
+      "版画"
+    ],
+    "bestFor": {
+      "en": "Exhibitions, cultural tourism, illustrated stories and collections",
+      "zh": "展览、文化旅游、插画故事与收藏"
+    },
+    "avoidFor": {
+      "en": "Photorealistic product configurators or dense operational tools",
+      "zh": "写实产品配置器或密集操作工具"
+    }
+  },
+  {
+    "id": "zen-garden",
+    "name": "Zen Garden",
+    "previewPath": "/design-systems/previews/zen-garden.webp",
+    "category": "mixed",
+    "tags": ["zen", "sand", "garden", "calm", "枯山水", "禅意", "庭院"],
+    "bestFor": {
+      "en": "Focus tools, contemplative collections, quiet wellness experiences",
+      "zh": "专注工具、沉静收藏、安静健康体验"
+    },
+    "avoidFor": {
+      "en": "Urgent operational monitoring or high-energy campaigns",
+      "zh": "紧急操作监控或高能活动宣传"
+    }
+  },
+  {
+    "id": "felt-skeuomorphism",
+    "name": "Felt Skeuomorphism",
+    "previewPath": "/design-systems/previews/felt-skeuomorphism.webp",
+    "category": "product",
+    "tags": ["felt", "wool", "tactile", "neumorphic", "毛毡", "羊毛", "拟物"],
+    "bestFor": {
+      "en": "Small utilities, gentle learning tools, tactile personal apps",
+      "zh": "小型工具、温和学习工具、触感个人应用"
+    },
+    "avoidFor": {
+      "en": "Dense professional workbenches or flat corporate systems",
+      "zh": "密集专业工作台或扁平企业系统"
+    }
+  },
+  {
+    "id": "claymorphism",
+    "name": "Claymorphism",
+    "previewPath": "/design-systems/previews/claymorphism.webp",
+    "category": "product",
+    "tags": ["clay", "pastel", "puffy", "timer", "黏土", "厨房", "柔软"],
+    "bestFor": {
+      "en": "Friendly timers, cooking utilities, playful family learning",
+      "zh": "友好计时器、烹饪工具、趣味家庭学习"
+    },
+    "avoidFor": {
+      "en": "Serious high-density analytics or austere developer tooling",
+      "zh": "严肃高密度分析或冷峻开发工具"
+    }
+  },
+  {
+    "id": "liquid-glass",
+    "name": "Liquid Glass",
+    "previewPath": "/design-systems/previews/liquid-glass.webp",
+    "category": "mixed",
+    "tags": [
+      "liquid",
+      "glass",
+      "translucent",
+      "refraction",
+      "液态",
+      "玻璃",
+      "透明"
+    ],
+    "bestFor": {
+      "en": "Spatial media, premium creative tools, expressive product surfaces",
+      "zh": "空间媒体、高端创意工具、表现型产品界面"
+    },
+    "avoidFor": {
+      "en": "Low-powered devices or text-heavy dense operations",
+      "zh": "低性能设备或文字密集操作界面"
+    }
+  },
+  {
+    "id": "pastel-isometric",
+    "name": "Pastel Isometric",
+    "previewPath": "/design-systems/previews/pastel-isometric.webp",
+    "category": "mixed",
+    "tags": ["isometric", "pastel", "spatial", "city", "等距", "粉彩", "城市"],
+    "bestFor": {
+      "en": "Educational explorers, spatial dashboards, playful creative portfolios",
+      "zh": "教育探索、空间仪表盘、趣味创意作品集"
+    },
+    "avoidFor": {
+      "en": "Dense text editing or workflows requiring a purely flat layout",
+      "zh": "密集文本编辑或必须纯平面的操作流程"
+    }
+  },
+  {
+    "id": "mission-control",
+    "name": "Mission Control",
+    "previewPath": "/design-systems/previews/mission-control.webp",
+    "category": "product",
+    "tags": [
+      "mission-control",
+      "instrument",
+      "amber",
+      "technical",
+      "任务控制",
+      "仪器",
+      "控制台"
+    ],
+    "bestFor": {
+      "en": "System monitoring, technical operations, engineering workspaces",
+      "zh": "系统监控、技术操作、工程工作区"
+    },
+    "avoidFor": {
+      "en": "Soft lifestyle stories or lighthearted retail campaigns",
+      "zh": "柔和生活叙事或轻松零售活动"
+    }
+  },
+  {
+    "id": "analog-synth",
+    "name": "Analog Synth",
+    "previewPath": "/design-systems/previews/analog-synth.webp",
+    "category": "product",
+    "tags": ["synth", "audio", "patchbay", "knob", "合成器", "旋钮", "连线"],
+    "bestFor": {
+      "en": "Audio tools, modular editors, hands-on creative workbenches",
+      "zh": "音频工具、模块编辑器、动手创作工作台"
+    },
+    "avoidFor": {
+      "en": "Simple reading pages or workflows with no meaningful parameters",
+      "zh": "简单阅读页或没有实际参数的工作流"
+    }
+  },
+  {
+    "id": "architectural-drafting",
+    "name": "Architectural Drafting",
+    "previewPath": "/design-systems/previews/architectural-drafting.webp",
+    "category": "product",
+    "tags": [
+      "drafting",
+      "architecture",
+      "blueprint",
+      "paper",
+      "建筑",
+      "制图",
+      "蓝图"
+    ],
+    "bestFor": {
+      "en": "Architecture portfolios, diagram tools, technical planning",
+      "zh": "建筑作品集、图表工具、技术规划"
+    },
+    "avoidFor": {
+      "en": "Soft consumer media feeds or photoreal luxury campaigns",
+      "zh": "柔和消费媒体信息流或写实奢华活动"
+    }
+  },
+  {
+    "id": "circuit-lab",
+    "name": "Circuit Lab",
+    "previewPath": "/design-systems/previews/circuit-lab.webp",
+    "category": "product",
+    "tags": ["logic", "circuit", "node", "industrial", "逻辑", "电路", "节点"],
+    "bestFor": {
+      "en": "Visual programming, technical education, connected workflow editors",
+      "zh": "可视化编程、技术教育、连接式流程编辑器"
+    },
+    "avoidFor": {
+      "en": "Lifestyle storytelling or simple brochure pages",
+      "zh": "生活方式叙事或简单展示页"
+    }
+  },
+  {
+    "id": "color-laboratory",
+    "name": "Color Laboratory",
+    "previewPath": "/design-systems/previews/color-laboratory.webp",
+    "category": "product",
+    "tags": [
+      "color",
+      "mixer",
+      "scientific",
+      "swatch",
+      "色彩",
+      "调色",
+      "实验室"
+    ],
+    "bestFor": {
+      "en": "Creative parameter tools, color education, visual comparison",
+      "zh": "创意参数工具、色彩教育、视觉对比"
+    },
+    "avoidFor": {
+      "en": "Products where color changes could obscure critical status",
+      "zh": "色彩变化可能遮蔽关键状态的产品"
+    }
+  },
+  {
+    "id": "neon-noir",
+    "name": "Neon Noir",
+    "previewPath": "/design-systems/previews/neon-noir.webp",
+    "category": "mixed",
+    "tags": ["neon", "sign", "glow", "cyberpunk", "霓虹", "招牌", "发光"],
+    "bestFor": {
+      "en": "Nightlife, expressive creative tools, music and event campaigns",
+      "zh": "夜生活、表现型创意工具、音乐与活动宣传"
+    },
+    "avoidFor": {
+      "en": "Long reading sessions or conservative administrative workflows",
+      "zh": "长时间阅读或保守行政流程"
+    }
+  },
+  {
+    "id": "prism-optics",
+    "name": "Prism Optics",
+    "previewPath": "/design-systems/previews/prism-optics.webp",
+    "category": "mixed",
+    "tags": ["prism", "optics", "light", "puzzle", "棱镜", "光学", "折射"],
+    "bestFor": {
+      "en": "Interactive science, visual explainers, precise experimental tools",
+      "zh": "交互科学、视觉讲解、精密实验工具"
+    },
+    "avoidFor": {
+      "en": "Plain business forms or photography-first publishing",
+      "zh": "普通业务表单或摄影主导出版"
+    }
+  },
+  {
+    "id": "organic-tidepool",
+    "name": "Organic Tidepool",
+    "previewPath": "/design-systems/previews/organic-tidepool.webp",
+    "category": "mixed",
+    "tags": ["tidepool", "nature", "water", "organic", "潮池", "海水", "自然"],
+    "bestFor": {
+      "en": "Nature education, calm exploration, organic creative collections",
+      "zh": "自然教育、安静探索、有机创意收藏"
+    },
+    "avoidFor": {
+      "en": "Urgent transaction tools or dense technical administration",
+      "zh": "紧急交易工具或密集技术管理"
+    }
   }
 ]

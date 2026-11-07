@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "open-builder-design-system/v1",
+  "id": "zen-garden",
+  "name": "Zen Garden",
+  "category": "mixed",
+  "description": "Raked sand, warm stone, low-contrast material depth and carefully placed empty space. The atmosphere is calm but the information hierarchy and interactive boundaries remain clear.",
+  "files": {
+    "design": "DESIGN.md",
+    "tokens": "tokens.css"
+  }
+}

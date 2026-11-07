@@ -340,3 +340,100 @@ describe("subagent iteration policy", () => {
     expect(streamTextMock).toHaveBeenCalledOnce();
   });
 });
+
+describe("developer subagent completion", () => {
+  it("keeps successful work provisional until its parent commits it", async () => {
+    const authorizeWrite = vi.fn(async () => {});
+    const result = await runSubagent({
+      ...options(),
+      name: "code-writer",
+      writePaths: ["src/feature.ts"],
+      authorizeWrite,
+      createGenerator: (config, events) => {
+        expect(config.executionMode).toBe("subagent");
+        expect(config.subagentWritePaths).toEqual(["src/feature.ts"]);
+        const generator = new WebAppGenerator(config, events);
+        vi.spyOn(generator, "generate").mockImplementation(async () => {
+          (generator as unknown as { ctrl: AbortController }).ctrl =
+            new AbortController();
+          const output = await generator.executeToolCall({
+            id: "write-owned",
+            type: "function",
+            function: {
+              name: "write_file",
+              arguments: JSON.stringify({
+                path: "src/feature.ts",
+                content: "export const enabled = true;",
+              }),
+            },
+          });
+          expect(output.result.isError).not.toBe(true);
+          return {
+            files: generator.getFiles(),
+            messages: [],
+            text: "Implemented",
+            aborted: false,
+            maxIterationsReached: false,
+          };
+        });
+        return generator;
+      },
+    });
+    expect(authorizeWrite).toHaveBeenCalledTimes(2);
+    expect(result.edits).toEqual([
+      {
+        path: "src/feature.ts",
+        before: undefined,
+        content: "export const enabled = true;",
+      },
+    ]);
+    expect(useSubagentStore.getState().progress["subagent-1"].status).toBe(
+      "running",
+    );
+    const final = JSON.parse(result.complete!());
+    expect(final).toMatchObject({ ok: true, status: "done" });
+    expect(final.text).toContain("src/feature.ts");
+    expect(useSubagentStore.getState().progress["subagent-1"].status).toBe(
+      "done",
+    );
+  });
+  it.each(["budget", "unowned", "deleted"])(
+    "discards %s work",
+    async (failure) => {
+      const result = await runSubagent({
+        ...options(),
+        name: "code-writer",
+        writePaths: ["src/feature.ts"],
+        authorizeWrite: async () => {},
+        createGenerator: (config, events) => {
+          const generator = new WebAppGenerator(config, events);
+          vi.spyOn(generator, "generate").mockImplementation(async () => {
+            if (failure === "deleted") generator.setFiles({});
+            else
+              generator.setFiles({
+                ...config.initialFiles,
+                [failure === "unowned" ? "src/other.ts" : "src/feature.ts"]:
+                  "changed",
+              });
+            return {
+              files: generator.getFiles(),
+              messages: [],
+              text: "Partial",
+              aborted: false,
+              maxIterationsReached: failure === "budget",
+            };
+          });
+          return generator;
+        },
+      });
+      expect(JSON.parse(result.text)).toMatchObject({
+        ok: false,
+        status: "failed",
+      });
+      expect(result.edits).toBeUndefined();
+      expect(useSubagentStore.getState().progress["subagent-1"].status).toBe(
+        "failed",
+      );
+    },
+  );
+});

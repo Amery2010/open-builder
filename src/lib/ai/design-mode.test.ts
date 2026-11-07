@@ -6,28 +6,20 @@ import {
 import type { DesignSystemPackage } from "../design-systems/validation";
 
 describe("Design mode design-system context", () => {
-  it("orders Skill loading and scoped contract guidance before the first UI write", () => {
-    const loadSkill = DESIGN_MODE_SYSTEM_SUFFIX.indexOf(
-      "Load the required Design Skill",
-    );
-    const submitContract = DESIGN_MODE_SYSTEM_SUFFIX.indexOf(
-      "Call submit_design_contract",
-    );
-    const firstWrite = DESIGN_MODE_SYSTEM_SUFFIX.indexOf(
-      'output exactly one concise line beginning "Design Read:"',
-    );
-
-    expect(loadSkill).toBeGreaterThan(-1);
-    expect(submitContract).toBeGreaterThan(loadSkill);
-    expect(firstWrite).toBeGreaterThan(submitContract);
+  it("uses host-prepared context and progressive work without a contract ritual", () => {
     expect(DESIGN_MODE_SYSTEM_SUFFIX).toContain(
-      "recommended, but not required, for ordinary project file edits",
+      "activates the trusted built-in Design Skills automatically",
     );
+    expect(DESIGN_MODE_SYSTEM_SUFFIX).not.toContain("submit_design_contract");
+    expect(DESIGN_MODE_SYSTEM_SUFFIX).toContain("Missing details stay pending");
     expect(DESIGN_MODE_SYSTEM_SUFFIX).toContain(
-      "Automatic visual review and repair require an accepted contract",
+      "entity arrays merge by stable ID",
     );
+    expect(DESIGN_MODE_SYSTEM_SUFFIX).toContain("No fixed batch phases");
     expect(DESIGN_MODE_SYSTEM_SUFFIX).toContain("selected-but-unapplied");
-    expect(DESIGN_MODE_SYSTEM_SUFFIX).toContain("one automatic repair");
+    expect(DESIGN_MODE_SYSTEM_SUFFIX).toContain(
+      "Visual findings do not start an automatic repair",
+    );
   });
 
   it("requires stable selection ids on independently editable content", () => {

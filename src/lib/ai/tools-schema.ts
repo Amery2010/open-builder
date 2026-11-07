@@ -18,8 +18,8 @@ import { SCREENSHOT_TO_CODE_TOOL } from "../tools/screenshot-to-code";
 import { APPLY_DESIGN_STYLE_TOOL } from "../tools/design-styles";
 import { PROJECT_HEALTH_CHECK_TOOL } from "../tools/project-health-tool";
 import { SUBMIT_DESIGN_REVIEW_TOOL } from "../design/review-tool";
-import { SUBMIT_DESIGN_CONTRACT_TOOL } from "../design/run-contract-tool";
-import { projectDesignSchema } from "../design/project-design";
+import { projectDesignToolInputSchema } from "../design/project-design";
+import { PROTOTYPE_ROUTE_MAX_LENGTH } from "../design/prototype-route";
 import { BASE_SKILL_TOOLS, SCRIPT_SKILL_TOOL } from "../skills/tools";
 import { HostToolCatalog, type HostToolRecord } from "./host-tool-catalog";
 import { HOST_TOOL_DESCRIPTORS } from "./host-tool-catalog-data";
@@ -326,6 +326,8 @@ export interface ToolRunContext {
   readonly activeSkillIds: ReadonlySet<string>;
   readonly approvedSkillScriptHashes: ReadonlySet<string>;
   readonly policyVersion: string;
+  /** Host-assigned exact paths; absent for read-only child runs. */
+  readonly subagentWritePaths?: readonly string[];
 }
 
 const EDITABLE_TOKEN_NAMES = [
@@ -439,29 +441,28 @@ export const DESIGN_HOST_TOOLS = {
   }),
   update_project_design: tool({
     description:
-      "Validate and atomically write the root design-project.json blueprint. Provide the complete blueprint document, including a non-empty responsibility for every page. Provide expected_revision when updating an existing blueprint so stale writes fail closed.",
-    inputSchema: z
-      .object({
-        document: projectDesignSchema,
-        expected_revision: z
-          .union([
-            z.number().int().nonnegative(),
-            z.string().trim().min(1).max(128),
-          ])
-          .optional(),
-      })
-      .strict(),
+      "Save a draft project blueprint in design-project.json. Prefer patch: entity collections merge by stable id and omitted fields are preserved; remove lists explicitly remove entities, never source files. A page may start with only its id. Missing descriptions, references, routes or preview samples are reported as warnings without blocking other pages. For dynamic routes provide previewPath with a concrete existing sample path; do not invent entity IDs. Numeric/string revisions are managed by the Host; expected_revision is optional and rejects stale edits when supplied. Legacy document inputs retain full-array replacement semantics and cannot be combined with patch/remove. Summary counts are not blueprint content. Journal entries are recorded by the Host, not supplied by the model.",
+    inputSchema: projectDesignToolInputSchema,
   }),
   capture_preview_evidence: tool({
     description:
-      "Capture bounded screenshot and semantic evidence for explicitly selected preview viewports. For a complete prototype, provide a validated page, route, and scenario target from design-project.json.",
+      "Capture screenshot and semantic evidence for explicitly selected preview viewports. scope defaults to full-page: the complete rendered document, possibly downscaled. Use viewport for the visible region. Unrendered or virtualized content is not expanded. For a complete prototype, provide a pageId and optional scenarioId from design-project.json; the Host resolves the executable route.",
     inputSchema: z.object({
       viewports: previewViewportsSchema,
+      scope: z.enum(["viewport", "full-page"]).optional(),
       target: z
         .object({
-          pageId: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/),
-          route: z.string().trim().min(1).max(256),
-          scenarioId: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/),
+          pageId: z.string().regex(/^[a-z0-9][a-z0-9-]{0,79}$/),
+          route: z
+            .string()
+            .trim()
+            .min(1)
+            .max(PROTOTYPE_ROUTE_MAX_LENGTH)
+            .optional(),
+          scenarioId: z
+            .string()
+            .regex(/^[a-z0-9][a-z0-9-]{0,79}$/)
+            .optional(),
         })
         .strict()
         .optional(),
@@ -470,7 +471,37 @@ export const DESIGN_HOST_TOOLS = {
   ...DESIGN_DIAGNOSTIC_TOOLS,
 };
 
+export const PREVIEW_CAPTURE_TOOLS: ToolSet = {
+  capture_preview_sequence: tool({
+    description:
+      "Capture 1–5 images of the currently mounted project preview at chosen time offsets, preserving its viewport, scroll, input and interaction state. scope defaults to viewport (the current visible region); full-page captures the complete rendered document, possibly downscaled, for every frame. Unrendered or virtualized content is not expanded. Omit atMs for a single screenshot. Offsets start when the screenshot runtime is ready. This does not navigate, resize or refresh the page. Actual sampling times and delays are reported. Images are available to this run only.",
+    inputSchema: z
+      .object({
+        scope: z.enum(["viewport", "full-page"]).optional(),
+        atMs: z
+          .array(z.number().int().min(0).max(30_000))
+          .min(1)
+          .max(5)
+          .refine(
+            (times) =>
+              times.every(
+                (time, index) => index === 0 || time > times[index - 1],
+              ),
+            {
+              message: "Time offsets must be strictly increasing.",
+            },
+          )
+          .optional()
+          .describe(
+            "Milliseconds after readiness, e.g. [0, 500, 1500]. Defaults to [0].",
+          ),
+      })
+      .strict(),
+  }),
+};
+
 export const STATIC_TOOL_DEFINITIONS: ToolSet = {
+  ...PREVIEW_CAPTURE_TOOLS,
   ...BUILTIN_TOOLS,
   ...SEARCH_TOOLS,
   ...WEB_READER_TOOL,
@@ -483,7 +514,6 @@ export const STATIC_TOOL_DEFINITIONS: ToolSet = {
   ...APPLY_DESIGN_STYLE_TOOL,
   ...PROJECT_HEALTH_CHECK_TOOL,
   ...SUBMIT_DESIGN_REVIEW_TOOL,
-  ...SUBMIT_DESIGN_CONTRACT_TOOL,
   ...BASE_SKILL_TOOLS,
   ...SCRIPT_SKILL_TOOL,
   ...DESIGN_HOST_TOOLS,

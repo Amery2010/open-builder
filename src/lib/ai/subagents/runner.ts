@@ -1,3 +1,8 @@
+import {
+  collectDelegatedEdits,
+  delegatedWriteError,
+  validateDelegatedWritePaths,
+} from "./delegated-edits";
 import { CANCELLED_TOOL_OUTPUT_KIND } from "../run-guard";
 import { sanitizeToolExecutionOutputForHistory } from "../../utils/message-security";
 import type { ToolSet } from "ai";
@@ -34,6 +39,8 @@ export interface ParentApiConfig {
 export interface RunSubagentOpts {
   name: string;
   task: string;
+  writePaths?: readonly string[];
+  authorizeWrite?: (name: string, args: unknown) => Promise<void>;
   files: ProjectFiles;
   signal: AbortSignal;
   toolCallId: string;
@@ -78,7 +85,7 @@ export function buildSubagentSystemPrompt(
   return basePrompt + customSystemPrompt + mandatorySkillsPrompt;
 }
 
-type WritePolicy = "readonly" | "fullWrite";
+type WritePolicy = "readonly" | "scopedWrite";
 
 function effectiveSubagentWhitelist(
   def: SubagentDefinition,
@@ -236,9 +243,12 @@ export async function runSubagent(
   const whitelist = effectiveSubagentWhitelist(
     def,
     policy,
-    opts.additionalToolNames,
+    policy === "readonly" ? opts.additionalToolNames : new Set(),
   );
-  const toolSet = buildSubagentToolSet(whitelist, opts.parentCustomToolSet);
+  const toolSet = buildSubagentToolSet(
+    whitelist,
+    policy === "readonly" ? opts.parentCustomToolSet : {},
+  );
   const wrappedHandler = wrapHandlerWithWhitelist(
     opts.parentCombinedToolHandler,
     whitelist,
@@ -352,7 +362,25 @@ export async function runSubagent(
     customTools: {},
     customToolHandler: wrappedHandler,
     executionMode: "subagent",
-    allowedMcpAliases: opts.additionalToolNames,
+    subagentWritePaths: policy === "scopedWrite" ? opts.writePaths : undefined,
+    authorizeToolCall:
+      policy === "scopedWrite"
+        ? async (name, args) => {
+            if (name !== "write_file" && name !== "patch_file") return;
+            const restriction = delegatedWriteError(
+              name,
+              args,
+              opts.writePaths ?? [],
+              opts.files,
+            );
+            if (restriction) return restriction;
+            if (!opts.authorizeWrite)
+              return "The parent write authority is unavailable.";
+            await opts.authorizeWrite(name, args);
+          }
+        : undefined,
+    allowedMcpAliases:
+      policy === "readonly" ? opts.additionalToolNames : new Set(),
     localToolAnnotations: opts.additionalToolAnnotations,
     initialSkillContext: opts.parentSkillContext,
     // Subagents do not get user interaction or plan-mode tools.
@@ -370,13 +398,19 @@ export async function runSubagent(
   const maxResultLength = def.maxResultLength ?? 4000;
 
   try {
+    if (policy === "scopedWrite")
+      validateDelegatedWritePaths(opts.writePaths, opts.files);
     opts.signal.addEventListener("abort", onAbort, { once: true });
     inner = opts.createGenerator
       ? await opts.createGenerator(generatorOptions, events)
       : new WebAppGenerator(generatorOptions, events);
     if (opts.signal.aborted) inner.abort();
     opts.signal.throwIfAborted();
-    const innerResult = await inner.generate(checkedTask.task);
+    const innerResult = await inner.generate(
+      policy === "scopedWrite"
+        ? `${checkedTask.task}\n\nYour exclusive writePaths: ${JSON.stringify(opts.writePaths)}`
+        : checkedTask.task,
+    );
     flushPending();
     const receivedText = opts.signal.aborted
       ? (currentProgress()?.text ?? "")
@@ -409,9 +443,10 @@ export async function runSubagent(
       : undefined;
     const status = budgetError ? "failed" : "done";
     settleLiveProgress();
-    useSubagentStore
-      .getState()
-      .markStatus(opts.toolCallId, status, budgetError, runId);
+    if (policy === "readonly" || budgetError)
+      useSubagentStore
+        .getState()
+        .markStatus(opts.toolCallId, status, budgetError, runId);
     const result: SubagentToolResult = {
       ok: !budgetError,
       subagent: def.name,
@@ -422,12 +457,39 @@ export async function runSubagent(
       durationMs: Date.now() - startedAt,
       ...(budgetError ? { error: budgetError } : {}),
     };
-    return {
-      text: JSON.stringify(result),
-      // Only propagate files for write-capable subagents. Readonly subagents'
-      // inner files cannot diverge from the parent's, so skip the work.
-      files: policy === "fullWrite" ? inner.getFiles() : undefined,
-    };
+    if (policy === "scopedWrite" && !budgetError) {
+      const edits = collectDelegatedEdits(
+        opts.files,
+        inner.getFiles(),
+        opts.writePaths ?? [],
+      );
+      let completed = false;
+      return {
+        text: JSON.stringify(result),
+        edits,
+        complete: (error) => {
+          if (completed) return JSON.stringify(result);
+          completed = true;
+          let status: SubagentToolResult["status"] = "done";
+          if (opts.signal.aborted) status = "aborted";
+          else if (error) status = "failed";
+          result.status = status;
+          result.durationMs = Date.now() - startedAt;
+          result.ok = status === "done";
+          result.error = error;
+          if (result.ok && edits.length)
+            result.text += `\n\nMerged files: ${edits.map((edit) => edit.path).join(", ")}`;
+          useSubagentStore
+            .getState()
+            .setFinalText(opts.toolCallId, result.text, runId);
+          useSubagentStore
+            .getState()
+            .markStatus(opts.toolCallId, status, error, runId);
+          return JSON.stringify(result);
+        },
+      };
+    }
+    return { text: JSON.stringify(result) };
   } catch (err) {
     const isAbort =
       (err as { name?: string })?.name === "AbortError" || opts.signal.aborted;
@@ -466,7 +528,16 @@ export async function runSubagent(
 export function createSubagentDispatcher(
   opts: CreateDispatcherOpts,
 ): NonNullable<GeneratorOptions["dispatchSubagent"]> {
-  return (name, task, files, signal, toolCallId, conversationId) =>
+  return (
+    name,
+    task,
+    files,
+    signal,
+    toolCallId,
+    conversationId,
+    writePaths,
+    authorizeWrite,
+  ) =>
     runSubagent({
       name,
       task,
@@ -474,6 +545,8 @@ export function createSubagentDispatcher(
       signal,
       toolCallId,
       conversationId,
+      writePaths,
+      authorizeWrite,
       parentApiConfig: opts.getApiConfig(),
       parentCustomToolSet: opts.getCustomToolSet(),
       parentCombinedToolHandler: opts.getCombinedToolHandler(),

@@ -276,7 +276,7 @@ describe("Design Token Mutation", () => {
     expect(harness.calls).toEqual(["read"]);
   });
 
-  it("requires an accepted Design contract and a ready token contract", async () => {
+  it("requires current Host context and a ready token contract", async () => {
     const harness = createHarness();
 
     const missingContract = await mutateDesignTokens(
@@ -285,7 +285,7 @@ describe("Design Token Mutation", () => {
     );
     expect(missingContract).toMatchObject({
       ok: false,
-      code: "design_contract_required",
+      code: "design_context_unavailable",
     });
     expect(harness.calls).toEqual([]);
 
@@ -304,6 +304,26 @@ describe("Design Token Mutation", () => {
     expect(selectedUnapplied.calls).toEqual(["read"]);
   });
 
+  it("accepts Host-prepared unknown intent fields without a model contract submission", async () => {
+    const harness = createHarness();
+    const result = await mutateDesignTokens(
+      {
+        ...mutation(),
+        acceptedDesignContract: undefined,
+        designRunContext: {
+          ...acceptedContract,
+          audience: "",
+          concept: "",
+          preserve: [],
+          acceptance: [],
+        },
+      },
+      harness.adapters,
+    );
+    expect(result).toMatchObject({ ok: true, status: "updated" });
+    expect(harness.calls.filter((call) => call === "commit")).toHaveLength(1);
+  });
+
   it("rejects mismatched contracts and missing, invalid, or legacy token contracts", async () => {
     const mismatched = createHarness();
     const mismatchResult = await mutateDesignTokens(
@@ -315,7 +335,7 @@ describe("Design Token Mutation", () => {
     );
     expect(mismatchResult).toMatchObject({
       ok: false,
-      code: "design_contract_mismatch",
+      code: "design_context_mismatch",
     });
     expect(mismatched.calls).toEqual(["read"]);
 

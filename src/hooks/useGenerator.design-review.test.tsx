@@ -353,7 +353,7 @@ describe("useGenerator background Design Review", () => {
       await hook.result.current.automaticDesignReview([screenshot], evidence);
     });
 
-    expect(useDesignReviewStore.getState().automatic?.stage).toBe("superseded");
+    expect(useDesignReviewStore.getState().automatic?.stage).toBe("warning");
     expect(
       useConversationStore
         .getState()
@@ -363,7 +363,7 @@ describe("useGenerator background Design Review", () => {
     ).toBe(false);
   });
 
-  it("promotes a current Design review into one bounded repair request", async () => {
+  it("reports current Design findings without starting a repair request", async () => {
     const conversationId = useConversationStore.getState().createConversation();
     useConversationStore.getState().setWorkspaceMode("design");
     useConversationStore.getState().setFiles({ "src/App.tsx": "export {}" });
@@ -430,6 +430,6 @@ describe("useGenerator background Design Review", () => {
         .conversations[conversationId].messages.some(
           (message) => message.metadata?.origin === "design_auto_fix",
         ),
-    ).toBe(true);
+    ).toBe(false);
   });
 });

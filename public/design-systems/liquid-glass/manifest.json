@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "open-builder-design-system/v1",
+  "id": "liquid-glass",
+  "name": "Liquid Glass",
+  "category": "mixed",
+  "description": "Translucent glass layers, rounded liquid edges and carefully controlled refractive highlights. Content remains on a stable readable surface; transparency adds depth rather than mixing every background into the text.",
+  "files": {
+    "design": "DESIGN.md",
+    "tokens": "tokens.css"
+  }
+}

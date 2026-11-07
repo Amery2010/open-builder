@@ -12,7 +12,7 @@ import {
   inspectDesignTokenContract,
   readEditableTokenValues,
 } from "./tokens";
-import type { DesignContract } from "./run-contract";
+import type { DesignRunContext } from "./design-run";
 import {
   runDesignSystemAdherenceCheck,
   type DesignAdherenceIssue,
@@ -49,7 +49,7 @@ export interface DesignDiagnosticContext {
   template: string;
   previewMode: ProjectPreviewMode;
   designState?: ConversationDesignState;
-  contract?: DesignContract | null;
+  contract?: DesignRunContext | null;
   history?: readonly Message[];
   signal?: AbortSignal;
 }
@@ -319,7 +319,7 @@ function layoutIssues(capture: DesignBridgeCaptureResult): LayoutIssue[] {
       message: `Document scroll width ${snapshot.document.scrollWidth}px exceeds viewport width ${snapshot.viewport.width}px.`,
     });
   }
-  if (capture.viewport.truncated) {
+  if (capture.viewport.truncated && capture.capture?.scope !== "viewport") {
     issues.push({
       severity: "info",
       code: "capture_truncated",
@@ -367,6 +367,23 @@ async function measurePreviewLayout(
       viewport: capture.semanticSnapshot.viewport,
       document: capture.semanticSnapshot.document,
       capture: {
+        ...(capture.capture
+          ? {
+              ...capture.capture,
+              imageWidth: Math.max(
+                1,
+                Math.floor(
+                  capture.capture.region.width * capture.capture.scale,
+                ),
+              ),
+              imageHeight: Math.max(
+                1,
+                Math.floor(
+                  capture.capture.region.height * capture.capture.scale,
+                ),
+              ),
+            }
+          : {}),
         capturedHeight: capture.viewport.capturedHeight,
         fullHeight: capture.viewport.fullHeight,
         truncated: capture.viewport.truncated,
@@ -718,6 +735,9 @@ async function comparePreviewStates(
     template: context.template,
     previewMode: context.previewMode,
     viewports,
+    scope:
+      baseline?.evidence.find((entry) => entry.view === viewports[0])?.capture
+        ?.scope ?? "full-page",
     signal: context.signal,
   });
   const current = isPreviewEvidenceSummary(currentOutput.structuredContent)
@@ -877,7 +897,7 @@ function traceDesignProvenance(
         ),
       },
     },
-    acceptedRunContract: context.contract
+    designRunContext: context.contract
       ? {
           surfaceMode: context.contract.surface_mode,
           changeMode: context.contract.change_mode,

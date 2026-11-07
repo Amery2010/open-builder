@@ -70,7 +70,13 @@ export async function storeAttachmentBlob(
   options: { createPreviewUrl?: boolean } = {},
 ): Promise<Attachment> {
   const id = createId();
-  await attachmentBlobs.setItem(id, blob);
+  // Materialize File bytes before IndexedDB storage. WebKit can reject File
+  // backing data even when it accepts an equivalent in-memory Blob.
+  const storedBlob =
+    blob instanceof File
+      ? new Blob([await blob.arrayBuffer()], { type: blob.type })
+      : blob;
+  await attachmentBlobs.setItem(id, storedBlob);
   return {
     id,
     type,
@@ -82,7 +88,7 @@ export async function storeAttachmentBlob(
     size: blob.size,
     previewUrl:
       type === "image" && options.createPreviewUrl !== false
-        ? URL.createObjectURL(blob)
+        ? URL.createObjectURL(storedBlob)
         : undefined,
   };
 }

@@ -43,6 +43,22 @@ function compiledOutput(tokensCss = validTokens): string {
 }
 
 describe("design-system AI utilities", () => {
+  it("offers all 36 builtins to routing, including every curated style", async () => {
+    const registry = new DesignSystemRegistry(new MemoryDesignSystemStorage());
+    const candidates = await listDesignSystemCandidates("zh", registry);
+    expect(candidates).toHaveLength(36);
+    const additions = candidates.slice(12);
+    expect(additions).toHaveLength(24);
+    expect(new Set(additions.map((candidate) => candidate.id)).size).toBe(24);
+    expect(additions.every((candidate) => candidate.source === "builtin")).toBe(
+      true,
+    );
+    expect(
+      additions.find((candidate) => candidate.id === "felt-skeuomorphism")
+        ?.summary,
+    ).toContain("毛毡");
+  });
+
   it("accepts a candidate id and loads only that validated package", async () => {
     const registry = new DesignSystemRegistry(new MemoryDesignSystemStorage());
     const reference = {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ToolSet } from "ai";
+import type { ZodType } from "zod";
 import {
   BUILTIN_TOOLS,
   DESIGN_DIAGNOSTIC_TOOLS,
@@ -16,6 +17,23 @@ import { HOST_TOOL_DESCRIPTORS } from "./host-tool-catalog-data";
 import { filterToolSet } from "../tools/tool-set-utils";
 
 describe("tool policies", () => {
+  it("accepts optional screenshot scopes without changing tool availability", () => {
+    const sequence = STATIC_TOOL_DEFINITIONS.capture_preview_sequence
+      .inputSchema as ZodType;
+    const evidence = DESIGN_HOST_TOOLS.capture_preview_evidence
+      .inputSchema as ZodType;
+    expect(sequence.safeParse({}).success).toBe(true);
+    expect(
+      sequence.safeParse({ scope: "full-page", atMs: [0, 100] }).success,
+    ).toBe(true);
+    expect(
+      evidence.safeParse({ scope: "viewport", viewports: ["mobile"] }).success,
+    ).toBe(true);
+    for (const schema of [sequence, evidence])
+      expect(
+        schema.safeParse({ scope: "selection", viewports: ["mobile"] }).success,
+      ).toBe(false);
+  });
   const staticDefinition = (name: string): ToolSet[string] => {
     const definition = HOST_TOOL_CATALOG.get(name)?.definition;
     if (!definition) throw new Error(`Missing test definition for ${name}`);
@@ -212,7 +230,11 @@ describe("tool policies", () => {
             const expected =
               record.modes.includes(mode) &&
               record.profiles.includes(profile) &&
-              record.platforms.includes(platform);
+              record.platforms.includes(platform) &&
+              !(
+                mode === "subagent" &&
+                ["write_file", "patch_file"].includes(record.name)
+              );
             expect(
               record.name in projected,
               `${record.name} in ${mode}/${profile}/${platform}`,
@@ -323,7 +345,6 @@ describe("tool policies", () => {
       apply_design_style: staticDefinition("apply_design_style"),
       apply_design_system: {} as ToolSet[string],
       submit_design_review: staticDefinition("submit_design_review"),
-      submit_design_contract: staticDefinition("submit_design_contract"),
       update_design_tokens: DESIGN_HOST_TOOLS.update_design_tokens,
       capture_preview_evidence: DESIGN_HOST_TOOLS.capture_preview_evidence,
       set_default_preview_view: DESIGN_HOST_TOOLS.set_default_preview_view,
@@ -348,7 +369,7 @@ describe("tool policies", () => {
     });
     expect(design.apply_design_style).toBeUndefined();
     expect(design.apply_design_system).toBeUndefined();
-    expect(design.submit_design_contract).toBeDefined();
+    expect(design.submit_design_contract).toBeUndefined();
     expect(design.update_design_tokens).toBeDefined();
     expect(design.capture_preview_evidence).toBeDefined();
     expect(design.set_default_preview_view).toBeDefined();
@@ -377,7 +398,6 @@ describe("tool policies", () => {
       web_search: staticDefinition("web_search"),
       apply_design_system: {} as ToolSet[string],
       submit_design_review: staticDefinition("submit_design_review"),
-      submit_design_contract: staticDefinition("submit_design_contract"),
       ...DESIGN_DIAGNOSTIC_TOOLS,
       mcp_review_escape: {} as ToolSet[string],
     };

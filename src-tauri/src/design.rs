@@ -89,7 +89,7 @@ fn create_unique_directory(parent: &Path, stem: &str) -> Result<(PathBuf, String
     Err("Could not allocate a unique export directory.".to_string())
 }
 
-fn validate_image_asset(asset: &DesignProjectAssetInput) -> Result<(), String> {
+fn validate_project_asset(asset: &DesignProjectAssetInput) -> Result<(), String> {
     let extension = Path::new(&asset.path)
         .extension()
         .and_then(|value| value.to_str())
@@ -111,11 +111,39 @@ fn validate_image_asset(asset: &DesignProjectAssetInput) -> Result<(), String> {
                 && bytes.starts_with(b"RIFF")
                 && bytes.get(8..12) == Some(b"WEBP")
         }
+        "image/gif" => {
+            extension == "gif" && (bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"))
+        }
+        "image/x-icon" => {
+            extension == "ico"
+                && bytes.len() >= 6
+                && bytes.starts_with(&[0, 0, 1, 0])
+                && (bytes[4] != 0 || bytes[5] != 0)
+        }
+        "image/avif" => {
+            extension == "avif" && bytes.len() >= 16 && bytes.get(4..8) == Some(b"ftyp") && {
+                let size = u32::from_be_bytes(bytes[0..4].try_into().unwrap()) as usize;
+                size >= 16
+                    && size <= bytes.len()
+                    && bytes[8..size]
+                        .chunks_exact(4)
+                        .enumerate()
+                        .any(|(index, brand)| index != 1 && (brand == b"avif" || brand == b"avis"))
+            }
+        }
+        "font/woff" => extension == "woff" && bytes.len() >= 44 && bytes.starts_with(b"wOFF"),
+        "font/woff2" => extension == "woff2" && bytes.len() >= 48 && bytes.starts_with(b"wOF2"),
+        "font/ttf" => {
+            extension == "ttf"
+                && bytes.len() >= 12
+                && (bytes.starts_with(&[0, 1, 0, 0]) || bytes.starts_with(b"true"))
+        }
+        "font/otf" => extension == "otf" && bytes.len() >= 12 && bytes.starts_with(b"OTTO"),
         _ => false,
     };
     if !signature_matches {
         return Err(format!(
-            "Project asset {:?} does not match its declared image type.",
+            "Project asset {:?} does not match its declared resource type.",
             asset.path
         ));
     }
@@ -176,7 +204,7 @@ fn export_project_files(
                     asset.path
                 ));
             }
-            validate_image_asset(asset)?;
+            validate_project_asset(asset)?;
             Ok((asset, relative))
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -343,5 +371,43 @@ mod tests {
         };
         assert!(export_project_files(parent.path(), "Invalid", &files, &[invalid]).is_err());
         assert!(!parent.path().join("Invalid").exists());
+    }
+
+    #[test]
+    fn export_preserves_web_fonts_and_animated_images() {
+        let parent = temporary_directory();
+        let files = BTreeMap::from([("index.html".to_string(), "<main />".to_string())]);
+        let mut font = vec![0; 48];
+        font[..4].copy_from_slice(b"wOF2");
+        let image = b"GIF89a-original-bytes".to_vec();
+        let assets = vec![
+            DesignProjectAssetInput {
+                path: "public/font.woff2".to_string(),
+                mime_type: "font/woff2".to_string(),
+                bytes: font.clone(),
+            },
+            DesignProjectAssetInput {
+                path: "public/animation.gif".to_string(),
+                mime_type: "image/gif".to_string(),
+                bytes: image.clone(),
+            },
+        ];
+        let result = export_project_files(parent.path(), "Resources", &files, &assets).unwrap();
+        assert_eq!(result.file_count, 3);
+        assert_eq!(
+            fs::read(Path::new(&result.path).join("public/font.woff2")).unwrap(),
+            font
+        );
+        assert_eq!(
+            fs::read(Path::new(&result.path).join("public/animation.gif")).unwrap(),
+            image
+        );
+        let invalid = DesignProjectAssetInput {
+            path: "public/fake.ttf".to_string(),
+            mime_type: "font/ttf".to_string(),
+            bytes: assets[0].bytes.clone(),
+        };
+        assert!(export_project_files(parent.path(), "Invalid-font", &files, &[invalid]).is_err());
+        assert!(!parent.path().join("Invalid-font").exists());
     }
 }

@@ -16,8 +16,8 @@ import {
   stageProjectAsset,
   type StagedProjectAsset,
 } from "../project-assets/core";
-import { compressLocalImage } from "../images/compress-local-image";
-import { useSettingsStore } from "../../store/settings";
+import type { ProjectRuntimeValidation } from "../project-runtime";
+import { assessProjectRuntime } from "../project-runtime/capabilities";
 
 export const PROJECT_IMPORT_LIMITS = {
   maxArchiveBytes: 16 * 1024 * 1024,
@@ -43,6 +43,8 @@ export interface StagedProjectImport {
   previewMode: ProjectPreviewMode;
   activeFile?: string;
   report: ProjectImportReport;
+  /** Present only after the staged files and assets pass isolated compilation. */
+  validation?: ProjectRuntimeValidation;
 }
 
 export type ProjectImportCommitResult =
@@ -271,102 +273,12 @@ function decodeText(bytes: Uint8Array): string | null {
   }
 }
 
-function dependencyNames(packageJson: Record<string, unknown>): Set<string> {
-  const names = new Set<string>();
-  for (const section of ["dependencies", "devDependencies"] as const) {
-    const value = packageJson[section];
-    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
-    for (const name of Object.keys(value)) names.add(name);
-  }
-  return names;
-}
-
 export function inferProjectPreview(files: ProjectFiles): {
   template: string;
   previewMode: ProjectPreviewMode;
 } {
-  const paths = Object.keys(files);
-  const hasTypeScript = paths.some((path) =>
-    /(?:^|\/)(?:tsconfig(?:\.[^/]*)?\.json|[^/]+\.tsx?)$/i.test(path),
-  );
-  let packageJson: Record<string, unknown> | null = null;
-  try {
-    const parsed = files["package.json"]
-      ? JSON.parse(files["package.json"])
-      : null;
-    packageJson =
-      parsed && typeof parsed === "object" && !Array.isArray(parsed)
-        ? parsed
-        : null;
-  } catch {
-    // A malformed root manifest is not enough to infer a runnable template.
-  }
-
-  const dependencies = packageJson
-    ? dependencyNames(packageJson)
-    : new Set<string>();
-  const has = (name: string) => dependencies.has(name);
-  const vite = has("vite");
-  const result = (template: string) => ({
-    template,
-    previewMode: "sandpack" as const,
-  });
-
-  if (has("next")) return result("nextjs");
-  if (has("astro")) return result("astro");
-  if (has("@angular/core")) return result("angular");
-  if (has("solid-js")) return result("solid");
-  if (has("svelte")) {
-    return result(
-      vite ? (hasTypeScript ? "vite-svelte-ts" : "vite-svelte") : "svelte",
-    );
-  }
-  if (has("vue")) {
-    return result(
-      vite
-        ? hasTypeScript
-          ? "vite-vue-ts"
-          : "vite-vue"
-        : hasTypeScript
-          ? "vue-ts"
-          : "vue",
-    );
-  }
-  if (has("preact")) {
-    return result(hasTypeScript ? "vite-preact-ts" : "vite-preact");
-  }
-  if (has("react")) {
-    return result(
-      vite
-        ? hasTypeScript
-          ? "vite-react-ts"
-          : "vite-react"
-        : hasTypeScript
-          ? "react-ts"
-          : "react",
-    );
-  }
-  if (vite) return result("vite");
-  if (
-    !packageJson &&
-    paths.some((path) => path.toLowerCase() === "index.html")
-  ) {
-    return result("static");
-  }
-  if (packageJson) {
-    const scripts = packageJson.scripts;
-    const scriptText =
-      scripts && typeof scripts === "object" && !Array.isArray(scripts)
-        ? Object.values(scripts).join(" ")
-        : "";
-    if (
-      typeof packageJson.main === "string" ||
-      /(?:^|\s)(?:node|tsx|ts-node)(?:\s|$)/.test(scriptText)
-    ) {
-      return result("node");
-    }
-  }
-  return { template: "static", previewMode: "code-only" };
+  const { template, previewMode } = assessProjectRuntime(files);
+  return { template, previewMode };
 }
 
 function chooseActiveFile(files: ProjectFiles): string | undefined {
@@ -399,8 +311,6 @@ async function stageSourceEntries(
   entries: SourceEntry[],
   report = createReport(),
 ): Promise<StagedProjectImport> {
-  const { imageCompressionEnabled, imageCompressionQuality } =
-    useSettingsStore.getState().system;
   const accepted: SourceEntry[] = [];
   const acceptedAssets: SourceEntry[] = [];
   const seen = new Set<string>();
@@ -474,17 +384,11 @@ async function stageSourceEntries(
       throw new Error(`Project asset "${entry.path}" changed while importing.`);
     }
     const mimeType = projectAssetMimeTypeForPath(entry.path);
-    const name = entry.path.split("/").pop() ?? entry.path;
-    const file = new File([Uint8Array.from(bytes).buffer], name, {
+    const blob = new Blob([Uint8Array.from(bytes).buffer], {
       type: mimeType ?? undefined,
-      lastModified: entry.lastModified ?? 0,
-    });
-    const compressed = await compressLocalImage(file, {
-      enabled: imageCompressionEnabled,
-      quality: imageCompressionQuality,
     });
     assets.push(
-      await stageProjectAsset(entry.path, compressed, mimeType ?? undefined),
+      await stageProjectAsset(entry.path, blob, mimeType ?? undefined),
     );
   }
 

@@ -52,11 +52,11 @@ const TOOL_ZH_NAMES: Readonly<Record<string, string>> = Object.freeze({
   screenshot_to_code: "截图转代码",
   apply_design_style: "应用设计风格",
   submit_design_review: "提交设计审查",
-  submit_design_contract: "提交设计契约",
   set_default_preview_view: "设置默认预览视图",
   update_design_tokens: "更新设计令牌",
   update_project_design: "更新项目设计蓝图",
   capture_preview_evidence: "捕获预览证据",
+  capture_preview_sequence: "连续捕捉当前预览",
   inspect_design_consistency: "检查设计一致性",
   measure_preview_layout: "测量预览布局",
   audit_accessibility_tree: "审计无障碍语义树",
@@ -88,11 +88,11 @@ const TOOL_ICON_KEYS: Readonly<Record<string, string>> = Object.freeze({
   screenshot_to_code: "screenshot",
   apply_design_style: "design-style",
   submit_design_review: "design",
-  submit_design_contract: "design-contract",
   set_default_preview_view: "preview",
   update_design_tokens: "design",
   update_project_design: "design-contract",
   capture_preview_evidence: "evidence",
+  capture_preview_sequence: "evidence",
   inspect_design_consistency: "design",
   measure_preview_layout: "preview",
   audit_accessibility_tree: "accessibility",
@@ -188,8 +188,18 @@ export const HOST_TOOL_DESCRIPTORS: readonly HostToolRecord[] = Object.freeze([
   hostRecord("read_files", "project", ["read_project"], ALL_READ_MODES, {
     profiles: ["default", "design", "design_review"],
   }),
-  hostRecord("write_file", "project", ["write_project"], ["chat", "auto_qa"]),
-  hostRecord("patch_file", "project", ["write_project"], ["chat", "auto_qa"]),
+  hostRecord(
+    "write_file",
+    "project",
+    ["write_project"],
+    ["chat", "auto_qa", "subagent"],
+  ),
+  hostRecord(
+    "patch_file",
+    "project",
+    ["write_project"],
+    ["chat", "auto_qa", "subagent"],
+  ),
   hostRecord("search_in_files", "project", ["read_project"], ALL_READ_MODES, {
     profiles: ["default", "design", "design_review"],
   }),
@@ -224,6 +234,16 @@ export const HOST_TOOL_DESCRIPTORS: readonly HostToolRecord[] = Object.freeze([
   hostRecord("ask_user_question", "builtin", ["conversation"], CHAT_AND_PLAN),
   hostRecord("exit_plan_mode", "builtin", ["conversation"], ["plan"]),
   hostRecord("dispatch_subagent", "builtin", ["conversation"], CHAT_AND_PLAN),
+  hostRecord(
+    "capture_preview_sequence",
+    "builtin",
+    ["read_runtime"],
+    CHAT_AND_PLAN,
+    {
+      retention: "summary-only",
+      approval: "none",
+    },
+  ),
   hostRecord("web_search", "network", ["network"], CHAT_AND_PLAN, {
     providerAlternative: true,
   }),
@@ -281,9 +301,6 @@ export const HOST_TOOL_DESCRIPTORS: readonly HostToolRecord[] = Object.freeze([
   ),
   hostRecord("submit_design_review", "builtin", ["conversation"], CHAT_ONLY, {
     profiles: ["design_review"],
-  }),
-  hostRecord("submit_design_contract", "builtin", ["conversation"], CHAT_ONLY, {
-    profiles: ["design"],
   }),
   hostRecord(
     "set_default_preview_view",
