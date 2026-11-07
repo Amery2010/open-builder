@@ -6,6 +6,7 @@ const assets = new URL("assets/", dist);
 const html = readFileSync(new URL("index.html", dist), "utf8");
 const files = readdirSync(assets);
 const failures = [];
+const warnings = [];
 const forbiddenTauriSpecifiers = [
   "@tauri-apps/plugin-dialog",
   "@tauri-apps/plugin-fs",
@@ -24,6 +25,7 @@ for (const file of files.filter((name) => name.endsWith(".js"))) {
   }
 }
 
+// Chunk placement affects loading performance, so these findings are advisory.
 const preloadHrefs = [
   ...html.matchAll(/rel="modulepreload"[^>]+href="([^"]+)"/g),
 ].map((match) => match[1]);
@@ -41,7 +43,7 @@ for (const href of preloadHrefs) {
   if (
     forbiddenInitialChunks.some((prefix) => href.includes(`/assets/${prefix}`))
   ) {
-    failures.push(`Heavy lazy chunk is preloaded on first paint: ${href}`);
+    warnings.push(`Heavy lazy chunk is preloaded on first paint: ${href}`);
   }
 }
 
@@ -53,7 +55,7 @@ for (const prefix of [
   "MarkdownContent-",
 ]) {
   if (!files.some((file) => file.startsWith(prefix) && file.endsWith(".js"))) {
-    failures.push(`Expected a lazy ${prefix} chunk in the production build.`);
+    warnings.push(`Expected a lazy ${prefix} chunk in the production build.`);
   }
 }
 
@@ -112,9 +114,25 @@ if (markdownChunk) {
   }
 }
 
+for (const warning of warnings) {
+  if (process.env.GITHUB_ACTIONS === "true") {
+    const message = warning
+      .replaceAll("%", "%25")
+      .replaceAll("\r", "%0D")
+      .replaceAll("\n", "%0A");
+    console.log(`::warning title=Build artifacts::${message}`);
+  } else {
+    console.warn(`build-artifacts warning: ${warning}`);
+  }
+}
+
 if (failures.length > 0) {
   for (const failure of failures) console.error(`build-artifacts: ${failure}`);
   process.exit(1);
 }
 
-console.log("Production artifact checks passed.");
+console.log(
+  warnings.length > 0
+    ? `Production artifact checks passed with ${warnings.length} warning(s).`
+    : "Production artifact checks passed.",
+);

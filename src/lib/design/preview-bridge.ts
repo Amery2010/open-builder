@@ -8,17 +8,23 @@ import { readScreenshotImage } from "../images/screenshot";
 import type { DesignSelectionContext, ProjectFiles } from "../../types";
 import { EDITABLE_DESIGN_TOKENS } from "./tokens";
 import {
+  isPreviewViewportSize,
   isSafePrototypePreviewRoute,
   prototypePreviewTargetsEqual,
   sanitizePrototypePreviewTarget,
   sanitizePreviewCaptureGeometry,
   PROTOTYPE_PREVIEW_ROUTE_MAX_LENGTH,
+  type DesignReviewViewportName,
   type PrototypePreviewTarget,
   type PreviewCaptureGeometry,
   type PreviewCaptureOptions,
 } from "./preview-runtime";
-export type { PrototypePreviewTarget } from "./preview-runtime";
+export type {
+  DesignReviewViewportName,
+  PrototypePreviewTarget,
+} from "./preview-runtime";
 export {
+  isPreviewViewportSize,
   isSafePrototypePreviewRoute,
   prototypePreviewTargetsEqual,
   sanitizePrototypePreviewTarget,
@@ -97,27 +103,6 @@ export interface DesignBridgeInjectionResult {
     | "missing-index"
     | "missing-entry"
     | "reserved-path";
-}
-
-export type DesignReviewViewportName = "desktop" | "tablet" | "mobile";
-
-export function isPreviewViewportSize(
-  name: DesignReviewViewportName,
-  width: number,
-  height: number,
-): boolean {
-  if (
-    !Number.isInteger(width) ||
-    !Number.isInteger(height) ||
-    width < 240 ||
-    width > 2000 ||
-    height < 240 ||
-    height > 2000
-  )
-    return false;
-  if (name === "mobile") return width < 768;
-  if (name === "tablet") return width >= 768 && width < 1024;
-  return name === "desktop" && width >= 1024;
 }
 
 export function designBridgeRuntimeRevision(

@@ -12,6 +12,27 @@ import type {
   DesignBridgeAnnotationCaptureResult,
 } from "./preview-bridge";
 
+export type DesignReviewViewportName = "desktop" | "tablet" | "mobile";
+
+export function isPreviewViewportSize(
+  name: DesignReviewViewportName,
+  width: number,
+  height: number,
+): boolean {
+  if (
+    !Number.isInteger(width) ||
+    !Number.isInteger(height) ||
+    width < 240 ||
+    width > 2000 ||
+    height < 240 ||
+    height > 2000
+  )
+    return false;
+  if (name === "mobile") return width < 768;
+  if (name === "tablet") return width >= 768 && width < 1024;
+  return name === "desktop" && width >= 1024;
+}
+
 export type PreviewCaptureScope = "viewport" | "full-page";
 
 export interface PreviewCaptureOptions {

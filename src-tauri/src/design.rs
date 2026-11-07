@@ -123,12 +123,13 @@ fn validate_project_asset(asset: &DesignProjectAssetInput) -> Result<(), String>
         "image/avif" => {
             extension == "avif" && bytes.len() >= 16 && bytes.get(4..8) == Some(b"ftyp") && {
                 let size = u32::from_be_bytes(bytes[0..4].try_into().unwrap()) as usize;
-                size >= 16
-                    && size <= bytes.len()
-                    && bytes[8..size]
-                        .chunks_exact(4)
+                size >= 16 && size <= bytes.len() && {
+                    let (brands, _) = bytes[8..size].as_chunks::<4>();
+                    brands
+                        .iter()
                         .enumerate()
                         .any(|(index, brand)| index != 1 && (brand == b"avif" || brand == b"avis"))
+                }
             }
         }
         "font/woff" => extension == "woff" && bytes.len() >= 44 && bytes.starts_with(b"wOFF"),

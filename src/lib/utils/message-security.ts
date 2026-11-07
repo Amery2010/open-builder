@@ -3,8 +3,10 @@ import {
   isSafePrototypeHashRoute,
 } from "../design/prototype-route";
 import { isCompressibleImageMimeType } from "../images/formats";
-import { isPreviewViewportSize } from "../design/preview-bridge";
-import { sanitizePreviewCaptureGeometry } from "../design/preview-runtime";
+import {
+  isPreviewViewportSize,
+  sanitizePreviewCaptureGeometry,
+} from "../design/preview-runtime";
 import type { ToolExecutionOutput } from "../ai/generator-types";
 import {
   ASK_USER_ANSWERS_KIND,
