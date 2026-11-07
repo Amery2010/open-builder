@@ -21,6 +21,7 @@ import { useT } from "../i18n";
 import { SandpackListener } from "./code-viewer/SandpackListener";
 import { projectStaticPreview } from "./code-viewer/sandpack-static-preview";
 import { projectSandpackRuntime } from "./code-viewer/sandpack-runtime-preview";
+import { projectReactPreview } from "./code-viewer/sandpack-react-preview";
 import {
   SandpackRuntimeSync,
   type SandpackRuntimeSyncHandle,
@@ -81,6 +82,7 @@ import {
   isDesignReviewViewportReady,
   loadDesignCaptureRuntimeSource,
   waitForPreviewReadiness,
+  waitForPreviewSynchronization,
   type DesignReviewViewport,
 } from "../lib/design/preview-capture";
 import {
@@ -903,10 +905,26 @@ export function CodeViewer({
       workspaceMode,
     ],
   );
-  const sandpackSourceFiles =
-    workspaceMode === "design" && bridgeInjection.supported
-      ? bridgeInjection.files
-      : staticPreviewProjection.files;
+  const reactPreviewProjection = useMemo(
+    () =>
+      projectReactPreview(
+        assetPreviewFiles,
+        workspaceMode === "design" && bridgeInjection.supported
+          ? bridgeInjection.files
+          : staticPreviewProjection.files,
+        template,
+        previewEnabled,
+      ),
+    [
+      assetPreviewFiles,
+      bridgeInjection,
+      previewEnabled,
+      staticPreviewProjection.files,
+      template,
+      workspaceMode,
+    ],
+  );
+  const sandpackSourceFiles = reactPreviewProjection.files;
   preparedProjectionRef.current = sandpackSourceFiles;
   const invalidateAutomaticReview = useCallback(() => {
     const review = useDesignReviewStore.getState();
@@ -925,7 +943,8 @@ export function CodeViewer({
       ) {
         return;
       }
-      let editableContent = content;
+      let editableContent = reactPreviewProjection.restore(path, content);
+      if (editableContent === undefined) return;
       if (bridgeInjection.supported && path === bridgeInjection.indexPath) {
         if (content === bridgeInjection.files[path]) return;
         const startMarker = `<!-- ${DESIGN_BRIDGE_MARKER}:start -->`;
@@ -976,6 +995,7 @@ export function CodeViewer({
       onFileChange,
       projectAssets,
       runtimePreviewProjection,
+      reactPreviewProjection,
       staticPreviewProjection,
     ],
   );
@@ -1635,6 +1655,19 @@ export function CodeViewer({
 
   const preparePreviewRuntime = useCallback(
     async (generation: string, signal: AbortSignal) => {
+      signal.throwIfAborted();
+      if (!previewEnabled) {
+        throw new PreviewRuntimeError(
+          "preview_unavailable",
+          "Preview capture is unavailable in code-only projects.",
+        );
+      }
+      if (bridgeInjection.reason === "unsupported-template") {
+        throw new PreviewRuntimeError(
+          "preview_unavailable",
+          `Preview capture is not supported for the ${template} preview template.`,
+        );
+      }
       const runtimeSource = await loadDesignCaptureRuntimeSource();
       signal.throwIfAborted();
       const previousMode = captureContextRef.current.viewMode;
@@ -1649,24 +1682,32 @@ export function CodeViewer({
           errorMessage:
             "The mounted preview did not reach the current project generation.",
         });
-        await waitForPreviewReadiness({
-          isReady: () => {
-            const projection = preparedProjectionRef.current;
-            return (
-              !assetProjectionPendingRef.current &&
-              projection[DESIGN_CAPTURE_RUNTIME_VIRTUAL_PATH] ===
-                runtimeSource &&
-              projection[DESIGN_BRIDGE_VIRTUAL_PATH]?.includes(
-                designBridgeRuntimeRevision(generation, true),
-              ) === true &&
-              runtimeSyncRef.current?.isSynchronized(projection) === true
-            );
+        const projectionReady = () => {
+          const projection = preparedProjectionRef.current;
+          return (
+            !assetProjectionPendingRef.current &&
+            projection[DESIGN_CAPTURE_RUNTIME_VIRTUAL_PATH] === runtimeSource &&
+            projection[DESIGN_BRIDGE_VIRTUAL_PATH]?.includes(
+              designBridgeRuntimeRevision(generation, true),
+            ) === true
+          );
+        };
+        await waitForPreviewSynchronization({
+          isReady: () =>
+            projectionReady() &&
+            runtimeSyncRef.current?.isSynchronized(
+              preparedProjectionRef.current,
+            ) === true,
+          canRestart: () =>
+            projectionReady() && runtimeSyncRef.current !== null,
+          restart: () => {
+            const runtime = runtimeSyncRef.current;
+            if (!runtime) throw new Error("The preview client is unavailable.");
+            return runtime.restart();
           },
           isCurrent: () => previewGenerationRef.current === generation,
           signal,
           timeoutMs: 5_000,
-          errorMessage:
-            "Screenshot runtime has not reached the current preview client.",
         });
         designBridgeReadyRef.current = false;
         captureRuntimeReadyRef.current = false;
@@ -1738,7 +1779,13 @@ export function CodeViewer({
         }
       }
     },
-    [conversationId, getPreviewIframe],
+    [
+      conversationId,
+      getPreviewIframe,
+      previewEnabled,
+      bridgeInjection.reason,
+      template,
+    ],
   );
 
   const capturePreviewCollection = useCallback(
@@ -2627,16 +2674,17 @@ export function CodeViewer({
               )}
             >
               <SandpackProvider
-                key={`${sandpackKey}:${previewRenderRetry}`}
+                key={`${sandpackKey}:${previewRenderRetry}:${reactPreviewProjection.sourceEntry ?? "node"}`}
                 template={
                   (previewEnabled
                     ? template
                     : "static") as SandpackPredefinedTemplate
                 }
                 customSetup={
-                  desktopMode && previewEnabled && template === "static"
+                  reactPreviewProjection.customSetup ??
+                  (desktopMode && previewEnabled && template === "static"
                     ? DESKTOP_STATIC_PREVIEW_SETUP
-                    : undefined
+                    : undefined)
                 }
                 theme={isDark ? "dark" : "light"}
                 files={sandpackFiles}

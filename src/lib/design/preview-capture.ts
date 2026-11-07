@@ -9,6 +9,8 @@ import {
 } from "./preview-bridge";
 import { PreviewRuntimeError } from "./preview-runtime";
 
+class PreviewReadinessTimeoutError extends Error {}
+
 /** Keep waiting for the same preview operation across three timeout windows. */
 export async function waitForPreviewReadiness({
   isReady,
@@ -38,7 +40,7 @@ export async function waitForPreviewReadiness({
     if (isReady()) return;
     const remaining = deadline - performance.now();
     if (remaining <= 0)
-      throw new Error(
+      throw new PreviewReadinessTimeoutError(
         typeof errorMessage === "function" ? errorMessage() : errorMessage,
       );
     await new Promise<void>((resolve, reject) => {
@@ -56,6 +58,82 @@ export async function waitForPreviewReadiness({
       signal.addEventListener("abort", abort, { once: true });
     });
   }
+}
+
+/** Recover a stalled delivery once, without replacing the mounted capture adapter. */
+export async function waitForPreviewSynchronization({
+  isReady,
+  canRestart,
+  restart,
+  isCurrent,
+  signal,
+  timeoutMs,
+}: {
+  isReady: () => boolean;
+  canRestart: () => boolean;
+  restart: () => Promise<void>;
+  isCurrent: () => boolean;
+  signal: AbortSignal;
+  timeoutMs: number;
+}): Promise<void> {
+  try {
+    await waitForPreviewReadiness({
+      isReady,
+      isCurrent,
+      signal,
+      timeoutMs,
+      errorMessage:
+        "Screenshot runtime has not reached the current preview client.",
+    });
+    return;
+  } catch (error) {
+    signal.throwIfAborted();
+    if (!isCurrent()) {
+      throw new PreviewRuntimeError(
+        "stale_generation",
+        "Preview generation was replaced.",
+      );
+    }
+    if (!(error instanceof PreviewReadinessTimeoutError) || !canRestart())
+      throw error;
+  }
+
+  let restarted = false;
+  let restartError: Error | undefined;
+  // The readiness deadline includes client creation. Sandpack cannot cancel
+  // it, so handle late settlements without resuming an ended capture.
+  void Promise.resolve()
+    .then(() => {
+      signal.throwIfAborted();
+      if (!isCurrent()) {
+        throw new PreviewRuntimeError(
+          "stale_generation",
+          "Preview generation was replaced.",
+        );
+      }
+      return restart();
+    })
+    .then(
+      () => {
+        restarted = true;
+      },
+      (error: unknown) => {
+        restartError = new Error(
+          `Preview client restart failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      },
+    );
+  await waitForPreviewReadiness({
+    isReady: () => {
+      if (restartError) throw restartError;
+      return restarted && isReady();
+    },
+    isCurrent,
+    signal,
+    timeoutMs,
+    errorMessage:
+      "Screenshot runtime is still not synchronized after restarting the preview client.",
+  });
 }
 
 export interface DesignReviewViewport {

@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 
+import { webcrypto } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { CSSProperties, PropsWithChildren } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -10,6 +11,27 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 let sandpackProviderError: Error | null = null;
 const projectFilesForSandpackMock = vi.hoisted(() => vi.fn());
 const getProjectAssetBlobMock = vi.hoisted(() => vi.fn());
+const captureRuntimeFixture = vi.hoisted(() => ({
+  enabled: false,
+  synchronized: false,
+  restart: vi.fn(),
+  adapter: null as
+    import("../../lib/design/preview-runtime").PreviewRuntimeAdapter | null,
+}));
+vi.mock("../../lib/design/preview-runtime", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("../../lib/design/preview-runtime")>();
+  return {
+    ...actual,
+    registerPreviewRuntime: (
+      conversationId: string,
+      adapter: import("../../lib/design/preview-runtime").PreviewRuntimeAdapter,
+    ) => {
+      captureRuntimeFixture.adapter = adapter;
+      return actual.registerPreviewRuntime(conversationId, adapter);
+    },
+  };
+});
 
 vi.mock("@codesandbox/sandpack-react", async (importOriginal) => ({
   SANDBOX_TEMPLATES: (
@@ -39,7 +61,29 @@ vi.mock("@codesandbox/sandpack-react", async (importOriginal) => ({
   SandpackConsole: () => <div data-testid="sandpack-console" />,
 }));
 
-vi.mock("./SandpackRuntimeSync", () => ({ SandpackRuntimeSync: () => null }));
+vi.mock("./SandpackRuntimeSync", async () => {
+  const { useEffect } = await import("react");
+  return {
+    SandpackRuntimeSync: ({
+      onChange,
+    }: {
+      onChange: (
+        handle:
+          import("./SandpackRuntimeSync").SandpackRuntimeSyncHandle | null,
+      ) => void;
+    }) => {
+      useEffect(() => {
+        if (!captureRuntimeFixture.enabled) return;
+        onChange({
+          isSynchronized: () => captureRuntimeFixture.synchronized,
+          restart: captureRuntimeFixture.restart,
+        });
+        return () => onChange(null);
+      }, [onChange]);
+      return null;
+    },
+  };
+});
 
 vi.mock("../../lib/project-assets/core", () => ({
   projectFilesForSandpack: projectFilesForSandpackMock,
@@ -174,6 +218,11 @@ const baseProps = {
 
 describe("CodeViewer preview scale", () => {
   beforeEach(() => {
+    captureRuntimeFixture.enabled = false;
+    captureRuntimeFixture.synchronized = false;
+    captureRuntimeFixture.adapter = null;
+    captureRuntimeFixture.restart.mockReset();
+    conversationState.conversations["conversation-a"].workspaceMode = "auto";
     projectFilesForSandpackMock.mockReset();
     projectFilesForSandpackMock.mockImplementation(
       async (files: Record<string, string>) => files,
@@ -214,9 +263,141 @@ describe("CodeViewer preview scale", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     sandpackProviderError = null;
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
+  });
+
+  it.each([
+    {
+      template: "react",
+      previewMode: "sandpack" as const,
+      error: "Preview capture is not supported for the react preview template.",
+    },
+    {
+      template: "static",
+      previewMode: "code-only" as const,
+      error: "Preview capture is unavailable in code-only projects.",
+    },
+  ])(
+    "rejects permanently unavailable capture for $template / $previewMode without restarting",
+    async ({ template, previewMode, error }) => {
+      vi.stubGlobal("crypto", webcrypto);
+      captureRuntimeFixture.enabled = true;
+      conversationState.conversations["conversation-a"].workspaceMode =
+        "design";
+      render(
+        <CodeViewer
+          {...baseProps}
+          conversationId="conversation-a"
+          template={template}
+          previewMode={previewMode}
+          files={{ "index.html": "<html><body>Capture fixture</body></html>" }}
+        />,
+      );
+      await waitFor(() =>
+        expect(captureRuntimeFixture.adapter?.getGeneration()).toBeTruthy(),
+      );
+      const adapter = captureRuntimeFixture.adapter!;
+      await expect(
+        adapter.prepare(adapter.getGeneration()!, new AbortController().signal),
+      ).rejects.toMatchObject({ code: "preview_unavailable", message: error });
+      expect(captureRuntimeFixture.restart).not.toHaveBeenCalled();
+    },
+  );
+
+  it("requires the current runtime nonce after recovering a stalled capture client", async () => {
+    vi.stubGlobal("crypto", webcrypto);
+    captureRuntimeFixture.enabled = true;
+    captureRuntimeFixture.restart.mockImplementation(async () => {
+      captureRuntimeFixture.synchronized = true;
+    });
+    conversationState.conversations["conversation-a"].workspaceMode = "design";
+    const { loadDesignCaptureRuntimeSource } =
+      await import("../../lib/design/preview-capture");
+    await loadDesignCaptureRuntimeSource();
+    render(
+      <CodeViewer
+        {...baseProps}
+        conversationId="conversation-a"
+        template="static"
+        files={{ "index.html": "<html><body>Capture fixture</body></html>" }}
+      />,
+    );
+    await waitFor(() =>
+      expect(captureRuntimeFixture.adapter?.getGeneration()).toBeTruthy(),
+    );
+    const adapter = captureRuntimeFixture.adapter!;
+    const generation = adapter.getGeneration()!;
+    const iframe = screen.getByTitle("Sandpack Preview") as HTMLIFrameElement;
+    Object.defineProperty(iframe, "src", {
+      value: "https://preview.example.test/",
+      configurable: true,
+    });
+    const sent: Array<Record<string, unknown>> = [];
+    vi.spyOn(iframe.contentWindow!, "postMessage").mockImplementation(
+      (message: unknown) => {
+        sent.push(message as Record<string, unknown>);
+      },
+    );
+    vi.useFakeTimers();
+    vi.spyOn(performance, "now").mockImplementation(() => Date.now());
+    let prepared = false;
+    let failure: unknown;
+    const preparation = adapter
+      .prepare(generation, new AbortController().signal)
+      .then(
+        () => {
+          prepared = true;
+        },
+        (error: unknown) => {
+          failure = error;
+        },
+      );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(14_999);
+    });
+    expect(captureRuntimeFixture.restart).not.toHaveBeenCalled();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(201);
+    });
+    expect(captureRuntimeFixture.restart).toHaveBeenCalledOnce();
+    const request = sent.find(
+      (message) => message.type === "open-builder:design-bridge-readiness",
+    );
+    expect(request).toMatchObject({
+      generation,
+      nonce: expect.any(String),
+      runtimeRevision: expect.any(String),
+    });
+    const respond = (nonce: unknown) => {
+      window.dispatchEvent(
+        new MessageEvent("message", {
+          source: iframe.contentWindow,
+          origin: "https://preview.example.test",
+          data: {
+            ...request,
+            type: "open-builder:design-bridge-ready",
+            nonce,
+            captureRuntimeAvailable: true,
+          },
+        }),
+      );
+    };
+    await act(async () => {
+      respond("obsolete-nonce");
+      await vi.advanceTimersByTimeAsync(200);
+    });
+    expect(prepared).toBe(false);
+    await act(async () => {
+      respond(request!.nonce);
+      await vi.advanceTimersByTimeAsync(250);
+    });
+    await preparation;
+    expect(failure).toBeUndefined();
+    expect(prepared).toBe(true);
+    expect(captureRuntimeFixture.restart).toHaveBeenCalledOnce();
   });
 
   it("keeps design captures at their unzoomed logical viewport", () => {

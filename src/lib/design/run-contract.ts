@@ -234,7 +234,7 @@ const DESIGN_GATED_WRITE_TOOLS = new Set([
   "install_component",
   "screenshot_to_code",
   // Local CLI media is admitted through a bounded Host-owned asset importer.
-  // It still mutates ProjectFiles and therefore requires the current contract.
+  // It follows the same Design write policy as other ProjectFiles mutations.
   "import_generated_image",
   "apply_design_style",
   "update_design_tokens",
@@ -279,7 +279,11 @@ export interface DesignContractController {
     reusableContract?: DesignContract,
   ): void;
   submit(input: unknown, context: SubmitDesignContractContext): DesignContract;
-  authorizeProjectWrite(toolName: string, args?: unknown): string | undefined;
+  authorizeProjectWrite(
+    toolName: string,
+    args?: unknown,
+    options?: { allowMissingContract?: boolean },
+  ): string | undefined;
   getContract(): DesignContract | null;
   isReusableContractSealed(): boolean;
   isReady(): boolean;
@@ -770,7 +774,7 @@ export function createDesignContractController(): DesignContractController {
       return cloneContract(parsed);
     },
 
-    authorizeProjectWrite(toolName, args) {
+    authorizeProjectWrite(toolName, args, options) {
       // Registered read-only subagents can perform the required pre-contract
       // inspection. Unknown and future write-capable agents remain fail-closed.
       const requestedSubagent =
@@ -804,6 +808,22 @@ export function createDesignContractController(): DesignContractController {
         return undefined;
       }
       if (!contract) {
+        if (
+          options?.allowMissingContract === true &&
+          !policy.allowProjectDesignRepair &&
+          !blueprintPolicy.enabled &&
+          !policy.sealReusableContract &&
+          toolName !== "update_project_design" &&
+          toolName !== "update_design_tokens"
+        ) {
+          return undefined;
+        }
+        if (toolName === "update_design_tokens") {
+          return (
+            "Design contract required for the dedicated update_design_tokens tool. " +
+            "Load the required Design Skill and call submit_design_contract first."
+          );
+        }
         return (
           `Design contract required before project write tool "${toolName}". ` +
           "Inspect the project, load the correct Design Skill, and call submit_design_contract first."

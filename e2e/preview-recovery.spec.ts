@@ -10,15 +10,37 @@ const previewFiles = {
     </main></body></html>`,
 };
 
-async function seedPreview(page: Page, design = false): Promise<void> {
+async function seedPreview(
+  page: Page,
+  design = false,
+  template = "static",
+): Promise<void> {
   await page.goto("/");
   await waitForAppReady(page);
   await page.evaluate(
-    async ({ files, design }) => {
+    async ({ files: staticFiles, design, template }) => {
       const conversationUrl = "/src/store/conversation.ts";
       const settingsUrl = "/src/store/settings/index.ts";
       const { useConversationStore } = await import(conversationUrl);
       const { useSettingsStore } = await import(settingsUrl);
+      let files: Record<string, string> = staticFiles;
+      let activeFile = "index.html";
+      if (template !== "static") {
+        const fsToolsUrl = "/src/lib/tools/fs-tools.ts";
+        const { fsInitProject } = await import(fsToolsUrl);
+        const initialized = await fsInitProject(template);
+        if (!initialized.newFiles) throw new Error(initialized.result);
+        files = initialized.newFiles;
+        activeFile = Object.keys(files).find((path) =>
+          /(?:^|\/)App\.[jt]sx?$/.test(path),
+        )!;
+        if (!activeFile) throw new Error("Missing React fixture entry");
+        files[activeFile] = `import React from "react";
+          export default function App() {
+            return <main><h1>Preview recovery fixture</h1></main>;
+          }`;
+        files["capture-unused.txt"] = "Delete this before capturing.";
+      }
       useSettingsStore.setState(
         (state: { system: Record<string, unknown> }) => ({
           system: { ...state.system, language: "en", theme: "dark" },
@@ -29,20 +51,74 @@ async function seedPreview(page: Page, design = false): Promise<void> {
       state.switchConversation(id);
       const result = state.replaceProject({
         files,
-        template: "static",
+        template,
         previewMode: "sandpack",
-        activeFile: "index.html",
+        activeFile,
       });
       if (!result.ok) throw new Error(result.error);
       if (design) useConversationStore.getState().setWorkspaceMode("design");
     },
-    { files: previewFiles, design },
+    { files: previewFiles, design, template },
   );
   await expect(
     page.frameLocator(".sp-preview-iframe").getByRole("heading", {
       name: "Preview recovery fixture",
     }),
   ).toBeVisible({ timeout: 60_000 });
+}
+
+for (const template of ["vite-react", "vite-react-ts"] as const) {
+  test(`captures the edited current project after file deletion (${template})`, async ({
+    page,
+  }) => {
+    await seedPreview(page, true, template);
+    await page.evaluate(async () => {
+      const conversationUrl = "/src/store/conversation.ts";
+      const { useConversationStore } = await import(conversationUrl);
+      const state = useConversationStore.getState();
+      const files = { ...state.conversations[state.activeId!].files };
+      delete files["capture-unused.txt"];
+      const path = Object.keys(files).find((path) =>
+        /(?:^|\/)App\.[jt]sx?$/.test(path),
+      )!;
+      files[path] = files[path].replace(
+        "Preview recovery fixture",
+        "Edited preview fixture",
+      );
+      state.setFiles(files);
+    });
+    await expect(
+      page.frameLocator(".sp-preview-iframe").getByRole("heading", {
+        name: "Edited preview fixture",
+      }),
+    ).toBeVisible({ timeout: 60_000 });
+    const result = await page.evaluate(async () => {
+      const conversationUrl = "/src/store/conversation.ts";
+      const evidenceUrl = "/src/lib/design/preview-evidence.ts";
+      const { useConversationStore } = await import(conversationUrl);
+      const { capturePreviewEvidence } = await import(evidenceUrl);
+      const state = useConversationStore.getState();
+      const conversation = state.conversations[state.activeId!];
+      const output = await capturePreviewEvidence({
+        conversationId: conversation.id,
+        files: conversation.files,
+        template: conversation.template,
+        previewMode: "sandpack",
+        viewports: ["desktop", "mobile"],
+      });
+      return output.structuredContent as {
+        status: string;
+        errors: string[];
+        evidence: Array<{ view: string }>;
+      };
+    });
+    expect(result.errors).toEqual([]);
+    expect(result.status).toBe("complete");
+    expect(result.evidence.map((item) => item.view)).toEqual([
+      "desktop",
+      "mobile",
+    ]);
+  });
 }
 
 for (const runtime of ["static", "parcel"] as const) {

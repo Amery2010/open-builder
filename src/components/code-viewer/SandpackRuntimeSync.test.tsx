@@ -8,6 +8,8 @@ import {
   SandpackReactContext,
   useSandpack,
 } from "@codesandbox/sandpack-react";
+import { projectSandpackRuntime } from "./sandpack-runtime-preview";
+import { waitForPreviewSynchronization } from "../../lib/design/preview-capture";
 import {
   SandpackRuntimeSync,
   type SandpackRuntimeSyncHandle,
@@ -346,6 +348,185 @@ describe("Node file delivery completion", () => {
     });
     expect(handle!.isSynchronized({ "index.html": "node-edit" })).toBe(true);
     unmount();
+  });
+});
+
+describe("preview package projection matches the real Provider", () => {
+  it.each([
+    { template: "vite-react" as const, command: "vite" },
+    { template: "vite-react" as const, command: "vite --clearScreen false" },
+    { template: "vite-react" as const, command: "node server.js" },
+    { template: "static" as const, command: null },
+  ])(
+    "matches Provider bytes and restores source formatting for $template / $command",
+    ({ template, command }) => {
+      type Sandpack = ReturnType<typeof useSandpack>["sandpack"];
+      type Client = Sandpack["clients"][string];
+      const source =
+        JSON.stringify(
+          command ? { scripts: { dev: command } } : { name: "static-fixture" },
+          null,
+          4,
+        ) + "\n";
+      const files = { "package.json": source, "index.html": "<main />" };
+      const projection = projectSandpackRuntime(files, true, template);
+      let handle: SandpackRuntimeSyncHandle | null = null;
+      let state!: Sandpack;
+      function MountClient() {
+        const { sandpack } = useSandpack();
+        state = sandpack;
+        useEffect(() => {
+          const client = {
+            status: "done",
+            options: {},
+            sandboxSetup: { files: sandpack.files, template: "node" },
+            updateSandbox() {},
+            listen: () => () => {},
+          } as unknown as Client;
+          sandpack.clients.preview = client;
+          return () => {
+            delete sandpack.clients.preview;
+          };
+        }, []);
+        return null;
+      }
+      const { unmount } = render(
+        <SandpackProvider
+          template={template}
+          files={projection.files}
+          options={{ autorun: false }}
+        >
+          <MountClient />
+          <SandpackRuntimeSync
+            onChange={(value) => {
+              handle = value;
+            }}
+          />
+        </SandpackProvider>,
+      );
+      try {
+        expect(state.files["/package.json"].code).toBe(
+          projection.files["package.json"],
+        );
+        expect(handle!.isSynchronized(projection.files)).toBe(true);
+        expect(files["package.json"]).toBe(source);
+        expect(
+          projection.restore("package.json", state.files["/package.json"].code),
+        ).toBe(source);
+      } finally {
+        unmount();
+      }
+    },
+  );
+});
+
+describe("capture recovery after a Node deletion", () => {
+  it("rebuilds once with the exact current files when Node never acknowledges a removal", async () => {
+    vi.stubGlobal("crypto", webcrypto);
+    type Sandpack = ReturnType<typeof useSandpack>["sandpack"];
+    type Client = Sandpack["clients"][string];
+    let state!: Sandpack;
+    let handle: SandpackRuntimeSyncHandle | null = null;
+    const clients: Array<{ client: Client; disk: Record<string, string> }> = [];
+    loader.load.mockImplementation(async (iframe, setup, options) => {
+      const listeners = new Set<Parameters<Client["listen"]>[0]>();
+      const disk = Object.fromEntries(
+        Object.entries(setup.files as Client["sandboxSetup"]["files"]).map(
+          ([path, file]) => [path, file.code],
+        ),
+      );
+      const client = {
+        iframe,
+        iframeSelector: iframe,
+        sandboxSetup: setup,
+        options,
+        status: "done",
+        destroy: vi.fn(() => listeners.clear()),
+        updateOptions() {},
+        dispatch() {},
+        listen(listener) {
+          listeners.add(listener);
+          return () => listeners.delete(listener);
+        },
+        updateSandbox(next) {
+          // Match running SandpackNode: write present modules, but never delete
+          // omitted modules or emit a compile/done pair for file updates.
+          this.sandboxSetup = next!;
+          for (const [path, file] of Object.entries(next!.files)) {
+            disk[path] = file.code;
+            queueMicrotask(() => {
+              for (const listener of listeners)
+                listener({ type: "fs/change", path, content: file.code });
+            });
+          }
+        },
+      } as Client;
+      clients.push({ client, disk });
+      return client;
+    });
+    function Mount() {
+      const { sandpack } = useSandpack();
+      state = sandpack;
+      useEffect(() => {
+        const iframe = document.createElement("iframe");
+        document.body.appendChild(iframe);
+        void sandpack
+          .registerBundler(iframe, "node-capture")
+          .then(() => sandpack.runSandpack());
+        return () => iframe.remove();
+      }, []);
+      return null;
+    }
+    const { unmount } = render(
+      <SandpackProvider
+        template="static"
+        customSetup={{ environment: "node" }}
+        files={{ "index.html": "current", "obsolete.ts": "old" }}
+        options={{ autorun: false, recompileDelay: 20 }}
+      >
+        <Mount />
+        <SandpackRuntimeSync
+          onChange={(value) => {
+            handle = value;
+          }}
+        />
+      </SandpackProvider>,
+    );
+    try {
+      await waitFor(() => expect(state.status).toBe("running"));
+      await act(async () => {
+        state.deleteFile("/obsolete.ts");
+      });
+      const expected = { "index.html": "current" };
+      expect(state.files["/obsolete.ts"]).toBeUndefined();
+      expect(clients[0].disk["/obsolete.ts"]).toBe("old");
+      expect(handle!.isSynchronized(expected)).toBe(false);
+      const restart = vi.fn(() => handle!.restart());
+      let result: Promise<void>;
+      await act(async () => {
+        result = waitForPreviewSynchronization({
+          isReady: () => handle!.isSynchronized(expected),
+          canRestart: () => true,
+          restart,
+          isCurrent: () => true,
+          signal: new AbortController().signal,
+          timeoutMs: 50,
+        });
+        await new Promise((resolve) => setTimeout(resolve, 170));
+      });
+      await act(async () => {
+        await result!;
+      });
+      expect(restart).toHaveBeenCalledOnce();
+      expect(clients).toHaveLength(2);
+      expect(clients[0].client.destroy).toHaveBeenCalledOnce();
+      expect(clients[1].disk["/obsolete.ts"]).toBeUndefined();
+      expect(clients[1].disk["/index.html"]).toBe("current");
+      expect(handle!.isSynchronized(expected)).toBe(true);
+    } finally {
+      unmount();
+      vi.unstubAllGlobals();
+    }
   });
 });
 

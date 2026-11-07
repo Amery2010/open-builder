@@ -34,6 +34,107 @@ describe("mergeMessages", () => {
     vi.unstubAllGlobals();
   });
 
+  it("renders a resumed conversation containing null tool arguments", async () => {
+    const { mergeMessages } = await import("./merge-messages");
+    const messages: Message[] = [
+      { role: "user", content: "Continue the previous work" },
+      {
+        role: "assistant",
+        content: "Checking the project",
+        tool_calls: [
+          {
+            id: "null-arguments",
+            type: "function",
+            function: { name: "project_health_check", arguments: "null" },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        tool_call_id: "null-arguments",
+        content: "Invalid tool arguments",
+      },
+    ];
+    const original = structuredClone(messages);
+    const merged = mergeMessages(messages, en);
+    expect(merged[1].blocks).toContainEqual(
+      expect.objectContaining({
+        type: "tool",
+        toolCallId: "null-arguments",
+        path: "",
+        rawArgs: {},
+        result: "Invalid tool arguments",
+      }),
+    );
+    expect(messages).toEqual(original);
+  });
+
+  it.each(["null", "[]", "true", "42", '"text"', "", "{unfinished"])(
+    "handles non-object or incomplete tool arguments %s across display branches",
+    async (arguments_) => {
+      const { mergeMessages } = await import("./merge-messages");
+      for (const name of ["read_files", AGNES_TOOL_ALIASES.get_video_status]) {
+        const merged = mergeMessages(
+          [
+            {
+              role: "assistant",
+              content: null,
+              tool_calls: [
+                {
+                  id: "call",
+                  type: "function",
+                  function: { name, arguments: arguments_ },
+                },
+              ],
+            },
+          ],
+          en,
+        );
+        expect(merged[0].blocks[0]).toMatchObject({
+          type: "tool",
+          path: "",
+          rawArgs: {},
+        });
+      }
+    },
+  );
+
+  it("normalizes path display fields without altering valid raw arguments", async () => {
+    const { mergeMessages } = await import("./merge-messages");
+    for (const path of [null, 42, { value: "src/App.tsx" }, "src/App.tsx"]) {
+      const args = {
+        path,
+        paths: ["src/App.tsx", null, 42, "styles.css"],
+        detail: { enabled: true },
+      };
+      const merged = mergeMessages(
+        [
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "call",
+                type: "function",
+                function: {
+                  name: "read_files",
+                  arguments: JSON.stringify(args),
+                },
+              },
+            ],
+          },
+        ],
+        en,
+      );
+      expect(merged[0].blocks[0]).toMatchObject({
+        type: "tool",
+        path: typeof path === "string" ? path : "",
+        paths: ["src/App.tsx", "styles.css"],
+        rawArgs: args,
+      });
+    }
+  });
+
   it("keeps separately submitted updates as individual user messages", async () => {
     const { mergeMessages } = await import("./merge-messages");
     const messages: Message[] = [

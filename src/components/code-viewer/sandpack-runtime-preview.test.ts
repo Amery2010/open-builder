@@ -31,6 +31,33 @@ describe("Sandpack Vite terminal compatibility", () => {
     },
   );
 
+  it.each([
+    { scripts: { dev: "vite --clearScreen false" } },
+    { name: "static-fixture" },
+  ])(
+    "normalizes package formatting without persisting generated maps for %j",
+    (pkg) => {
+      const source = JSON.stringify(pkg, null, 4) + "\n";
+      const files = { "package.json": source };
+      const result = projectSandpackRuntime(files);
+      const projected = result.files["package.json"];
+      expect(projected).toBe(
+        JSON.stringify(
+          { ...pkg, dependencies: {}, devDependencies: {} },
+          null,
+          2,
+        ),
+      );
+      expect(result.restore("package.json", projected)).toBe(source);
+      expect(projectSandpackRuntime(result.files).files).toBe(result.files);
+      const edited = { ...JSON.parse(projected), description: "A real edit" };
+      expect(
+        JSON.parse(result.restore("package.json", JSON.stringify(edited))!),
+      ).toEqual({ ...pkg, description: "A real edit" });
+      expect(projectSandpackRuntime(files, false).files).toBe(files);
+    },
+  );
+
   it("prevents the actual Vite logger from reaching the missing Nodebox API", () => {
     const descriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
     const ci = process.env.CI;

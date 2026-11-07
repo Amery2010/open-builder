@@ -15,6 +15,7 @@ const projectFilesForSandpack = vi.hoisted(() =>
 const sandpackMock = vi.hoisted(() => ({
   error: null as Error | null,
   files: {} as Record<string, { code: string }>,
+  customSetup: undefined as { entry: string; environment: string } | undefined,
 }));
 
 vi.mock("@codesandbox/sandpack-react", async (importOriginal) => ({
@@ -24,11 +25,14 @@ vi.mock("@codesandbox/sandpack-react", async (importOriginal) => ({
   SandpackProvider: ({
     children,
     files,
+    customSetup,
   }: {
     children: ReactNode;
     files: Record<string, { code: string }>;
+    customSetup?: { entry: string; environment: string };
   }) => {
     sandpackMock.files = files;
+    sandpackMock.customSetup = customSetup;
     if (sandpackMock.error) throw sandpackMock.error;
     return <div>{children}</div>;
   },
@@ -88,6 +92,37 @@ describe("MobilePreview", () => {
       JSON.parse(sandpackMock.files["/package.json"].code).scripts.dev,
     ).toBe("vite --clearScreen false");
     expect(JSON.parse(files["package.json"]).scripts.dev).toBe("vite");
+  });
+
+  it("uses the same compatible React runtime without mutating the mobile project", () => {
+    const files = {
+      "package.json": JSON.stringify({
+        scripts: { dev: "vite" },
+        dependencies: { react: "^18.3.1", "react-dom": "^18.3.1" },
+        devDependencies: { vite: "4.2.0", "@vitejs/plugin-react": "^4.3.4" },
+      }),
+      "vite.config.ts":
+        "import { defineConfig } from 'vite'; import react from '@vitejs/plugin-react'; export default defineConfig({plugins:[react()]});",
+      "index.html":
+        '<div id="root"></div><script type="module" src="/index.tsx"></script>',
+      "index.tsx": "export default 1;",
+    };
+    const before = structuredClone(files);
+    render(
+      <TooltipProvider>
+        <MobilePreview
+          files={files}
+          template="vite-react-ts"
+          sandpackKey={0}
+          onReloadPreview={vi.fn()}
+        />
+      </TooltipProvider>,
+    );
+    expect(sandpackMock.customSetup?.environment).toBe("create-react-app");
+    expect(sandpackMock.files["/public/index.html"].code).toContain(
+      'id="root"',
+    );
+    expect(files).toEqual(before);
   });
 
   it("rebuilds the preview through its owner", async () => {

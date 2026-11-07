@@ -416,7 +416,6 @@ function designBlueprintBindings(
 }
 
 function designBlueprintRunPolicy(files: ProjectFiles) {
-  if (!isPrototypeProject(files)) return {};
   const result = readProjectDesign(files);
   if (result.status === "ready") {
     return { blueprint: designBlueprintBindings(files) };
@@ -968,6 +967,7 @@ export function useGenerator({
   const mcpRuntimeRef = useRef<McpRuntimeBundle | null>(null);
   const activeToolProfileRef = useRef<ToolProfile>("default");
   const designContractControllerRef = useRef(createDesignContractController());
+  const designRunRequiresContractRef = useRef(true);
   const lastAcceptedDesignContractRef = useRef<DesignContract | null>(null);
   const designRunInitialFilesRef = useRef<ProjectFiles>({});
   const designRunExpectedChangeModesRef = useRef<
@@ -993,6 +993,10 @@ export function useGenerator({
         options.expectedChangeModes ??
         (Object.keys(files).length === 0 ? (["create"] as const) : undefined);
       designRunInitialFilesRef.current = { ...files };
+      designRunRequiresContractRef.current =
+        options.sealReusableContract === true ||
+        isPrototypeProject(files) ||
+        readProjectDesign(files).status !== "missing";
       designRunExpectedChangeModesRef.current = expectedChangeModes
         ? [...expectedChangeModes]
         : undefined;
@@ -2103,6 +2107,7 @@ export function useGenerator({
         },
         onProjectDesignUpdated: (nextFiles) => {
           if (!isCurrentCandidate()) return;
+          designRunRequiresContractRef.current = true;
           const currentConversation =
             useConversationStore.getState().conversations[
               generatorConversationId
@@ -2664,9 +2669,24 @@ export function useGenerator({
           // immutable tool authority. A workspace selector change cannot
           // loosen an already-running Design request.
           if (activeToolProfileRef.current !== "design") return;
+          const currentFiles = candidate?.getFiles() ?? {};
+          if (
+            isPrototypeProject(currentFiles) ||
+            readProjectDesign(currentFiles).status !== "missing" ||
+            (name === "init_project" &&
+              args !== null &&
+              typeof args === "object" &&
+              "template" in args &&
+              args.template === "vite-react-ts-prototype")
+          ) {
+            // Once this run enters a prototype batch, removing its marker or
+            // blueprint cannot turn later writes into ordinary file edits.
+            designRunRequiresContractRef.current = true;
+          }
           return designContractControllerRef.current.authorizeProjectWrite(
             name,
             args,
+            { allowMissingContract: !designRunRequiresContractRef.current },
           );
         },
         projectPermissionSession,

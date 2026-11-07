@@ -33,7 +33,7 @@ Tauri 桌面版（macOS / Windows / Linux）提供 stdio MCP 等本机运行能�
 
 ## 演示
 
-![screenshot](public/images/screenshot.jpg)
+![screenshot](public/images/screenshot.png)
 
 [演示网站](https://builder.u14.app)
 

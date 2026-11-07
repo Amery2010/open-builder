@@ -15,6 +15,7 @@ import {
   DESIGN_REVIEW_VIEWPORTS,
   isDesignReviewViewportReady,
   waitForPreviewReadiness,
+  waitForPreviewSynchronization,
 } from "./preview-capture";
 import {
   DESIGN_CAPTURE_RUNTIME_GLOBAL,
@@ -234,6 +235,147 @@ describe("Design preview capture sequence", () => {
     ).rejects.toMatchObject({ name: "AbortError" });
     expect(restore).toHaveBeenCalledOnce();
   });
+});
+
+describe("capture synchronization recovery", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  function fixture() {
+    vi.useFakeTimers();
+    vi.spyOn(performance, "now").mockImplementation(() => Date.now());
+    const controller = new AbortController();
+    const state = { ready: false, current: true, projectionReady: true };
+    const restart = vi.fn(async () => {});
+    const wait = () =>
+      waitForPreviewSynchronization({
+        isReady: () => state.ready,
+        canRestart: () => state.projectionReady,
+        isCurrent: () => state.current,
+        restart,
+        signal: controller.signal,
+        timeoutMs: 10,
+      });
+    return { controller, state, restart, wait };
+  }
+
+  it("returns without restarting an already synchronized preview", async () => {
+    const { state, restart, wait } = fixture();
+    state.ready = true;
+    await wait();
+    expect(restart).not.toHaveBeenCalled();
+  });
+
+  it("restarts once after the first window and waits for both restart and synchronization", async () => {
+    const { state, restart, wait } = fixture();
+    let finish!: () => void;
+    restart.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    let completed = false;
+    const result = wait().then(() => {
+      completed = true;
+    });
+    await vi.advanceTimersByTimeAsync(29);
+    expect(restart).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(restart).toHaveBeenCalledOnce();
+    state.ready = true;
+    await vi.advanceTimersByTimeAsync(10);
+    expect(completed).toBe(false);
+    finish();
+    await vi.advanceTimersByTimeAsync(15);
+    await result;
+    expect(completed).toBe(true);
+    expect(restart).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(["pending restart", "unsynchronized client"])(
+    "bounds a %s without another restart",
+    async (mode) => {
+      const { restart, wait } = fixture();
+      let rejectLate!: (reason: Error) => void;
+      if (mode === "pending restart")
+        restart.mockImplementation(
+          () =>
+            new Promise<void>((_resolve, reject) => {
+              rejectLate = reject;
+            }),
+        );
+      const result = wait().catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(60);
+      expect(await result).toMatchObject({
+        message: expect.stringContaining("after restarting"),
+      });
+      expect(restart).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(0);
+      if (rejectLate) rejectLate(new Error("late restart rejection"));
+      await Promise.resolve();
+    },
+  );
+
+  it("reports a rejected restart without a second attempt", async () => {
+    const { restart, wait } = fixture();
+    restart.mockRejectedValue(new Error("client creation failed"));
+    const result = wait().catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(55);
+    expect(await result).toMatchObject({
+      message: "Preview client restart failed: client creation failed",
+    });
+    expect(restart).toHaveBeenCalledOnce();
+  });
+
+  it("does not restart an incomplete asset/runtime projection", async () => {
+    const { state, restart, wait } = fixture();
+    state.projectionReady = false;
+    const result = wait().catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(30);
+    expect(await result).toMatchObject({
+      message: "Screenshot runtime has not reached the current preview client.",
+    });
+    expect(restart).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])(
+    "stops cancellation or supersession with recovery started=%s",
+    async (recovering) => {
+      for (const action of ["abort", "supersede"] as const) {
+        const { controller, state, restart, wait } = fixture();
+        let finish!: () => void;
+        restart.mockImplementation(
+          () =>
+            new Promise<void>((resolve) => {
+              finish = resolve;
+            }),
+        );
+        const handshake = vi.fn();
+        const result = wait()
+          .then(handshake)
+          .catch((error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(recovering ? 30 : 5);
+        if (action === "abort") controller.abort();
+        else state.current = false;
+        await vi.advanceTimersByTimeAsync(25);
+        expect(await result).toMatchObject(
+          action === "abort"
+            ? { name: "AbortError" }
+            : { code: "stale_generation" },
+        );
+        expect(restart).toHaveBeenCalledTimes(recovering ? 1 : 0);
+        if (finish) finish();
+        state.ready = true;
+        await vi.advanceTimersByTimeAsync(100);
+        expect(handshake).not.toHaveBeenCalled();
+        expect(vi.getTimerCount()).toBe(0);
+      }
+    },
+  );
 });
 
 describe("capture runtime script entry", () => {

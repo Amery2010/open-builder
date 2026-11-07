@@ -171,19 +171,23 @@ impl BrokerRun {
         if self.max_tool_calls == 0 {
             return true;
         }
-        let reserved = self
-            .tool_calls_started
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |started| {
-                (started < self.max_tool_calls).then(|| started + 1)
-            })
-            .is_ok();
-        if !reserved {
-            self.fail(
-                LocalCliFailureCode::ToolBudgetExceeded,
-                TOOL_CALL_BUDGET_EXHAUSTED,
-            );
+        let mut started = self.tool_calls_started.load(Ordering::Acquire);
+        while started < self.max_tool_calls {
+            match self.tool_calls_started.compare_exchange_weak(
+                started,
+                started + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(current) => started = current,
+            }
         }
-        reserved
+        self.fail(
+            LocalCliFailureCode::ToolBudgetExceeded,
+            TOOL_CALL_BUDGET_EXHAUSTED,
+        );
+        false
     }
 
     fn cancel_pending(&self, reason: &str) {

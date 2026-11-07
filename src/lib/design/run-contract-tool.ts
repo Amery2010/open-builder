@@ -23,7 +23,8 @@ export const SUBMIT_DESIGN_CONTRACT_TOOL = {
   submit_design_contract: tool({
     description:
       "Submit the run-local Design contract after inspecting the project and loading the required Design Skill. " +
-      "In Design mode, init_project may run before this tool, but every other project write is blocked until the contract is accepted.",
+      "A contract is recommended for ordinary project file edits and required for prototype/blueprint batches, the dedicated update_design_tokens tool, and automatic visual review. " +
+      "init_project may precede it; an automatic Design repair reuses its preloaded contract.",
     inputSchema: designContractToolInputSchema,
   }),
 };

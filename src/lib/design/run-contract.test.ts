@@ -201,6 +201,39 @@ describe("Design contract controller", () => {
     ).toBeUndefined();
   });
 
+  it("allows ordinary file edits only when the Host explicitly permits a missing contract", () => {
+    const controller = createDesignContractController();
+    const args = { path: "src/App.tsx", content: "changed" };
+    const ordinary = { allowMissingContract: true };
+
+    expect(
+      controller.authorizeProjectWrite("patch_file", args, ordinary),
+    ).toContain("Design run policy required");
+    controller.reset({ enabled: true });
+    expect(controller.authorizeProjectWrite("patch_file", args)).toContain(
+      "Design contract required",
+    );
+    for (const name of ["write_file", "patch_file", "manage_dependencies"]) {
+      expect(
+        controller.authorizeProjectWrite(name, args, ordinary),
+      ).toBeUndefined();
+    }
+    for (const name of ["update_design_tokens", "update_project_design"]) {
+      expect(controller.authorizeProjectWrite(name, {}, ordinary)).toContain(
+        "Design contract required",
+      );
+    }
+
+    controller.reset({ enabled: true, allowProjectDesignRepair: true });
+    expect(
+      controller.authorizeProjectWrite("patch_file", args, ordinary),
+    ).toContain("Design contract required");
+    controller.reset({ enabled: true, blueprint: { expectedRevision: 1 } });
+    expect(
+      controller.authorizeProjectWrite("patch_file", args, ordinary),
+    ).toContain("Design contract required");
+  });
+
   it("allows only the validated blueprint Host update while repairing invalid authority", () => {
     const controller = createDesignContractController();
     const skills = createSkillActiveContext();
@@ -405,10 +438,14 @@ describe("Design contract controller", () => {
       }),
     ).toContain("reviewed blueprint is sealed");
     expect(
-      controller.authorizeProjectWrite("write_file", {
-        path: "src/pages/Dashboard.tsx",
-        content: "out of reviewed scope",
-      }),
+      controller.authorizeProjectWrite(
+        "write_file",
+        {
+          path: "src/pages/Dashboard.tsx",
+          content: "out of reviewed scope",
+        },
+        { allowMissingContract: true },
+      ),
     ).toContain("outside the selected page files");
     expect(
       controller.authorizeProjectWrite("write_file", {

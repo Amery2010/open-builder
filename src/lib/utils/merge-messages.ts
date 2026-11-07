@@ -328,9 +328,18 @@ export function mergeMessages(
               // Skip memory tool calls — they should be invisible to the user
               if (tc.function.name === "manage_memories") continue;
 
-              let args: Record<string, any> = {};
+              let args: Record<string, unknown> = {};
               try {
-                args = JSON.parse(tc.function.arguments);
+                const parsed: unknown = JSON.parse(tc.function.arguments);
+                // Failed tool calls can persist JSON null. Only objects have
+                // display fields; leave the original history untouched.
+                if (
+                  parsed !== null &&
+                  typeof parsed === "object" &&
+                  !Array.isArray(parsed)
+                ) {
+                  args = parsed as Record<string, unknown>;
+                }
               } catch {
                 /* ignore */
               }
@@ -369,9 +378,12 @@ export function mergeMessages(
                 }
               }
               const isReadFiles = tc.function.name === "read_files";
-              const paths: string[] | undefined = isReadFiles
-                ? (args.paths as string[])
-                : undefined;
+              const paths: string[] | undefined =
+                isReadFiles && Array.isArray(args.paths)
+                  ? args.paths.filter(
+                      (path): path is string => typeof path === "string",
+                    )
+                  : undefined;
               const toolName = tc.function.name as keyof typeof t.tool.names;
 
               const translatedName = t.tool.names[toolName];
@@ -388,7 +400,7 @@ export function mergeMessages(
                 type: "tool",
                 toolName: tc.function.name,
                 title,
-                path: args.path || "",
+                path: typeof args.path === "string" ? args.path : "",
                 paths,
                 result,
                 toolOutput,

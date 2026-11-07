@@ -33,7 +33,7 @@ The Tauri desktop build (macOS / Windows / Linux) provides local runtime capabil
 
 ## Demo
 
-![screenshot](public/images/screenshot.jpg)
+![screenshot](public/images/screenshot.png)
 
 [Live Demo](https://builder.u14.app)
 

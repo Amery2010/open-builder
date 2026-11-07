@@ -27,6 +27,50 @@ describe("useMergedMessages", () => {
     useSettingsStore.getState().setSystem(originalSystem);
   });
 
+  it("keeps failed historical tool calls renderable when the conversation continues", () => {
+    const history: Message[] = [
+      { role: "user", content: "Original task" },
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "failed",
+            type: "function",
+            function: { name: "read_files", arguments: "null" },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        tool_call_id: "failed",
+        content: "Error: failed to parse arguments",
+      },
+    ];
+    const original = structuredClone(history);
+    const { result, rerender } = renderHook(
+      ({ messages }) => useMergedMessages(messages),
+      { initialProps: { messages: history } },
+    );
+    expect(result.current[1].blocks[0]).toMatchObject({
+      type: "tool",
+      path: "",
+      result: "Error: failed to parse arguments",
+    });
+    rerender({
+      messages: [
+        ...history,
+        { role: "user", content: "Continue" },
+        { role: "assistant", content: "Continuing" },
+      ],
+    });
+    expect(result.current.at(-1)?.blocks[0]).toMatchObject({
+      type: "text",
+      content: "Continuing",
+    });
+    expect(history).toEqual(original);
+  });
+
   it("keeps an unsent message at its submitted position when later dialogue arrives", () => {
     const history: Message[] = [
       { role: "user", content: "Original task" },

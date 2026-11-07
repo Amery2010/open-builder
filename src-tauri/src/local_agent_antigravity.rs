@@ -396,7 +396,9 @@ fn has_required_help(help: &str) -> Result<(), String> {
     Ok(())
 }
 
-async fn inspect_installation(executable: &Path) -> Result<InstallationInspection, AdapterProbe> {
+async fn inspect_installation(
+    executable: &Path,
+) -> Result<InstallationInspection, Box<AdapterProbe>> {
     let version_output = match command_output_capped(
         executable,
         &["--version"],
@@ -407,7 +409,7 @@ async fn inspect_installation(executable: &Path) -> Result<InstallationInspectio
     {
         Ok(output) if output.status.success() => output,
         Ok(_) => {
-            return Err(AdapterProbe {
+            return Err(Box::new(AdapterProbe {
                 availability: LocalAgentAvailability::Unsupported,
                 version: None,
                 models: Vec::new(),
@@ -418,10 +420,10 @@ async fn inspect_installation(executable: &Path) -> Result<InstallationInspectio
                     "The selected Antigravity executable failed to report its version.".to_string(),
                 ),
                 missing_environment: Vec::new(),
-            })
+            }))
         }
         Err(message) => {
-            return Err(AdapterProbe {
+            return Err(Box::new(AdapterProbe {
                 availability: LocalAgentAvailability::Error,
                 version: None,
                 models: Vec::new(),
@@ -430,11 +432,11 @@ async fn inspect_installation(executable: &Path) -> Result<InstallationInspectio
                 verification_required: false,
                 message: Some(message),
                 missing_environment: Vec::new(),
-            })
+            }))
         }
     };
     let Some(version) = first_output_line(&version_output) else {
-        return Err(AdapterProbe {
+        return Err(Box::new(AdapterProbe {
             availability: LocalAgentAvailability::Unsupported,
             version: None,
             models: Vec::new(),
@@ -443,7 +445,7 @@ async fn inspect_installation(executable: &Path) -> Result<InstallationInspectio
             verification_required: false,
             message: Some("Antigravity returned an empty version response.".to_string()),
             missing_environment: Vec::new(),
-        });
+        }));
     };
     let help_output = match command_output_capped(
         executable,
@@ -455,7 +457,7 @@ async fn inspect_installation(executable: &Path) -> Result<InstallationInspectio
     {
         Ok(output) => output,
         Err(message) => {
-            return Err(AdapterProbe {
+            return Err(Box::new(AdapterProbe {
                 availability: LocalAgentAvailability::Error,
                 version: Some(version),
                 models: Vec::new(),
@@ -464,12 +466,12 @@ async fn inspect_installation(executable: &Path) -> Result<InstallationInspectio
                 verification_required: false,
                 message: Some(message),
                 missing_environment: Vec::new(),
-            })
+            }))
         }
     };
     let help = combined_output(&help_output);
     if !help_output.status.success() {
-        return Err(AdapterProbe {
+        return Err(Box::new(AdapterProbe {
             availability: LocalAgentAvailability::Unsupported,
             version: Some(version),
             models: Vec::new(),
@@ -478,10 +480,10 @@ async fn inspect_installation(executable: &Path) -> Result<InstallationInspectio
             verification_required: false,
             message: Some("Antigravity did not expose its structured CLI interface.".to_string()),
             missing_environment: Vec::new(),
-        });
+        }));
     }
     if let Err(message) = has_required_help(&help) {
-        return Err(AdapterProbe {
+        return Err(Box::new(AdapterProbe {
             availability: LocalAgentAvailability::Unsupported,
             version: Some(version),
             models: Vec::new(),
@@ -490,7 +492,7 @@ async fn inspect_installation(executable: &Path) -> Result<InstallationInspectio
             verification_required: false,
             message: Some(message),
             missing_environment: Vec::new(),
-        });
+        }));
     }
     Ok(InstallationInspection { version })
 }
@@ -670,7 +672,7 @@ fn looks_like_auth_failure(output: &str) -> bool {
 pub(crate) async fn probe(executable: &Path) -> AdapterProbe {
     let installation = match inspect_installation(executable).await {
         Ok(installation) => installation,
-        Err(probe) => return probe,
+        Err(probe) => return *probe,
     };
     let provider_environment = match load_provider_environment() {
         Ok(environment) => environment,

@@ -277,7 +277,7 @@ export async function mutateDesignTokens(
     return failure(
       conversationId,
       "design_contract_required",
-      "Accept a Design contract before updating Design Tokens.",
+      "The dedicated update_design_tokens tool requires an accepted Design contract. Load the required Design Skill and call submit_design_contract first.",
     );
   }
 

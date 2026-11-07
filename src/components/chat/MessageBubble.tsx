@@ -150,14 +150,14 @@ export const MessageBubble = memo(function MessageBubble({
           className="flex items-start gap-2 rounded-md border border-border/60 bg-muted/30 px-3 py-2 text-xs text-muted-foreground"
         >
           <Activity size={14} className="mt-0.5 shrink-0" aria-hidden="true" />
-          <div>
+          <div className="min-w-0 flex-1">
             <p className="font-medium text-foreground">
               {message.origin === "design_auto_fix"
                 ? t.chat.autoDesignFixActivity
                 : t.chat.autoQaActivity}
             </p>
             {textBlocks.length > 0 && (
-              <p className="mt-0.5 line-clamp-2">
+              <p className="mt-0.5 line-clamp-2 whitespace-normal [overflow-wrap:anywhere]">
                 {textBlocks.map((block) => block.content).join(" ")}
               </p>
             )}

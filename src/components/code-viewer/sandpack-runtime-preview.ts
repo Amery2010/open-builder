@@ -136,7 +136,7 @@ function packageRecord(content: string): Record<string, unknown> | undefined {
   }
 }
 
-/** Vite's terminal clearing reaches an unimplemented Nodebox TTY method. */
+/** Match Sandpack's package bytes and disable unsupported Vite terminal clearing. */
 export function projectSandpackRuntime(
   files: ProjectFiles,
   enabled = true,
@@ -150,14 +150,13 @@ export function projectSandpackRuntime(
     restore: (_path: string, content: string) => content,
   };
   if (!enabled) return identity;
+  const base =
+    template && template in SANDBOX_TEMPLATES
+      ? SANDBOX_TEMPLATES[template as keyof typeof SANDBOX_TEMPLATES]
+      : undefined;
   let source = files["package.json"];
   const synthetic = source === undefined;
-  if (
-    synthetic &&
-    template?.startsWith("vite") &&
-    template in SANDBOX_TEMPLATES
-  ) {
-    const base = SANDBOX_TEMPLATES[template as keyof typeof SANDBOX_TEMPLATES];
+  if (synthetic && template?.startsWith("vite") && base) {
     const file = (base.files as Record<string, string | { code: string }>)[
       "/package.json"
     ];
@@ -165,36 +164,47 @@ export function projectSandpackRuntime(
   }
   if (!source) return identity;
   const pkg = packageRecord(source);
-  if (
-    !pkg?.scripts ||
-    typeof pkg.scripts !== "object" ||
-    Array.isArray(pkg.scripts)
-  )
-    return identity;
-  const scripts = { ...pkg.scripts } as Record<string, unknown>;
+  if (!pkg) return identity;
+  const scripts =
+    pkg.scripts &&
+    typeof pkg.scripts === "object" &&
+    !Array.isArray(pkg.scripts)
+      ? ({ ...pkg.scripts } as Record<string, unknown>)
+      : undefined;
   const replacements = new Map<string, CommandProjection>();
-  for (const [name, command] of Object.entries(scripts)) {
+  for (const [name, command] of Object.entries(scripts ?? {})) {
     if (typeof command !== "string") continue;
     const projection = withoutTerminalClearing(command);
     if (projection.projected === command) continue;
-    scripts[name] = projection.projected;
+    scripts![name] = projection.projected;
     replacements.set(name, projection);
   }
-  if (replacements.size === 0) return identity;
-  const projected = JSON.stringify({ ...pkg, scripts }, null, 2) + "\n";
+  // SandpackProvider reserializes package.json and supplies dependency maps.
+  // Produce those exact bytes before synchronization rather than relaxing the
+  // delivery comparison or writing formatting changes into the project.
+  const projectedPackage = {
+    ...pkg,
+    ...(scripts ? { scripts } : {}),
+    dependencies: {
+      ...(pkg.dependencies as Record<string, unknown> | undefined),
+    },
+    devDependencies: {
+      ...(pkg.devDependencies as Record<string, unknown> | undefined),
+    },
+  };
+  const projected = JSON.stringify(projectedPackage, null, 2);
+  if (projected === source) return identity;
   return {
     files: { ...files, "package.json": projected },
     restore(path, content) {
       if (path !== "package.json") return content;
       if (content === projected) return synthetic ? undefined : source;
       const edited = packageRecord(content);
-      if (
-        !edited?.scripts ||
-        typeof edited.scripts !== "object" ||
-        Array.isArray(edited.scripts)
-      )
-        return content;
-      const editedScripts = edited.scripts as Record<string, unknown>;
+      if (!edited) return content;
+      const editedScripts =
+        edited.scripts && typeof edited.scripts === "object"
+          ? (edited.scripts as Record<string, unknown>)
+          : {};
       let restored = false;
       for (const [name, replacement] of replacements) {
         const command = editedScripts[name];
@@ -202,6 +212,15 @@ export function projectSandpackRuntime(
         const original = restoreCommand(replacement, command);
         if (original !== command) {
           editedScripts[name] = original;
+          restored = true;
+        }
+      }
+      for (const key of ["dependencies", "devDependencies"] as const) {
+        if (
+          !(key in pkg) &&
+          JSON.stringify(edited[key]) === JSON.stringify(projectedPackage[key])
+        ) {
+          delete edited[key];
           restored = true;
         }
       }

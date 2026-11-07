@@ -561,11 +561,18 @@ impl RunPhaseTracker {
     }
 
     fn tool_resolved(&self) {
-        let _ = self
-            .pending_tools
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
-                (pending > 0).then_some(pending - 1)
-            });
+        let mut pending = self.pending_tools.load(Ordering::Acquire);
+        while pending > 0 {
+            match self.pending_tools.compare_exchange_weak(
+                pending,
+                pending - 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(current) => pending = current,
+            }
+        }
         if self.pending_tools.load(Ordering::Acquire) == 0 {
             self.set(LocalCliFailurePhase::Stream);
         }
@@ -2194,6 +2201,9 @@ mod tests {
         });
         assert_eq!(phase.current(), LocalCliFailurePhase::Tool);
         phase.tool_resolved();
+        assert_eq!(phase.current(), LocalCliFailurePhase::Stream);
+        phase.tool_resolved();
+        assert_eq!(phase.pending_tools.load(Ordering::Acquire), 0);
         assert_eq!(phase.current(), LocalCliFailurePhase::Stream);
 
         phase.observe(&LocalAgentEvent::Done {

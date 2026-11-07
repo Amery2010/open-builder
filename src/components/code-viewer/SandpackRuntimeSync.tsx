@@ -8,6 +8,7 @@ type Setup = Client["sandboxSetup"];
 
 export interface SandpackRuntimeSyncHandle {
   isSynchronized: (expected: ProjectFiles) => boolean;
+  restart: () => Promise<void>;
 }
 
 function equalValue(left: unknown, right: unknown): boolean {
@@ -73,6 +74,7 @@ export function SandpackRuntimeSync({
 
   useEffect(() => {
     onChange?.({
+      restart: () => latest.current.runSandpack(),
       isSynchronized(expected) {
         const current = latest.current;
         if (

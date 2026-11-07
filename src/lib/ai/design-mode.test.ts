@@ -6,7 +6,7 @@ import {
 import type { DesignSystemPackage } from "../design-systems/validation";
 
 describe("Design mode design-system context", () => {
-  it("orders Skill loading and contract submission before the first UI write", () => {
+  it("orders Skill loading and scoped contract guidance before the first UI write", () => {
     const loadSkill = DESIGN_MODE_SYSTEM_SUFFIX.indexOf(
       "Load the required Design Skill",
     );
@@ -20,6 +20,12 @@ describe("Design mode design-system context", () => {
     expect(loadSkill).toBeGreaterThan(-1);
     expect(submitContract).toBeGreaterThan(loadSkill);
     expect(firstWrite).toBeGreaterThan(submitContract);
+    expect(DESIGN_MODE_SYSTEM_SUFFIX).toContain(
+      "recommended, but not required, for ordinary project file edits",
+    );
+    expect(DESIGN_MODE_SYSTEM_SUFFIX).toContain(
+      "Automatic visual review and repair require an accepted contract",
+    );
     expect(DESIGN_MODE_SYSTEM_SUFFIX).toContain("selected-but-unapplied");
     expect(DESIGN_MODE_SYSTEM_SUFFIX).toContain("one automatic repair");
   });

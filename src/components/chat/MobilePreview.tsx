@@ -5,6 +5,7 @@ import type { ProjectAssets, ProjectFiles } from "../../types";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { projectFilesForPreview } from "../../lib/utils/project-file-policy";
 import { projectSandpackRuntime } from "../code-viewer/sandpack-runtime-preview";
+import { projectReactPreview } from "../code-viewer/sandpack-react-preview";
 import { useT } from "../../i18n";
 import { SandpackRefreshAction } from "../code-viewer/SandpackPreviewActions";
 import {
@@ -119,16 +120,23 @@ export function MobilePreview({
       cancelled = true;
     };
   }, [assetProjectionRetry, assets, conversationId, previewFiles]);
+  const reactPreviewProjection = useMemo(
+    () =>
+      projectReactPreview(
+        assetPreviewFiles,
+        projectSandpackRuntime(assetPreviewFiles, true, template).files,
+        template,
+      ),
+    [assetPreviewFiles, template],
+  );
   const sandpackFiles = useMemo(() => {
     return Object.fromEntries(
-      Object.entries(
-        projectSandpackRuntime(assetPreviewFiles, true, template).files,
-      ).map(([path, content]) => [
+      Object.entries(reactPreviewProjection.files).map(([path, content]) => [
         path.startsWith("/") ? path : `/${path}`,
         { code: content },
       ]),
     );
-  }, [assetPreviewFiles, template]);
+  }, [reactPreviewProjection.files]);
 
   return (
     <div className="editor border rounded-lg min-h-160 overflow-hidden bg-background">
@@ -178,8 +186,9 @@ export function MobilePreview({
           )}
         >
           <SandpackProvider
-            key={`${sandpackKey}:${renderRetry}`}
+            key={`${sandpackKey}:${renderRetry}:${reactPreviewProjection.sourceEntry ?? "node"}`}
             template={template as SandpackPredefinedTemplate}
+            customSetup={reactPreviewProjection.customSetup}
             theme={isDark ? "dark" : "light"}
             files={sandpackFiles}
           >

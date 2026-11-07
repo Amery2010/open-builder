@@ -3,17 +3,21 @@
 import { render, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { sandpackState, setActiveFile, setConsoleLogs } = vi.hoisted(() => ({
-  sandpackState: {
-    activeFile: "/src/App.tsx",
-    files: { "/src/App.tsx": { code: "app" } },
-  },
-  setActiveFile: vi.fn(),
-  setConsoleLogs: vi.fn(),
-}));
+const { sandpackState, setActiveFile, setConsoleLogs, listen } = vi.hoisted(
+  () => ({
+    sandpackState: {
+      activeFile: "/src/App.tsx",
+      files: { "/src/App.tsx": { code: "app" } },
+    },
+    setActiveFile: vi.fn(),
+    setConsoleLogs: vi.fn(),
+    listen: () => () => {},
+  }),
+);
 
 vi.mock("@codesandbox/sandpack-react", () => ({
   useSandpack: () => ({
+    listen,
     sandpack: {
       ...sandpackState,
       setActiveFile,
@@ -22,7 +26,8 @@ vi.mock("@codesandbox/sandpack-react", () => ({
   useSandpackConsole: () => ({ logs: [] }),
 }));
 
-vi.mock("@/store/sandpack", () => ({
+vi.mock("@/store/sandpack", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/store/sandpack")>()),
   useSandpackStore: (
     selector: (state: { setConsoleLogs: typeof setConsoleLogs }) => unknown,
   ) => selector({ setConsoleLogs }),

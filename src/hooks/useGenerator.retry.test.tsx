@@ -6,6 +6,7 @@ import { useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useConversationStore } from "../store/conversation";
 import { useInteractiveStore } from "../store/interactive";
+import { useDesignReviewStore } from "../store/design-review";
 import { useSettingsStore } from "../store/settings";
 import { createSkillActiveContext } from "../lib/skills/active-context";
 import type { SkillEntry } from "../lib/skills/types";
@@ -630,10 +631,184 @@ describe("useGenerator retry Design policy", () => {
       useConversationStore.getState().conversations[conversationId]
         .workspaceMode,
     ).toBe("auto");
-    expect(beforeContract).toContain("Design contract required");
+    expect(beforeContract).toBeUndefined();
     expect(rejectedCreate).toContain("change_mode must be one of: migrate");
     expect(afterContract).toBeUndefined();
     expect(record.backend.retryCalls).toBe(1);
+  });
+
+  it("allows the first ordinary Design patch without scheduling a contractless review", async () => {
+    const conversationId = useConversationStore.getState().createConversation();
+    useConversationStore.getState().setWorkspaceMode("design");
+    const initialFiles = {
+      "src/App.tsx": "export default () => <main>Before</main>;",
+    };
+    useConversationStore.getState().setFiles(initialFiles);
+    const capture = vi.spyOn(
+      useDesignReviewStore.getState(),
+      "requestAutomaticCapture",
+    );
+    let patchAuthorization: string | void = undefined;
+    let tokenAuthorization: string | void = undefined;
+    generateActionForNextBackend = async (backend) => {
+      const { extras } = records.at(-1)!;
+      patchAuthorization = await extras.authorizeToolCall?.(
+        "patch_file",
+        { path: "src/App.tsx", search: "Before", replace: "After" },
+        toolContextFor(backend),
+      );
+      tokenAuthorization = await extras.authorizeToolCall?.(
+        "update_design_tokens",
+        {},
+        toolContextFor(backend),
+      );
+      backend.setFiles({
+        "src/App.tsx": "export default () => <main>After</main>;",
+      });
+      records.at(-1)!.events?.onFileChange?.(backend.getFiles(), []);
+      return resultFor(backend);
+    };
+    const hook = renderGenerator();
+    try {
+      await act(async () => {
+        await hook.result.current.generate("Update the heading");
+      });
+      expect(patchAuthorization).toBeUndefined();
+      expect(tokenAuthorization).toContain("Design contract required");
+      expect(capture).not.toHaveBeenCalled();
+      expect(
+        useConversationStore.getState().conversations[conversationId].files[
+          "src/App.tsx"
+        ],
+      ).toContain("After");
+    } finally {
+      capture.mockRestore();
+    }
+  });
+
+  it.each([
+    "prototype-init",
+    "prototype-project",
+    "blueprint",
+    "invalid-blueprint",
+  ] as const)(
+    "requires a contract after detecting %s and cannot downgrade within the run",
+    async (kind) => {
+      useConversationStore.getState().createConversation();
+      useConversationStore.getState().setWorkspaceMode("design");
+      const ordinary = { "src/App.tsx": "export default () => null;" };
+      useConversationStore.getState().setFiles(ordinary);
+      const authorizations: Array<string | void> = [];
+      generateActionForNextBackend = async (backend) => {
+        const { extras } = records.at(-1)!;
+        const authorize = (name: string, args: unknown) =>
+          extras.authorizeToolCall?.(name, args, toolContextFor(backend));
+        if (kind === "prototype-init") {
+          authorizations.push(
+            await authorize("init_project", {
+              template: "vite-react-ts-prototype",
+            }),
+          );
+        } else {
+          const files = prototypeFiles(0);
+          backend.setFiles(
+            kind === "prototype-project"
+              ? { ...ordinary, "package.json": files["package.json"] }
+              : {
+                  ...ordinary,
+                  "design-project.json":
+                    kind === "blueprint"
+                      ? files["design-project.json"]
+                      : "invalid",
+                },
+          );
+        }
+        authorizations.push(
+          await authorize("patch_file", { path: "src/App.tsx" }),
+        );
+        backend.setFiles(ordinary);
+        authorizations.push(
+          await authorize("patch_file", { path: "src/App.tsx" }),
+        );
+        return resultFor(backend);
+      };
+      const hook = renderGenerator();
+      await act(async () => {
+        await hook.result.current.generate("Update this project");
+      });
+      if (kind === "prototype-init")
+        expect(authorizations.shift()).toBeUndefined();
+      expect(authorizations).toHaveLength(2);
+      for (const authorization of authorizations) {
+        expect(authorization).toContain("Design contract required");
+      }
+    },
+  );
+
+  it("binds an imported blueprint's write scope without a prototype package marker", async () => {
+    useConversationStore.getState().createConversation();
+    useConversationStore.getState().setWorkspaceMode("design");
+    const files = prototypeFiles(0);
+    delete files["package.json"];
+    useConversationStore.getState().setFiles(files);
+    const fixture = SAAS_PROTOTYPE_BLUEPRINT_FIXTURE;
+    const selectedPage = fixture.pages[0];
+    let missingScope: unknown;
+    let accepted: unknown;
+    let selectedWrite: string | void = undefined;
+    let otherWrite: string | void = undefined;
+    generateActionForNextBackend = async (backend) => {
+      backend.getSkillContext().activate(ART_DIRECT_SKILL);
+      const context = toolContextFor(backend);
+      try {
+        missingScope = await backend.customToolHandler?.(
+          "submit_design_contract",
+          contractFor("extend"),
+          context,
+        );
+      } catch (error) {
+        missingScope = error instanceof Error ? error.message : String(error);
+      }
+      accepted = await backend.customToolHandler?.(
+        "submit_design_contract",
+        {
+          ...contractFor("extend"),
+          blueprint: {
+            revision: fixture.revision,
+            target_page_ids: [selectedPage.id],
+            shared_scope: { file_paths: [], ui_ids: [] },
+            batch_phase: "core_flow",
+          },
+        },
+        context,
+      );
+      const { extras } = records.at(-1)!;
+      selectedWrite = await extras.authorizeToolCall?.(
+        "patch_file",
+        { path: selectedPage.filePaths[0] },
+        context,
+      );
+      otherWrite = await extras.authorizeToolCall?.(
+        "patch_file",
+        { path: fixture.pages[1].filePaths[0] },
+        context,
+      );
+      return resultFor(backend);
+    };
+    const hook = renderGenerator();
+    await act(async () => {
+      await hook.result.current.generate(
+        "Update the selected page",
+        undefined,
+        {
+          skipAutomaticDesignReview: true,
+        },
+      );
+    });
+    expect(missingScope).toContain("blueprint scope is required");
+    expect(accepted).toBe('{"accepted":true}');
+    expect(selectedWrite).toBeUndefined();
+    expect(otherWrite).toContain("outside the selected page files");
   });
 
   it("keeps the request-start Design profile across asynchronous preparation", async () => {
