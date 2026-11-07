@@ -220,7 +220,7 @@ describe("useGenerator optimistic request lifecycle", () => {
         {
           forcedSkillIds: ["art-direct-web"],
           designSelection: {
-            protocolVersion: 1,
+            protocolVersion: 2,
             elementId: "hero-card",
             label: "Hero card",
             tagName: "section",

@@ -263,12 +263,11 @@ describe("preview evidence tool output", () => {
   });
 
   it.each(["#/dashboard", "#/dashboard?filter=" + "a".repeat(500)])(
-    "persists the requested page and scenario with every capture (%s)",
+    "persists the requested page and route with every capture (%s)",
     async (route) => {
       const target: PrototypePreviewTarget = {
         pageId: "dashboard",
         route,
-        scenarioId: "populated",
       };
       let currentGeneration: string | undefined;
       unregisters.push(
@@ -315,13 +314,12 @@ describe("preview evidence tool output", () => {
     },
   );
 
-  it("returns a target identity error when an adapter reports another scenario", async () => {
+  it("returns a target identity error when an adapter reports another route", async () => {
     const target: PrototypePreviewTarget = {
       pageId: "dashboard",
       route: "#/dashboard",
-      scenarioId: "populated",
     };
-    const mismatched = { ...target, scenarioId: "empty" };
+    const mismatched = { ...target, route: "#/other-page" };
     let currentGeneration: string | undefined;
     unregisters.push(
       registerPreviewRuntime("conversation-mismatch", {
@@ -446,7 +444,6 @@ describe("preview evidence tool output", () => {
         target: {
           pageId: "home",
           route: "#/home",
-          scenarioId: "default",
         },
       }),
     ).toBe(false);
@@ -461,7 +458,6 @@ describe("preview evidence tool output", () => {
               prototypeIdentity: {
                 pageId: "home",
                 route: "#/home",
-                scenarioId: "default",
               },
               route: "#/home",
             },

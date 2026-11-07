@@ -18,6 +18,7 @@ vi.mock("../../../lib/storage/registry", () => ({
     attachments: { bytes: 0, items: 0 },
     projectAssets: { bytes: 1536, items: 3 },
     projectArchives: { bytes: 1024, items: 1 },
+    designWorkspace: { bytes: 1024, items: 4 },
   })),
 }));
 
@@ -78,7 +79,9 @@ describe("StorageTab", () => {
     expect(screen.getByText("512 B")).toBeInTheDocument();
     expect(screen.getByText("1.5 KB")).toBeInTheDocument();
     expect(screen.getByText("Project archives")).toBeInTheDocument();
-    expect(screen.getByText("1.0 KB")).toBeInTheDocument();
-    expect(screen.getByText("3.0 KB")).toBeInTheDocument();
+    expect(screen.getAllByText("1.0 KB")).toHaveLength(2);
+    expect(screen.getByText("Canvas layouts")).toBeInTheDocument();
+    expect(screen.getByText("4")).toBeInTheDocument();
+    expect(screen.getByText("4.0 KB")).toBeInTheDocument();
   });
 });

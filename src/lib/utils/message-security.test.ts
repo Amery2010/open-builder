@@ -135,7 +135,6 @@ describe("message security", () => {
         revision: 4,
         pageCount: 1,
         flowCount: 1,
-        scenarioCount: 2,
       },
     });
   });
@@ -221,7 +220,6 @@ describe("message security", () => {
         target: {
           pageId: "pricing",
           route,
-          scenarioId: "default",
         },
         evidence: [
           {
@@ -240,7 +238,6 @@ describe("message security", () => {
               prototypeIdentity: {
                 pageId: "pricing",
                 route,
-                scenarioId: "default",
               },
               horizontalOverflow: false,
               fonts: "ready",
@@ -277,7 +274,7 @@ describe("message security", () => {
       expect(output?.structuredContent).toMatchObject({
         kind: "preview_evidence_v1",
         generation,
-        target: { pageId: "pricing", scenarioId: "default", route },
+        target: { pageId: "pricing", route },
         evidence: [
           {
             view: "mobile",

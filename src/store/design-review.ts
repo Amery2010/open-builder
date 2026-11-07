@@ -3,6 +3,7 @@ import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 import {
   coverageTargetKey,
+  DESIGN_REVIEW_COVERAGE_VERSION,
   designReviewReportSchema,
   type DesignReviewCoverageTarget,
   type DesignReviewReport,
@@ -178,7 +179,28 @@ function interruptRun(run: DesignReviewRun, now: number): DesignReviewRun {
 }
 
 function normalizePersistedRun(run: DesignReviewRun): DesignReviewRun {
-  const parsedReport = designReviewReportSchema.safeParse(run.report);
+  const currentCoverage =
+    run.coverageVersion === DESIGN_REVIEW_COVERAGE_VERSION;
+  // Legacy report prose stays readable; scenario evidence must never become
+  // page-level evidence by dropping its identity dimension.
+  const report =
+    !currentCoverage && run.report && Array.isArray(run.report.findings)
+      ? {
+          ...run.report,
+          findings: run.report.findings.map((finding) => {
+            if (
+              !finding ||
+              typeof finding !== "object" ||
+              Array.isArray(finding)
+            )
+              return finding;
+            const { scenario_id: _legacyScenario, ...pageFinding } =
+              finding as typeof finding & { scenario_id?: unknown };
+            return pageFinding;
+          }),
+        }
+      : run.report;
+  const parsedReport = designReviewReportSchema.safeParse(report);
   const blueprintRevision =
     (typeof run.blueprintRevision === "number" &&
       Number.isSafeInteger(run.blueprintRevision) &&
@@ -214,7 +236,9 @@ function normalizePersistedRun(run: DesignReviewRun): DesignReviewRun {
     ...(parsedReport.success
       ? { report: parsedReport.data }
       : { report: undefined }),
-    coverage: normalizeCoverage(run.coverage),
+    coverageVersion: currentCoverage ? DESIGN_REVIEW_COVERAGE_VERSION : 1,
+    freshness: currentCoverage ? run.freshness : "stale",
+    coverage: currentCoverage ? normalizeCoverage(run.coverage) : undefined,
     ...(run.error
       ? { error: sanitizeDesignReviewLogText(run.error) }
       : { error: undefined }),
@@ -231,7 +255,7 @@ function normalizeCoverage(
     if (
       !entry ||
       !/^[a-z0-9][a-z0-9-]{0,79}$/.test(entry.pageId) ||
-      !/^[a-z0-9][a-z0-9-]{0,79}$/.test(entry.scenarioId) ||
+      "scenarioId" in entry ||
       !isSafePrototypePreviewRoute(entry.route) ||
       !["desktop", "tablet", "mobile"].includes(entry.viewport) ||
       !statuses.has(entry.status)
@@ -279,11 +303,7 @@ function completedCoverage(
     if (entry.status === "unreviewed") return entry;
     const hasFinding =
       unattributedFinding ||
-      report.findings.some(
-        (finding) =>
-          finding.page_id === entry.pageId &&
-          (!finding.scenario_id || finding.scenario_id === entry.scenarioId),
-      );
+      report.findings.some((finding) => finding.page_id === entry.pageId);
     return { ...entry, status: hasFinding ? "needs-fix" : "passed" };
   });
 }
@@ -460,6 +480,7 @@ export const useDesignReviewStore = create<DesignReviewState>()(
           phase: input.phase ?? "initial",
           status: input.status ?? "queued",
           freshness: "fresh",
+          coverageVersion: DESIGN_REVIEW_COVERAGE_VERSION,
           sourceDigest: input.sourceDigest,
           ...(input.sourceProjectDigest
             ? { sourceProjectDigest: input.sourceProjectDigest }
@@ -652,7 +673,10 @@ export const useDesignReviewStore = create<DesignReviewState>()(
               ...state.runsByConversation,
               [conversationId]: runs.map((run) => {
                 const freshness =
-                  run.sourceDigest === sourceDigest ? "fresh" : "stale";
+                  run.coverageVersion === DESIGN_REVIEW_COVERAGE_VERSION &&
+                  run.sourceDigest === sourceDigest
+                    ? "fresh"
+                    : "stale";
                 if (run.freshness === freshness) return run;
                 return {
                   ...run,
@@ -680,7 +704,10 @@ export const useDesignReviewStore = create<DesignReviewState>()(
           return {
             runsByConversation: mapRun(state, runId, (run) => {
               const freshness =
-                run.sourceDigest === sourceDigest ? "fresh" : "stale";
+                run.coverageVersion === DESIGN_REVIEW_COVERAGE_VERSION &&
+                run.sourceDigest === sourceDigest
+                  ? "fresh"
+                  : "stale";
               if (run.freshness === freshness) return run;
               return {
                 ...run,
@@ -706,8 +733,13 @@ export const useDesignReviewStore = create<DesignReviewState>()(
           const now = Date.now();
           return {
             runsByConversation: mapRun(state, runId, (run) => {
-              if (!run.sourceProjectDigest) return run;
+              if (
+                !run.sourceProjectDigest &&
+                run.coverageVersion === DESIGN_REVIEW_COVERAGE_VERSION
+              )
+                return run;
               const freshness =
+                run.coverageVersion === DESIGN_REVIEW_COVERAGE_VERSION &&
                 run.sourceProjectDigest === sourceProjectDigest
                   ? "fresh"
                   : "stale";

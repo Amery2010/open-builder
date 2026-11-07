@@ -15,6 +15,17 @@ import {
 } from "@codesandbox/sandpack-react";
 import type { SandpackPredefinedTemplate } from "@codesandbox/sandpack-react";
 import { Terminal } from "lucide-react";
+import {
+  DesignCanvasWorkspace,
+  type DesignCanvasBoard,
+} from "./design/DesignCanvasWorkspace";
+import { DesignCanvasActions } from "./design/DesignCanvasActions";
+import { useCanvasPreviews } from "./design/useCanvasPreviews";
+import type { CanvasPreviewRequest } from "../lib/design/canvas-preview";
+import {
+  defaultBranchId,
+  isConversationIdentityCurrent,
+} from "../lib/conversation/branches";
 import { cn } from "@/lib/utils";
 import { useTheme } from "@/hooks/useTheme";
 import { useT } from "../i18n";
@@ -53,14 +64,13 @@ import { useConversationStore } from "../store/conversation";
 import { DesignSystemPanel } from "./design/DesignSystemPanel";
 import { DesignTokenPanel } from "./design/DesignTokenPanel";
 import { DesignReviewDialog } from "./design/DesignReviewDialog";
-import { ProjectDesignOutlineDialog } from "./design/ProjectDesignOutlineDialog";
+import { resolvePageSource } from "../lib/design/page-source";
 import { useDesignSelectionStore } from "../store/design-selection";
 import {
   createDesignBridgeNonce,
   designBridgeRuntimeRevision,
   DESIGN_BRIDGE_CAPTURE_TIMEOUT_MS,
   DESIGN_BRIDGE_TIMEOUT_ATTEMPTS,
-  DESIGN_BRIDGE_MARKER,
   DESIGN_BRIDGE_PAYLOAD_MAX_BYTES,
   DESIGN_BRIDGE_PROTOCOL_VERSION,
   DESIGN_BRIDGE_VIRTUAL_PATH,
@@ -115,28 +125,17 @@ import { useDesignReviewStore } from "../store/design-review";
 import { useProjectDesignWorkspaceStore } from "../store/project-design-workspace";
 import type { AutomaticDesignReviewEvidence } from "../lib/design/automatic-review";
 import { computeDesignReviewSourceDigest } from "../lib/design/review-jobs/digest";
-import {
-  isDesignReviewTerminalStatus,
-  type DesignReviewRun,
-} from "../lib/design/review-jobs/types";
+import { type DesignReviewRun } from "../lib/design/review-jobs/types";
 import { DEFAULT_TITLE } from "../store/conversation";
 import {
-  applyProjectDesignUpdate,
-  deriveImpactPages,
-  PROJECT_DESIGN_PATH,
   readProjectDesign,
   resolveProjectDesignPreview,
   resolveProjectDesignPreviewRoute,
-  type ProjectDesign,
 } from "../lib/design/project-design";
 import { isPrototypeProject } from "../lib/design/prototype-starter";
-import { derivePageBuildState } from "../lib/design/page-build-state";
 import { buildPrototypeReviewCaptureReport } from "../lib/design/prototype-review-plan";
 import { createIsolatedPreviewSession } from "../lib/design/prototype-preview-session";
-import {
-  ProjectDesignNavigator,
-  type ProjectDesignReviewStatus,
-} from "./design/ProjectDesignNavigator";
+
 import { flushPendingSandpackFileChanges } from "./code-viewer/sandpack-file-changes";
 import {
   SandpackActionButton,
@@ -174,34 +173,11 @@ interface PendingDesignNavigation {
   removeAbortListener: () => void;
 }
 
-const EMPTY_DESIGN_REVIEW_RUNS: readonly DesignReviewRun[] = [];
 const EMPTY_PROJECT_ASSETS: ProjectAssets = {};
+const EMPTY_CANVAS_REQUESTS: readonly CanvasPreviewRequest[] = [];
 // The iframe bundler avoids the static service-worker relay's stale responses
 // in desktop webviews. Keep this setup stable across file updates.
 const DESKTOP_STATIC_PREVIEW_SETUP = { environment: "parcel" } as const;
-
-function pageReviewStatus(
-  pageId: string,
-  runs: readonly DesignReviewRun[],
-): ProjectDesignReviewStatus {
-  const latest = runs.find((run) =>
-    run.coverage?.some((entry) => entry.pageId === pageId),
-  );
-  if (!latest) return "unreviewed";
-  if (latest.freshness === "stale") return "stale";
-  if (!isDesignReviewTerminalStatus(latest.status)) return "in-review";
-  const pageCoverage = latest.coverage?.filter(
-    (entry) => entry.pageId === pageId,
-  );
-  if (!pageCoverage?.length) return "unreviewed";
-  if (pageCoverage.some((entry) => entry.status === "needs-fix")) {
-    return "changes-requested";
-  }
-  if (pageCoverage.every((entry) => entry.status === "passed")) {
-    return "approved";
-  }
-  return "unreviewed";
-}
 
 function afterPreviewPaint(): Promise<void> {
   return new Promise((resolve) => {
@@ -476,6 +452,12 @@ export function CodeViewer({
   const [annotationScope, setAnnotationScope] =
     useState<PreviewCaptureScope | null>(null);
   const annotationOpen = annotationScope !== null;
+  const [designFocus, setDesignFocus] = useState(false);
+  const [canvasFocusRequest, setCanvasFocusRequest] = useState<{
+    pageId: string;
+    requestId: number;
+  }>();
+  const [pageSourceMissing, setPageSourceMissing] = useState(false);
   const annotationIntake = useAttachmentIntakeContext();
   const closeAnnotation = useCallback(() => setAnnotationScope(null), []);
   const [viewMode, setViewMode] = useState<ViewMode>(
@@ -493,14 +475,9 @@ export function CodeViewer({
   const [designTokensOpen, setDesignTokensOpen] = useState(false);
   const [designSelectionActive, setDesignSelectionActive] = useState(false);
   const [designReviewOpen, setDesignReviewOpen] = useState(false);
-  const [projectDesignOutlineOpen, setProjectDesignOutlineOpen] =
-    useState(false);
   const [selectedPrototypePageId, setSelectedPrototypePageId] = useState<
     string | undefined
   >();
-  const [selectedPrototypeScenarioId, setSelectedPrototypeScenarioId] =
-    useState<string | undefined>();
-  const [prototypeResetPending, setPrototypeResetPending] = useState(false);
   const [captureRuntimeSource, setCaptureRuntimeSource] = useState<
     string | null
   >(null);
@@ -556,6 +533,27 @@ export function CodeViewer({
     (state) =>
       state.conversations[conversationId]?.assets ?? EMPTY_PROJECT_ASSETS,
   );
+  const branchId = useConversationStore(
+    (state) =>
+      state.conversations[conversationId]?.activeBranchId ??
+      defaultBranchId(conversationId),
+  );
+  const checkoutEpoch = useConversationStore(
+    (state) => state.conversations[conversationId]?.checkoutEpoch ?? 0,
+  );
+  const parentBranchId = useConversationStore(
+    (state) =>
+      state.conversations[conversationId]?.branches?.[branchId]?.parentBranchId,
+  );
+  const canvasIdentity = useMemo(
+    () => ({ conversationId, branchId, checkoutEpoch }),
+    [conversationId, branchId, checkoutEpoch],
+  );
+  const designCanvasEnabled = workspaceMode === "design" && previewEnabled;
+  const canvasMode =
+    designCanvasEnabled && effectiveViewMode === "preview" && !designFocus;
+  const canvasModeRef = useRef(canvasMode);
+  canvasModeRef.current = canvasMode;
   const desktopMode = supportsDesktopDesignTools();
   const setDesignSelection = useDesignSelectionStore(
     (state) => state.setSelection,
@@ -575,10 +573,6 @@ export function CodeViewer({
   const automaticStage = useDesignReviewStore(
     (state) => state.automatic?.stage,
   );
-  const designReviewRuns = useDesignReviewStore(
-    (state) =>
-      state.runsByConversation?.[conversationId] ?? EMPTY_DESIGN_REVIEW_RUNS,
-  );
   const dialogRequestId = useDesignReviewStore(
     (state) => state.dialogRequestId,
   );
@@ -596,7 +590,6 @@ export function CodeViewer({
   useEffect(() => {
     if (!prototypeWorkspaceEnabled || projectDesign.status !== "ready") {
       setSelectedPrototypePageId(undefined);
-      setSelectedPrototypeScenarioId(undefined);
       return;
     }
     const page =
@@ -607,28 +600,12 @@ export function CodeViewer({
     if (page.id !== selectedPrototypePageId) {
       setSelectedPrototypePageId(page.id);
     }
-    const availableScenarios = new Set([
-      page.defaultScenario ?? "default",
-      ...page.scenarioIds,
-    ]);
-    if (
-      !selectedPrototypeScenarioId ||
-      !availableScenarios.has(selectedPrototypeScenarioId)
-    ) {
-      setSelectedPrototypeScenarioId(page.defaultScenario ?? "default");
-    }
-  }, [
-    projectDesign,
-    prototypeWorkspaceEnabled,
-    selectedPrototypePageId,
-    selectedPrototypeScenarioId,
-  ]);
+  }, [projectDesign, prototypeWorkspaceEnabled, selectedPrototypePageId]);
   useEffect(() => {
     if (
       !prototypeWorkspaceEnabled ||
       projectDesign.status !== "ready" ||
-      !selectedPrototypePageId ||
-      !selectedPrototypeScenarioId
+      !selectedPrototypePageId
     ) {
       clearProjectDesignWorkspaceSelection(conversationId);
       return;
@@ -636,7 +613,6 @@ export function CodeViewer({
     // Selection is useful even while a draft page has no executable preview.
     setProjectDesignWorkspaceSelection(conversationId, {
       pageId: selectedPrototypePageId,
-      scenarioId: selectedPrototypeScenarioId,
       explicit: explicitPrototypePageRef.current === selectedPrototypePageId,
     });
   }, [
@@ -645,102 +621,26 @@ export function CodeViewer({
     projectDesign,
     prototypeWorkspaceEnabled,
     selectedPrototypePageId,
-    selectedPrototypeScenarioId,
     setProjectDesignWorkspaceSelection,
   ]);
-  const projectDesignNavigatorModel = useMemo(() => {
-    if (projectDesign.status !== "ready") {
-      return {
-        blueprint: {
-          status: projectDesign.status,
-          ...(projectDesign.status === "invalid"
-            ? { message: projectDesign.error }
-            : {}),
-        },
-        pages: [],
-      } as const;
-    }
-    const design = projectDesign.design;
-    const scenarios = new Map(
-      design.scenarios.map((scenario) => [scenario.id, scenario]),
-    );
-    const selectedPage = design.pages.find(
-      (page) => page.id === selectedPrototypePageId,
-    );
-    const affectedPages = selectedPage
-      ? deriveImpactPages(design, [
-          ...(selectedPage.layoutId ? [selectedPage.layoutId] : []),
-          ...selectedPage.sharedUiRefs,
-        ])
-      : [];
-    return {
-      blueprint: { status: "ready" as const },
-      selectedPageId: selectedPrototypePageId,
-      selectedSceneId: selectedPrototypeScenarioId,
-      pages: design.pages.map((page) => ({
-        id: page.id,
-        parentId: page.parentId ?? undefined,
-        name: page.name,
-        responsibility:
-          page.responsibility ?? t.prototypeWorkspace.pendingDetails,
-        previewIssue: (() => {
-          const preview = resolveProjectDesignPreview(design, page.id);
-          return preview.status === "unavailable"
-            ? t.prototypeWorkspace.previewReasons[preview.reason]
-            : undefined;
-        })(),
-        ...derivePageBuildState(design, page, files),
-        reviewStatus: pageReviewStatus(page.id, designReviewRuns),
-        scenes: [
-          ...new Set([page.defaultScenario ?? "default", ...page.scenarioIds]),
-        ]
-          .map(
-            (scenarioId) =>
-              scenarios.get(scenarioId) ??
-              (scenarioId === "default" && !design.scenarios.length
-                ? {
-                    id: "default",
-                    name: t.prototypeWorkspace.previewBaseline,
-                    kind: "default",
-                  }
-                : undefined),
-          )
-          .filter((scenario) => scenario !== undefined)
-          .map((scenario) => ({
-            id: scenario.id,
-            name: scenario.name,
-            description: scenario.kind,
-          })),
-      })),
-      ...(affectedPages.length > 1
-        ? {
-            sharedLayoutImpact: {
-              description: t.prototypeWorkspace.sharedImpactDescription.replace(
-                "{count}",
-                String(affectedPages.length),
-              ),
-              affectedPages: affectedPages.length,
-            },
-          }
-        : {}),
-    };
-  }, [
-    designReviewRuns,
-    projectDesign,
-    selectedPrototypePageId,
-    selectedPrototypeScenarioId,
-    t.prototypeWorkspace.sharedImpactDescription,
-  ]);
+  const workspaceKey = JSON.stringify(canvasIdentity);
+  useEffect(() => {
+    setCanvasFocusRequest(undefined);
+    setPageSourceMissing(false);
+  }, [workspaceKey]);
 
   const deviceDimensions = captureViewport
     ? { width: captureViewport.width, height: captureViewport.height }
-    : deviceSize === "tablet"
-      ? { width: 768, height: 1024 }
-      : { width: 375, height: 667 };
-  const fixedPreview = captureViewport !== null || deviceSize !== "desktop";
+    : canvasMode && deviceSize === "desktop"
+      ? { width: 1440, height: 900 }
+      : deviceSize === "tablet"
+        ? { width: 768, height: 1024 }
+        : { width: 375, height: 667 };
+  const fixedPreview =
+    captureViewport !== null || deviceSize !== "desktop" || canvasMode;
   const previewScale = resolvePreviewScale({
     captureActive: captureViewport !== null,
-    requestedScale,
+    requestedScale: canvasMode ? 1 : requestedScale,
   });
 
   useEffect(() => {
@@ -979,22 +879,8 @@ export function CodeViewer({
       }
       let editableContent = reactPreviewProjection.restore(path, content);
       if (editableContent === undefined) return;
-      if (bridgeInjection.supported && path === bridgeInjection.indexPath) {
-        if (content === bridgeInjection.files[path]) return;
-        const startMarker = `<!-- ${DESIGN_BRIDGE_MARKER}:start -->`;
-        const endMarker = `<!-- ${DESIGN_BRIDGE_MARKER}:end -->`;
-        const start = content.indexOf(startMarker);
-        const end = content.indexOf(endMarker);
-        if (start >= 0 || end >= 0) {
-          if (start < 0 || end < start) return;
-          const afterMarker = end + endMarker.length;
-          // Remove the injected block and its own trailing newline only.
-          // The canonical HTML's surrounding whitespace belongs to the editor.
-          const afterBlock =
-            afterMarker + (content[afterMarker] === "\n" ? 1 : 0);
-          editableContent = content.slice(0, start) + content.slice(afterBlock);
-        }
-      }
+      editableContent = bridgeInjection.restore(path, editableContent);
+      if (editableContent === undefined) return;
       const canonical = files[path];
       if (
         canonical !== undefined &&
@@ -1176,29 +1062,6 @@ export function CodeViewer({
           version: DESIGN_BRIDGE_PROTOCOL_VERSION,
           nonce,
           active,
-        },
-        targetOrigin,
-      );
-      return true;
-    },
-    [getPreviewIframe],
-  );
-
-  const postPrototypeDataReset = useCallback(
-    (generation: string) => {
-      const iframe = getPreviewIframe();
-      if (!iframe?.contentWindow) return false;
-      const targetOrigin = getDesignBridgeTargetOrigin(
-        iframe.src,
-        window.location.href,
-      );
-      if (!targetOrigin) return false;
-      iframe.contentWindow.postMessage(
-        {
-          type: "open-builder:design-bridge-reset-data",
-          version: DESIGN_BRIDGE_PROTOCOL_VERSION,
-          generation,
-          nonce: createDesignBridgeNonce(),
         },
         targetOrigin,
       );
@@ -1475,9 +1338,8 @@ export function CodeViewer({
             projectDesign.design,
             route,
           );
-          if (target && !retainExplicitDraft()) {
+          if (target && !canvasModeRef.current && !retainExplicitDraft()) {
             setSelectedPrototypePageId(target.pageId);
-            setSelectedPrototypeScenarioId(target.scenarioId);
           }
         }
         return;
@@ -1522,9 +1384,9 @@ export function CodeViewer({
                 : undefined;
               return preview?.status === "ready" ? preview.target : null;
             })();
-          if (target && !retainExplicitDraft()) {
+          if (target && !canvasModeRef.current && !retainExplicitDraft()) {
             setSelectedPrototypePageId(target.pageId);
-            setSelectedPrototypeScenarioId(target.scenarioId);
+
             if (!observed) {
               const controller = new AbortController();
               void requestPreviewNavigation(
@@ -1617,9 +1479,11 @@ export function CodeViewer({
         ? t.toolbar.selectionUnsupportedTemplate.replace("{template}", template)
         : bridgeInjection.reason === "missing-index"
           ? t.toolbar.selectionMissingIndex
-          : bridgeInjection.reason === "reserved-path"
-            ? t.toolbar.selectionReservedPath
-            : undefined;
+          : bridgeInjection.reason === "missing-entry"
+            ? t.toolbar.selectionMissingEntry
+            : bridgeInjection.reason === "reserved-path"
+              ? t.toolbar.selectionReservedPath
+              : undefined;
 
   const handleDesignTokenCommit = useCallback(
     async (changes: readonly DesignTokenChange[]) => {
@@ -1638,33 +1502,6 @@ export function CodeViewer({
     setDesignTokensOpen(false);
     setDesignSystemsOpen(true);
   }, []);
-
-  const saveProjectDesignOutline = useCallback(
-    async (nextDesign: ProjectDesign) => {
-      if (projectDesign.status !== "ready") {
-        throw new Error("The project design is not available.");
-      }
-      const result = applyProjectDesignUpdate(
-        files,
-        nextDesign,
-        projectDesign.design.revision,
-      );
-      if (!result.ok) throw new Error(result.error);
-      invalidateAutomaticReview();
-      onFileChange(
-        conversationId,
-        PROJECT_DESIGN_PATH,
-        result.files[PROJECT_DESIGN_PATH],
-      );
-    },
-    [
-      conversationId,
-      files,
-      invalidateAutomaticReview,
-      onFileChange,
-      projectDesign,
-    ],
-  );
 
   const handleExportDirectory = useCallback(async () => {
     if (isGenerating) return;
@@ -2033,6 +1870,23 @@ export function CodeViewer({
     [getPreviewIframe, requestPreviewCapture],
   );
 
+  const bootstrapIsolatedPreview = useMemo(() => {
+    if (
+      !reactPreviewProjection.customSetup &&
+      !(desktopMode && template === "static")
+    )
+      return undefined;
+    return async (frame: HTMLIFrameElement, signal: AbortSignal) => {
+      const runtime = runtimeSyncRef.current;
+      if (!runtime)
+        throw new PreviewRuntimeError(
+          "preview_unavailable",
+          "The preview client is not ready.",
+        );
+      return runtime.bootstrapIsolatedPreview(frame, signal);
+    };
+  }, [reactPreviewProjection.customSetup, desktopMode, template]);
+
   const previewRuntimeRef = useRef<{
     conversationId: string;
     adapter: PreviewRuntimeAdapter;
@@ -2193,29 +2047,17 @@ export function CodeViewer({
                 if (!sourceFrame) {
                   throw new Error("Preview iframe is not available.");
                 }
-                let isolated = await createIsolatedPreviewSession(
+                const isolated = await createIsolatedPreviewSession(
                   sourceFrame,
                   generation,
                   signal,
+                  bootstrapIsolatedPreview,
                 );
-                let activeScenarioId: string | undefined;
                 const captures: DesignBridgeCaptureResult[] = [];
                 const errors: string[] = [...skippedMessages];
                 try {
                   for (const [index, item] of prototypeTargets.entries()) {
                     try {
-                      if (
-                        activeScenarioId !== undefined &&
-                        activeScenarioId !== item.target.scenarioId
-                      ) {
-                        isolated.dispose();
-                        isolated = await createIsolatedPreviewSession(
-                          sourceFrame,
-                          generation,
-                          signal,
-                        );
-                      }
-                      activeScenarioId = item.target.scenarioId;
                       await isolated.setViewport(item.viewport);
                       await isolated.navigate(item.target);
                       captures.push(
@@ -2226,7 +2068,7 @@ export function CodeViewer({
                         throw error;
                       }
                       errors.push(
-                        `${item.target.pageId}/${item.target.scenarioId}/${item.viewport.name}: ${
+                        `${item.target.pageId}/${item.viewport.name}: ${
                           error instanceof Error ? error.message : String(error)
                         }`,
                       );
@@ -2234,7 +2076,7 @@ export function CodeViewer({
                     useDesignReviewStore.getState().updateCaptureProgress({
                       completed: index + 1,
                       total: prototypeTargets.length,
-                      viewport: `${item.target.pageId}/${item.target.scenarioId}/${item.viewport.name}`,
+                      viewport: `${item.target.pageId}/${item.viewport.name}`,
                     });
                   }
                 } finally {
@@ -2277,7 +2119,7 @@ export function CodeViewer({
               dataUrl: capture.dataUrl,
               mimeType: capture.mimeType,
               name: capture.semanticSnapshot.prototypeIdentity
-                ? `preview-${capture.semanticSnapshot.prototypeIdentity.pageId}-${capture.semanticSnapshot.prototypeIdentity.scenarioId}-${capture.viewport.name}.${capture.mimeType.slice(6)}`
+                ? `preview-${capture.semanticSnapshot.prototypeIdentity.pageId}-${capture.viewport.name}.${capture.mimeType.slice(6)}`
                 : `preview-${capture.viewport.name}-${capture.viewport.width}x${capture.viewport.height}.${capture.mimeType.slice(6)}`,
               source: "automatic",
               viewport: capture.viewport,
@@ -2386,6 +2228,7 @@ export function CodeViewer({
       bridgeInjection.supported,
       bridgeUnavailableReason,
       capturePreviewCollection,
+      bootstrapIsolatedPreview,
       conversationId,
       designState?.appliedSystem,
       files,
@@ -2493,7 +2336,7 @@ export function CodeViewer({
   }, [conversationId, retryPreviewRender]);
 
   const navigatePrototype = useCallback(
-    async (pageId: string, scenarioId?: string) => {
+    async (pageId: string) => {
       if (!prototypeWorkspaceEnabled || projectDesign.status !== "ready") {
         return;
       }
@@ -2501,22 +2344,18 @@ export function CodeViewer({
         (candidate) => candidate.id === pageId,
       );
       if (!page) return;
-      const nextScenarioId = scenarioId ?? page.defaultScenario ?? "default";
       setDesktopActionMessage(null);
       explicitPrototypePageRef.current = pageId;
       prototypeNavigationAbortRef.current?.abort();
       prototypeNavigationAbortRef.current = null;
       setSelectedPrototypePageId(pageId);
-      setSelectedPrototypeScenarioId(nextScenarioId);
       setProjectDesignWorkspaceSelection(conversationId, {
         pageId,
-        scenarioId: nextScenarioId,
         explicit: true,
       });
       const resolution = resolveProjectDesignPreview(
         projectDesign.design,
         pageId,
-        nextScenarioId,
       );
       if (resolution.status === "unavailable") {
         setDesktopActionMessage(
@@ -2527,20 +2366,13 @@ export function CodeViewer({
       const generation = previewGenerationRef.current;
       if (!generation) return;
       const target = resolution.target;
-      const resetForScenarioChange =
-        selectedPrototypeScenarioId !== nextScenarioId;
       const controller = new AbortController();
       prototypeNavigationAbortRef.current = controller;
       setSelectedPrototypePageId(pageId);
-      setSelectedPrototypeScenarioId(nextScenarioId);
       try {
         await waitForDesignBridge(generation, controller.signal);
         await requestPreviewNavigation(target, generation, controller.signal);
         controller.signal.throwIfAborted();
-        if (resetForScenarioChange && !postPrototypeDataReset(generation)) {
-          softRefreshRef.current?.();
-        }
-        if (resetForScenarioChange) await afterPreviewPaint();
       } catch (error) {
         if ((error as { name?: string })?.name !== "AbortError") {
           setDesktopActionMessage(
@@ -2556,28 +2388,12 @@ export function CodeViewer({
     [
       conversationId,
       projectDesign,
-      postPrototypeDataReset,
       prototypeWorkspaceEnabled,
       requestPreviewNavigation,
-      selectedPrototypeScenarioId,
       setProjectDesignWorkspaceSelection,
       waitForDesignBridge,
     ],
   );
-
-  const resetPrototypeData = useCallback(async () => {
-    setPrototypeResetPending(true);
-    try {
-      flushPendingSandpackFileChanges(conversationId);
-      const generation = previewGenerationRef.current;
-      if (!generation || !postPrototypeDataReset(generation)) {
-        softRefreshRef.current?.();
-      }
-      await afterPreviewPaint();
-    } finally {
-      setPrototypeResetPending(false);
-    }
-  }, [conversationId, postPrototypeDataReset]);
 
   const registerRuntimeSync = useCallback(
     (handle: SandpackRuntimeSyncHandle | null) => {
@@ -2599,56 +2415,237 @@ export function CodeViewer({
     [onApplyDesignReviewFixes],
   );
 
-  const prototypeToolbarNavigation = useMemo(() => {
-    if (!prototypeWorkspaceEnabled || projectDesign.status !== "ready") {
-      return undefined;
-    }
-    const selectedPage = projectDesign.design.pages.find(
-      (page) => page.id === selectedPrototypePageId,
-    );
-    const scenarios = new Map(
-      projectDesign.design.scenarios.map((scenario) => [scenario.id, scenario]),
-    );
-    return {
-      pages: projectDesign.design.pages.map((page) => ({
-        id: page.id,
-        name: page.name,
-      })),
-      scenarios: selectedPage
-        ? [
-            ...new Set([
-              selectedPage.defaultScenario ?? "default",
-              ...selectedPage.scenarioIds,
-            ]),
-          ]
-            .map(
-              (id) =>
-                scenarios.get(id) ??
-                (id === "default" && !projectDesign.design.scenarios.length
-                  ? {
-                      id: "default",
-                      name: t.prototypeWorkspace.previewBaseline,
-                    }
-                  : undefined),
-            )
-            .filter((scenario) => scenario !== undefined)
-            .map((scenario) => ({ id: scenario.id, name: scenario.name }))
-        : [],
-      selectedPageId: selectedPrototypePageId,
-      selectedScenarioId: selectedPrototypeScenarioId,
-      onPageSelect: (pageId: string) => void navigatePrototype(pageId),
-      onScenarioSelect: (scenarioId: string) => {
-        if (selectedPrototypePageId) {
-          void navigatePrototype(selectedPrototypePageId, scenarioId);
-        }
-      },
-    };
-  }, [
-    navigatePrototype,
-    projectDesign,
-    selectedPrototypePageId,
-    selectedPrototypeScenarioId,
+  const canvasViewport = useMemo(
+    () => DESIGN_REVIEW_VIEWPORTS.find((value) => value.name === deviceSize)!,
+    [deviceSize],
+  );
+  const canvasScopeKey = JSON.stringify([
+    canvasIdentity,
+    previewGeneration,
+    deviceSize,
   ]);
+  const canvasTargets = useMemo(
+    () =>
+      projectDesign.status === "ready"
+        ? projectDesign.design.pages.map((page) => ({
+            page,
+            resolution: resolveProjectDesignPreview(
+              projectDesign.design,
+              page.id,
+            ),
+          }))
+        : [],
+    [projectDesign],
+  );
+  const canvasRequests = useMemo<CanvasPreviewRequest[]>(() => {
+    if (projectDesign.status === "invalid") return [];
+    if (projectDesign.status === "missing")
+      return [
+        {
+          key: JSON.stringify([canvasScopeKey, "current-preview"]),
+          pageId: "current-preview",
+          viewport: canvasViewport,
+        },
+      ];
+    return canvasTargets.flatMap(({ page, resolution }) =>
+      resolution.status === "ready"
+        ? [
+            {
+              key: JSON.stringify([
+                canvasScopeKey,
+                page.id,
+                resolution.target.route,
+              ]),
+              pageId: page.id,
+              target: resolution.target,
+              viewport: canvasViewport,
+            },
+          ]
+        : [],
+    );
+  }, [canvasScopeKey, canvasViewport, projectDesign.status, canvasTargets]);
+  const canvasRequestKeys = useRef(new Set<string>());
+  canvasRequestKeys.current = new Set(
+    canvasRequests.map((request) => request.key),
+  );
+  const captureCanvasPage = useCallback(
+    async (request: CanvasPreviewRequest, signal: AbortSignal) => {
+      const generation = previewGenerationRef.current;
+      const assertCurrent = () => {
+        signal.throwIfAborted();
+        if (
+          !generation ||
+          generation !== previewGenerationRef.current ||
+          !canvasRequestKeys.current.has(request.key) ||
+          !isConversationIdentityCurrent(
+            canvasIdentity,
+            useConversationStore.getState().conversations[conversationId],
+          )
+        )
+          throw new DOMException("Canvas preview was replaced.", "AbortError");
+      };
+      assertCurrent();
+      return withPreviewCaptureLock({
+        conversationId,
+        owner: "canvas",
+        signal,
+        run: async (_adapter, captureSignal) => {
+          await prepareCurrentPreview(generation!, captureSignal);
+          assertCurrent();
+          if (!request.target) {
+            const result = await captureCurrentPreview(
+              generation!,
+              captureSignal,
+              "full-page",
+            );
+            assertCurrent();
+            return result;
+          }
+          const source = getPreviewIframe();
+          if (!source)
+            throw new PreviewRuntimeError(
+              "preview_unavailable",
+              "The preview iframe is unavailable.",
+            );
+          const session = await createIsolatedPreviewSession(
+            source,
+            generation!,
+            captureSignal,
+            bootstrapIsolatedPreview,
+          );
+          try {
+            await session.setViewport(request.viewport);
+            await session.navigate(request.target);
+            const result = await session.capture(
+              request.viewport,
+              request.target,
+            );
+            assertCurrent();
+            return result;
+          } finally {
+            session.dispose();
+          }
+        },
+      });
+    },
+    [
+      canvasIdentity,
+      bootstrapIsolatedPreview,
+      conversationId,
+      prepareCurrentPreview,
+      captureCurrentPreview,
+      getPreviewIframe,
+    ],
+  );
+  const {
+    previews: canvasPreviews,
+    retry: retryCanvasPreview,
+    onVisiblePages: prioritizeCanvasPages,
+  } = useCanvasPreviews({
+    scopeKey: canvasScopeKey,
+    requests: designCanvasEnabled ? canvasRequests : EMPTY_CANVAS_REQUESTS,
+    paused:
+      !canvasMode ||
+      !designBridgeReady ||
+      !captureRuntimeSettled ||
+      isGenerating ||
+      annotationOpen ||
+      designReviewOpen ||
+      (!!automaticStage &&
+        ["capturing", "reviewing", "fixing", "verifying"].includes(
+          automaticStage,
+        )) ||
+      assetProjectionStatus !== "ready",
+    capture: captureCanvasPage,
+  });
+  const canvasBoards = useMemo<DesignCanvasBoard[]>(() => {
+    if (projectDesign.status === "missing")
+      return [
+        {
+          id: "current-preview",
+          name: t.designCanvas.currentPage,
+          previewKey: canvasRequests[0]?.key,
+          ...(!bridgeInjection.supported
+            ? { issue: bridgeUnavailableReason }
+            : {}),
+        },
+      ];
+    return canvasTargets.map(({ page, resolution }) => ({
+      id: page.id,
+      name: page.name,
+      responsibility: page.responsibility,
+      previewKey: canvasRequests.find((request) => request.pageId === page.id)
+        ?.key,
+      issue:
+        resolution.status === "unavailable"
+          ? t.prototypeWorkspace.previewReasons[resolution.reason]
+          : !bridgeInjection.supported
+            ? bridgeUnavailableReason
+            : undefined,
+    }));
+  }, [
+    projectDesign.status,
+    canvasTargets,
+    canvasRequests,
+    t,
+    bridgeInjection.supported,
+    bridgeUnavailableReason,
+  ]);
+  const selectCanvasBoard = (pageId: string) => {
+    if (
+      projectDesign.status !== "ready" ||
+      !projectDesign.design.pages.some((page) => page.id === pageId)
+    )
+      return;
+    explicitPrototypePageRef.current = pageId;
+    setSelectedPrototypePageId(pageId);
+    setProjectDesignWorkspaceSelection(conversationId, {
+      pageId,
+      explicit: true,
+    });
+  };
+  const playCanvasBoard = (pageId: string) => {
+    const board = canvasBoards.find((value) => value.id === pageId);
+    if (!board || board.issue) return;
+    selectCanvasBoard(pageId);
+    setDesignFocus(true);
+    setViewMode("preview");
+    if (pageId !== "current-preview") void navigatePrototype(pageId);
+  };
+  const focusCanvasPage = (pageId: string) =>
+    setCanvasFocusRequest((current) => ({
+      pageId,
+      requestId: (current?.requestId ?? 0) + 1,
+    }));
+  const selectPageSource = (pageId: string | undefined) => {
+    if (projectDesign.status !== "ready" || !pageId) {
+      setPageSourceMissing(false);
+      return;
+    }
+    const page = projectDesign.design.pages.find(
+      (candidate) => candidate.id === pageId,
+    );
+    const source = page
+      ? resolvePageSource(page.filePaths, files, previewFiles, currentFile)
+      : undefined;
+    setPageSourceMissing(!source);
+    if (source) onFileSelect(source);
+  };
+  const changeWorkspaceView = (mode: ViewMode) => {
+    if (mode === "code") selectPageSource(selectedPrototypePageId);
+    else if (designCanvasEnabled) {
+      deactivateDesignSelection();
+      setDesignFocus(false);
+      if (selectedPrototypePageId) focusCanvasPage(selectedPrototypePageId);
+      if (projectDesign.status === "missing" && canvasRequests[0])
+        retryCanvasPreview(canvasRequests[0].key);
+    }
+    setViewMode(mode);
+  };
+  const activeCanvasPageId =
+    projectDesign.status === "missing"
+      ? "current-preview"
+      : selectedPrototypePageId;
 
   const requestedCurrentFile = currentFile.replace(/^\/+/, "");
   const effectiveCurrentFile =
@@ -2710,7 +2707,7 @@ export function CodeViewer({
         viewMode={
           assetProjectionStatus === "error" ? "code" : effectiveViewMode
         }
-        onViewModeChange={setViewMode}
+        onViewModeChange={changeWorkspaceView}
         deviceSize={deviceSize}
         onDeviceSizeChange={handleDeviceSizeChange}
         files={files}
@@ -2756,9 +2753,33 @@ export function CodeViewer({
             : activateDesignSelection()
         }
         designSelectionUnavailableReason={bridgeUnavailableReason}
-        prototypeNavigation={prototypeToolbarNavigation}
+        designWorkspace={
+          designCanvasEnabled || prototypeWorkspaceEnabled
+            ? {
+                focused: designFocus,
+                actions: (
+                  <DesignCanvasActions
+                    device={deviceSize}
+                    onDevice={handleDeviceSizeChange}
+                    onSystems={
+                      onApplyDesignSystem
+                        ? () => setDesignSystemsOpen(true)
+                        : undefined
+                    }
+                    onTokens={() => setDesignTokensOpen(true)}
+                    onReview={onDesignReview ? openDesignReview : undefined}
+                    onExport={
+                      desktopMode
+                        ? () => void handleExportDirectory()
+                        : undefined
+                    }
+                    busy={isGenerating}
+                  />
+                ),
+              }
+            : undefined
+        }
       />
-
       {workspaceMode === "design" && onApplyDesignSystem && (
         <DesignSystemPanel
           open={designSystemsOpen}
@@ -2791,79 +2812,9 @@ export function CodeViewer({
           isGenerating={isGenerating}
         />
       )}
-      {prototypeWorkspaceEnabled && projectDesign.status === "ready" && (
-        <ProjectDesignOutlineDialog
-          open={projectDesignOutlineOpen}
-          design={projectDesign.design}
-          onOpenChange={setProjectDesignOutlineOpen}
-          onSave={saveProjectDesignOutline}
-        />
-      )}
 
       <div className="relative flex min-h-0 flex-1 overflow-hidden bg-muted/50">
-        <div inert={annotationOpen} className="contents">
-          {prototypeWorkspaceEnabled && effectiveViewMode === "preview" && (
-            <ProjectDesignNavigator
-              model={projectDesignNavigatorModel}
-              onPageSelect={(pageId) => void navigatePrototype(pageId)}
-              onSceneSelect={(pageId, scenarioId) =>
-                void navigatePrototype(pageId, scenarioId)
-              }
-              onResetData={resetPrototypeData}
-              onEditBlueprint={
-                isGenerating
-                  ? undefined
-                  : () => setProjectDesignOutlineOpen(true)
-              }
-              resetPending={prototypeResetPending}
-              labels={{
-                title: t.prototypeWorkspace.title,
-                open: t.prototypeWorkspace.open,
-                close: t.prototypeWorkspace.close,
-                collapse: t.prototypeWorkspace.collapse,
-                expand: t.prototypeWorkspace.expand,
-                pages: t.prototypeWorkspace.pages,
-                pageTree: t.prototypeWorkspace.pageTree,
-                pageCount: (count) =>
-                  t.prototypeWorkspace.pageCount.replace(
-                    "{count}",
-                    String(count),
-                  ),
-                buildProgress: t.prototypeWorkspace.buildProgress,
-                reviewStatus: t.prototypeWorkspace.reviewStatus,
-                sharedLayoutImpact: t.prototypeWorkspace.sharedImpact,
-                missingBlueprintTitle: t.prototypeWorkspace.missingTitle,
-                missingBlueprintDescription:
-                  t.prototypeWorkspace.missingDescription,
-                invalidBlueprintTitle: t.prototypeWorkspace.invalidTitle,
-                invalidBlueprintDescription:
-                  t.prototypeWorkspace.invalidDescription,
-                noPagesTitle: t.prototypeWorkspace.noPages,
-                noPagesDescription: t.prototypeWorkspace.noPagesDescription,
-                noScenes: t.prototypeWorkspace.noScenarios,
-                resetData: t.prototypeWorkspace.resetData,
-                resetting: t.prototypeWorkspace.resetting,
-                resetDataDescription: t.prototypeWorkspace.resetDataDescription,
-                editBlueprint: t.prototypeWorkspace.editBlueprint,
-                buildStatuses: {
-                  recorded: t.prototypeWorkspace.buildStatuses.recorded,
-                  "not-started": t.prototypeWorkspace.buildStatuses.notStarted,
-                  "in-progress": t.prototypeWorkspace.buildStatuses.inProgress,
-                  complete: t.prototypeWorkspace.buildStatuses.complete,
-                  blocked: t.prototypeWorkspace.buildStatuses.blocked,
-                },
-                reviewStatuses: {
-                  unreviewed: t.prototypeWorkspace.reviewStatuses.unreviewed,
-                  "in-review": t.prototypeWorkspace.reviewStatuses.inReview,
-                  approved: t.prototypeWorkspace.reviewStatuses.approved,
-                  "changes-requested":
-                    t.prototypeWorkspace.reviewStatuses.changesRequested,
-                  stale: t.prototypeWorkspace.reviewStatuses.stale,
-                },
-              }}
-            />
-          )}
-        </div>
+        <div inert={annotationOpen} className="contents"></div>
         <div
           inert={annotationOpen}
           className="relative min-w-0 flex-1 overflow-hidden"
@@ -2873,7 +2824,10 @@ export function CodeViewer({
             !designReviewOpen && (
               <div
                 role="status"
-                className="absolute right-3 top-3 z-40 max-w-md rounded-lg border bg-background/95 px-3 py-2 text-xs shadow-lg backdrop-blur"
+                className={cn(
+                  "absolute z-40 max-w-md rounded-lg border bg-background/95 px-3 py-2 text-xs shadow-lg backdrop-blur",
+                  canvasMode ? "bottom-20 right-4" : "right-3 top-3",
+                )}
               >
                 {t.designReview.automaticStages[automaticStage]}
               </div>
@@ -2881,9 +2835,44 @@ export function CodeViewer({
           {desktopActionMessage && (
             <div
               role="status"
-              className="absolute right-3 top-3 z-40 max-w-md rounded-lg border bg-background/95 px-3 py-2 text-xs shadow-lg backdrop-blur"
+              className={cn(
+                "absolute z-40 max-w-md rounded-lg border bg-background/95 px-3 py-2 text-xs shadow-lg backdrop-blur",
+                canvasMode ? "bottom-20 right-4" : "right-3 top-3",
+              )}
             >
               {desktopActionMessage}
+            </div>
+          )}
+          {designCanvasEnabled && (
+            <div
+              className={cn(
+                "absolute inset-0",
+                canvasMode && assetProjectionStatus !== "error"
+                  ? "z-10"
+                  : "hidden",
+              )}
+              inert={annotationOpen}
+            >
+              <DesignCanvasWorkspace
+                key={workspaceKey}
+                identity={canvasIdentity}
+                parentBranchId={parentBranchId}
+                boards={canvasBoards}
+                viewport={canvasViewport}
+                previews={canvasPreviews}
+                selectedPageId={activeCanvasPageId}
+                focusRequest={canvasFocusRequest}
+                active={canvasMode && assetProjectionStatus !== "error"}
+                onSelect={selectCanvasBoard}
+                onPlay={playCanvasBoard}
+                onRetry={retryCanvasPreview}
+                onVisiblePages={prioritizeCanvasPages}
+                emptyMessage={
+                  projectDesign.status === "invalid"
+                    ? t.prototypeWorkspace.invalidTitle
+                    : undefined
+                }
+              />
             </div>
           )}
           {assetProjectionStatus === "loading" || preparingInitialCapture ? (
@@ -2897,20 +2886,22 @@ export function CodeViewer({
             <PreviewErrorBoundary
               resetKey={previewBoundaryResetKey}
               fallback={(props) => (
-                <PreviewErrorFallback
-                  {...props}
-                  conversationId={conversationId}
-                  files={previewFiles}
-                  canonicalFiles={files}
-                  currentFile={effectiveCurrentFile}
-                  onFileSelect={onFileSelect}
-                  onFileChange={onFileChange}
-                  onRetry={retryPreviewRender}
-                  onDeleteFile={(path) => {
-                    invalidateAutomaticReview();
-                    onDeleteFile(path);
-                  }}
-                />
+                <div className={cn("h-full", canvasMode && "relative z-20")}>
+                  <PreviewErrorFallback
+                    {...props}
+                    conversationId={conversationId}
+                    files={previewFiles}
+                    canonicalFiles={files}
+                    currentFile={effectiveCurrentFile}
+                    onFileSelect={onFileSelect}
+                    onFileChange={onFileChange}
+                    onRetry={retryPreviewRender}
+                    onDeleteFile={(path) => {
+                      invalidateAutomaticReview();
+                      onDeleteFile(path);
+                    }}
+                  />
+                </div>
               )}
             >
               <SandpackProvider
@@ -2945,9 +2936,23 @@ export function CodeViewer({
                   {previewEnabled && assetProjectionStatus === "ready" && (
                     <div
                       ref={previewHostRef}
+                      aria-hidden={canvasMode || undefined}
+                      inert={canvasMode}
+                      style={
+                        canvasMode
+                          ? {
+                              width: canvasViewport.width + 32,
+                              height: canvasViewport.height + 32,
+                            }
+                          : undefined
+                      }
                       className={cn(
                         "h-full w-full",
-                        effectiveViewMode === "preview" ? "block" : "hidden",
+                        canvasMode
+                          ? "design-canvas-runtime"
+                          : effectiveViewMode === "preview"
+                            ? "block"
+                            : "hidden",
                         previewHostOverflowClass,
                       )}
                     >
@@ -2968,7 +2973,9 @@ export function CodeViewer({
                           <div
                             className={cn(
                               "relative transition-[width,height,transform,opacity] duration-300 ease-in-out",
-                              showConsole ? "row-span-2" : "row-span-3",
+                              showConsole && !canvasMode
+                                ? "row-span-2"
+                                : "row-span-3",
                             )}
                           >
                             <SandpackPreview
@@ -2977,7 +2984,7 @@ export function CodeViewer({
                                 previewScale !== 1 && "preview-content-scaled",
                               )}
                               style={previewContentStyle}
-                              showNavigator={!captureViewport}
+                              showNavigator={!captureViewport && !canvasMode}
                               showOpenInCodeSandbox={false}
                               showRefreshButton={false}
                               showRestartButton={false}
@@ -3003,7 +3010,9 @@ export function CodeViewer({
                           <div
                             className={cn(
                               "overflow-hidden border-t",
-                              showConsole ? "row-span-1" : "max-h-0 border-t-0",
+                              showConsole && !canvasMode
+                                ? "row-span-1"
+                                : "max-h-0 border-t-0",
                             )}
                           >
                             <SandpackConsole
@@ -3047,7 +3056,10 @@ export function CodeViewer({
                       <FileExplorer
                         files={previewFiles}
                         currentFile={currentFile}
-                        onFileSelect={onFileSelect}
+                        onFileSelect={(path) => {
+                          setPageSourceMissing(false);
+                          onFileSelect(path);
+                        }}
                         onCreateFile={handleCreateFile}
                         onCreateFolder={handleCreateFolder}
                         onRenameFile={(oldPath, newPath) => {
@@ -3096,13 +3108,22 @@ export function CodeViewer({
                           </Button>
                         </div>
                       )}
-                      <SandpackCodeEditor
-                        showTabs={false}
-                        showLineNumbers
-                        showInlineErrors
-                        wrapContent={false}
-                        closableTabs={false}
-                      />
+                      {pageSourceMissing ? (
+                        <div
+                          role="status"
+                          className="flex flex-1 items-center justify-center p-6 text-sm text-muted-foreground"
+                        >
+                          {t.prototypeWorkspace.noSource}
+                        </div>
+                      ) : (
+                        <SandpackCodeEditor
+                          showTabs={false}
+                          showLineNumbers
+                          showInlineErrors
+                          wrapContent={false}
+                          closableTabs={false}
+                        />
+                      )}
                     </div>
                   </div>
                 </SandpackLayout>

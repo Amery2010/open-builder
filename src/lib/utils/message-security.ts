@@ -66,9 +66,6 @@ function summarizeProjectDesignArguments(
           ...(Array.isArray(document.flows)
             ? { flowCount: document.flows.length }
             : {}),
-          ...(Array.isArray(document.scenarios)
-            ? { scenarioCount: document.scenarios.length }
-            : {}),
         }
       : {},
   };
@@ -100,7 +97,7 @@ export function sanitizeToolArguments(
 
 function sanitizePrototypeTargetMetadata(
   value: unknown,
-): { pageId: string; route: string; scenarioId: string } | undefined {
+): { pageId: string; route: string } | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return undefined;
   }
@@ -108,8 +105,6 @@ function sanitizePrototypeTargetMetadata(
   if (
     typeof target.pageId !== "string" ||
     !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(target.pageId) ||
-    typeof target.scenarioId !== "string" ||
-    !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(target.scenarioId) ||
     typeof target.route !== "string" ||
     !isSafePrototypeHashRoute(target.route)
   ) {
@@ -118,7 +113,6 @@ function sanitizePrototypeTargetMetadata(
   return {
     pageId: target.pageId,
     route: target.route,
-    scenarioId: target.scenarioId,
   };
 }
 

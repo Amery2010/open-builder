@@ -28,6 +28,11 @@ export interface IsolatedPreviewSession {
   dispose: () => void;
 }
 
+export type IsolatedPreviewBootstrap = (
+  frame: HTMLIFrameElement,
+  signal: AbortSignal,
+) => Promise<() => void>;
+
 function afterIsolatedPreviewPaint(): Promise<void> {
   return new Promise((resolve) => {
     let settled = false;
@@ -43,7 +48,7 @@ function afterIsolatedPreviewPaint(): Promise<void> {
 }
 
 /**
- * Creates a disposable preview used only for deterministic review capture.
+ * Creates a disposable preview for page images and deterministic review capture.
  * It deliberately clones the active preview instead of navigating it, so a
  * review cannot mutate the user's current route or shared mock-data session.
  */
@@ -51,18 +56,23 @@ export function createIsolatedPreviewSession(
   source: HTMLIFrameElement,
   generation: string,
   signal: AbortSignal,
+  bootstrap?: IsolatedPreviewBootstrap,
 ): Promise<IsolatedPreviewSession> {
-  const targetOrigin = getDesignBridgeTargetOrigin(
-    source.src,
-    window.location.href,
-  );
-  if (!targetOrigin) {
+  if (!getDesignBridgeTargetOrigin(source.src, window.location.href)) {
     return Promise.reject(new Error("Preview iframe origin is invalid."));
   }
 
   const frame = source.cloneNode(false) as HTMLIFrameElement;
+  // The Sandpack marker identifies the one active preview, not this disposable
+  // capture frame. Keep active-preview discovery unambiguous during capture.
+  frame.classList.remove("sp-preview-iframe");
+  frame.setAttribute("data-ob-isolated-preview", "");
   frame.removeAttribute("id");
   frame.removeAttribute("name");
+  if (bootstrap) {
+    frame.removeAttribute("srcdoc");
+    frame.src = "about:blank";
+  }
   frame.title = "Temporary prototype review preview";
   frame.tabIndex = -1;
   Object.assign(frame.style, {
@@ -77,9 +87,13 @@ export function createIsolatedPreviewSession(
   });
   const lifecycle = new AbortController();
   const sessionSignal = lifecycle.signal;
+  let disposeClient: (() => void) | undefined;
   const dispose = () => {
     lifecycle.abort();
     signal.removeEventListener("abort", dispose);
+    const cleanup = disposeClient;
+    disposeClient = undefined;
+    cleanup?.();
     frame.remove();
   };
   signal.addEventListener("abort", dispose, { once: true });
@@ -153,11 +167,24 @@ export function createIsolatedPreviewSession(
         onAbort();
         return;
       }
+      // A compiled preview client may select a different bundler URL while
+      // bootstrapping. Bind each request to this iframe's current origin.
+      const targetOrigin = getDesignBridgeTargetOrigin(
+        frame.src,
+        window.location.href,
+      );
+      if (!targetOrigin) {
+        cleanup();
+        reject(new Error("Preview iframe origin is invalid."));
+        return;
+      }
       frame.contentWindow?.postMessage(message, targetOrigin);
       void expectation;
     });
 
   const ready = new Promise<void>((resolve, reject) => {
+    let bridgeReady = false;
+    let clientReady = !bootstrap;
     const cleanup = () => {
       window.clearTimeout(timeout);
       window.removeEventListener("message", onMessage);
@@ -167,6 +194,11 @@ export function createIsolatedPreviewSession(
       cleanup();
       frame.remove();
       reject(sessionSignal.reason);
+    };
+    const finish = () => {
+      if (!bridgeReady || !clientReady || sessionSignal.aborted) return;
+      cleanup();
+      resolve();
     };
     const onMessage = (event: MessageEvent) => {
       if (
@@ -192,8 +224,8 @@ export function createIsolatedPreviewSession(
       ) {
         return;
       }
-      cleanup();
-      resolve();
+      bridgeReady = true;
+      finish();
     };
     const timeout = window.setTimeout(() => {
       cleanup();
@@ -207,6 +239,28 @@ export function createIsolatedPreviewSession(
       return;
     }
     document.body.appendChild(frame);
+    if (bootstrap) {
+      void Promise.resolve()
+        .then(() => {
+          sessionSignal.throwIfAborted();
+          return bootstrap(frame, sessionSignal);
+        })
+        .then(
+          (release) => {
+            if (sessionSignal.aborted) {
+              release();
+              return;
+            }
+            disposeClient = release;
+            clientReady = true;
+            finish();
+          },
+          (error) => {
+            cleanup();
+            reject(error);
+          },
+        );
+    }
   });
 
   return ready

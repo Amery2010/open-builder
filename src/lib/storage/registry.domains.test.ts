@@ -49,6 +49,7 @@ import {
   StorageClearError,
   clearAllStorageDomains,
 } from "./registry";
+import { useProjectDesignWorkspaceStore } from "../../store/project-design-workspace";
 
 function stubDomainClears() {
   return Object.fromEntries(
@@ -64,6 +65,34 @@ function stubDomainClears() {
 
 describe("storage domain registry", () => {
   afterEach(() => vi.restoreAllMocks());
+
+  it("exports canvas layouts separately and clears their volatile selection too", async () => {
+    const layouts = {
+      '["conversation","main"]': {
+        camera: { x: 10, y: 20, zoom: 0.5 },
+        positions: { home: { x: 0, y: 0 } },
+      },
+    };
+    useProjectDesignWorkspaceStore.setState({
+      layouts,
+      selections: {
+        conversation: { pageId: "home", explicit: true },
+      },
+    });
+    const clearDisk = vi
+      .spyOn(useProjectDesignWorkspaceStore.persist, "clearStorage")
+      .mockResolvedValue();
+    const domain = STORAGE_DOMAINS.find(
+      (candidate) => candidate.id === "designWorkspace",
+    )!;
+
+    await expect(domain.export()).resolves.toEqual(layouts);
+    await expect(domain.estimate()).resolves.toMatchObject({ items: 1 });
+    await domain.clear();
+    expect(clearDisk).toHaveBeenCalledOnce();
+    expect(useProjectDesignWorkspaceStore.getState().layouts).toEqual({});
+    expect(useProjectDesignWorkspaceStore.getState().selections).toEqual({});
+  });
 
   it("registers imported Design systems for estimation and clearing", async () => {
     const domain = STORAGE_DOMAINS.find(

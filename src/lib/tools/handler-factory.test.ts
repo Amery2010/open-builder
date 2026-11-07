@@ -180,7 +180,7 @@ describe("buildToolHandlers Design diagnostics", () => {
       onProjectDesignUpdated,
     });
     const document = {
-      schemaVersion: "open-builder-design-project/v1",
+      schemaVersion: "open-builder-design-project/v3",
       productGoal: "Manage customer work",
       audience: "Operations teams",
       revision: 1,
@@ -191,13 +191,12 @@ describe("buildToolHandlers Design diagnostics", () => {
           responsibility: "Summarize active work",
           route: "/dashboard",
           kind: "dashboard",
-          defaultScenario: "default",
+
           parentId: null,
           layoutId: "app-shell",
           filePaths: ["src/pages/Dashboard.tsx"],
           sharedUiRefs: ["primary-nav"],
           flowIds: ["manage-work"],
-          scenarioIds: ["default"],
         },
       ],
       layouts: [
@@ -223,10 +222,9 @@ describe("buildToolHandlers Design diagnostics", () => {
           id: "manage-work",
           name: "Manage work",
           pageIds: ["dashboard"],
-          scenarioIds: ["default"],
         },
       ],
-      scenarios: [{ id: "default", name: "Default", kind: "default" }],
+
       buildProgress: {
         status: "not-started",
         percent: 0,
@@ -330,7 +328,7 @@ describe("buildToolHandlers Design diagnostics", () => {
     const previousNotifications = onProjectDesignUpdated.mock.calls.length;
     const summary = await dispatch({
       expected_revision: 1,
-      document: { revision: 2, pageCount: 1, flowCount: 1, scenarioCount: 1 },
+      document: { revision: 2, pageCount: 1, flowCount: 1 },
     });
     expect(summary).toMatchObject({ isError: true });
     expect((summary as { text: string }).text).toContain("summary");

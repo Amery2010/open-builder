@@ -618,7 +618,8 @@ describe("useGenerator retry Design policy", () => {
       });
       expect(patchAuthorization).toBeUndefined();
       expect(tokenAuthorization).toBeUndefined();
-      expect(capture).toHaveBeenCalledOnce();
+      // Capture is scheduled after the asynchronous source digest completes.
+      await waitFor(() => expect(capture).toHaveBeenCalledOnce());
       expect(
         useConversationStore.getState().conversations[conversationId].files[
           "src/App.tsx"
@@ -702,7 +703,7 @@ describe("useGenerator retry Design policy", () => {
         .getState()
         .setSelection(useConversationStore.getState().activeId!, {
           pageId: selectedPage.id,
-          scenarioId: "default",
+
           explicit,
         });
       let selectedWrite: string | void = undefined;

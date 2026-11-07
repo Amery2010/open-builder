@@ -233,11 +233,10 @@ describe("structured Design Review", () => {
     expect(context).toContain('"missing":["tablet","mobile"]');
   });
 
-  it("binds prototype coverage to page, scenario, and viewport identities", () => {
+  it("binds prototype coverage to page and viewport identities", () => {
     const target = {
       pageId: "dashboard",
       route: "#/dashboard?scenario=default",
-      scenarioId: "default",
     };
     const context = buildDesignReviewSemanticContext(
       [
@@ -269,16 +268,17 @@ describe("structured Design Review", () => {
       [
         { ...target, viewport: "desktop" },
         {
-          pageId: "dashboard",
-          route: "#/dashboard?scenario=empty",
-          scenarioId: "empty",
+          pageId: "settings",
+          route: "#/settings",
+
           viewport: "desktop",
         },
       ],
     );
 
     expect(context).toContain('"prototypeCoverage"');
-    expect(context).toContain('"scenarioId":"default"');
-    expect(context).toContain('"scenarioId":"empty"');
+    expect(context).toContain('"pageId":"dashboard"');
+    expect(context).toContain('"pageId":"settings"');
+    expect(context).not.toContain("scenarioId");
   });
 });

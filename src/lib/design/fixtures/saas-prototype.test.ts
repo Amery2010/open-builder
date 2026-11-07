@@ -8,7 +8,7 @@ import { buildPrototypeReviewCapturePlan } from "../prototype-review-plan";
 import { SAAS_PROTOTYPE_BLUEPRINT_FIXTURE } from "./saas-prototype";
 
 describe("complete SaaS prototype fixture", () => {
-  it("covers the agreed pages, shared navigation impact, and active states", () => {
+  it("covers the agreed pages, shared navigation impact, and responsive coverage", () => {
     const parsed = parseProjectDesign(SAAS_PROTOTYPE_BLUEPRINT_FIXTURE);
     expect(parsed.status).toBe("ready");
     if (parsed.status !== "ready") return;
@@ -35,7 +35,7 @@ describe("complete SaaS prototype fixture", () => {
         parsed.design,
         "#/requests?scenario=empty&filter=open",
       ),
-    ).toMatchObject({ pageId: "requests", scenarioId: "empty" });
+    ).toMatchObject({ pageId: "requests" });
 
     const reviewPlan = buildPrototypeReviewCapturePlan(parsed.design);
     for (const page of parsed.design.pages) {
@@ -43,24 +43,17 @@ describe("complete SaaS prototype fixture", () => {
         expect.objectContaining({
           target: expect.objectContaining({
             pageId: page.id,
-            scenarioId: page.defaultScenario,
           }),
           viewport: expect.objectContaining({ name: "desktop" }),
         }),
       );
     }
-    for (const scenarioId of [
-      "loading",
-      "empty",
-      "error",
-      "validation",
-      "success",
-    ]) {
-      expect(reviewPlan).toContainEqual(
-        expect.objectContaining({
-          target: expect.objectContaining({ scenarioId }),
-        }),
-      );
-    }
+    expect(
+      new Set(
+        reviewPlan.map(
+          ({ target, viewport }) => `${target.pageId}:${viewport.name}`,
+        ),
+      ).size,
+    ).toBe(reviewPlan.length);
   });
 });

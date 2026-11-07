@@ -22,7 +22,7 @@ export default function App() {
 }
 `;
 
-const PROTOTYPE_DATA = `import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+const PROTOTYPE_DATA = `import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import type { Dispatch, PropsWithChildren, SetStateAction } from "react";
 
 type PrototypeData = Record<string, unknown>;
@@ -36,27 +36,12 @@ interface PrototypeDataContextValue {
 const initialData: PrototypeData = {};
 const PrototypeDataContext = createContext<PrototypeDataContextValue | null>(null);
 
-function scenarioFromHash() {
-  return new URLSearchParams(window.location.hash.split("?", 2)[1] ?? "").get("scenario") ?? "default";
-}
-
 export function PrototypeDataProvider({ children }: PropsWithChildren) {
   const [data, setData] = useState<PrototypeData>(() => structuredClone(initialData));
   const resetData = useCallback(() => setData(structuredClone(initialData)), []);
-  const scenarioRef = useRef(scenarioFromHash());
   useEffect(() => {
     window.addEventListener("open-builder:prototype-reset-data", resetData);
     return () => window.removeEventListener("open-builder:prototype-reset-data", resetData);
-  }, [resetData]);
-  useEffect(() => {
-    const resetForScenarioChange = () => {
-      const nextScenario = scenarioFromHash();
-      if (scenarioRef.current === nextScenario) return;
-      scenarioRef.current = nextScenario;
-      resetData();
-    };
-    window.addEventListener("hashchange", resetForScenarioChange);
-    return () => window.removeEventListener("hashchange", resetForScenarioChange);
   }, [resetData]);
   const value = useMemo(() => ({ data, setData, resetData }), [data, resetData]);
   return <PrototypeDataContext.Provider value={value}>{children}</PrototypeDataContext.Provider>;
@@ -69,18 +54,14 @@ export function usePrototypeData() {
 }
 `;
 
-const PROTOTYPE_HOME = `import { useSearchParams } from "react-router-dom";
-import { usePrototypeData } from "./PrototypeData";
+const PROTOTYPE_HOME = `import { usePrototypeData } from "./PrototypeData";
 
 export function PrototypeHome() {
-  const [params] = useSearchParams();
   const { resetData } = usePrototypeData();
-  const scenario = params.get("scenario") ?? "default";
   return (
     <main data-ob-id="prototype-home" className="prototype-start">
       <p>Prototype workspace</p>
       <h1>Start from the approved project outline</h1>
-      <p>Current scenario: {scenario}</p>
       <button type="button" onClick={resetData}>Reset prototype data</button>
     </main>
   );
@@ -112,7 +93,7 @@ pnpm dev
 
 Use \`pnpm build\` to verify a production build and \`pnpm preview\` to serve it. Navigation uses React Router's \`HashRouter\`, so the built static files keep working without a server-side route fallback.
 
-Prototype data is local mock data. Page changes share the same in-memory session; switching a declared scenario or reloading restores its initial state. Product structure and review scenarios are documented in \`design-project.json\`.
+Prototype data is local mock data. Page changes share the same in-memory session; resetting or reloading restores its initial state. Product structure are documented in \`design-project.json\`.
 `;
 
 export function applyPrototypeStarter(files: ProjectFiles): ProjectFiles {

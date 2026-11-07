@@ -73,10 +73,10 @@ export function sanitizePreviewCaptureGeometry(
 }
 
 export type PreviewCaptureOwner =
-  "tool" | "manual-review" | "automatic-review" | "annotation";
+  "tool" | "manual-review" | "automatic-review" | "annotation" | "canvas";
 
 /**
- * Declarative identity for one page and one named prototype scenario.
+ * Declarative identity for one prototype page at a concrete application route.
  *
  * Routes intentionally use the URL hash form consumed by HashRouter. The
  * route is data only; callers must never evaluate it as code.
@@ -84,7 +84,6 @@ export type PreviewCaptureOwner =
 export interface PrototypePreviewTarget {
   pageId: string;
   route: string;
-  scenarioId: string;
 }
 
 export type PrototypePreviewIdentity = PrototypePreviewTarget;
@@ -114,14 +113,13 @@ export function sanitizePrototypePreviewTarget(
   if (
     !isSafePrototypePreviewId(raw.pageId) ||
     !isSafePrototypePreviewRoute(raw.route) ||
-    !isSafePrototypePreviewId(raw.scenarioId)
+    "scenarioId" in raw
   ) {
     return null;
   }
   return {
     pageId: raw.pageId,
     route: raw.route as string,
-    scenarioId: raw.scenarioId,
   };
 }
 
@@ -140,8 +138,7 @@ export function prototypePreviewTargetsEqual(
   if (!leftTarget || !rightTarget) return false;
   return (
     leftTarget.pageId === rightTarget.pageId &&
-    leftTarget.route === rightTarget.route &&
-    leftTarget.scenarioId === rightTarget.scenarioId
+    leftTarget.route === rightTarget.route
   );
 }
 
@@ -218,6 +215,7 @@ export interface PreviewRuntimeAdapter {
 interface ActiveCapture {
   owner: PreviewCaptureOwner;
   controller: AbortController;
+  finished: Promise<void>;
 }
 
 interface PreviewRuntimeRegistration {
@@ -280,12 +278,32 @@ export function isPreviewCaptureBusy(conversationId: string): boolean {
   return registrations.get(conversationId)?.active !== undefined;
 }
 
+function waitForCaptureCleanup(
+  finished: Promise<void>,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (!signal) return finished;
+  return new Promise((resolve, reject) => {
+    const abort = () => {
+      signal.removeEventListener("abort", abort);
+      reject(signal.reason);
+    };
+    signal.addEventListener("abort", abort, { once: true });
+    if (signal.aborted) abort();
+    void finished.then(() => {
+      signal.removeEventListener("abort", abort);
+      resolve();
+    });
+  });
+}
+
 export async function withPreviewCaptureLock<T>(input: {
   conversationId: string;
   owner: PreviewCaptureOwner;
   signal?: AbortSignal;
   run: (adapter: PreviewRuntimeAdapter, signal: AbortSignal) => Promise<T>;
 }): Promise<T> {
+  input.signal?.throwIfAborted();
   const registration = registrations.get(input.conversationId);
   if (!registration) {
     throw new PreviewRuntimeError(
@@ -293,24 +311,44 @@ export async function withPreviewCaptureLock<T>(input: {
       "The preview runtime is not mounted for this conversation.",
     );
   }
-  if (registration.active) {
-    throw new PreviewRuntimeError(
-      "capture_busy",
-      `Preview capture is busy (${registration.active.owner}).`,
+  while (registration.active) {
+    const active = registration.active;
+    if (input.owner === "canvas" || active.owner !== "canvas") {
+      throw new PreviewRuntimeError(
+        "capture_busy",
+        `Preview capture is busy (${active.owner}).`,
+      );
+    }
+    // Foreground work must wait for the isolated iframe and listeners to be
+    // disposed before acquiring the same runtime. Abort alone is not release.
+    active.controller.abort(
+      abortError("Canvas capture yielded to a foreground request."),
     );
+    await waitForCaptureCleanup(active.finished, input.signal);
+    input.signal?.throwIfAborted();
+    if (registrations.get(input.conversationId) !== registration) {
+      throw abortError("Preview runtime changed while waiting for capture.");
+    }
   }
 
   const controller = new AbortController();
   const removeAbortRelay = relayAbort(input.signal, controller);
-  registration.active = { owner: input.owner, controller };
+  let finish!: () => void;
+  const finished = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  registration.active = { owner: input.owner, controller, finished };
   try {
     controller.signal.throwIfAborted();
-    return await input.run(registration.adapter, controller.signal);
+    const result = await input.run(registration.adapter, controller.signal);
+    controller.signal.throwIfAborted();
+    return result;
   } finally {
     removeAbortRelay();
     if (registration.active?.controller === controller) {
       registration.active = undefined;
     }
+    finish();
   }
 }
 
@@ -356,7 +394,7 @@ export async function captureRegisteredPreview(input: {
           ) {
             throw new PreviewRuntimeError(
               "target_identity_mismatch",
-              "The preview navigated to a different page or scenario.",
+              "The preview navigated to a different page or route.",
             );
           }
         }
@@ -403,7 +441,7 @@ export async function captureRegisteredPreview(input: {
       ) {
         throw new PreviewRuntimeError(
           "target_identity_mismatch",
-          "Preview evidence was returned for a different page or scenario.",
+          "Preview evidence was returned for a different page or route.",
         );
       }
       for (const capture of result.captures) {
@@ -418,7 +456,7 @@ export async function captureRegisteredPreview(input: {
         ) {
           throw new PreviewRuntimeError(
             "target_identity_mismatch",
-            "Preview evidence was not bound to the requested page and scenario.",
+            "Preview evidence was not bound to the requested page and route.",
           );
         }
       }

@@ -92,7 +92,7 @@ function clickPreviewTarget(
       new previewWindow.MessageEvent("message", {
         data: {
           type: "open-builder:design-bridge-control",
-          version: 1,
+          version: 2,
           nonce: "0123456789abcdef0123456789abcdef",
           active: true,
         },
@@ -161,7 +161,7 @@ describe("Design preview bridge", () => {
       );
 
     expect(payload).toMatchObject({
-      protocolVersion: 1,
+      protocolVersion: 2,
       label: "Small title",
       tagName: "h2",
       idSource: "runtime",
@@ -378,7 +378,7 @@ describe("Design preview bridge", () => {
 
   it("sanitizes and bounds untrusted selection data", () => {
     const selection = sanitizeDesignSelectionPayload({
-      protocolVersion: 1,
+      protocolVersion: 2,
       elementId: "pricing-card-pro",
       label: "<b>Pro</b>",
       tagName: "article",
@@ -390,7 +390,7 @@ describe("Design preview bridge", () => {
     });
 
     expect(selection).toEqual({
-      protocolVersion: 1,
+      protocolVersion: 2,
       elementId: "pricing-card-pro",
       label: "b Pro /b",
       tagName: "article",
@@ -406,21 +406,21 @@ describe("Design preview bridge", () => {
   it("rejects bad ids, versions, and payloads over 8 KB", () => {
     expect(
       sanitizeDesignSelectionPayload({
-        protocolVersion: 2,
+        protocolVersion: 1 /* unsupported legacy protocol */,
         elementId: "hero",
         tagName: "main",
       }),
     ).toBeNull();
     expect(
       sanitizeDesignSelectionPayload({
-        protocolVersion: 1,
+        protocolVersion: 2,
         elementId: "../../escape",
         tagName: "main",
       }),
     ).toBeNull();
     expect(
       sanitizeDesignSelectionPayload({
-        protocolVersion: 1,
+        protocolVersion: 2,
         elementId: "hero",
         tagName: "main",
         extra: "x".repeat(DESIGN_BRIDGE_PAYLOAD_MAX_BYTES),
@@ -430,7 +430,7 @@ describe("Design preview bridge", () => {
 
   it("rejects malformed or overlong runtime locators without weakening v1 compatibility", () => {
     const base = {
-      protocolVersion: 1,
+      protocolVersion: 2,
       elementId: "runtime-1",
       label: "Title",
       tagName: "h2",
@@ -468,7 +468,7 @@ describe("Design preview bridge", () => {
 
   it("enforces consistent explicit, runtime, and legacy selection identities", () => {
     const base = {
-      protocolVersion: 1,
+      protocolVersion: 2,
       elementId: "target",
       label: "Target",
       tagName: "h2",
@@ -526,7 +526,7 @@ describe("Design preview bridge", () => {
 
   it("wraps selection as untrusted model context", () => {
     const selection = sanitizeDesignSelectionPayload({
-      protocolVersion: 1,
+      protocolVersion: 2,
       elementId: "runtime-1",
       idSource: "runtime",
       anchorElementId: "hero",
@@ -556,7 +556,7 @@ describe("Design preview bridge", () => {
     };
     const message = {
       type: "open-builder:design-bridge-capture-result",
-      version: 1,
+      version: 2,
       generation: expectation.generation,
       nonce: expectation.nonce,
       requestId: expectation.requestId,
@@ -727,7 +727,6 @@ describe("Design preview bridge", () => {
     const target = {
       pageId: "pricing",
       route: "#/pricing",
-      scenarioId: "default",
     };
     const targetMessage = {
       ...message,
@@ -754,7 +753,7 @@ describe("Design preview bridge", () => {
     expect(
       parseDesignBridgeCaptureResponse(targetMessage, {
         ...expectation,
-        target: { ...target, scenarioId: "empty" },
+        target: { ...target, route: "#/other-page" },
       }),
     ).toBeNull();
   });
@@ -763,7 +762,6 @@ describe("Design preview bridge", () => {
     const target = {
       pageId: "dashboard",
       route: "#/dashboard?mode=review",
-      scenarioId: "populated",
     };
     expect(isSafePrototypePreviewRoute("#/dashboard")).toBe(true);
     expect(isSafePrototypePreviewRoute("https://attacker.example/")).toBe(
@@ -789,7 +787,7 @@ describe("Design preview bridge", () => {
     };
     const message = {
       type: "open-builder:design-bridge-navigation-result",
-      version: 1,
+      version: 2,
       generation: expectation.generation,
       nonce: expectation.nonce,
       requestId: expectation.requestId,
@@ -804,7 +802,7 @@ describe("Design preview bridge", () => {
       parseDesignBridgeRouteMessage(
         {
           type: "open-builder:design-bridge-route",
-          version: 1,
+          version: 2,
           generation: "generation-a",
           route: target.route,
         },
@@ -815,7 +813,7 @@ describe("Design preview bridge", () => {
       parseDesignBridgeRouteMessage(
         {
           type: "open-builder:design-bridge-route",
-          version: 1,
+          version: 2,
           generation: "stale",
           route: target.route,
         },
@@ -833,7 +831,7 @@ describe("Design preview bridge", () => {
         {
           ...message,
           payload: {
-            target: { ...target, scenarioId: "empty" },
+            target: { ...target, route: "#/other-page" },
             route: target.route,
           },
         },
@@ -905,7 +903,6 @@ describe("Design preview bridge", () => {
       const target = {
         pageId: "dashboard",
         route,
-        scenarioId: "default",
       };
       const result = injectDesignBridge(
         { "index.html": "<!doctype html><body></body>" },
@@ -919,7 +916,7 @@ describe("Design preview bridge", () => {
         new previewWindow.MessageEvent("message", {
           data: {
             type: "open-builder:design-bridge-navigate",
-            version: 1,
+            version: 2,
             generation: "generation-a",
             nonce: "0123456789abcdef0123456789abcdef",
             requestId: "abcdef0123456789abcdef0123456789",
@@ -987,7 +984,7 @@ describe("Design preview bridge", () => {
             origin: "https://builder.test",
             data: {
               type: "open-builder:design-bridge-capture",
-              version: 1,
+              version: 2,
               generation: "generation-a",
               nonce: "capture-1",
               requestId: "request-1",
@@ -1106,7 +1103,6 @@ describe("Design preview bridge", () => {
         {
           pageId: "dashboard",
           route: "#/dashboard",
-          scenarioId: "default",
         },
       );
       expect(append).not.toHaveBeenCalled();
@@ -1147,7 +1143,7 @@ describe("Design preview bridge", () => {
       parseDesignBridgeCaptureResponse(
         {
           type: "open-builder:design-bridge-capture-result",
-          version: 1,
+          version: 2,
           generation: expectation.generation,
           nonce: expectation.nonce,
           requestId: expectation.requestId,
@@ -1210,6 +1206,147 @@ describe("Design preview bridge", () => {
   });
 });
 
+describe("offscreen preview scheduling", () => {
+  function mountOffscreenPreview() {
+    const iframe = document.createElement("iframe");
+    document.body.appendChild(iframe);
+    const frame = iframe.contentWindow as Window & typeof globalThis;
+    const messages: Record<string, unknown>[] = [];
+    Object.defineProperty(frame, "parent", {
+      configurable: true,
+      value: frame,
+    });
+    frame.setTimeout = window.setTimeout.bind(window);
+    frame.clearTimeout = window.clearTimeout.bind(window);
+    // Model an offscreen iframe whose browser never delivers animation frames.
+    frame.requestAnimationFrame = vi.fn(() => 1);
+    frame.cancelAnimationFrame = vi.fn();
+    frame.postMessage = ((message: Record<string, unknown>) => {
+      messages.push(message);
+    }) as typeof frame.postMessage;
+    const toCanvas = vi.fn(async () => ({
+      toDataURL: () => webpDataUrl(frame.innerWidth, frame.innerHeight),
+    }));
+    Object.defineProperty(frame, DESIGN_CAPTURE_RUNTIME_GLOBAL, {
+      value: { toCanvas },
+    });
+    frame.eval(
+      injectDesignBridge(
+        { "index.html": "<!doctype html><body></body>" },
+        "static",
+        true,
+        "capture runtime",
+        "offscreen-generation",
+      ).files[DESIGN_BRIDGE_VIRTUAL_PATH],
+    );
+    return {
+      frame,
+      messages,
+      toCanvas,
+      send(data: Record<string, unknown>) {
+        frame.dispatchEvent(
+          new frame.MessageEvent("message", {
+            source: frame,
+            origin: "https://builder.test",
+            data: {
+              version: 2,
+              generation: "offscreen-generation",
+              nonce: "offscreen-capture",
+              requestId: "offscreen-request",
+              ...data,
+            },
+          }),
+        );
+      },
+      dispose() {
+        iframe.remove();
+      },
+    };
+  }
+
+  it("acknowledges navigation and captures only after two stable timer samples", async () => {
+    vi.useFakeTimers();
+    const preview = mountOffscreenPreview();
+    try {
+      const target = {
+        pageId: "dashboard",
+        route: "#/dashboard?scenario=default",
+      };
+      preview.send({ type: "open-builder:design-bridge-navigate", target });
+      expect(
+        preview.messages.some(
+          (message) =>
+            message.type === "open-builder:design-bridge-navigation-result",
+        ),
+      ).toBe(false);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(preview.messages).toContainEqual(
+        expect.objectContaining({
+          type: "open-builder:design-bridge-navigation-result",
+          payload: { target, route: target.route },
+        }),
+      );
+      preview.send({
+        type: "open-builder:design-bridge-capture",
+        viewport: { name: "desktop", width: 1280, height: 768 },
+        target,
+      });
+      await vi.advanceTimersByTimeAsync(50);
+      expect(preview.toCanvas).not.toHaveBeenCalled();
+      Object.defineProperty(preview.frame, "innerWidth", {
+        configurable: true,
+        value: 1280,
+      });
+      await vi.advanceTimersByTimeAsync(50);
+      expect(preview.toCanvas).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(50);
+      expect(preview.toCanvas).toHaveBeenCalledOnce();
+      expect(preview.messages).toContainEqual(
+        expect.objectContaining({
+          type: "open-builder:design-bridge-capture-result",
+          payload: expect.objectContaining({
+            viewport: expect.objectContaining({ width: 1280 }),
+          }),
+        }),
+      );
+      expect(preview.frame.cancelAnimationFrame).toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      preview.dispose();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels timer-based viewport sampling immediately without rendering", async () => {
+    vi.useFakeTimers();
+    const preview = mountOffscreenPreview();
+    try {
+      preview.send({
+        type: "open-builder:design-bridge-capture",
+        viewport: { name: "desktop", width: 1024, height: 768 },
+      });
+      await vi.advanceTimersByTimeAsync(50);
+      preview.send({ type: "open-builder:design-bridge-cancel-capture" });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(preview.toCanvas).not.toHaveBeenCalled();
+      expect(preview.messages).toContainEqual(
+        expect.objectContaining({
+          type: "open-builder:design-bridge-capture-error",
+          error: "Screenshot capture was cancelled.",
+        }),
+      );
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(preview.toCanvas).not.toHaveBeenCalled();
+    } finally {
+      preview.dispose();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("preview bridge runtime upgrades", () => {
   it("does not scroll or reply from a capture replaced while fonts are loading", async () => {
     vi.useFakeTimers();
@@ -1262,7 +1399,7 @@ describe("preview bridge runtime upgrades", () => {
           origin: "https://builder.test",
           data: {
             type: "open-builder:design-bridge-capture",
-            version: 1,
+            version: 2,
             generation,
             nonce: "capture-1",
             requestId: "request-1",
@@ -1347,7 +1484,7 @@ describe("preview bridge runtime upgrades", () => {
           origin: "https://builder.test",
           data: {
             type: "open-builder:design-bridge-readiness",
-            version: 1,
+            version: 2,
             generation,
             runtimeRevision,
             nonce: "capture-request-1",
@@ -1463,7 +1600,7 @@ describe("preview screenshot format fallback", () => {
             origin: "https://builder.test",
             data: {
               type: "open-builder:design-bridge-capture",
-              version: 1,
+              version: 2,
               ...expectation,
               viewport: { name: "desktop", width: 1440, height: 900 },
             },
@@ -1610,7 +1747,7 @@ describe("capture viewport and cancellation identity", () => {
               origin: "https://builder.test",
               data: {
                 type,
-                version: 1,
+                version: 2,
                 generation,
                 nonce,
                 requestId: "request-current",
@@ -1713,7 +1850,7 @@ describe("live viewport capture", () => {
           origin: "https://builder.test",
           data: {
             type: "open-builder:design-bridge-capture",
-            version: 1,
+            version: 2,
             generation: "live-generation",
             nonce: "live-nonce",
             requestId: "live-request",
@@ -1787,7 +1924,7 @@ describe("capture region protocol", () => {
       message: {
         ...expected,
         type: "open-builder:design-bridge-capture-result",
-        version: 1,
+        version: 2,
         payload,
       },
     };
@@ -1966,7 +2103,7 @@ describe("long-page rendering requests", () => {
             data: {
               ...expectation,
               type: "open-builder:design-bridge-capture",
-              version: 1,
+              version: 2,
               viewport: { name: "desktop", width: 1024, height: 768 },
             },
           }),

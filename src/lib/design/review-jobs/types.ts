@@ -76,6 +76,8 @@ export interface DesignReviewRun {
   phase: "initial" | "verify";
   status: DesignReviewRunStatus;
   freshness: DesignReviewFreshness;
+  /** Missing/older versions are readable history, never current page coverage. */
+  coverageVersion?: number;
   sourceDigest: string;
   /** Files plus applied Design-system digest, used for stale checks after reload. */
   sourceProjectDigest?: string;

@@ -55,7 +55,7 @@ describe("ChatInput Design selection context", () => {
 
     act(() => {
       useDesignSelectionStore.getState().setSelection(id, {
-        protocolVersion: 1,
+        protocolVersion: 2,
         elementId: "pricing-card-pro",
         label: "Pro plan",
         tagName: "article",
@@ -100,7 +100,7 @@ describe("ChatInput Design selection context", () => {
     );
 
     const runtimeSelection = {
-      protocolVersion: 1,
+      protocolVersion: 2,
       elementId: "runtime-target",
       idSource: "runtime",
       anchorElementId: "hero-shell",

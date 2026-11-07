@@ -1,5 +1,5 @@
 export const SAAS_PROTOTYPE_BLUEPRINT_FIXTURE = {
-  schemaVersion: "open-builder-design-project/v1",
+  schemaVersion: "open-builder-design-project/v3",
   productGoal:
     "Let a support team manage customer requests from intake to resolution.",
   audience: "Support operations teams",
@@ -35,18 +35,11 @@ export const SAAS_PROTOTYPE_BLUEPRINT_FIXTURE = {
     responsibility,
     route,
     kind,
-    defaultScenario: "default",
     parentId: index > 1 ? "overview" : null,
     layoutId: id === "login" ? null : "app-shell",
     filePaths: [`src/pages/${id}.tsx`],
     sharedUiRefs: id === "login" ? [] : ["primary-navigation"],
     flowIds: id === "login" ? ["sign-in"] : ["manage-requests"],
-    scenarioIds:
-      id === "requests"
-        ? ["default", "loading", "empty", "error"]
-        : id === "request-editor"
-          ? ["default", "validation", "success"]
-          : ["default"],
   })),
   layouts: [
     {
@@ -77,22 +70,12 @@ export const SAAS_PROTOTYPE_BLUEPRINT_FIXTURE = {
       id: "sign-in",
       name: "Sign in",
       pageIds: ["login", "overview"],
-      scenarioIds: ["default"],
     },
     {
       id: "manage-requests",
       name: "Manage requests",
       pageIds: ["overview", "requests", "request-detail", "request-editor"],
-      scenarioIds: ["default", "validation", "success"],
     },
-  ],
-  scenarios: [
-    { id: "default", name: "Default", kind: "default" },
-    { id: "loading", name: "Loading", kind: "loading" },
-    { id: "empty", name: "Empty", kind: "empty" },
-    { id: "error", name: "Load failed", kind: "error" },
-    { id: "validation", name: "Validation errors", kind: "validation" },
-    { id: "success", name: "Saved", kind: "success" },
   ],
   buildProgress: {
     status: "complete",

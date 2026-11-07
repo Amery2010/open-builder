@@ -3,14 +3,31 @@
 import { webcrypto } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  render as renderWithTestingLibrary,
+  screen,
+  waitFor,
+} from "@testing-library/react";
+import { TooltipProvider } from "../ui/tooltip";
+import type { ReactNode } from "react";
 import userEvent from "@testing-library/user-event";
 import type { CSSProperties, PropsWithChildren } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+function render(ui: ReactNode) {
+  return renderWithTestingLibrary(ui, { wrapper: TooltipProvider });
+}
+
 let sandpackProviderError: Error | null = null;
 const projectFilesForSandpackMock = vi.hoisted(() => vi.fn());
 const getProjectAssetBlobMock = vi.hoisted(() => vi.fn());
+const bridgeProjectionFixture = vi.hoisted(() => ({
+  files: {} as Record<string, { code: string }>,
+  onFileChange: undefined as
+    | ((conversationId: string, path: string, content: string) => void)
+    | undefined,
+}));
 const captureRuntimeFixture = vi.hoisted(() => ({
   enabled: false,
   synchronized: false,
@@ -37,8 +54,14 @@ vi.mock("@codesandbox/sandpack-react", async (importOriginal) => ({
   SANDBOX_TEMPLATES: (
     await importOriginal<typeof import("@codesandbox/sandpack-react")>()
   ).SANDBOX_TEMPLATES,
-  SandpackProvider: ({ children }: PropsWithChildren) => {
+  SandpackProvider: ({
+    children,
+    files,
+  }: PropsWithChildren<{
+    files: Record<string, { code: string }>;
+  }>) => {
     if (sandpackProviderError) throw sandpackProviderError;
+    bridgeProjectionFixture.files = files;
     return <>{children}</>;
   },
   SandpackLayout: ({ children }: PropsWithChildren) => <>{children}</>,
@@ -77,6 +100,7 @@ vi.mock("./SandpackRuntimeSync", async () => {
         onChange({
           isSynchronized: () => captureRuntimeFixture.synchronized,
           restart: captureRuntimeFixture.restart,
+          bootstrapIsolatedPreview: async () => () => undefined,
         });
         return () => onChange(null);
       }, [onChange]);
@@ -90,7 +114,14 @@ vi.mock("../../lib/project-assets/core", () => ({
   getProjectAssetBlob: getProjectAssetBlobMock,
 }));
 
-vi.mock("./SandpackListener", () => ({ SandpackListener: () => null }));
+vi.mock("./SandpackListener", () => ({
+  SandpackListener: (props: {
+    onFileChange: typeof bridgeProjectionFixture.onFileChange;
+  }) => {
+    bridgeProjectionFixture.onFileChange = props.onFileChange;
+    return null;
+  },
+}));
 vi.mock("./FileExplorer", () => ({ FileExplorer: () => null }));
 vi.mock("../design/DesignSystemPanel", () => ({
   DesignSystemPanel: () => null,
@@ -218,6 +249,8 @@ const baseProps = {
 
 describe("CodeViewer preview scale", () => {
   beforeEach(() => {
+    bridgeProjectionFixture.files = {};
+    bridgeProjectionFixture.onFileChange = undefined;
     captureRuntimeFixture.enabled = false;
     captureRuntimeFixture.synchronized = false;
     captureRuntimeFixture.adapter = null;
@@ -271,9 +304,10 @@ describe("CodeViewer preview scale", () => {
 
   it.each([
     {
-      template: "react",
+      template: "nextjs",
       previewMode: "sandpack" as const,
-      error: "Preview capture is not supported for the react preview template.",
+      error:
+        "Preview capture is not supported for the nextjs preview template.",
     },
     {
       template: "static",
@@ -487,6 +521,56 @@ describe("CodeViewer preview scale", () => {
     expect(viewportActions?.parentElement).toBe(preview.parentElement);
     expect(viewportActions?.parentElement).toHaveClass("relative");
     expect(viewportActions).toHaveClass("absolute", "bottom-2", "right-2");
+  });
+
+  it("restores a selected template's script entry before saving Sandpack edits", async () => {
+    const source = 'export const title = "Before";\n';
+    const onFileChange = vi.fn();
+    render(
+      <CodeViewer
+        {...baseProps}
+        conversationId="conversation-a"
+        template="vue"
+        currentFile="src/main.js"
+        files={{
+          "package.json": '{"main":"/src/main.js"}',
+          "src/main.js": source,
+        }}
+        onFileChange={onFileChange}
+      />,
+    );
+    await waitFor(() =>
+      expect(bridgeProjectionFixture.files["/src/main.js"]?.code).toContain(
+        "open-builder-design-bridge:start",
+      ),
+    );
+    const projected = bridgeProjectionFixture.files["/src/main.js"].code;
+    act(() => {
+      bridgeProjectionFixture.onFileChange?.(
+        "conversation-a",
+        "src/main.js",
+        projected,
+      );
+      bridgeProjectionFixture.onFileChange?.(
+        "conversation-a",
+        "__open_builder_design_bridge__.js",
+        "runtime",
+      );
+    });
+    expect(onFileChange).not.toHaveBeenCalled();
+    act(() =>
+      bridgeProjectionFixture.onFileChange?.(
+        "conversation-a",
+        "src/main.js",
+        projected.replace("Before", "After"),
+      ),
+    );
+    expect(onFileChange).toHaveBeenCalledExactlyOnceWith(
+      "conversation-a",
+      "src/main.js",
+      source.replace("Before", "After"),
+      { expectedContent: source },
+    );
   });
 
   it("keeps a Sandpack render error recoverable in the code workspace", () => {

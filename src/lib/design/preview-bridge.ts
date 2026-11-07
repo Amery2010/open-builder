@@ -1,3 +1,4 @@
+import { SANDBOX_TEMPLATES } from "@codesandbox/sandpack-react";
 import { prototypeHashRoutePolicySource } from "./prototype-route";
 import {
   inspectImageBytes,
@@ -26,7 +27,7 @@ export {
 } from "./preview-runtime";
 export { formatDesignSelectionForModel } from "./selection-context";
 
-export const DESIGN_BRIDGE_PROTOCOL_VERSION = 1 as const;
+export const DESIGN_BRIDGE_PROTOCOL_VERSION = 2 as const;
 export const DESIGN_BRIDGE_PAYLOAD_MAX_BYTES = 8 * 1024;
 export const DESIGN_BRIDGE_SEMANTIC_MAX_BYTES = 64 * 1024;
 export const DESIGN_BRIDGE_CAPTURE_MAX_BYTES = 1_500 * 1024;
@@ -48,11 +49,30 @@ export const DESIGN_RUNTIME_TOKEN_NAMES = EDITABLE_DESIGN_TOKENS.map(
   (token) => token.property,
 );
 
+const SCRIPT_ENTRY_TEMPLATES = new Set([
+  "react",
+  "react-ts",
+  "vue",
+  "vue-ts",
+  "svelte",
+  "solid",
+  "angular",
+  "vanilla",
+  "vanilla-ts",
+]);
+
 export const SUPPORTED_DESIGN_BRIDGE_TEMPLATES = new Set([
   "static",
   "vite",
   "vite-react",
   "vite-react-ts",
+  "vite-preact",
+  "vite-preact-ts",
+  "vite-vue",
+  "vite-vue-ts",
+  "vite-svelte",
+  "vite-svelte-ts",
+  ...SCRIPT_ENTRY_TEMPLATES,
 ]);
 
 function bridgeTags(includeCaptureRuntime: boolean): string {
@@ -70,8 +90,13 @@ export interface DesignBridgeInjectionResult {
   supported: boolean;
   files: ProjectFiles;
   indexPath?: string;
+  restore: (path: string, content: string) => string | undefined;
   reason?:
-    "code-only" | "unsupported-template" | "missing-index" | "reserved-path";
+    | "code-only"
+    | "unsupported-template"
+    | "missing-index"
+    | "missing-entry"
+    | "reserved-path";
 }
 
 export type DesignReviewViewportName = "desktop" | "tablet" | "mobile";
@@ -99,7 +124,7 @@ export function designBridgeRuntimeRevision(
   generation: string,
   captureRuntimeAvailable: boolean,
 ): string {
-  return `${generation}:9:${captureRuntimeAvailable ? "capture" : "selection"}`;
+  return `${generation}:10:${captureRuntimeAvailable ? "capture" : "selection"}`;
 }
 
 export interface DesignPreviewSemanticElement {
@@ -345,11 +370,11 @@ function previewBridgeClientSource(
   }
   var safeHashRoute = ${prototypeHashRoutePolicySource()};
   function safePrototypeTarget(value) {
-    return !!value && typeof value === "object" && validId(value.pageId) && safeHashRoute(value.route) && validId(value.scenarioId);
+    return !!value && typeof value === "object" && validId(value.pageId) && safeHashRoute(value.route) && !("scenarioId" in value);
   }
   function samePrototypeTarget(left, right) {
     return safePrototypeTarget(left) && safePrototypeTarget(right) &&
-      left.pageId === right.pageId && left.route === right.route && left.scenarioId === right.scenarioId;
+      left.pageId === right.pageId && left.route === right.route;
   }
   function previewRoute() {
     var hash = typeof window.location.hash === "string" ? window.location.hash : "";
@@ -547,22 +572,43 @@ function previewBridgeClientSource(
   }
   function nextPaint() {
     return new Promise(function (resolve) {
-      requestAnimationFrame(function () { requestAnimationFrame(resolve); });
+      var settled = false;
+      var frameId = 0;
+      // Browsers may suspend animation frames in an offscreen preview iframe.
+      var timer = setTimeout(finish, 100);
+      function finish() {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        cancelAnimationFrame(frameId);
+        resolve();
+      }
+      frameId = requestAnimationFrame(function () {
+        frameId = requestAnimationFrame(finish);
+      });
     });
   }
   function stableViewport(name, signal) {
     return new Promise(function (resolve, reject) {
       var previous = null;
       var frameId = 0;
+      var sampleTimer = 0;
+      var settled = false;
       var timer = setTimeout(function () { finish(new Error("Preview viewport did not stabilize: " + window.innerWidth + "x" + window.innerHeight + ".")); }, 5000);
       function finish(error, size) {
+        if (settled) return;
+        settled = true;
         clearTimeout(timer);
+        clearTimeout(sampleTimer);
         cancelAnimationFrame(frameId);
         signal.removeEventListener("abort", abort);
         if (error) reject(error); else resolve(size);
       }
       function abort() { finish(signal.reason); }
       function check() {
+        if (settled) return;
+        clearTimeout(sampleTimer);
+        cancelAnimationFrame(frameId);
         if (signal.aborted) { abort(); return; }
         var size = { width: window.innerWidth, height: window.innerHeight };
         if (viewportSizeMatches(name, size.width, size.height) && previous && previous.width === size.width && previous.height === size.height) {
@@ -570,11 +616,15 @@ function previewBridgeClientSource(
           return;
         }
         previous = size;
+        schedule();
+      }
+      function schedule() {
+        sampleTimer = setTimeout(check, 50);
         frameId = requestAnimationFrame(check);
       }
       signal.addEventListener("abort", abort, { once: true });
       if (signal.aborted) { abort(); return; }
-      frameId = requestAnimationFrame(check);
+      schedule();
     });
   }
   function waitForFonts() {
@@ -710,8 +760,7 @@ function previewBridgeClientSource(
       designTokens: designTokens,
       prototypeIdentity: safePrototypeTarget(prototypeIdentity) ? {
         pageId: prototypeIdentity.pageId,
-        route: prototypeIdentity.route,
-        scenarioId: prototypeIdentity.scenarioId
+        route: prototypeIdentity.route
       } : undefined,
       elements: candidates.map(semanticElement).filter(Boolean)
     };
@@ -729,8 +778,7 @@ function previewBridgeClientSource(
       payload: {
         target: {
           pageId: data.target.pageId,
-          route: data.target.route,
-          scenarioId: data.target.scenarioId
+          route: data.target.route
         },
         route: route
       }
@@ -1007,34 +1055,109 @@ export function injectDesignBridge(
   captureRuntimeSource?: string,
   generation = "unversioned",
 ): DesignBridgeInjectionResult {
+  const identity = {
+    files,
+    restore: (_path: string, content: string) => content,
+  };
   if (!previewEnabled) {
-    return { supported: false, files, reason: "code-only" };
+    return { ...identity, supported: false, reason: "code-only" };
   }
   if (!SUPPORTED_DESIGN_BRIDGE_TEMPLATES.has(template)) {
-    return { supported: false, files, reason: "unsupported-template" };
+    return { ...identity, supported: false, reason: "unsupported-template" };
   }
   if (
     DESIGN_BRIDGE_VIRTUAL_PATH in files ||
     DESIGN_CAPTURE_RUNTIME_VIRTUAL_PATH in files
   ) {
-    return { supported: false, files, reason: "reserved-path" };
+    return { ...identity, supported: false, reason: "reserved-path" };
   }
-  const indexPath = Object.keys(files).find(
-    (path) => !path.includes("/") && path.toLowerCase() === "index.html",
-  );
-  if (!indexPath || !/<\/body\s*>/i.test(files[indexPath])) {
-    return { supported: false, files, reason: "missing-index" };
+
+  let entryPath: string | undefined;
+  let source: string | undefined;
+  let scriptEntry = SCRIPT_ENTRY_TEMPLATES.has(template);
+  if (scriptEntry) {
+    // Sandpack merges template files into partial projects. Its `main` field
+    // selects the editor tab; package.json.main selects the executable module.
+    const defaults = SANDBOX_TEMPLATES[
+      template as keyof typeof SANDBOX_TEMPLATES
+    ].files as Record<string, string | { code: string }>;
+    const defaultSource = (path: string) => {
+      const file = defaults[`/${path}`] ?? defaults[path];
+      return typeof file === "string" ? file : file?.code;
+    };
+    try {
+      const pkg = JSON.parse(
+        files["package.json"] ?? defaultSource("package.json") ?? "{}",
+      );
+      const main = Array.isArray(pkg.main) ? pkg.main[0] : pkg.main;
+      if (typeof main === "string") {
+        const path = main.replace(/^\/?(?:\.\/)?/, "");
+        if (
+          !path
+            .split("/")
+            .some((part) => !part || part === "." || part === "..") &&
+          /\.(?:[jt]sx?|html)$/.test(path)
+        ) {
+          entryPath = path;
+          source = files[path] ?? defaultSource(path);
+        }
+      }
+    } catch {
+      // Invalid packages cannot provide a trustworthy executable entry.
+    }
+    // Angular configuration can override package.main. Do not instrument an
+    // inactive entry when this project uses a custom CLI configuration.
+    if (
+      !entryPath ||
+      source === undefined ||
+      (template === "angular" &&
+        ("angular.json" in files || ".angular-cli.json" in files))
+    ) {
+      return { ...identity, supported: false, reason: "missing-entry" };
+    }
+    if (entryPath.endsWith(".html")) {
+      if (template !== "vanilla" && template !== "vanilla-ts") {
+        return { ...identity, supported: false, reason: "missing-entry" };
+      }
+      scriptEntry = false;
+    }
+  } else {
+    entryPath = Object.keys(files).find(
+      (path) => !path.includes("/") && path.toLowerCase() === "index.html",
+    );
+    source = entryPath ? files[entryPath] : undefined;
   }
-  if (files[indexPath].includes(DESIGN_BRIDGE_MARKER)) {
-    return { supported: false, files, reason: "reserved-path" };
+  if (
+    !entryPath ||
+    source === undefined ||
+    (!scriptEntry && !/<\/body\s*>/i.test(source))
+  ) {
+    return { ...identity, supported: false, reason: "missing-index" };
   }
-  const index = stripDesignBridge(files[indexPath]).replace(
-    /<\/body\s*>/i,
-    `${bridgeTags(Boolean(captureRuntimeSource))}\n</body>`,
-  );
+  if (source.includes(DESIGN_BRIDGE_MARKER)) {
+    return { ...identity, supported: false, reason: "reserved-path" };
+  }
+  const startMarker = scriptEntry
+    ? `/* ${DESIGN_BRIDGE_MARKER}:start */`
+    : `<!-- ${DESIGN_BRIDGE_MARKER}:start -->`;
+  const endMarker = scriptEntry
+    ? `/* ${DESIGN_BRIDGE_MARKER}:end */`
+    : `<!-- ${DESIGN_BRIDGE_MARKER}:end -->`;
+  const relativeRoot = "../".repeat(entryPath.split("/").length - 1) || "./";
+  const block = scriptEntry
+    ? `${startMarker}\n${[
+        ...(captureRuntimeSource ? [DESIGN_CAPTURE_RUNTIME_VIRTUAL_PATH] : []),
+        DESIGN_BRIDGE_VIRTUAL_PATH,
+      ]
+        .map((path) => `import ${JSON.stringify(relativeRoot + path)};`)
+        .join("\n")}\n${endMarker}\n`
+    : `${bridgeTags(Boolean(captureRuntimeSource))}\n`;
+  const projected = scriptEntry
+    ? source.replace(/^(#![^\n]*\n)?/, (prefix) => prefix + block)
+    : source.replace(/<\/body\s*>/i, (closing) => block + closing);
   const injectedFiles: ProjectFiles = {
     ...files,
-    [indexPath]: index,
+    [entryPath]: projected,
     [DESIGN_BRIDGE_VIRTUAL_PATH]: previewBridgeClientSource(
       Boolean(captureRuntimeSource),
       generation,
@@ -1045,8 +1168,26 @@ export function injectDesignBridge(
   }
   return {
     supported: true,
-    indexPath,
+    ...(!scriptEntry ? { indexPath: entryPath } : {}),
     files: injectedFiles,
+    restore(path, content) {
+      if (
+        path === DESIGN_BRIDGE_VIRTUAL_PATH ||
+        path === DESIGN_CAPTURE_RUNTIME_VIRTUAL_PATH
+      )
+        return undefined;
+      if (path !== entryPath) return content;
+      // Template-only entries are preview scaffolding, not new project files.
+      if (files[path] === undefined) return undefined;
+      if (content === projected) return source;
+      const start = content.indexOf(startMarker);
+      const end = content.indexOf(endMarker);
+      if (start < 0 && end < 0) return content;
+      if (start < 0 || end < start) return undefined;
+      const afterMarker = end + endMarker.length;
+      const afterBlock = afterMarker + (content[afterMarker] === "\n" ? 1 : 0);
+      return content.slice(0, start) + content.slice(afterBlock);
+    },
   };
 }
 

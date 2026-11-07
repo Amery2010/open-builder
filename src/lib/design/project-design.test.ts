@@ -40,11 +40,9 @@ function design(
         responsibility: "Explain the product and start the sign-up flow.",
         route: "/",
         kind: "landing",
-        defaultScenario: "default",
         layoutId: "shell",
         sharedUiRefs: ["nav"],
         flowIds: ["signup"],
-        scenarioIds: ["default", "empty"],
       },
       {
         id: "settings",
@@ -52,13 +50,11 @@ function design(
         responsibility: "Let people manage their product preferences.",
         route: "/settings",
         kind: "settings",
-        defaultScenario: "default",
         parentId: "home",
         layoutId: "shell",
         filePaths: ["src/pages/Settings.tsx"],
         sharedUiRefs: ["nav"],
         flowIds: [],
-        scenarioIds: ["default"],
       },
     ],
     layouts: [
@@ -84,12 +80,7 @@ function design(
         id: "signup",
         name: "Sign up",
         pageIds: ["home"],
-        scenarioIds: ["default"],
       },
-    ],
-    scenarios: [
-      { id: "default", name: "Default", kind: "default" },
-      { id: "empty", name: "Empty state", kind: "empty" },
     ],
     buildProgress: {
       status: "in-progress",
@@ -194,7 +185,6 @@ describe("project design deep module", () => {
           revision: 8,
           pageCount: 2,
           flowCount: 1,
-          scenarioCount: 2,
         }),
       ).toMatchObject({
         ok: false,
@@ -270,12 +260,6 @@ describe("project design deep module", () => {
     for (const patch of [
       { flows: [] },
       { buildProgress: { completedFlowIds: ["wantlist"] } },
-      {
-        pages: original.pages.map((page) => ({
-          ...page,
-          defaultScenario: "missing",
-        })),
-      },
       {
         pages: original.pages.map((page) => ({ ...page, layoutId: "missing" })),
       },
@@ -440,14 +424,13 @@ describe("project design deep module", () => {
   it("serializes canonically and upserts without mutating files", () => {
     const input = design({
       pages: [...(design().pages as unknown[])].reverse(),
-      scenarios: [...(design().scenarios as unknown[])].reverse(),
     });
     const first = serializeProjectDesign(input);
     const second = serializeProjectDesign(JSON.parse(first) as unknown);
     expect(first).toBe(second);
     expect(first.endsWith("\n")).toBe(true);
     expect(first.indexOf('"pages":')).toBeLessThan(
-      first.indexOf('"scenarios":'),
+      first.indexOf('"buildProgress":'),
     );
     expect(JSON.parse(first).sharedUiRefs[0].filePaths).toEqual([
       "src/components/PrimaryNav.tsx",
@@ -482,19 +465,6 @@ describe("project design deep module", () => {
     });
   });
 
-  it("accepts declarative validation and submission-success scenarios", () => {
-    const parsed = parseProjectDesign({
-      ...design(),
-      scenarios: [
-        ...(design().scenarios as unknown[]),
-        { id: "validation", name: "Validation errors", kind: "validation" },
-        { id: "success", name: "Submission complete", kind: "success" },
-      ],
-    });
-
-    expect(parsed).toMatchObject({ status: "ready" });
-  });
-
   it("derives a stable page tree, impact pages, coverage targets, and incomplete progress", () => {
     const parsed = parseProjectDesign(design());
     expect(parsed.status).toBe("ready");
@@ -508,47 +478,36 @@ describe("project design deep module", () => {
       "settings",
     ]);
     expect(
-      resolveProjectDesignPreviewTarget(parsed.design, "settings", "default"),
+      resolveProjectDesignPreviewTarget(parsed.design, "settings"),
     ).toEqual({
       pageId: "settings",
-      route: "#/settings?scenario=default",
-      scenarioId: "default",
+      route: "#/settings",
     });
-    expect(
-      resolveProjectDesignPreviewTarget(parsed.design, "settings", "empty"),
-    ).toBeNull();
     expect(
       resolveProjectDesignPreviewRoute(
         parsed.design,
         "#/settings?scenario=default",
       ),
-    ).toMatchObject({ pageId: "settings", scenarioId: "default" });
+    ).toMatchObject({ pageId: "settings" });
     expect(
       resolveProjectDesignPreviewRoute(parsed.design, "#/settings"),
-    ).toMatchObject({ pageId: "settings", scenarioId: "default" });
+    ).toMatchObject({ pageId: "settings" });
     expect(
       resolveProjectDesignPreviewRoute(
         parsed.design,
         "#/settings?status=active",
       ),
-    ).toMatchObject({ pageId: "settings", scenarioId: "default" });
+    ).toMatchObject({ pageId: "settings" });
     expect(resolveProjectDesignPreviewRoute(parsed.design, "/")).toMatchObject({
       pageId: "home",
-      scenarioId: "default",
     });
     expect(
       deriveImpactPages(parsed.design, ["src/components/PrimaryNav.tsx"]),
     ).toEqual(["home", "settings"]);
     expect(deriveImpactPages(parsed.design, ["signup"])).toEqual(["home"]);
     expect(deriveCoverageTargets(parsed.design)).toEqual([
-      { id: "home:default", pageId: "home", route: "/", scenarioId: "default" },
-      { id: "home:empty", pageId: "home", route: "/", scenarioId: "empty" },
-      {
-        id: "settings:default",
-        pageId: "settings",
-        route: "/settings",
-        scenarioId: "default",
-      },
+      { id: "home", pageId: "home", route: "#/" },
+      { id: "settings", pageId: "settings", route: "#/settings" },
     ]);
     expect(getIncompleteBuildProgress(parsed.design)).toEqual({
       status: "in-progress",
@@ -630,8 +589,8 @@ describe("project design deep module", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error(result.error);
     expect(result.design.pages.map((page) => page.id)).toEqual([
-      "draft",
       "home",
+      "draft",
     ]);
     expect(
       result.design.pages.find((page) => page.id === "home"),
@@ -800,5 +759,186 @@ describe("project design deep module", () => {
     expect(() =>
       isProjectDesignRevisionStale(0, Number.MAX_SAFE_INTEGER + 1),
     ).toThrow();
+  });
+});
+
+describe("page-only blueprint migration", () => {
+  const scenarios = [
+    { id: "default", name: "Default", kind: "default" },
+    { id: "empty", name: "Empty", kind: "empty" },
+  ];
+  it.each([
+    1,
+    "open-builder-design-project/v1",
+    "open-builder-design-project/v2",
+  ])(
+    "preserves old default URLs without writing source for %s",
+    (schemaVersion) => {
+      const legacy = {
+        schemaVersion,
+        revision: 4,
+        scenarios,
+        pages: [
+          { id: "home", route: "/home" },
+          {
+            id: "items",
+            route: "/items/[id]?tag=a&tag=b&empty=",
+            previewPath: "/items/42",
+            defaultScenario: "empty",
+          },
+          { id: "encoded", route: "/search?%73cenario=default&q=中文" },
+          { id: "draft" },
+          { id: "dynamic", route: "/item/:id" },
+        ],
+        flows: [
+          {
+            id: "flow",
+            name: "Flow",
+            pageIds: ["home"],
+            scenarioIds: ["default"],
+          },
+        ],
+      };
+      const files = filesWith(legacy);
+      const original = files[PROJECT_DESIGN_PATH];
+      const parsed = readProjectDesign(files);
+      expect(parsed.status).toBe("ready");
+      if (parsed.status !== "ready")
+        throw new Error(
+          parsed.status === "invalid" ? parsed.error : "Missing blueprint",
+        );
+      expect(files[PROJECT_DESIGN_PATH]).toBe(original);
+      expect(parsed.design.schemaVersion).toBe(PROJECT_DESIGN_SCHEMA_VERSION);
+      expect(parsed.design).not.toHaveProperty("scenarios");
+      expect(parsed.design.flows[0]).not.toHaveProperty("scenarioIds");
+      expect(parsed.design.pages[1]).toMatchObject({
+        route: "/items/:id?tag=a&tag=b&empty=&scenario=empty",
+        previewPath: "/items/42",
+      });
+      expect(parsed.design.pages[1]).not.toHaveProperty("defaultScenario");
+      expect(resolveProjectDesignPreviewTarget(parsed.design, "items")).toEqual(
+        {
+          pageId: "items",
+          route: "#/items/42?tag=a&tag=b&empty=&scenario=empty",
+        },
+      );
+      expect(
+        resolveProjectDesignPreviewTarget(parsed.design, "home")?.route,
+      ).toBe("#/home?scenario=default");
+      expect(
+        resolveProjectDesignPreviewTarget(parsed.design, "encoded")?.route,
+      ).toBe("#/search?%73cenario=default&q=%E4%B8%AD%E6%96%87");
+      expect(resolveProjectDesignPreview(parsed.design, "draft")).toMatchObject(
+        { reason: "missing-route" },
+      );
+      expect(
+        resolveProjectDesignPreview(parsed.design, "dynamic"),
+      ).toMatchObject({ reason: "missing-example" });
+      const serialized = serializeProjectDesign(parsed.design);
+      expect(serializeProjectDesign(serialized)).toBe(serialized);
+      expect(parseProjectDesign(serialized)).toEqual({
+        status: "ready",
+        design: parsed.design,
+      });
+    },
+  );
+
+  it("rejects every removed field at new write boundaries", () => {
+    const files = filesWith(design());
+    for (const patch of [
+      { scenarios: [] },
+      { scenarioCount: 1 },
+      { pages: [{ id: "home", defaultScenario: "default" }] },
+      { pages: [{ id: "home", scenarioIds: [] }] },
+      { flows: [{ id: "signup", scenarioIds: [] }] },
+    ]) {
+      expect(applyProjectDesignToolRequest(files, { patch }).ok).toBe(false);
+      expect(applyProjectDesignToolRequest(files, { document: patch }).ok).toBe(
+        false,
+      );
+    }
+    expect(
+      applyProjectDesignToolRequest(files, {
+        patch: {},
+        remove: { scenarios: ["default"] },
+      }).ok,
+    ).toBe(false);
+    expect(parseProjectDesign(design({ scenarios: [] })).status).toBe(
+      "invalid",
+    );
+    expect(
+      parseProjectDesign(
+        design({
+          pages: [{ id: "home", route: "/home", defaultScenario: "default" }],
+        }),
+      ).status,
+    ).toBe("invalid");
+    expect(
+      resolveProjectDesignPreview(projectDesignSchema.parse(design()), "home"),
+    ).toEqual({ status: "ready", target: { pageId: "home", route: "#/" } });
+  });
+
+  it("refuses ambiguous defaults and unsafe conversions with page-specific errors", () => {
+    for (const page of [
+      { id: "broken", route: "/home", defaultScenario: "missing" },
+      { id: "broken", route: "/home?scenario=empty" },
+      { id: "broken", route: "/home?scenario=default&%73cenario=default" },
+      { id: "broken", route: "/" + "a".repeat(2035) },
+    ]) {
+      const input = {
+        schemaVersion: "open-builder-design-project/v2",
+        revision: 1,
+        pages: [page],
+        scenarios,
+      };
+      const files = filesWith(input);
+      const before = files[PROJECT_DESIGN_PATH];
+      expect(readProjectDesign(files)).toMatchObject({
+        status: "invalid",
+        error: expect.stringContaining('page "broken"'),
+      });
+      expect(files[PROJECT_DESIGN_PATH]).toBe(before);
+    }
+  });
+
+  it("keeps legacy structural validation before dropping retired entities", () => {
+    for (const invalidScenarios of [
+      [scenarios[0], scenarios[0]],
+      [{ ...scenarios[0], script: "run()" }],
+      [{ ...scenarios[0], kind: "invalid" }],
+    ]) {
+      expect(
+        parseProjectDesign({
+          schemaVersion: 1,
+          revision: 1,
+          pages: [],
+          scenarios: invalidScenarios,
+        }).status,
+      ).toBe("invalid");
+    }
+  });
+
+  it("preserves sibling order through an unrelated field edit and serialization", () => {
+    const original = projectDesignSchema.parse(
+      design({
+        pages: [
+          { id: "parent" },
+          { id: "z-last", parentId: "parent" },
+          { id: "a-first", parentId: "parent" },
+        ],
+      }),
+    );
+    const result = applyProjectDesignToolRequest(filesWith(original), {
+      patch: { pages: [{ id: "z-last", responsibility: "Edited" }] },
+    });
+    if (!result.ok) throw new Error(result.error);
+    expect(result.design.pages.map((page) => page.id)).toEqual([
+      "parent",
+      "z-last",
+      "a-first",
+    ]);
+    expect(
+      derivePageTree(result.design)[0].children.map((page) => page.id),
+    ).toEqual(["z-last", "a-first"]);
   });
 });

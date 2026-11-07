@@ -49,7 +49,12 @@ export const isSafePrototypeHashRoute = createHashRoutePolicy(
   PROTOTYPE_ROUTE_MAX_LENGTH,
 );
 export function prototypeHashRoutePolicySource(): string {
-  return `(${createHashRoutePolicy.toString()})(${PROTOTYPE_ROUTE_MAX_LENGTH})`;
+  // Parcel's Sandpack preset still parses injected JS with Babel 6. Restore
+  // the catch binding after serialization, including after Host minification.
+  const source = createHashRoutePolicy
+    .toString()
+    .replace(/\bcatch\s*\{/g, "catch (_) {");
+  return `(${source})(${PROTOTYPE_ROUTE_MAX_LENGTH})`;
 }
 
 export type PrototypeRouteIssueReason =
@@ -60,32 +65,25 @@ export type PrototypeRouteIssueReason =
   | "missing-example"
   | "invalid-example"
   | "unknown-page"
-  | "unknown-scenario"
-  | "scenario-query-conflict"
   | "ambiguous-route";
 
 export interface PrototypeRoutePage {
   id: string;
   route?: string;
   previewPath?: string;
-  defaultScenario?: string;
-  scenarioIds?: readonly string[];
 }
 export interface PrototypeRouteDesign {
   pages: readonly PrototypeRoutePage[];
-  scenarios: readonly { id: string }[];
 }
 export interface PrototypeRouteTarget {
   pageId: string;
   route: string;
-  scenarioId: string;
 }
 export type PrototypeRouteResolution =
   | { status: "ready"; target: PrototypeRouteTarget }
   | {
       status: "unavailable";
       pageId?: string;
-      scenarioId?: string;
       reason: PrototypeRouteIssueReason;
       message: string;
     };
@@ -211,7 +209,6 @@ function matchesPath(patternPath: string, concretePath: string): boolean {
 export function resolvePrototypeRoute(
   design: PrototypeRouteDesign,
   pageId: string,
-  scenarioId?: string,
 ): PrototypeRouteResolution {
   const page = design.pages.find((candidate) => candidate.id === pageId);
   const fail = (
@@ -220,7 +217,6 @@ export function resolvePrototypeRoute(
   ): PrototypeRouteResolution => ({
     status: "unavailable",
     pageId,
-    ...(scenarioId ? { scenarioId } : {}),
     reason,
     message,
   });
@@ -249,49 +245,18 @@ export function resolvePrototypeRoute(
     }
     concretePath = example.route;
   }
-  const selected = scenarioId ?? page.defaultScenario ?? "default";
-  const baseline =
-    selected === "default" &&
-    !page.defaultScenario &&
-    !(page.scenarioIds ?? []).includes("default");
-  if (
-    !baseline &&
-    (!design.scenarios.some((scenario) => scenario.id === selected) ||
-      (!(page.scenarioIds ?? []).includes(selected) &&
-        page.defaultScenario !== selected))
-  ) {
-    return fail(
-      "unknown-scenario",
-      `Scenario "${selected}" is not defined for this page.`,
-    );
-  }
-  const existing = new URLSearchParams(query).getAll("scenario");
-  if (
-    existing.length > 1 ||
-    (existing.length === 1 && existing[0] !== selected)
-  ) {
-    return fail(
-      "scenario-query-conflict",
-      "The route scenario query conflicts with the selected scenario; update the declaration without overwriting business query values.",
-    );
-  }
-  const suffix = existing.length
-    ? hasQuery
-      ? `?${query}`
-      : ""
-    : `${hasQuery ? `?${query}${query ? "&" : ""}` : "?"}scenario=${encodeURIComponent(selected)}`;
-  const route = `#${concretePath}${suffix}`;
+  const route = `#${concretePath}${hasQuery ? `?${query}` : ""}`;
   if (route.length > PROTOTYPE_ROUTE_MAX_LENGTH)
     return fail(
       "route-too-long",
-      `The final preview route including its scenario exceeds ${PROTOTYPE_ROUTE_MAX_LENGTH} characters.`,
+      `The final preview route exceeds ${PROTOTYPE_ROUTE_MAX_LENGTH} characters.`,
     );
   if (!isSafePrototypeHashRoute(route))
     return fail(
       "unsafe-route",
       "This route cannot be used for safe in-app navigation.",
     );
-  return { status: "ready", target: { pageId, route, scenarioId: selected } };
+  return { status: "ready", target: { pageId, route } };
 }
 
 /** Exact pages win over parameter declarations; equally specific matches remain ambiguous. */
@@ -308,24 +273,21 @@ export function resolveObservedPrototypeRoute(
     };
   const observed = splitRoute(normalized.route);
   const query = new URLSearchParams(observed.query);
-  const scenarios = query.getAll("scenario");
-  if (scenarios.length > 1)
-    return {
-      status: "unavailable",
-      reason: "scenario-query-conflict",
-      message: "The observed route contains multiple scenario values.",
-    };
-  const matches: Array<{ page: PrototypeRoutePage; score: number }> = [];
+  let matches: Array<{ page: PrototypeRoutePage; score: number }> = [];
+  const pathMatches: typeof matches = [];
   for (const page of design.pages) {
     const declared = normalizePrototypeRoute(page.route ?? "");
     if (!declared.ok) continue;
     const parts = splitRoute(declared.route);
     if (!matchesPath(parts.path, observed.path)) continue;
+    const specificity = parts.path
+      .split("/")
+      .filter((part) => !parameter.test(part)).length;
+    pathMatches.push({ page, score: specificity });
     const declaredQuery = new URLSearchParams(parts.query);
     const remaining = [...query.entries()];
     let matched = true;
     for (const [key, value] of declaredQuery) {
-      if (key === "scenario") continue;
       const index = remaining.findIndex(
         (entry) => entry[0] === key && entry[1] === value,
       );
@@ -344,6 +306,9 @@ export function resolveObservedPrototypeRoute(
           [...declaredQuery].length,
       });
   }
+  // Internal links may omit a page's preview-only business query. Identify
+  // the page only when its pathname is unambiguous; retain the observed URL.
+  if (!matches.length) matches = pathMatches;
   matches.sort((a, b) => b.score - a.score);
   if (!matches.length)
     return {
@@ -361,7 +326,6 @@ export function resolveObservedPrototypeRoute(
   const result = resolvePrototypeRoute(
     { ...design, pages: [{ ...page, previewPath: observed.path }] },
     page.id,
-    scenarios[0] ?? page.defaultScenario ?? "default",
   );
   return result.status === "ready"
     ? { ...result, target: { ...result.target, route: `#${normalized.route}` } }

@@ -150,15 +150,200 @@ describe("preview runtime registry", () => {
     await expect(replaced).rejects.toMatchObject({ name: "AbortError" });
   });
 
-  it("keeps a target capture bound to page and scenario identity", async () => {
+  it.each(["tool", "manual-review", "automatic-review", "annotation"] as const)(
+    "%s preempts a canvas capture only after its cleanup finishes",
+    async (owner) => {
+      const conversationId = `canvas-preempt-${owner}`;
+      const unregister = registerPreviewRuntime(conversationId, adapter());
+      const cleanup = deferred<void>();
+      const events: string[] = [];
+      const background = withPreviewCaptureLock({
+        conversationId,
+        owner: "canvas",
+        run: async (_runtime, signal) => {
+          try {
+            await new Promise<void>((_resolve, reject) => {
+              signal.addEventListener(
+                "abort",
+                () => {
+                  events.push("abort");
+                  reject(signal.reason);
+                },
+                { once: true },
+              );
+            });
+          } finally {
+            await cleanup.promise;
+            events.push("cleanup");
+          }
+        },
+      });
+      const backgroundResult = expect(background).rejects.toMatchObject({
+        name: "AbortError",
+      });
+      const foreground = withPreviewCaptureLock({
+        conversationId,
+        owner,
+        run: async () => {
+          events.push("foreground");
+        },
+      });
+      expect(events).toEqual(["abort"]);
+      expect(isPreviewCaptureBusy(conversationId)).toBe(true);
+      cleanup.resolve();
+      await Promise.all([backgroundResult, foreground]);
+      expect(events).toEqual(["abort", "cleanup", "foreground"]);
+      expect(isPreviewCaptureBusy(conversationId)).toBe(false);
+      unregister();
+    },
+  );
+
+  it("never lets canvas work interrupt foreground work", async () => {
+    const conversationId = "foreground-priority";
+    const unregister = registerPreviewRuntime(conversationId, adapter());
+    const gate = deferred<void>();
+    let foregroundSignal!: AbortSignal;
+    const foreground = withPreviewCaptureLock({
+      conversationId,
+      owner: "annotation",
+      run: async (_runtime, signal) => {
+        foregroundSignal = signal;
+        await gate.promise;
+      },
+    });
+    const capture = vi.fn(async () => undefined);
+    await expect(
+      withPreviewCaptureLock({ conversationId, owner: "canvas", run: capture }),
+    ).rejects.toMatchObject({ code: "capture_busy" });
+    expect(foregroundSignal.aborted).toBe(false);
+    expect(capture).not.toHaveBeenCalled();
+    gate.resolve();
+    await foreground;
+    unregister();
+  });
+
+  it("permits only one competing foreground waiter to take the released lock", async () => {
+    const conversationId = "canvas-waiter-race";
+    const unregister = registerPreviewRuntime(conversationId, adapter());
+    const backgroundGate = deferred<void>();
+    const foregroundGate = deferred<void>();
+    const background = withPreviewCaptureLock({
+      conversationId,
+      owner: "canvas",
+      run: async () => backgroundGate.promise,
+    });
+    const backgroundResult = expect(background).rejects.toMatchObject({
+      name: "AbortError",
+    });
+    const first = withPreviewCaptureLock({
+      conversationId,
+      owner: "annotation",
+      run: async () => foregroundGate.promise,
+    });
+    const secondRun = vi.fn(async () => undefined);
+    const second = withPreviewCaptureLock({
+      conversationId,
+      owner: "manual-review",
+      run: secondRun,
+    });
+    const secondResult = expect(second).rejects.toMatchObject({
+      code: "capture_busy",
+    });
+    backgroundGate.resolve();
+    await Promise.all([backgroundResult, secondResult]);
+    expect(secondRun).not.toHaveBeenCalled();
+    foregroundGate.resolve();
+    await first;
+    unregister();
+  });
+
+  it("rejects a foreground waiter when the runtime is replaced during cleanup", async () => {
+    const conversationId = "canvas-runtime-replacement";
+    const unregister = registerPreviewRuntime(conversationId, adapter());
+    const gate = deferred<void>();
+    const background = withPreviewCaptureLock({
+      conversationId,
+      owner: "canvas",
+      run: async () => gate.promise,
+    });
+    const backgroundResult = expect(background).rejects.toMatchObject({
+      name: "AbortError",
+    });
+    const run = vi.fn(async () => undefined);
+    const foreground = withPreviewCaptureLock({
+      conversationId,
+      owner: "tool",
+      run,
+    });
+    const foregroundResult = expect(foreground).rejects.toMatchObject({
+      name: "AbortError",
+    });
+    const unregisterReplacement = registerPreviewRuntime(
+      conversationId,
+      adapter("generation-b"),
+    );
+    unregister();
+    gate.resolve();
+    await Promise.all([backgroundResult, foregroundResult]);
+    expect(run).not.toHaveBeenCalled();
+    await expect(
+      withPreviewCaptureLock({
+        conversationId,
+        owner: "tool",
+        run: async (runtime) => runtime.getGeneration(),
+      }),
+    ).resolves.toBe("generation-b");
+    unregisterReplacement();
+  });
+
+  it("cancels a waiting foreground request without waiting for canvas cleanup", async () => {
+    const conversationId = "canvas-wait-cancel";
+    const unregister = registerPreviewRuntime(conversationId, adapter());
+    const gate = deferred<void>();
+    const background = withPreviewCaptureLock({
+      conversationId,
+      owner: "canvas",
+      run: async () => gate.promise,
+    });
+    const backgroundResult = expect(background).rejects.toMatchObject({
+      name: "AbortError",
+    });
+    const controller = new AbortController();
+    const run = vi.fn(async () => undefined);
+    const foreground = withPreviewCaptureLock({
+      conversationId,
+      owner: "annotation",
+      signal: controller.signal,
+      run,
+    });
+    controller.abort();
+    await expect(foreground).rejects.toMatchObject({ name: "AbortError" });
+    expect(run).not.toHaveBeenCalled();
+    expect(isPreviewCaptureBusy(conversationId)).toBe(true);
+    gate.resolve();
+    await backgroundResult;
+    unregister();
+  });
+
+  it("rejects legacy scenario identity while retaining ordinary query parameters", () => {
+    const target = {
+      pageId: "dashboard",
+      route: "#/dashboard?scenario=empty&tab=history",
+    };
+    expect(sanitizePrototypePreviewTarget(target)).toEqual(target);
+    expect(
+      sanitizePrototypePreviewTarget({ ...target, scenarioId: "empty" }),
+    ).toBeNull();
+  });
+
+  it("keeps a target capture bound to page and route identity", async () => {
     const target: PrototypePreviewTarget = {
       pageId: "dashboard",
       route: "#/dashboard",
-      scenarioId: "populated",
     };
     const wrongTarget: PrototypePreviewTarget = {
       ...target,
-      scenarioId: "empty",
+      route: "#/other-page",
     };
     const capture = vi.fn(async () => ({
       generation: "generation-a",
@@ -219,7 +404,6 @@ describe("preview runtime registry", () => {
       sanitizePrototypePreviewTarget({
         pageId: "home",
         route: "javascript:alert(1)",
-        scenarioId: "default",
       }),
     ).toBeNull();
     await expect(
@@ -229,7 +413,6 @@ describe("preview runtime registry", () => {
         target: {
           pageId: "home",
           route: "#/" + "a".repeat(2048),
-          scenarioId: "default",
         },
         viewports: ["desktop"],
       }),

@@ -412,7 +412,7 @@ function projectDesignWorkspaceContext(
     return "";
   return `
 <project_design_workspace>
-The current trusted workspace selection is page_id "${selection.pageId}" and scenario_id "${selection.scenarioId}". For a local or deictic request such as "this page", default target_page_ids to this page only. Add shared_scope entries only when the requested change truly modifies a declared shared layout or shared UI.
+The current trusted workspace selection is page_id "${selection.pageId}". For a local or deictic request such as "this page", default target_page_ids to this page only. Add shared_scope entries only when the requested change truly modifies a declared shared layout or shared UI.
 </project_design_workspace>
 `;
 }
@@ -430,22 +430,13 @@ function expectedPrototypeReviewCoverage(
   const targets = result.design.pages
     .filter((page) => !affected || affected.has(page.id))
     .flatMap((page) => {
-      const scenarios = [
-        ...new Set([page.defaultScenario ?? "default", ...page.scenarioIds]),
-      ];
-      return scenarios.flatMap((scenarioId) => {
-        const target = resolveProjectDesignPreviewTarget(
-          result.design,
-          page.id,
-          scenarioId,
-        );
-        return target
-          ? (["desktop", "tablet", "mobile"] as const).map((viewport) => ({
-              ...target,
-              viewport,
-            }))
-          : [];
-      });
+      const target = resolveProjectDesignPreviewTarget(result.design, page.id);
+      return target
+        ? (["desktop", "tablet", "mobile"] as const).map((viewport) => ({
+            ...target,
+            viewport,
+          }))
+        : [];
     });
   return targets.slice(0, 120);
 }
@@ -1888,7 +1879,6 @@ export function useGenerator({
               target?: {
                 pageId?: unknown;
                 route?: unknown;
-                scenarioId?: unknown;
               };
             }
           ).target;
@@ -1897,16 +1887,16 @@ export function useGenerator({
             const blueprint = readProjectDesign(currentFiles);
             if (
               blueprint.status !== "ready" ||
+              !rawTarget ||
+              typeof rawTarget !== "object" ||
               typeof rawTarget.pageId !== "string" ||
-              (rawTarget.scenarioId !== undefined &&
-                typeof rawTarget.scenarioId !== "string")
+              "scenarioId" in rawTarget
             ) {
               return "Error: prototype preview targets require a valid design-project.json blueprint.";
             }
             const resolution = resolveProjectDesignPreview(
               blueprint.design,
               rawTarget.pageId,
-              rawTarget.scenarioId as string | undefined,
             );
             if (resolution.status !== "ready")
               return {

@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { useSandpack } from "@codesandbox/sandpack-react";
+import { loadSandpackClient } from "@codesandbox/sandpack-client";
 import type { ProjectFiles } from "../../types";
 
 type Sandpack = ReturnType<typeof useSandpack>["sandpack"];
@@ -9,6 +10,10 @@ type Setup = Client["sandboxSetup"];
 export interface SandpackRuntimeSyncHandle {
   isSynchronized: (expected: ProjectFiles) => boolean;
   restart: () => Promise<void>;
+  bootstrapIsolatedPreview: (
+    frame: HTMLIFrameElement,
+    signal: AbortSignal,
+  ) => Promise<() => void>;
 }
 
 function equalValue(left: unknown, right: unknown): boolean {
@@ -71,10 +76,58 @@ export function SandpackRuntimeSync({
   const latest = useRef(sandpack);
   latest.current = sandpack;
   const reconcileRef = useRef<(() => void) | null>(null);
+  const isolatedClients = useRef(new Set<() => void>());
 
   useEffect(() => {
     onChange?.({
       restart: () => latest.current.runSandpack(),
+      async bootstrapIsolatedPreview(frame, signal) {
+        signal.throwIfAborted();
+        const source = Object.values(latest.current.clients)[0];
+        if (!source) throw new Error("The preview client is unavailable.");
+        const setup = copySetup(source.sandboxSetup);
+        const options = {
+          ...source.options,
+          ...(source.options.externalResources
+            ? { externalResources: [...source.options.externalResources] }
+            : {}),
+          ...(source.options.customNpmRegistries
+            ? {
+                customNpmRegistries: source.options.customNpmRegistries.map(
+                  (registry) => ({ ...registry }),
+                ),
+              }
+            : {}),
+        };
+        let client: Awaited<ReturnType<typeof loadSandpackClient>> | undefined;
+        let disposed = false;
+        const dispose = () => {
+          if (disposed) return;
+          disposed = true;
+          signal.removeEventListener("abort", dispose);
+          isolatedClients.current.delete(dispose);
+          client?.destroy();
+        };
+        isolatedClients.current.add(dispose);
+        signal.addEventListener("abort", dispose, { once: true });
+        try {
+          client = await loadSandpackClient(frame, setup, options);
+          // Client construction imports a runtime asynchronously and cannot be
+          // cancelled. A client that arrives after abort/unmount is never kept.
+          if (disposed) {
+            client.destroy();
+            throw (
+              signal.reason ??
+              new DOMException("Preview runtime was removed.", "AbortError")
+            );
+          }
+          signal.throwIfAborted();
+          return dispose;
+        } catch (error) {
+          dispose();
+          throw error;
+        }
+      },
       isSynchronized(expected) {
         const current = latest.current;
         if (
@@ -281,7 +334,9 @@ export function SandpackRuntimeSync({
   }, [sandpack.files, sandpack.environment, listen]);
   useEffect(() => {
     const records = deliveries.current;
+    const temporary = isolatedClients.current;
     return () => {
+      for (const dispose of temporary) dispose();
       for (const record of records.values()) record.restore();
       records.clear();
     };

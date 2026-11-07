@@ -13,6 +13,7 @@ import { useMemoryStore } from "../../../store/memory";
 import { useProjectTemplateStore } from "../../../store/project-templates";
 import { useSkillsStore } from "../../../store/skills";
 import { useSnapshotStore } from "../../../store/snapshot";
+import { useProjectDesignWorkspaceStore } from "../../../store/project-design-workspace";
 
 const STORAGE_SNAPSHOT_LIMIT = 20;
 type ExtraStorageEstimate = { bytes: number; items: number; error?: string };
@@ -27,6 +28,7 @@ export function StorageTab() {
   const memories = useMemoryStore((s) => s.memories);
   const skills = useSkillsStore((s) => s.skills);
   const templates = useProjectTemplateStore((s) => s.templates);
+  const canvasLayouts = useProjectDesignWorkspaceStore((s) => s.layouts);
   const [notice, setNotice] = useState<string | null>(null);
   const [extraDomains, setExtraDomains] = useState<{
     mcp: ExtraStorageEstimate;
@@ -34,12 +36,14 @@ export function StorageTab() {
     attachments: ExtraStorageEstimate;
     projectAssets: ExtraStorageEstimate;
     projectArchives: ExtraStorageEstimate;
+    designWorkspace: ExtraStorageEstimate;
   }>({
     mcp: { bytes: 0, items: 0 },
     designSystems: { bytes: 0, items: 0 },
     attachments: { bytes: 0, items: 0 },
     projectAssets: { bytes: 0, items: 0 },
     projectArchives: { bytes: 0, items: 0 },
+    designWorkspace: { bytes: 0, items: 0 },
   });
 
   useEffect(() => {
@@ -54,13 +58,14 @@ export function StorageTab() {
             attachments: estimates.attachments,
             projectAssets: estimates.projectAssets,
             projectArchives: estimates.projectArchives,
+            designWorkspace: estimates.designWorkspace,
           });
         }
       });
     return () => {
       active = false;
     };
-  }, [conversations, memories, skills, snapshots, templates]);
+  }, [conversations, memories, skills, snapshots, templates, canvasLayouts]);
 
   const report = useMemo(
     () =>
@@ -191,6 +196,13 @@ export function StorageTab() {
         : formatBytes(extraDomains.projectArchives.bytes),
     },
     {
+      label: t.settings.storage.designWorkspace,
+      value: extraDomains.designWorkspace.items,
+      detail: extraDomains.designWorkspace.error
+        ? t.settings.storage.estimateUnavailable
+        : formatBytes(extraDomains.designWorkspace.bytes),
+    },
+    {
       label: t.settings.storage.projectAssets,
       value: extraDomains.projectAssets.items,
       detail: extraDomains.projectAssets.error
@@ -217,6 +229,7 @@ export function StorageTab() {
                 extraDomains.designSystems.bytes +
                 extraDomains.attachments.bytes +
                 extraDomains.projectAssets.bytes +
+                extraDomains.designWorkspace.bytes +
                 extraDomains.projectArchives.bytes,
             )}
           </span>

@@ -1,5 +1,7 @@
 import {
   Eye,
+  LayoutGrid,
+  ArrowLeft,
   Code2,
   Monitor,
   Tablet,
@@ -74,13 +76,9 @@ interface ViewToolbarProps {
   interactionLocked?: boolean;
   onAnnotate?: (scope: PreviewCaptureScope) => void;
   annotationUnavailableReason?: string;
-  prototypeNavigation?: {
-    pages: readonly { id: string; name: string }[];
-    scenarios: readonly { id: string; name: string }[];
-    selectedPageId?: string;
-    selectedScenarioId?: string;
-    onPageSelect: (pageId: string) => void;
-    onScenarioSelect: (scenarioId: string) => void;
+  designWorkspace?: {
+    focused: boolean;
+    actions: ReactNode;
   };
 }
 
@@ -128,6 +126,41 @@ function ToolbarIconButton({
   );
 }
 
+/** Shared device capsule for the live preview and design canvas headers. */
+export function PreviewDeviceSelector({
+  value,
+  onChange,
+}: {
+  value: DeviceSize;
+  onChange: (size: DeviceSize) => void;
+}) {
+  const t = useT();
+  const options = [
+    { value: "desktop", icon: Monitor },
+    { value: "tablet", icon: Tablet },
+    { value: "mobile", icon: Smartphone },
+  ] as const;
+  return (
+    <div
+      role="group"
+      aria-label={t.toolbar.deviceSize}
+      className="inline-flex shrink-0 items-center gap-1 rounded-lg border bg-background/60 p-0.5"
+    >
+      {options.map((option) => (
+        <ToolbarIconButton
+          key={option.value}
+          selected={value === option.value}
+          onClick={() => onChange(option.value)}
+          label={t.toolbar[option.value]}
+          className={option.value}
+        >
+          <option.icon size={16} />
+        </ToolbarIconButton>
+      ))}
+    </div>
+  );
+}
+
 export function ViewToolbar({
   viewMode,
   onViewModeChange,
@@ -153,13 +186,14 @@ export function ViewToolbar({
   interactionLocked = false,
   onAnnotate,
   annotationUnavailableReason,
-  prototypeNavigation,
+  designWorkspace,
 }: ViewToolbarProps) {
   const t = useT();
   return (
     <div
       inert={interactionLocked}
-      className="min-h-14 border-b bg-background px-4 py-2 flex flex-wrap items-center justify-between gap-2 shrink-0 z-10"
+      data-testid="view-toolbar"
+      className="design-workspace-header min-h-14 border-b bg-background px-4 py-2 flex flex-wrap items-center justify-between gap-2 shrink-0 z-10"
     >
       <div className="flex items-center gap-1 p-0.5 rounded-lg border">
         {previewEnabled && (
@@ -169,8 +203,8 @@ export function ViewToolbar({
             onClick={() => onViewModeChange("preview")}
             className="gap-2"
           >
-            <Eye size={16} />
-            {t.toolbar.preview}
+            {designWorkspace ? <LayoutGrid size={16} /> : <Eye size={16} />}
+            {designWorkspace ? t.designCanvas.canvas : t.toolbar.preview}
           </Button>
         )}
         <Button
@@ -184,189 +218,146 @@ export function ViewToolbar({
         </Button>
       </div>
 
-      {previewEnabled && viewMode === "preview" && prototypeNavigation && (
-        <div className="mx-2 hidden min-w-0 items-center gap-1 lg:flex">
-          <label className="sr-only" htmlFor="prototype-page-select">
-            {t.prototypeWorkspace.pages}
-          </label>
-          <select
-            id="prototype-page-select"
-            aria-label={t.prototypeWorkspace.pages}
-            className="h-8 max-w-40 rounded-md border bg-background px-2 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            value={prototypeNavigation.selectedPageId ?? ""}
-            onChange={(event) =>
-              prototypeNavigation.onPageSelect(event.currentTarget.value)
-            }
-          >
-            {prototypeNavigation.pages.map((page) => (
-              <option key={page.id} value={page.id}>
-                {page.name}
-              </option>
-            ))}
-          </select>
-          <label className="sr-only" htmlFor="prototype-scenario-select">
-            {t.prototypeWorkspace.scenario}
-          </label>
-          <select
-            id="prototype-scenario-select"
-            aria-label={t.prototypeWorkspace.scenario}
-            className="h-8 max-w-36 rounded-md border bg-background px-2 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            value={prototypeNavigation.selectedScenarioId ?? ""}
-            onChange={(event) =>
-              prototypeNavigation.onScenarioSelect(event.currentTarget.value)
-            }
-          >
-            {prototypeNavigation.scenarios.map((scenario) => (
-              <option key={scenario.id} value={scenario.id}>
-                {scenario.name}
-              </option>
-            ))}
-          </select>
-        </div>
+      {designWorkspace?.focused && viewMode === "preview" && (
+        <Button
+          className="mr-auto"
+          size="sm"
+          variant="ghost"
+          onClick={() => onViewModeChange("preview")}
+        >
+          <ArrowLeft size={16} />
+          {t.designCanvas.back}
+        </Button>
       )}
 
-      <div className="flex items-center gap-2">
-        {previewEnabled && viewMode === "preview" && (
-          <div className="flex items-center gap-1">
-            {onAnnotate && (
-              <DropdownMenu>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <span
-                      className="inline-flex"
-                      tabIndex={annotationUnavailableReason ? 0 : undefined}
-                    >
-                      <DropdownMenuTrigger asChild>
-                        <Button
-                          variant="ghost"
-                          size="icon-sm"
-                          aria-label={t.annotation.title}
-                          disabled={!!annotationUnavailableReason}
+      <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
+        {previewEnabled &&
+        viewMode === "preview" &&
+        designWorkspace &&
+        !designWorkspace.focused
+          ? designWorkspace.actions
+          : previewEnabled &&
+            viewMode === "preview" && (
+              <div className="flex items-center gap-1">
+                {onAnnotate && (
+                  <DropdownMenu>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <span
+                          className="inline-flex"
+                          tabIndex={annotationUnavailableReason ? 0 : undefined}
                         >
-                          <Camera size={15} />
-                        </Button>
-                      </DropdownMenuTrigger>
-                    </span>
-                  </TooltipTrigger>
-                  <TooltipContent>
-                    {annotationUnavailableReason || t.annotation.title}
-                  </TooltipContent>
-                </Tooltip>
-                <DropdownMenuContent align="end">
-                  <DropdownMenuItem onSelect={() => onAnnotate("viewport")}>
-                    {t.annotation.viewport}
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onSelect={() => onAnnotate("full-page")}>
-                    {t.annotation.fullPage}
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="icon-sm"
+                              aria-label={t.annotation.title}
+                              disabled={!!annotationUnavailableReason}
+                            >
+                              <Camera size={15} />
+                            </Button>
+                          </DropdownMenuTrigger>
+                        </span>
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        {annotationUnavailableReason || t.annotation.title}
+                      </TooltipContent>
+                    </Tooltip>
+                    <DropdownMenuContent align="end">
+                      <DropdownMenuItem onSelect={() => onAnnotate("viewport")}>
+                        {t.annotation.viewport}
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
+                        onSelect={() => onAnnotate("full-page")}
+                      >
+                        {t.annotation.fullPage}
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                )}
+                {designMode && onOpenDesignReview && (
+                  <ToolbarIconButton
+                    onClick={onOpenDesignReview}
+                    label={t.toolbar.reviewDesign}
+                    disabled={isGenerating}
+                  >
+                    <ScanSearch size={15} />
+                  </ToolbarIconButton>
+                )}
+                {designMode && designSelectionSupported && (
+                  <ToolbarIconButton
+                    selected={designSelectionActive}
+                    onClick={() => onToggleDesignSelection?.()}
+                    disabled={isGenerating}
+                    label={
+                      designSelectionActive
+                        ? t.toolbar.stopSelecting
+                        : t.toolbar.selectElement
+                    }
+                  >
+                    <MousePointerClick size={15} />
+                  </ToolbarIconButton>
+                )}
+                {designMode &&
+                  !designSelectionSupported &&
+                  designSelectionUnavailableReason && (
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <span
+                          className="inline-flex size-8 items-center justify-center text-muted-foreground"
+                          aria-label={designSelectionUnavailableReason}
+                          tabIndex={0}
+                        >
+                          <CircleHelp size={15} />
+                        </span>
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        {designSelectionUnavailableReason}
+                      </TooltipContent>
+                    </Tooltip>
+                  )}
+                {onReloadPreview && (
+                  <ToolbarIconButton
+                    onClick={onReloadPreview}
+                    label={t.toolbar.reloadPreview}
+                  >
+                    <RefreshCw size={15} />
+                  </ToolbarIconButton>
+                )}
+                <div
+                  role="group"
+                  aria-label={t.toolbar.zoomLevel}
+                  className="flex h-8 items-center rounded-lg border border-border/70 p-0.5"
+                >
+                  <ToolbarIconButton
+                    onClick={() => onPreviewZoomOut?.()}
+                    label={t.toolbar.zoomOut}
+                    disabled={previewScale <= MIN_PREVIEW_SCALE}
+                    className="size-7 text-muted-foreground hover:text-foreground"
+                  >
+                    <Minus size={13} />
+                  </ToolbarIconButton>
+                  <output
+                    aria-label={t.toolbar.zoomLevel}
+                    className="w-8 text-center font-mono text-[10px] font-medium tabular-nums text-muted-foreground"
+                  >
+                    {Math.round(previewScale * 100)}
+                  </output>
+                  <ToolbarIconButton
+                    onClick={() => onPreviewZoomIn?.()}
+                    label={t.toolbar.zoomIn}
+                    disabled={previewScale >= MAX_PREVIEW_SCALE}
+                    className="size-7 text-muted-foreground hover:text-foreground"
+                  >
+                    <Plus size={13} />
+                  </ToolbarIconButton>
+                </div>
+                <PreviewDeviceSelector
+                  value={deviceSize}
+                  onChange={onDeviceSizeChange}
+                />
+              </div>
             )}
-            {designMode && onOpenDesignReview && (
-              <ToolbarIconButton
-                onClick={onOpenDesignReview}
-                label={t.toolbar.reviewDesign}
-                disabled={isGenerating}
-              >
-                <ScanSearch size={15} />
-              </ToolbarIconButton>
-            )}
-            {designMode && designSelectionSupported && (
-              <ToolbarIconButton
-                selected={designSelectionActive}
-                onClick={() => onToggleDesignSelection?.()}
-                disabled={isGenerating}
-                label={
-                  designSelectionActive
-                    ? t.toolbar.stopSelecting
-                    : t.toolbar.selectElement
-                }
-              >
-                <MousePointerClick size={15} />
-              </ToolbarIconButton>
-            )}
-            {designMode &&
-              !designSelectionSupported &&
-              designSelectionUnavailableReason && (
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <span
-                      className="inline-flex size-8 items-center justify-center text-muted-foreground"
-                      aria-label={designSelectionUnavailableReason}
-                      tabIndex={0}
-                    >
-                      <CircleHelp size={15} />
-                    </span>
-                  </TooltipTrigger>
-                  <TooltipContent>
-                    {designSelectionUnavailableReason}
-                  </TooltipContent>
-                </Tooltip>
-              )}
-            {onReloadPreview && (
-              <ToolbarIconButton
-                onClick={onReloadPreview}
-                label={t.toolbar.reloadPreview}
-              >
-                <RefreshCw size={15} />
-              </ToolbarIconButton>
-            )}
-            <div
-              role="group"
-              aria-label={t.toolbar.zoomLevel}
-              className="flex h-8 items-center rounded-lg border border-border/70 p-0.5"
-            >
-              <ToolbarIconButton
-                onClick={() => onPreviewZoomOut?.()}
-                label={t.toolbar.zoomOut}
-                disabled={previewScale <= MIN_PREVIEW_SCALE}
-                className="size-7 text-muted-foreground hover:text-foreground"
-              >
-                <Minus size={13} />
-              </ToolbarIconButton>
-              <output
-                aria-label={t.toolbar.zoomLevel}
-                className="w-8 text-center font-mono text-[10px] font-medium tabular-nums text-muted-foreground"
-              >
-                {Math.round(previewScale * 100)}
-              </output>
-              <ToolbarIconButton
-                onClick={() => onPreviewZoomIn?.()}
-                label={t.toolbar.zoomIn}
-                disabled={previewScale >= MAX_PREVIEW_SCALE}
-                className="size-7 text-muted-foreground hover:text-foreground"
-              >
-                <Plus size={13} />
-              </ToolbarIconButton>
-            </div>
-            <div className="flex items-center gap-1 p-0.5 rounded-lg border">
-              <ToolbarIconButton
-                selected={deviceSize === "desktop"}
-                onClick={() => onDeviceSizeChange("desktop")}
-                label={t.toolbar.desktop}
-                className="desktop"
-              >
-                <Monitor size={16} />
-              </ToolbarIconButton>
-              <ToolbarIconButton
-                selected={deviceSize === "tablet"}
-                onClick={() => onDeviceSizeChange("tablet")}
-                label={t.toolbar.tablet}
-                className="tablet"
-              >
-                <Tablet size={16} />
-              </ToolbarIconButton>
-              <ToolbarIconButton
-                selected={deviceSize === "mobile"}
-                onClick={() => onDeviceSizeChange("mobile")}
-                label={t.toolbar.mobile}
-                className="mobile"
-              >
-                <Smartphone size={16} />
-              </ToolbarIconButton>
-            </div>
-          </div>
-        )}
 
         {viewMode === "code" && (
           <div className="flex items-center gap-1">

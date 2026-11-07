@@ -56,6 +56,11 @@ for (const entry of ["index.tsx", "src/main.tsx"]) {
       { app, entry },
     );
 
+    await expect(page.getByTestId("design-canvas")).toBeVisible();
+    await page
+      .getByTestId("design-canvas")
+      .getByRole("button", { name: "Current page", exact: true })
+      .press("Enter");
     const preview = page.frameLocator(".sp-preview-iframe");
     await expect(
       preview.getByRole("heading", { name: "Large React preview" }),

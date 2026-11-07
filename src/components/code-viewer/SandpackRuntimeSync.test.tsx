@@ -16,6 +16,10 @@ import {
 } from "./SandpackRuntimeSync";
 
 const loader = vi.hoisted(() => ({ load: vi.fn() }));
+vi.mock("@codesandbox/sandpack-client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@codesandbox/sandpack-client")>()),
+  loadSandpackClient: loader.load,
+}));
 // Keep the real Provider's delayed compile effect; replace only browser client creation.
 vi.mock("@codesandbox/sandpack-react", async () => {
   const { createRequire } = await import("node:module");
@@ -151,6 +155,155 @@ describe("Sandpack runtime file delivery", () => {
     client.status = "done";
     await new Promise((resolve) => setTimeout(resolve, 70));
     expect(updates).toEqual(["edit-A", "edit-C"]);
+  });
+});
+
+describe("isolated compiled preview bootstrap", () => {
+  type Sandpack = ReturnType<typeof useSandpack>["sandpack"];
+  type Client = Sandpack["clients"][string];
+
+  function mountSource() {
+    loader.load.mockReset();
+    let state!: Sandpack;
+    let handle: SandpackRuntimeSyncHandle | null = null;
+    const source = {
+      status: "done",
+      options: {
+        externalResources: ["https://example.test/theme.css"],
+        showErrorScreen: true,
+      },
+      sandboxSetup: {
+        files: {} as Sandpack["files"],
+        template: "parcel",
+        dependencies: { react: "18.3.1" },
+        devDependencies: { typescript: "5.4.5" },
+        entry: "/index.html",
+      },
+      listen: () => () => {},
+      updateSandbox: vi.fn(),
+      destroy: vi.fn(),
+    } as unknown as Client;
+    function Mount() {
+      const { sandpack } = useSandpack();
+      state = sandpack;
+      useEffect(() => {
+        source.sandboxSetup.files = sandpack.files;
+        sandpack.clients.source = source;
+        return () => {
+          delete sandpack.clients.source;
+        };
+      }, []);
+      return null;
+    }
+    const mounted = render(
+      <SandpackProvider
+        template="static"
+        customSetup={{ environment: "parcel" }}
+        files={{ "index.html": "<main>Source</main>" }}
+      >
+        <Mount />
+        <SandpackRuntimeSync
+          onChange={(value) => {
+            handle = value;
+          }}
+        />
+      </SandpackProvider>,
+    );
+    return { ...mounted, source, state, getHandle: () => handle! };
+  }
+
+  it("copies the source setup and options without registering or mutating the source", async () => {
+    const mounted = mountSource();
+    const destroy = vi.fn();
+    loader.load.mockResolvedValueOnce({ destroy });
+    const frame = document.createElement("iframe");
+    const controller = new AbortController();
+    const release = await mounted
+      .getHandle()
+      .bootstrapIsolatedPreview(frame, controller.signal);
+    expect(loader.load).toHaveBeenCalledOnce();
+    const [loadedFrame, setup, options] = loader.load.mock.calls[0] as [
+      HTMLIFrameElement,
+      Client["sandboxSetup"],
+      Client["options"],
+    ];
+    expect(loadedFrame).toBe(frame);
+    expect(setup).toEqual(mounted.source.sandboxSetup);
+    expect(options).toEqual(mounted.source.options);
+    setup.files["/index.html"].code = "temporary change";
+    setup.dependencies!.react = "changed";
+    options.externalResources!.push("temporary.css");
+    expect(mounted.source.sandboxSetup.files["/index.html"].code).toBe(
+      "<main>Source</main>",
+    );
+    expect(mounted.source.sandboxSetup.dependencies!.react).toBe("18.3.1");
+    expect(mounted.source.options.externalResources).toHaveLength(1);
+    expect(Object.values(mounted.state.clients)).toEqual([mounted.source]);
+    expect(mounted.source.destroy).not.toHaveBeenCalled();
+    controller.abort();
+    release();
+    expect(destroy).toHaveBeenCalledOnce();
+    mounted.unmount();
+    expect(destroy).toHaveBeenCalledOnce();
+  });
+
+  it.each(["abort", "unmount"])(
+    "destroys a late-created client after %s",
+    async (reason) => {
+      const mounted = mountSource();
+      const destroy = vi.fn();
+      let finish!: (client: { destroy: () => void }) => void;
+      loader.load.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve;
+          }),
+      );
+      const controller = new AbortController();
+      const pending = mounted
+        .getHandle()
+        .bootstrapIsolatedPreview(
+          document.createElement("iframe"),
+          controller.signal,
+        );
+      const rejected = expect(pending).rejects.toMatchObject({
+        name: "AbortError",
+      });
+      if (reason === "abort") controller.abort();
+      else mounted.unmount();
+      finish({ destroy });
+      await rejected;
+      expect(destroy).toHaveBeenCalledOnce();
+      if (reason === "abort") mounted.unmount();
+    },
+  );
+
+  it("does not load a cancelled preview and propagates bootstrap failures", async () => {
+    const mounted = mountSource();
+    const stopped = new AbortController();
+    stopped.abort();
+    await expect(
+      mounted
+        .getHandle()
+        .bootstrapIsolatedPreview(
+          document.createElement("iframe"),
+          stopped.signal,
+        ),
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect(loader.load).not.toHaveBeenCalled();
+    loader.load.mockRejectedValueOnce(
+      new Error("Cannot load preview compiler"),
+    );
+    await expect(
+      mounted
+        .getHandle()
+        .bootstrapIsolatedPreview(
+          document.createElement("iframe"),
+          new AbortController().signal,
+        ),
+    ).rejects.toThrow("Cannot load preview compiler");
+    expect(Object.values(mounted.state.clients)).toEqual([mounted.source]);
+    mounted.unmount();
   });
 });
 

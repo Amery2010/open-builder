@@ -46,7 +46,7 @@ _Avoid_: Source archive, deployed site
 
 **Preview Sequence**:
 Run-scoped captures of the same mounted Preview Generation at requested time offsets, preserving its current interaction state. Actual sampling times describe delays; history retains summaries rather than image bytes.
-_Avoid_: Video, exact animation frames, refreshed scenario
+_Avoid_: Video, exact animation frames, reset application data
 
 **Delegated Edit Task**:
 A parent-assigned development task with exclusive ownership of explicit project paths. It works on an independent snapshot and contributes only successful, conflict-free edits through an atomic parent commit.
@@ -54,24 +54,36 @@ _Avoid_: Shared writable project, unrestricted subagent, whole-tree replacement
 
 ## Design language
 
+**Design Canvas**:
+The spatial Design workspace where Prototype Pages appear as complete-page boards. Selecting a board chooses the design context; entering its Focused Preview enables interaction with the running page.
+_Avoid_: Project file tree, visual source editor, multiple live applications
+
+**Canvas Layout**:
+The locally saved board positions and viewing position for one Conversation branch; spatial placement is independent of the page tree order. It is a workspace preference, independent of the Project Design Blueprint, file snapshots, and project source exports.
+_Avoid_: Page layout, source change, Blueprint order
+
+**Canvas Preview Image**:
+A temporary full-page image used to display a board in the Design Canvas. It describes a particular project state, page, and viewport but does not establish Prototype Review Coverage.
+_Avoid_: Preview Evidence, persisted screenshot archive, live page
+
+**Focused Preview**:
+The interactive view of one running project page reached from a Design Canvas board. Returning to the canvas preserves the viewing position and the running page's interaction state.
+_Avoid_: New runtime, image enlargement, separate project
+
 **Project Design Blueprint**:
-The root `design-project.json` authority for a prototype's known product goal, stable pages, shared layouts and UI, flows, scenarios, tasks, and committed progress. It can be incomplete; missing information is tracked for the affected target. It travels with project files, snapshots, copies, and exports; Conversation state does not own another copy.
+The root `design-project.json` authority for a prototype's known product goal, stable pages, shared layouts and UI, flows, tasks, and committed progress. It can be incomplete; missing information is tracked for the affected target. It travels with project files, snapshots, copies, and exports; Conversation state does not own another copy.
 _Avoid_: Design system, chat outline, runtime route table
 
 **Prototype Page**:
-A stable blueprint page ID with its known responsibility, route declaration, shared references, applicable scenarios, and source-file scope. A draft page can exist before it has a usable preview location.
+A stable blueprint page ID with its known responsibility, route declaration, shared references and source-file scope. A draft page can exist before it has a usable preview location.
 _Avoid_: Browser tab, screenshot, generated component
-
-**Prototype Scenario**:
-A declarative, named state for a Prototype Page, such as default, loading, empty, error, validation, or success. Selecting a scenario resets the prototype's shared mock data and never executes scenario-supplied script.
-_Avoid_: Arbitrary JavaScript, test runner, URL pathname
 
 **Prototype Build Batch**:
 A historical label for a recorded group of prototype work. New work follows the current request's concrete tasks and committed changes rather than a fixed sequence of phases.
 _Avoid_: Model turn, unrestricted project rewrite, release milestone
 
 **Prototype Review Coverage**:
-The persisted status for one source state, Prototype Page, Prototype Scenario, and viewport. Captured targets can become passed or needs-fix; unavailable targets remain unreviewed. Changes to source, preview targets, or the visual system make prior evidence stale; progress notes alone do not.
+The persisted status for one source state, Prototype Page and viewport. Captured targets can become passed or needs-fix; unavailable targets remain unreviewed. Changes to source, preview targets, or the visual system make prior evidence stale; progress notes alone do not.
 _Avoid_: WCAG certification, deployment proof, screenshot archive
 
 **Design Run**:
@@ -79,7 +91,7 @@ The host-owned context for one user design request, its selected scope, applied 
 _Avoid_: Model-submitted permission, fixed build phase
 
 **Prototype Preview Location**:
-A concrete, safe application location resolved from a Prototype Page and scenario. Dynamic route declarations require a known sample path before they can be checked visually.
+A concrete, safe application location resolved from a Prototype Page. Dynamic route declarations require a known sample path before they can be checked visually.
 _Avoid_: Route declaration, invented business ID
 
 **Design Token Contract**:

@@ -446,7 +446,7 @@ export const DESIGN_HOST_TOOLS = {
   }),
   capture_preview_evidence: tool({
     description:
-      "Capture screenshot and semantic evidence for explicitly selected preview viewports. scope defaults to full-page: the complete rendered document, possibly downscaled. Use viewport for the visible region. Unrendered or virtualized content is not expanded. For a complete prototype, provide a pageId and optional scenarioId from design-project.json; the Host resolves the executable route.",
+      "Capture screenshot and semantic evidence for explicitly selected preview viewports. scope defaults to full-page: the complete rendered document, possibly downscaled. Use viewport for the visible region. Unrendered or virtualized content is not expanded. For a complete prototype, provide a pageId from design-project.json; the Host resolves the executable route.",
     inputSchema: z.object({
       viewports: previewViewportsSchema,
       scope: z.enum(["viewport", "full-page"]).optional(),
@@ -458,10 +458,6 @@ export const DESIGN_HOST_TOOLS = {
             .trim()
             .min(1)
             .max(PROTOTYPE_ROUTE_MAX_LENGTH)
-            .optional(),
-          scenarioId: z
-            .string()
-            .regex(/^[a-z0-9][a-z0-9-]{0,79}$/)
             .optional(),
         })
         .strict()

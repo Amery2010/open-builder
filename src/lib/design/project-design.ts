@@ -16,7 +16,7 @@ import {
 export const PROJECT_DESIGN_PATH = "design-project.json" as const;
 export const PROJECT_DESIGN_FILE = PROJECT_DESIGN_PATH;
 export const PROJECT_DESIGN_SCHEMA_VERSION =
-  "open-builder-design-project/v2" as const;
+  "open-builder-design-project/v3" as const;
 export const LEGACY_PROJECT_DESIGN_SCHEMA_VERSION =
   "open-builder-design-project/v1" as const;
 
@@ -30,7 +30,6 @@ export const PROJECT_DESIGN_LIMITS = Object.freeze({
   maxLayouts: 100,
   maxSharedUiRefs: 200,
   maxFlows: 200,
-  maxScenarios: 200,
   maxRefsPerEntity: 40,
   maxChangedIds: 200,
   maxTreeDepth: 24,
@@ -79,7 +78,7 @@ const SHARED_UI_KINDS = [
   "custom",
 ] as const;
 
-const SCENARIO_KINDS = [
+const LEGACY_SCENARIO_KINDS = [
   "default",
   "happy-path",
   "smoke",
@@ -114,7 +113,6 @@ export const PROJECT_DESIGN_BATCH_PHASES = [
 export type PageKind = (typeof PAGE_KINDS)[number];
 export type LayoutKind = (typeof LAYOUT_KINDS)[number];
 export type SharedUiKind = (typeof SHARED_UI_KINDS)[number];
-export type ScenarioKind = (typeof SCENARIO_KINDS)[number];
 export type BuildProgressStatus = (typeof BUILD_PROGRESS_STATUSES)[number];
 export type ProjectDesignRevision = string | number;
 
@@ -214,11 +212,11 @@ const filePathListSchema = z
     });
   });
 
-const scenarioSchema = z
+const legacyScenarioSchema = z
   .object({
     id: stableIdSchema,
     name: textSchema,
-    kind: z.enum(SCENARIO_KINDS),
+    kind: z.enum(LEGACY_SCENARIO_KINDS),
   })
   .strict();
 
@@ -229,13 +227,11 @@ const pageShape = {
   route: routeSchema.optional(),
   previewPath: routeSchema.optional(),
   kind: z.enum(PAGE_KINDS).optional(),
-  defaultScenario: stableIdSchema.optional(),
   parentId: stableIdSchema.nullable().optional(),
   layoutId: stableIdSchema.nullable().optional(),
   filePaths: filePathListSchema,
   sharedUiRefs: idListSchema,
   flowIds: idListSchema,
-  scenarioIds: idListSchema,
 };
 const pageSchema = z
   .object(pageShape)
@@ -272,7 +268,6 @@ const flowSchema = z
     id: stableIdSchema,
     name: textSchema,
     pageIds: idListSchema,
-    scenarioIds: idListSchema,
   })
   .strict();
 
@@ -337,13 +332,7 @@ export type ProjectDesignJournalEntry = z.output<typeof journalEntrySchema>;
 
 const rawProjectDesignSchema = z
   .object({
-    schemaVersion: z.union([
-      z.literal(PROJECT_DESIGN_SCHEMA_VERSION),
-      z.literal(LEGACY_PROJECT_DESIGN_SCHEMA_VERSION),
-      // Accept the compact v1 marker when reading older generated files; all
-      // writes use the namespaced marker above.
-      z.literal(1),
-    ]),
+    schemaVersion: z.literal(PROJECT_DESIGN_SCHEMA_VERSION),
     productGoal: draftTextSchema.optional(),
     audience: draftTextSchema.optional(),
     revision: revisionSchema,
@@ -357,15 +346,137 @@ const rawProjectDesignSchema = z
       .max(PROJECT_DESIGN_LIMITS.maxSharedUiRefs)
       .default([]),
     flows: z.array(flowSchema).max(PROJECT_DESIGN_LIMITS.maxFlows).default([]),
-    scenarios: z
-      .array(scenarioSchema)
-      .max(PROJECT_DESIGN_LIMITS.maxScenarios)
-      .default([]),
     buildProgress: buildProgressSchema.prefault({}),
     tasks: z.array(taskSchema).max(200).optional(),
     journal: z.array(journalEntrySchema).optional(),
   })
   .strict();
+
+/** Read-only compatibility boundary. New writes never accept these fields. */
+const legacyProjectDesignSchema = rawProjectDesignSchema
+  .extend({
+    schemaVersion: z.union([
+      z.literal(LEGACY_PROJECT_DESIGN_SCHEMA_VERSION),
+      z.literal("open-builder-design-project/v2"),
+      z.literal(1),
+    ]),
+    pages: z
+      .array(
+        z
+          .object({
+            ...pageShape,
+            defaultScenario: stableIdSchema.optional(),
+            scenarioIds: idListSchema,
+          })
+          .strict()
+          .transform((page) => ({
+            ...page,
+            name: page.name ?? page.id,
+            parentId: page.parentId ?? null,
+            layoutId: page.layoutId ?? null,
+          })),
+      )
+      .max(PROJECT_DESIGN_LIMITS.maxPages)
+      .default([]),
+    flows: z
+      .array(flowSchema.extend({ scenarioIds: idListSchema }))
+      .max(PROJECT_DESIGN_LIMITS.maxFlows)
+      .default([]),
+    scenarios: z.array(legacyScenarioSchema).max(200).default([]),
+  })
+  .superRefine((design, ctx) => {
+    validateStructure(
+      { ...design, schemaVersion: PROJECT_DESIGN_SCHEMA_VERSION },
+      ctx,
+    );
+    addDuplicateIssues(design.scenarios, "scenarios", ctx);
+  });
+
+/** Preserve the exact old default URL before forgetting the legacy state model. */
+function migrateLegacyProjectDesign(
+  input: unknown,
+  ctx: z.RefinementCtx,
+): unknown {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return input;
+  const version = (input as Record<string, unknown>).schemaVersion;
+  if (
+    version !== 1 &&
+    version !== LEGACY_PROJECT_DESIGN_SCHEMA_VERSION &&
+    version !== "open-builder-design-project/v2"
+  )
+    return input;
+  const parsed = legacyProjectDesignSchema.safeParse(input);
+  if (!parsed.success) {
+    for (const issue of parsed.error.issues)
+      ctx.addIssue({
+        code: "custom",
+        path: issue.path,
+        message: issue.message,
+      });
+    return z.NEVER;
+  }
+  const { scenarios, ...legacy } = parsed.data;
+  let failed = false;
+  const pages = legacy.pages.map(
+    ({ defaultScenario, scenarioIds, ...page }, index) => {
+      const resolution = resolvePrototypeRoute({ pages: [page] }, page.id);
+      // Incomplete declarations remain editable drafts, without inventing a route.
+      if (resolution.status !== "ready") return page;
+      const fail = (message: string) => {
+        failed = true;
+        ctx.addIssue({
+          code: "custom",
+          path: ["pages", index, "route"],
+          message: `Cannot migrate page "${page.id}": ${message}`,
+        });
+      };
+      const selected = defaultScenario ?? "default";
+      const baseline =
+        selected === "default" &&
+        !defaultScenario &&
+        !scenarioIds.includes("default");
+      if (
+        !baseline &&
+        !scenarios.some((scenario) => scenario.id === selected)
+      ) {
+        fail(`the default scenario "${selected}" is not defined.`);
+        return page;
+      }
+      const route = page.route!;
+      const queryAt = route.indexOf("?");
+      const query = queryAt < 0 ? "" : route.slice(queryAt + 1);
+      const values = new URLSearchParams(query).getAll("scenario");
+      if (
+        values.length > 1 ||
+        (values.length === 1 && values[0] !== selected)
+      ) {
+        fail("the declared URL conflicts with its default scenario.");
+        return page;
+      }
+      const suffix = values.length
+        ? ""
+        : `${queryAt < 0 ? "?" : query ? "&" : ""}scenario=${encodeURIComponent(selected)}`;
+      const next = { ...page, route: route + suffix };
+      const expected = resolution.target.route + suffix;
+      const migrated = resolvePrototypeRoute({ pages: [next] }, page.id);
+      if (migrated.status !== "ready" || migrated.target.route !== expected) {
+        fail("the original default preview URL cannot be preserved safely.");
+      }
+      return next;
+    },
+  );
+  if (failed) return z.NEVER;
+  return {
+    ...legacy,
+    schemaVersion: PROJECT_DESIGN_SCHEMA_VERSION,
+    pages,
+    flows: legacy.flows.map((flow) => {
+      const next = { ...flow };
+      Reflect.deleteProperty(next, "scenarioIds");
+      return next;
+    }),
+  };
+}
 
 /** Input schemas deliberately omit read-time defaults so omission preserves data. */
 const progressPatchSchema = z
@@ -386,7 +497,6 @@ export const projectDesignUpdateSchema = rawProjectDesignSchema
     layouts: true,
     sharedUiRefs: true,
     flows: true,
-    scenarios: true,
     journal: true,
   })
   .partial()
@@ -397,14 +507,10 @@ export const projectDesignUpdateSchema = rawProjectDesignSchema
       .removeDefault()
       .optional(),
     flows: rawProjectDesignSchema.shape.flows.removeDefault().optional(),
-    scenarios: rawProjectDesignSchema.shape.scenarios
-      .removeDefault()
-      .optional(),
     buildProgress: progressPatchSchema.optional(),
     journal: rawProjectDesignSchema.shape.journal,
     pageCount: z.number().int().nonnegative().optional(),
     flowCount: z.number().int().nonnegative().optional(),
-    scenarioCount: z.number().int().nonnegative().optional(),
   });
 const pagePatchSchema = z
   .object({
@@ -412,7 +518,6 @@ const pagePatchSchema = z
     filePaths: filePathListSchema.removeDefault(),
     sharedUiRefs: idListSchema.removeDefault(),
     flowIds: idListSchema.removeDefault(),
-    scenarioIds: idListSchema.removeDefault(),
   })
   .partial()
   .required({ id: true })
@@ -433,7 +538,6 @@ const sharedUiPatchSchema = sharedUiRefSchema
 const flowPatchSchema = flowSchema
   .extend({
     pageIds: idListSchema.removeDefault(),
-    scenarioIds: idListSchema.removeDefault(),
   })
   .partial()
   .required({ id: true });
@@ -454,10 +558,6 @@ export const projectDesignPatchSchema = projectDesignUpdateSchema.extend({
     .array(flowPatchSchema)
     .max(PROJECT_DESIGN_LIMITS.maxFlows)
     .optional(),
-  scenarios: z
-    .array(scenarioSchema.partial().required({ id: true }))
-    .max(PROJECT_DESIGN_LIMITS.maxScenarios)
-    .optional(),
   tasks: z
     .array(taskSchema.partial().required({ id: true }))
     .max(200)
@@ -468,7 +568,6 @@ const entityCollections = [
   "layouts",
   "sharedUiRefs",
   "flows",
-  "scenarios",
   "tasks",
 ] as const;
 export const projectDesignRemoveSchema = z
@@ -477,7 +576,6 @@ export const projectDesignRemoveSchema = z
     layouts: idListSchema.removeDefault().optional(),
     sharedUiRefs: idListSchema.removeDefault().optional(),
     flows: idListSchema.removeDefault().optional(),
-    scenarios: idListSchema.removeDefault().optional(),
     tasks: idListSchema.removeDefault().optional(),
   })
   .strict();
@@ -506,7 +604,6 @@ export type ProjectDesignPage = z.output<typeof pageSchema>;
 export type ProjectDesignLayout = z.infer<typeof layoutSchema>;
 export type ProjectDesignSharedUiRef = z.infer<typeof sharedUiRefSchema>;
 export type ProjectDesignFlow = z.infer<typeof flowSchema>;
-export type ProjectDesignScenario = z.infer<typeof scenarioSchema>;
 export type ProjectDesignBuildProgress = z.infer<typeof buildProgressSchema>;
 export type ProjectDesignBuildCheckpoint = z.infer<
   typeof buildCheckpointSchema
@@ -516,9 +613,7 @@ export interface ProjectDesign extends Omit<
   z.output<typeof rawProjectDesignSchema>,
   "schemaVersion"
 > {
-  schemaVersion:
-    | typeof PROJECT_DESIGN_SCHEMA_VERSION
-    | typeof LEGACY_PROJECT_DESIGN_SCHEMA_VERSION;
+  schemaVersion: typeof PROJECT_DESIGN_SCHEMA_VERSION;
 }
 
 function addDuplicateIssues<T extends { id: string }>(
@@ -599,7 +694,6 @@ function validateReferences(
   const layoutIds = new Set(design.layouts.map((layout) => layout.id));
   const sharedUiIds = new Set(design.sharedUiRefs.map((ref) => ref.id));
   const flowIds = new Set(design.flows.map((flow) => flow.id));
-  const scenarioIds = new Set(design.scenarios.map((scenario) => scenario.id));
 
   const checkIds = (
     ids: readonly string[],
@@ -638,16 +732,8 @@ function validateReferences(
         path: ["pages", index, "layoutId"],
       });
     }
-    if (page.defaultScenario && !scenarioIds.has(page.defaultScenario)) {
-      ctx.addIssue({
-        code: "custom",
-        message: `unknown default scenario "${page.defaultScenario}"`,
-        path: ["pages", index, "defaultScenario"],
-      });
-    }
     checkIds(page.sharedUiRefs, sharedUiIds, ["pages", index, "sharedUiRefs"]);
     checkIds(page.flowIds, flowIds, ["pages", index, "flowIds"]);
-    checkIds(page.scenarioIds, scenarioIds, ["pages", index, "scenarioIds"]);
   });
 
   design.layouts.forEach((layout, index) => {
@@ -661,7 +747,6 @@ function validateReferences(
 
   design.flows.forEach((flow, index) => {
     checkIds(flow.pageIds, pageIds, ["flows", index, "pageIds"]);
-    checkIds(flow.scenarioIds, scenarioIds, ["flows", index, "scenarioIds"]);
   });
 
   checkIds(design.buildProgress.completedPageIds, pageIds, [
@@ -702,12 +787,10 @@ function validateReferences(
 }
 
 /** Structurally validated draft; semantic completeness is reported separately. */
-export const projectDesignSchema = rawProjectDesignSchema
-  .superRefine(validateStructure)
-  .transform((design): ProjectDesign => ({
-    ...design,
-    schemaVersion: PROJECT_DESIGN_SCHEMA_VERSION,
-  }));
+export const projectDesignSchema = z.preprocess(
+  migrateLegacyProjectDesign,
+  rawProjectDesignSchema.superRefine(validateStructure),
+);
 
 export interface ProjectDesignDiagnostic {
   path: string;
@@ -922,7 +1005,7 @@ function canonicalDesign(design: ProjectDesign): ProjectDesign {
     productGoal: design.productGoal,
     audience: design.audience,
     revision: design.revision,
-    pages: sortedById(design.pages).map((page) => ({
+    pages: design.pages.map((page) => ({
       id: page.id,
       name: page.name,
       responsibility: page.responsibility,
@@ -931,13 +1014,11 @@ function canonicalDesign(design: ProjectDesign): ProjectDesign {
         ? { previewPath: page.previewPath }
         : {}),
       kind: page.kind,
-      defaultScenario: page.defaultScenario,
       parentId: page.parentId,
       layoutId: page.layoutId,
       filePaths: sortedIds(page.filePaths),
       sharedUiRefs: sortedIds(page.sharedUiRefs),
       flowIds: sortedIds(page.flowIds),
-      scenarioIds: sortedIds(page.scenarioIds),
     })),
     layouts: sortedById(design.layouts).map((layout) => ({
       id: layout.id,
@@ -957,12 +1038,6 @@ function canonicalDesign(design: ProjectDesign): ProjectDesign {
       id: flow.id,
       name: flow.name,
       pageIds: sortedIds(flow.pageIds),
-      scenarioIds: sortedIds(flow.scenarioIds),
-    })),
-    scenarios: sortedById(design.scenarios).map((scenario) => ({
-      id: scenario.id,
-      name: scenario.name,
-      kind: scenario.kind,
     })),
     ...(design.tasks ? { tasks: sortedById(design.tasks) } : {}),
     ...(design.journal ? { journal: design.journal } : {}),
@@ -996,7 +1071,7 @@ export function getProjectDesignStructureFingerprint(
 ): string {
   const canonical = canonicalDesign(design);
   return JSON.stringify({
-    pages: canonical.pages.map(
+    pages: sortedById(canonical.pages).map(
       ({
         id,
         route,
@@ -1006,8 +1081,6 @@ export function getProjectDesignStructureFingerprint(
         filePaths,
         sharedUiRefs,
         flowIds,
-        scenarioIds,
-        defaultScenario,
       }) => ({
         id,
         route,
@@ -1017,8 +1090,6 @@ export function getProjectDesignStructureFingerprint(
         filePaths,
         sharedUiRefs,
         flowIds,
-        scenarioIds,
-        defaultScenario,
       }),
     ),
     layouts: canonical.layouts.map(
@@ -1033,12 +1104,10 @@ export function getProjectDesignStructureFingerprint(
       id,
       filePaths,
     })),
-    flows: canonical.flows.map(({ id, pageIds, scenarioIds }) => ({
+    flows: canonical.flows.map(({ id, pageIds }) => ({
       id,
       pageIds,
-      scenarioIds,
     })),
-    scenarios: canonical.scenarios.map(({ id, kind }) => ({ id, kind })),
   });
 }
 
@@ -1208,7 +1277,6 @@ export function applyProjectDesignToolRequest(
   const {
     pageCount,
     flowCount,
-    scenarioCount,
     journal: echoedJournal,
     ...changes
   } = request.patch ?? request.document!;
@@ -1278,9 +1346,7 @@ export function applyProjectDesignToolRequest(
     warnings.unshift(
       "Ignored supplied journal; recovery records are maintained by the Host.",
     );
-  if (
-    [pageCount, flowCount, scenarioCount].some((count) => count !== undefined)
-  )
+  if ([pageCount, flowCount].some((count) => count !== undefined))
     warnings.unshift(
       "Ignored summary counts; counts are derived from blueprint entities.",
     );
@@ -1328,11 +1394,11 @@ export function derivePageTree(
 ): readonly ProjectPageTreeNode[] {
   const design = validatedDesign(input);
   const nodes = new Map<string, ProjectPageTreeNode>();
-  for (const page of sortedById(design.pages)) {
+  for (const page of design.pages) {
     nodes.set(page.id, { ...page, children: [] });
   }
   const roots: ProjectPageTreeNode[] = [];
-  for (const page of sortedById(design.pages)) {
+  for (const page of design.pages) {
     const node = nodes.get(page.id)!;
     const parent = page.parentId ? nodes.get(page.parentId) : undefined;
     if (parent) parent.children.push(node);
@@ -1422,22 +1488,14 @@ export function deriveImpactPages(
       .filter((flow) => changedIdsSet.has(flow.id))
       .map((flow) => flow.id),
   );
-  const changedScenarioIds = new Set(
-    design.scenarios
-      .filter((scenario) => changedIdsSet.has(scenario.id))
-      .map((scenario) => scenario.id),
-  );
 
   for (const page of design.pages) {
     if (
       changedIdsSet.has(page.id) ||
       page.filePaths.some((path) => changedPaths.has(path.toLowerCase())) ||
       (page.layoutId !== null && changedLayoutIds.has(page.layoutId)) ||
-      (page.defaultScenario !== undefined &&
-        changedScenarioIds.has(page.defaultScenario)) ||
       page.sharedUiRefs.some((id) => changedSharedUiIds.has(id)) ||
-      page.flowIds.some((id) => changedFlowIds.has(id)) ||
-      page.scenarioIds.some((id) => changedScenarioIds.has(id))
+      page.flowIds.some((id) => changedFlowIds.has(id))
     ) {
       impacted.add(page.id);
     }
@@ -1452,10 +1510,7 @@ export function deriveImpactPages(
     }
   }
   for (const flow of design.flows) {
-    if (
-      !changedFlowIds.has(flow.id) &&
-      !flow.scenarioIds.some((id) => changedScenarioIds.has(id))
-    ) {
+    if (!changedFlowIds.has(flow.id)) {
       continue;
     }
     flow.pageIds.forEach((pageId) => {
@@ -1472,28 +1527,22 @@ export interface ProjectDesignCoverageTarget {
   id: string;
   pageId: string;
   route: string;
-  scenarioId: string;
 }
 
-/** Usable coverage only; callers surface unavailable page/scenario diagnostics. */
+/** Usable coverage only; callers surface unavailable page diagnostics. */
 export function deriveCoverageTargets(
   input: ProjectDesign,
 ): readonly ProjectDesignCoverageTarget[] {
   const design = validatedDesign(input);
   const targets: ProjectDesignCoverageTarget[] = [];
   for (const page of sortedById(design.pages)) {
-    for (const scenarioId of sortedIds([
-      ...new Set([page.defaultScenario ?? "default", ...page.scenarioIds]),
-    ])) {
-      const resolution = resolvePrototypeRoute(design, page.id, scenarioId);
-      if (resolution.status === "ready")
-        targets.push({
-          id: `${page.id}:${scenarioId}`,
-          pageId: page.id,
-          route: page.route ?? "",
-          scenarioId,
-        });
-    }
+    const resolution = resolvePrototypeRoute(design, page.id);
+    if (resolution.status === "ready")
+      targets.push({
+        id: page.id,
+        pageId: page.id,
+        route: resolution.target.route,
+      });
   }
   return targets;
 }
@@ -1501,16 +1550,14 @@ export function deriveCoverageTargets(
 export function resolveProjectDesignPreview(
   input: ProjectDesign,
   pageId: string,
-  scenarioId?: string,
 ): PrototypeRouteResolution {
-  return resolvePrototypeRoute(input, pageId, scenarioId);
+  return resolvePrototypeRoute(input, pageId);
 }
 export function resolveProjectDesignPreviewTarget(
   input: ProjectDesign,
   pageId: string,
-  scenarioId?: string,
 ): PrototypePreviewTarget | null {
-  const result = resolveProjectDesignPreview(input, pageId, scenarioId);
+  const result = resolveProjectDesignPreview(input, pageId);
   return result.status === "ready" ? result.target : null;
 }
 export function resolveProjectDesignPreviewRoute(

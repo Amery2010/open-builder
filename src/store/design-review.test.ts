@@ -176,7 +176,7 @@ describe("Design review automation state", () => {
         {
           pageId: "dashboard",
           route: "javascript:alert(1)",
-          scenarioId: "default",
+
           viewport: "desktop",
           status: "passed",
         },
@@ -188,6 +188,93 @@ describe("Design review automation state", () => {
 
     expect(normalized.conversation[0].blueprintRevision).toBeUndefined();
     expect(normalized.conversation[0].coverage).toBeUndefined();
+  });
+
+  it.each([undefined, 1])(
+    "keeps legacy review prose stale despite matching digests (version %s)",
+    (coverageVersion) => {
+      const legacy = {
+        ...persistedRun({
+          status: "succeeded",
+          coverageVersion,
+          sourceProjectDigest: "project-digest",
+        }),
+        report: {
+          overview: "Legacy review remains readable.",
+          findings: [
+            {
+              id: "old-finding",
+              priority: "P2",
+              dimension: "copy_specificity",
+              title: "Old title",
+              evidence: "Old evidence",
+              recommendation: "Old recommendation",
+              page_id: "dashboard",
+              scenario_id: "empty",
+            },
+          ],
+        },
+        coverage: [
+          {
+            pageId: "dashboard",
+            route: "#/dashboard?scenario=default",
+            scenarioId: "default",
+            viewport: "desktop",
+            status: "passed",
+          },
+          {
+            pageId: "dashboard",
+            route: "#/dashboard?scenario=empty",
+            scenarioId: "empty",
+            viewport: "desktop",
+            status: "needs-fix",
+          },
+        ],
+      } as unknown as DesignReviewRun;
+      const normalized = normalizePersistedDesignReviewRuns({
+        conversation: [legacy],
+      });
+      const restored = normalized.conversation[0];
+      expect(restored.report?.overview).toBe("Legacy review remains readable.");
+      expect(restored.report?.findings[0].title).toBe("Old title");
+      expect(restored.report?.findings[0]).not.toHaveProperty("scenario_id");
+      expect(restored.coverage).toBeUndefined();
+      expect(restored.freshness).toBe("stale");
+      useDesignReviewStore.setState({ runsByConversation: normalized });
+      const store = useDesignReviewStore.getState();
+      store.markConversationFreshness("conversation", legacy.sourceDigest);
+      store.markRunFreshness(legacy.id, legacy.sourceDigest);
+      store.markRunProjectFreshness(legacy.id, "project-digest");
+      expect(
+        useDesignReviewStore.getState().runsByConversation.conversation[0]
+          .freshness,
+      ).toBe("stale");
+      const secondRead = normalizePersistedDesignReviewRuns(
+        useDesignReviewStore.getState().runsByConversation,
+      );
+      expect(secondRead.conversation[0].freshness).toBe("stale");
+      expect(secondRead.conversation[0].coverage).toBeUndefined();
+    },
+  );
+
+  it("restores current page coverage without discarding its verdict", () => {
+    const run = persistedRun({
+      status: "succeeded",
+      coverageVersion: 2,
+      coverage: [
+        {
+          pageId: "dashboard",
+          route: "#/dashboard",
+          viewport: "desktop",
+          status: "passed",
+        },
+      ],
+    });
+    const normalized = normalizePersistedDesignReviewRuns({
+      conversation: [run],
+    });
+    expect(normalized.conversation[0].coverage).toEqual(run.coverage);
+    expect(normalized.conversation[0].freshness).toBe("fresh");
   });
 
   it("retains only the latest 20 terminal runs per conversation", () => {
@@ -330,7 +417,7 @@ describe("Design review automation state", () => {
     expect(run.logs.at(-1)?.event).toBe("stale");
   });
 
-  it("tracks page, scenario, and viewport coverage through review completion", () => {
+  it("tracks page and viewport coverage through review completion", () => {
     const store = useDesignReviewStore.getState();
     store.createRun({
       id: "review-coverage",
@@ -342,13 +429,13 @@ describe("Design review automation state", () => {
         {
           pageId: "dashboard",
           route: "#/dashboard?scenario=default",
-          scenarioId: "default",
+
           viewport: "desktop",
         },
         {
           pageId: "settings",
           route: "#/settings?scenario=error",
-          scenarioId: "error",
+
           viewport: "mobile",
         },
       ],
@@ -356,7 +443,7 @@ describe("Design review automation state", () => {
         {
           pageId: "dashboard",
           route: "#/dashboard?scenario=default",
-          scenarioId: "default",
+
           viewport: "desktop",
         },
       ],
@@ -381,7 +468,6 @@ describe("Design review automation state", () => {
           evidence: "The primary action is crowded.",
           recommendation: "Add space around the action.",
           page_id: "dashboard",
-          scenario_id: "default",
         },
       ],
     });
@@ -454,6 +540,7 @@ function persistedRun(
     phase: "initial",
     status: "queued",
     freshness: "fresh",
+    coverageVersion: 2,
     sourceDigest: "a".repeat(64),
     provider: { runtime: "api", provider: "openai", model: "gpt" },
     logs: [],

@@ -17,7 +17,6 @@ const design: PrototypeRouteDesign = {
       previewPath: "/商品/sku-42",
     },
   ],
-  scenarios: [],
 };
 
 describe("Prototype Route module", () => {
@@ -44,14 +43,12 @@ describe("Prototype Route module", () => {
     });
   });
 
-  it("resolves explicit dynamic examples and a technical default without inventing entities", () => {
+  it("resolves explicit dynamic examples without adding host query parameters", () => {
     expect(resolvePrototypeRoute(design, "details")).toEqual({
       status: "ready",
       target: {
         pageId: "details",
-        scenarioId: "default",
-        route:
-          "#/%E5%95%86%E5%93%81/sku-42?tab=history&tag=a&tag=b&empty=&scenario=default",
+        route: "#/%E5%95%86%E5%93%81/sku-42?tab=history&tag=a&tag=b&empty=",
       },
     });
     const noExample = {
@@ -77,38 +74,24 @@ describe("Prototype Route module", () => {
     expect(noExample.pages[0].previewPath).toBeUndefined();
   });
 
-  it("preserves scenario queries and rejects conflicting or encoded duplicate keys", () => {
+  it("treats former scenario parameters as ordinary business queries", () => {
     for (const route of [
       "/items?scenario=error",
-      "/items?scenario=default&scenario=default",
-      "/items?%73cenario=error",
+      "/items?scenario=a&scenario=b",
+      "/items?%73cenario=default&x=",
     ]) {
-      expect(
-        resolvePrototypeRoute(
-          { pages: [{ id: "items", route }], scenarios: [] },
-          "items",
-        ),
-      ).toMatchObject({
-        status: "unavailable",
-        reason: "scenario-query-conflict",
+      const blueprint = { pages: [{ id: "items", route }] };
+      expect(resolvePrototypeRoute(blueprint, "items")).toEqual({
+        status: "ready",
+        target: { pageId: "items", route: `#${route}` },
       });
+      expect(
+        resolveObservedPrototypeRoute(blueprint, `#${route}`),
+      ).toMatchObject({ status: "ready" });
+      expect(resolveObservedPrototypeRoute(blueprint, "#/items")).toMatchObject(
+        { status: "ready", target: { route: "#/items" } },
+      );
     }
-    expect(
-      resolvePrototypeRoute(
-        {
-          pages: [{ id: "items", route: "/items?%73cenario=default&x=" }],
-          scenarios: [],
-        },
-        "items",
-      ),
-    ).toMatchObject({
-      status: "ready",
-      target: { route: "#/items?%73cenario=default&x=" },
-    });
-    expect(resolvePrototypeRoute(design, "details", "success")).toMatchObject({
-      status: "unavailable",
-      reason: "unknown-scenario",
-    });
   });
 
   it("applies one safety policy to Host and injected code", () => {
@@ -142,17 +125,14 @@ describe("Prototype Route module", () => {
     }
   });
 
-  it("checks the actual final target including encoded query and scenario", () => {
+  it("checks the actual final target including encoded query and dynamic sample", () => {
     const page = {
       id: "long",
-      route: "/" + "a".repeat(1900),
-      defaultScenario: "s".repeat(80),
+      route: "/items/:id?q=" + "a".repeat(1900),
+      previewPath: "/items/" + "b".repeat(200),
     };
-    const input = { pages: [page], scenarios: [{ id: page.defaultScenario }] };
-    expect(resolvePrototypeRoute(input, "long").status).toBe("ready");
-    page.route = "/" + "a".repeat(2000);
     expect(normalizePrototypeRoute(page.route).ok).toBe(true);
-    expect(resolvePrototypeRoute(input, "long")).toMatchObject({
+    expect(resolvePrototypeRoute({ pages: [page] }, "long")).toMatchObject({
       status: "unavailable",
       reason: "route-too-long",
     });
@@ -162,27 +142,76 @@ describe("Prototype Route module", () => {
     expect(
       resolveObservedPrototypeRoute(
         design,
-        "#/商品/sku-99?tag=a&tag=b&tab=history&empty=&scenario=default",
+        "#/商品/sku-99?tag=a&tag=b&tab=history&empty=",
       ),
     ).toMatchObject({
       status: "ready",
-      target: { pageId: "details", scenarioId: "default" },
+      target: { pageId: "details" },
     });
     const pages = [
       { id: "dynamic", route: "/items/:id" },
       { id: "new", route: "/items/new" },
     ];
     expect(
-      resolveObservedPrototypeRoute({ pages, scenarios: [] }, "#/items/new"),
+      resolveObservedPrototypeRoute({ pages }, "#/items/new"),
     ).toMatchObject({ status: "ready", target: { pageId: "new" } });
     expect(
       resolveObservedPrototypeRoute(
         {
           pages: [pages[0], { id: "other", route: "/items/[key]" }],
-          scenarios: [],
         },
         "#/items/1",
       ),
     ).toMatchObject({ status: "unavailable", reason: "ambiguous-route" });
+  });
+});
+
+describe("observed links with preview query defaults", () => {
+  it("recognizes a unique page when an internal link omits its preview query", () => {
+    const pages = [
+      { id: "home", route: "/home?scenario=default" },
+      { id: "library", route: "/library?scenario=empty" },
+    ];
+    expect(resolveObservedPrototypeRoute({ pages }, "#/library")).toEqual({
+      status: "ready",
+      target: { pageId: "library", route: "#/library" },
+    });
+    expect(
+      resolveObservedPrototypeRoute({ pages }, "#/library?tab=all"),
+    ).toEqual({
+      status: "ready",
+      target: { pageId: "library", route: "#/library?tab=all" },
+    });
+  });
+  it("prefers strict business queries and refuses ambiguous pathname fallback", () => {
+    const pages = [
+      { id: "open", route: "/items?filter=open" },
+      { id: "closed", route: "/items?filter=closed" },
+    ];
+    expect(
+      resolveObservedPrototypeRoute({ pages }, "#/items?filter=open"),
+    ).toMatchObject({ status: "ready", target: { pageId: "open" } });
+    expect(resolveObservedPrototypeRoute({ pages }, "#/items")).toMatchObject({
+      status: "unavailable",
+      reason: "ambiguous-route",
+    });
+    expect(
+      resolveObservedPrototypeRoute(
+        {
+          pages: [
+            ...pages,
+            {
+              id: "detail",
+              route: "/items/:id?tab=history",
+              previewPath: "/items/42",
+            },
+          ],
+        },
+        "#/items/other",
+      ),
+    ).toMatchObject({
+      status: "ready",
+      target: { pageId: "detail", route: "#/items/other" },
+    });
   });
 });

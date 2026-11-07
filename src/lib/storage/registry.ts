@@ -6,6 +6,7 @@ import { useSettingsStore } from "../../store/settings";
 import { useSkillsStore } from "../../store/skills";
 import { useSnapshotStore } from "../../store/snapshot";
 import { useDesignReviewStore } from "../../store/design-review";
+import { useProjectDesignWorkspaceStore } from "../../store/project-design-workspace";
 import {
   clearAttachmentStorage,
   estimateAttachmentStorage,
@@ -47,6 +48,7 @@ export interface StorageDomain {
     | "settings"
     | "conversations"
     | "designReviews"
+    | "designWorkspace"
     | "snapshots"
     | "memories"
     | "templates"
@@ -159,6 +161,20 @@ export const STORAGE_DOMAINS: readonly StorageDomain[] = [
     },
     export: async () =>
       redactStorageExport(useDesignReviewStore.getState().runsByConversation),
+  },
+  {
+    id: "designWorkspace",
+    estimate: async () => {
+      const layouts = useProjectDesignWorkspaceStore.getState().layouts;
+      return jsonEstimate(layouts, Object.keys(layouts).length);
+    },
+    clear: async () => {
+      useProjectDesignWorkspaceStore.getState().clearLayouts();
+      await clearPersistedStore(() =>
+        useProjectDesignWorkspaceStore.persist.clearStorage(),
+      );
+    },
+    export: async () => useProjectDesignWorkspaceStore.getState().layouts,
   },
   {
     id: "conversations",

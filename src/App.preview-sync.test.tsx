@@ -266,10 +266,14 @@ describe("App Sandpack synchronization", () => {
           <App />
         </TooltipProvider>,
       );
-      const editor = await screen.findByRole("textbox", {
-        name: "Project code",
-        hidden: true,
-      });
+      const editor = await screen.findByRole(
+        "textbox",
+        {
+          name: "Project code",
+          hidden: true,
+        },
+        { timeout: 5000 },
+      );
       expect(editor).toHaveAttribute("data-runtime", environment);
       if (previewMode === "code-only") {
         expect(screen.queryByTestId("preview-code")).toBeNull();

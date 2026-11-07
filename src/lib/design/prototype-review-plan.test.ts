@@ -67,13 +67,9 @@ describe("prototype review plan", () => {
     if (parsed.status !== "ready") return;
     const report = buildPrototypeReviewCaptureReport(parsed.design);
     expect(report.targets).toHaveLength(3);
-    expect(
-      report.targets.every(
-        (item) =>
-          item.target.pageId === "ready" &&
-          item.target.scenarioId === "default",
-      ),
-    ).toBe(true);
+    expect(report.targets.every((item) => item.target.pageId === "ready")).toBe(
+      true,
+    );
     expect(report.skipped).toMatchObject([
       { pageId: "draft", reason: "missing-route" },
       { pageId: "dynamic", reason: "missing-example" },
@@ -84,19 +80,15 @@ describe("prototype review plan", () => {
     });
   });
 
-  it("prioritizes every affected default and critical state before responsive repeats", () => {
+  it("captures each affected page once at every viewport", () => {
     const parsed = parseProjectDesign(blueprint);
     expect(parsed.status).toBe("ready");
     if (parsed.status !== "ready") return;
 
     const plan = buildPrototypeReviewCapturePlan(parsed.design, ["dashboard"]);
-    expect(plan.slice(0, 2)).toMatchObject([
-      { target: { pageId: "dashboard", scenarioId: "default" } },
-      { target: { pageId: "dashboard", scenarioId: "error" } },
-    ]);
+    expect(plan).toHaveLength(3);
     expect(plan.every((item) => item.target.pageId === "dashboard")).toBe(true);
     expect(plan.map((item) => item.viewport.name)).toEqual([
-      "desktop",
       "desktop",
       "tablet",
       "mobile",

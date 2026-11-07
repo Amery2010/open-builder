@@ -51,7 +51,7 @@ describe("local Host Tool Authority", () => {
         },
       },
       { expected_revision: 1, document: { buildProgress: { percent: 20 } } },
-      { document: { pageCount: 1, flowCount: 2, scenarioCount: 1 } },
+      { document: { pageCount: 1, flowCount: 2 } },
       {
         patch: { pages: [{ id: "home", name: "Updated" }] },
         remove: { pages: ["old"] },

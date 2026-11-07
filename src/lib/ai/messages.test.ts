@@ -16,7 +16,7 @@ describe("messagesToModelMessages", () => {
         content: "Make this shorter",
         metadata: {
           designSelection: {
-            protocolVersion: 1,
+            protocolVersion: 2,
             elementId: "hero-title",
             label: "Hero title",
             tagName: "h1",

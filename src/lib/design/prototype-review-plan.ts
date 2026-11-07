@@ -26,44 +26,16 @@ export function buildPrototypeReviewCaptureReport(
   design: ProjectDesign,
   affectedPageIds?: readonly string[],
 ): PrototypeReviewCaptureReport {
-  const scenarios = new Map(
-    design.scenarios.map((scenario) => [scenario.id, scenario]),
-  );
   const affected = affectedPageIds ? new Set(affectedPageIds) : undefined;
   const pages = design.pages.filter(
     (page) => !affected || affected.has(page.id),
   );
-  const defaults: PrototypePreviewTarget[] = [];
-  const critical: PrototypePreviewTarget[] = [];
+  const pageTargets: PrototypePreviewTarget[] = [];
   const skipped: PrototypeReviewSkippedTarget[] = [];
-  const resolve = (
-    pageId: string,
-    scenarioId: string | undefined,
-    targets: PrototypePreviewTarget[],
-  ) => {
-    const result = resolvePrototypeRoute(design, pageId, scenarioId);
-    if (result.status === "ready") targets.push(result.target);
-    else skipped.push({ ...result, pageId, scenarioId });
-  };
   for (const page of pages) {
-    resolve(page.id, page.defaultScenario, defaults);
-    for (const scenarioId of page.scenarioIds) {
-      if (scenarioId === (page.defaultScenario ?? "default")) continue;
-      const scenario = scenarios.get(scenarioId);
-      if (
-        !scenario ||
-        [
-          "empty",
-          "loading",
-          "validation",
-          "success",
-          "error",
-          "failure",
-        ].includes(scenario.kind ?? "")
-      ) {
-        resolve(page.id, scenarioId, critical);
-      }
-    }
+    const result = resolvePrototypeRoute(design, page.id);
+    if (result.status === "ready") pageTargets.push(result.target);
+    else skipped.push({ ...result, pageId: page.id });
   }
   const targets: PrototypeReviewCapturePlanItem[] = [];
   const add = (
@@ -76,10 +48,9 @@ export function buildPrototypeReviewCaptureReport(
     if (viewport)
       for (const target of items) targets.push({ target, viewport });
   };
-  add(defaults, "desktop");
-  add(critical, "desktop");
-  add(defaults, "tablet");
-  add(defaults, "mobile");
+  add(pageTargets, "desktop");
+  add(pageTargets, "tablet");
+  add(pageTargets, "mobile");
   return { targets: targets.slice(0, MAX_DESIGN_REVIEW_SCREENSHOTS), skipped };
 }
 

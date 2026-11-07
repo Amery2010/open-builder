@@ -34,6 +34,20 @@ describe("tool policies", () => {
         schema.safeParse({ scope: "selection", viewports: ["mobile"] }).success,
       ).toBe(false);
   });
+  it("accepts page capture targets and rejects removed scenario selection", () => {
+    const schema = DESIGN_HOST_TOOLS.capture_preview_evidence
+      .inputSchema as ZodType;
+    expect(
+      schema.safeParse({ viewports: ["desktop"], target: { pageId: "home" } })
+        .success,
+    ).toBe(true);
+    expect(
+      schema.safeParse({
+        viewports: ["desktop"],
+        target: { pageId: "home", scenarioId: "default" },
+      }).success,
+    ).toBe(false);
+  });
   const staticDefinition = (name: string): ToolSet[string] => {
     const definition = HOST_TOOL_CATALOG.get(name)?.definition;
     if (!definition) throw new Error(`Missing test definition for ${name}`);

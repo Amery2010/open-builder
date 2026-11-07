@@ -103,7 +103,7 @@ describe("fsInitProject", () => {
       "resetData",
     );
     expect(result.newFiles?.["prototype/PrototypeData.tsx"]).toContain(
-      'window.addEventListener("hashchange", resetForScenarioChange)',
+      'window.addEventListener("open-builder:prototype-reset-data", resetData)',
     );
     expect(result.newFiles?.["README.md"]).toContain("pnpm build");
     expect(
@@ -112,8 +112,8 @@ describe("fsInitProject", () => {
     expect(
       JSON.parse(result.newFiles?.["tsconfig.json"] ?? "{}").exclude,
     ).toEqual(["vite.config.ts", "node_modules", "dist"]);
-    expect(result.newFiles?.["prototype/PrototypeHome.tsx"]).toContain(
-      'params.get("scenario")',
+    expect(result.newFiles?.["prototype/PrototypeHome.tsx"]).not.toContain(
+      "scenario",
     );
   });
 

@@ -1,12 +1,15 @@
 // @vitest-environment jsdom
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createIsolatedPreviewSession } from "./prototype-preview-session";
+import {
+  createIsolatedPreviewSession,
+  type IsolatedPreviewBootstrap,
+} from "./prototype-preview-session";
 import { DESIGN_BRIDGE_CAPTURE_TIMEOUT_MS } from "./preview-bridge";
 
 const controllers: AbortController[] = [];
 
-function setupSession() {
+function setupSession(bootstrap?: IsolatedPreviewBootstrap) {
   const source = document.createElement("iframe");
   source.src = "about:blank";
   const controller = new AbortController();
@@ -15,6 +18,7 @@ function setupSession() {
     source,
     "generation-1",
     controller.signal,
+    bootstrap,
   );
   const frame = document.querySelector<HTMLIFrameElement>(
     'iframe[title="Temporary prototype review preview"]',
@@ -33,7 +37,7 @@ function setupSession() {
   const ready = (generation = "generation-1") =>
     reply({
       type: "open-builder:design-bridge-ready",
-      version: 1,
+      version: 2,
       generation,
       captureRuntimeAvailable: true,
       route: "#/dashboard",
@@ -49,6 +53,137 @@ afterEach(() => {
 });
 
 describe("isolated prototype preview session", () => {
+  it("installs readiness listeners before bootstrapping and releases the compiled client", async () => {
+    const release = vi.fn();
+    const bootstrap = vi.fn(async (frame: HTMLIFrameElement) => {
+      expect(frame.isConnected).toBe(true);
+      expect(frame.hasAttribute("data-ob-isolated-preview")).toBe(true);
+      expect(frame.classList.contains("sp-preview-iframe")).toBe(false);
+      window.dispatchEvent(
+        new MessageEvent("message", {
+          source: frame.contentWindow,
+          origin: "null",
+          data: {
+            type: "open-builder:design-bridge-ready",
+            version: 2,
+            generation: "generation-1",
+            captureRuntimeAvailable: true,
+          },
+        }),
+      );
+      return release;
+    });
+    const setup = setupSession(bootstrap);
+    const active = await setup.session;
+    expect(bootstrap).toHaveBeenCalledOnce();
+    active.dispose();
+    active.dispose();
+    expect(release).toHaveBeenCalledOnce();
+    expect(setup.frame.isConnected).toBe(false);
+  });
+
+  it.each(["abort", "timeout"])(
+    "releases a client arriving after bootstrap %s",
+    async (reason) => {
+      vi.useFakeTimers();
+      const release = vi.fn();
+      let finish!: (release: () => void) => void;
+      let bootstrapSignal!: AbortSignal;
+      const setup = setupSession(async (_frame, signal) => {
+        bootstrapSignal = signal;
+        return new Promise((resolve) => {
+          finish = resolve;
+        });
+      });
+      const rejected = expect(setup.session).rejects.toMatchObject(
+        reason === "abort"
+          ? { name: "AbortError" }
+          : { message: "Temporary prototype preview did not become ready." },
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      if (reason === "abort") setup.controller.abort();
+      else
+        await vi.advanceTimersByTimeAsync(DESIGN_BRIDGE_CAPTURE_TIMEOUT_MS * 3);
+      await rejected;
+      expect(bootstrapSignal.aborted).toBe(true);
+      expect(setup.frame.isConnected).toBe(false);
+      finish(release);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(release).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it("rejects bootstrap failures even when readiness arrived first", async () => {
+    let fail!: (error: Error) => void;
+    const setup = setupSession(
+      () =>
+        new Promise((_resolve, reject) => {
+          fail = reject;
+        }),
+    );
+    const rejected = expect(setup.session).rejects.toThrow("Compiler failed");
+    setup.ready();
+    await Promise.resolve();
+    fail(new Error("Compiler failed"));
+    await rejected;
+    expect(setup.frame.isConnected).toBe(false);
+  });
+
+  it("uses the bootstrapped iframe origin for requests and rejects replies from the old origin", async () => {
+    const release = vi.fn();
+    const setup = setupSession(async (frame) => {
+      frame.src = "https://compiled-preview.example.test/";
+      return release;
+    });
+    await Promise.resolve();
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        source: setup.frame.contentWindow,
+        origin: "https://compiled-preview.example.test",
+        data: {
+          type: "open-builder:design-bridge-ready",
+          version: 2,
+          generation: "generation-1",
+          captureRuntimeAvailable: true,
+        },
+      }),
+    );
+    const active = await setup.session;
+    const post = vi
+      .spyOn(setup.frame.contentWindow!, "postMessage")
+      .mockImplementation(() => {});
+    const target = { pageId: "home", route: "#/home" };
+    const pending = active.navigate(target);
+    const message = post.mock.calls[0][0];
+    expect(post.mock.calls[0][1]).toBe("https://compiled-preview.example.test");
+    let settled = false;
+    void pending.then(() => {
+      settled = true;
+    });
+    setup.reply({
+      ...message,
+      type: "open-builder:design-bridge-navigation-result",
+      payload: { target, route: target.route },
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        source: setup.frame.contentWindow,
+        origin: "https://compiled-preview.example.test",
+        data: {
+          ...message,
+          type: "open-builder:design-bridge-navigation-result",
+          payload: { target, route: target.route },
+        },
+      }),
+    );
+    await expect(pending).resolves.toEqual(target);
+    active.dispose();
+    expect(release).toHaveBeenCalledOnce();
+  });
+
   it("accepts readiness and the original navigation response in later timeout windows", async () => {
     vi.useFakeTimers();
     const { session, frame, ready, post, reply } = setupSession();
@@ -64,7 +199,6 @@ describe("isolated prototype preview session", () => {
     const target = {
       pageId: "dashboard",
       route: "#/dashboard",
-      scenarioId: "default",
     };
     const navigation = active.navigate(target);
     let navigationError: unknown;
@@ -96,7 +230,6 @@ describe("isolated prototype preview session", () => {
         {
           pageId: "dashboard",
           route: "#/dashboard",
-          scenarioId: "default",
         },
       )
       .catch((cause) => {
@@ -125,7 +258,6 @@ describe("isolated prototype preview session", () => {
         .navigate({
           pageId: "dashboard",
           route: "#/dashboard",
-          scenarioId: "default",
         })
         .catch((cause) => {
           error = cause;

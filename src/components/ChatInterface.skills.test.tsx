@@ -283,7 +283,7 @@ describe("ChatInterface forced Skills", () => {
     const conversationId = useConversationStore.getState().createConversation();
     useConversationStore.getState().setWorkspaceMode("design");
     const selection = {
-      protocolVersion: 1 as const,
+      protocolVersion: 2 as const,
       elementId: "hero-title",
       label: "Hero title",
       tagName: "h1",

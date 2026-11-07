@@ -112,8 +112,13 @@ async function seedDesignProject(
     },
     { files: projectFiles, tokens: initialTokens },
   );
+  await expect(page.getByTestId("design-canvas")).toBeVisible();
+  await page
+    .getByTestId("design-canvas")
+    .getByRole("button", { name: "Current page", exact: true })
+    .press("Enter");
   await expect(
-    page.getByRole("button", { name: "Preview", exact: true }),
+    page.getByRole("button", { name: "Canvas", exact: true }),
   ).toBeVisible();
   return conversationId;
 }
@@ -240,7 +245,11 @@ test("point-selects a real Sandpack element, keeps token edits pending until sav
   expect(beforeSave).toContain("--accent: #6541f5;");
 
   await page.getByRole("button", { name: "Save tokens" }).click();
-  await page.getByRole("button", { name: "Preview" }).click();
+  await page.getByRole("button", { name: "Canvas", exact: true }).click();
+  await page
+    .getByTestId("design-canvas")
+    .getByRole("button", { name: "Current page", exact: true })
+    .press("Enter");
   await expect
     .poll(() => heading.evaluate((node) => getComputedStyle(node).color))
     .toBe("rgb(255, 0, 110)");
@@ -262,7 +271,12 @@ test("point-selects a real Sandpack element, keeps token edits pending until sav
 
   await page.getByRole("button", { name: "Code" }).click();
   const downloadPromise = page.waitForEvent("download");
-  await page.getByRole("button", { name: "Download", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Download project", exact: true })
+    .click();
+  await page
+    .getByRole("menuitem", { name: "Download source", exact: true })
+    .click();
   const download = await downloadPromise;
   const path = await download.path();
   expect(path).not.toBeNull();
@@ -525,13 +539,18 @@ test("keeps the project default separate from a manual override while token and 
   });
   expect(otherConversationId).not.toBe(conversationId);
   await expect(
-    page.getByRole("button", { name: "Preview", exact: true }),
+    page.getByRole("button", { name: "Canvas", exact: true }),
   ).toHaveCount(0);
   await page.evaluate(async (id) => {
     const conversationUrl = "/src/store/conversation.ts";
     const { useConversationStore } = await import(conversationUrl);
     useConversationStore.getState().switchConversation(id);
   }, conversationId);
+  await expect(page.getByTestId("design-canvas")).toBeVisible();
+  await page
+    .getByTestId("design-canvas")
+    .getByRole("button", { name: "Current page", exact: true })
+    .press("Enter");
   await expect(page.getByRole("button", { name: "Mobile" })).toHaveAttribute(
     "aria-pressed",
     "true",

@@ -1,0 +1,294 @@
+/* Local stacking: boards 0, guides 1, chrome 10. Dialogs
+   remain in the app's portal layer outside this isolated workspace. */
+.design-canvas {
+  --canvas-x: 64px;
+  --canvas-y: 96px;
+  --canvas-zoom: 0.4;
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  isolation: isolate;
+  container-type: inline-size;
+  background-color: var(--background);
+  background-image: radial-gradient(
+    circle,
+    color-mix(in oklch, var(--muted-foreground) 24%, transparent) 0.75px,
+    transparent 0.75px
+  );
+  background-size: 20px 20px;
+  background-position: var(--canvas-x) var(--canvas-y);
+  outline: none;
+  touch-action: none;
+  user-select: none;
+}
+.design-canvas[data-tool="hand"] {
+  cursor: grab;
+}
+.design-canvas[data-dragging="true"] {
+  cursor: grabbing;
+}
+.design-canvas [data-canvas-ui] {
+  cursor: auto;
+  touch-action: auto;
+}
+.design-canvas-world {
+  position: absolute;
+  inset: 0;
+  transform-origin: 0 0;
+  transform: translate(var(--canvas-x), var(--canvas-y))
+    scale(var(--canvas-zoom));
+  pointer-events: none;
+}
+.design-canvas-board {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform: translate(var(--board-x), var(--board-y));
+  pointer-events: auto;
+  background: var(--background);
+  box-shadow: 0 4px 24px color-mix(in oklch, var(--foreground) 10%, transparent);
+}
+.design-canvas-board[data-selected="true"] {
+  outline: calc(2px / var(--canvas-zoom)) solid var(--primary);
+  outline-offset: calc(4px / var(--canvas-zoom));
+}
+.design-canvas-board-caption {
+  position: absolute;
+  bottom: calc(100% + 12px / var(--canvas-zoom));
+  left: 0;
+  width: calc(100% * var(--canvas-zoom));
+  transform: scale(calc(1 / var(--canvas-zoom)));
+  transform-origin: bottom left;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--foreground);
+  font-size: 12px;
+  line-height: 20px;
+  cursor: move;
+}
+.design-canvas-board-caption-size {
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted-foreground);
+  white-space: nowrap;
+}
+.design-canvas-board-content {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  position: relative;
+  outline: none;
+}
+.design-canvas-board-content:focus-visible {
+  outline: calc(3px / var(--canvas-zoom)) solid var(--ring);
+  outline-offset: calc(6px / var(--canvas-zoom));
+}
+.design-canvas-page-image {
+  display: block;
+  width: 100%;
+  height: auto;
+  pointer-events: none;
+}
+.design-canvas-placeholder {
+  width: 100%;
+  height: 100%;
+  background: var(--background);
+  overflow: hidden;
+}
+.design-canvas-skeleton {
+  padding: 8%;
+  display: grid;
+  gap: 40px;
+  opacity: 0.55;
+}
+.design-canvas-skeleton span {
+  display: block;
+  background: var(--muted);
+  height: 44px;
+  width: 50%;
+  border-radius: 4px;
+}
+.design-canvas-skeleton span:nth-child(2) {
+  height: 180px;
+  width: 80%;
+  margin-top: 24px;
+}
+.design-canvas-skeleton span:nth-child(3) {
+  height: 28px;
+  width: 65%;
+}
+.design-canvas-skeleton span:nth-child(4) {
+  height: 280px;
+  width: 100%;
+  margin-top: 24px;
+}
+.design-canvas-loading-label,
+.design-canvas-board-message {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%) scale(calc(1 / var(--canvas-zoom)));
+  transform-origin: center;
+  width: min(320px, calc(100% * var(--canvas-zoom) - 32px));
+  text-align: center;
+  font-size: 12px;
+  color: var(--muted-foreground);
+  line-height: 1.6;
+}
+.design-canvas-board-message {
+  display: flex;
+  align-items: center;
+  flex-direction: column;
+  gap: 12px;
+}
+.design-canvas-board-message h3 {
+  color: var(--foreground);
+  font-weight: 500;
+  font-size: 14px;
+}
+.design-canvas-board-message p {
+  max-height: 80px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+}
+.design-canvas-panel {
+  background: var(--popover);
+  color: var(--popover-foreground);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 2px 12px color-mix(in oklch, var(--foreground) 6%, transparent);
+}
+.design-canvas-bottom {
+  position: absolute;
+  z-index: 10;
+  bottom: 16px;
+  left: 16px;
+  right: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  pointer-events: none;
+}
+.design-canvas-bottom .design-canvas-panel {
+  flex-shrink: 0;
+  background: color-mix(in oklch, var(--popover) 70%, transparent);
+  -webkit-backdrop-filter: blur(16px);
+  backdrop-filter: blur(16px);
+}
+.design-canvas-guide {
+  display: none;
+  position: absolute;
+  z-index: 1;
+  pointer-events: none;
+  background: var(--primary);
+}
+.design-canvas-bottom > * {
+  pointer-events: auto;
+}
+.design-canvas-hint {
+  font-size: 12px;
+  color: var(--muted-foreground);
+  pointer-events: none !important;
+}
+.design-canvas-help {
+  color: var(--muted-foreground);
+  padding: 8px;
+}
+.design-canvas-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 16px;
+  padding: 80px 32px;
+  text-align: center;
+  color: var(--muted-foreground);
+  font-size: 14px;
+}
+.design-canvas-empty h2 {
+  color: var(--foreground);
+  font-size: 20px;
+  font-weight: 500;
+}
+.design-canvas-empty p {
+  max-width: 320px;
+}
+.design-canvas-storage-message {
+  position: absolute;
+  z-index: 30;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 12px 16px;
+  font-size: 12px;
+  max-width: calc(100% - 32px);
+}
+.design-canvas-wide-action {
+  display: inline-flex;
+}
+.design-canvas-runtime {
+  /* Keep Sandpack's lazy-start anchor in the viewport beneath the opaque
+     canvas. Immediate startup can race the SDK's StrictMode client setup. */
+  position: absolute;
+  left: 0;
+  top: 0;
+  pointer-events: none;
+  opacity: 0.01;
+}
+.design-canvas-compact-actions {
+  display: none;
+}
+.design-canvas button {
+  white-space: nowrap;
+}
+.design-canvas button:active:not(:disabled) {
+  transform: scale(0.98);
+}
+@container (max-width: 1050px) {
+  .design-canvas-hint {
+    display: none;
+  }
+}
+@container (max-width: 767px) {
+  .design-canvas-wide-action {
+    display: none;
+  }
+  .design-canvas-compact-actions {
+    display: inline-flex;
+  }
+  .design-canvas-bottom {
+    left: 12px;
+    right: 12px;
+    bottom: 12px;
+    gap: 4px;
+  }
+  .design-canvas-help {
+    display: none;
+  }
+  .design-canvas-board-caption-size {
+    display: none;
+  }
+}
+@container (max-width: 430px) {
+  .design-canvas-bottom .design-canvas-panel {
+    gap: 0;
+    padding: 2px;
+  }
+  .design-canvas-bottom .design-canvas-panel > span {
+    margin-inline: 0;
+  }
+  .design-canvas-bottom button {
+    width: 28px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .design-canvas * {
+    animation: none !important;
+    transition: none !important;
+  }
+}

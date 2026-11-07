@@ -3,6 +3,7 @@ import { persist, createJSONStorage } from "zustand/middleware";
 import localforage from "localforage";
 import { useSnapshotStore } from "./snapshot";
 import { useProjectTemplateStore } from "./project-templates";
+import { useProjectDesignWorkspaceStore } from "./project-design-workspace";
 import { runMigrations, type MigrationStep } from "./utils/migrate";
 import type {
   Conversation,
@@ -648,6 +649,7 @@ export const useConversationStore = create<ConversationState>()(
 
         deleteConversation: (id) => {
           const current = get();
+          useProjectDesignWorkspaceStore.getState().clearConversation(id);
           const deletedAssets = current.conversations[id]
             ? conversationBranchStates(current.conversations[id]).map(
                 (branch) => branch.assets,
@@ -1180,6 +1182,7 @@ export const useConversationStore = create<ConversationState>()(
           const paths = Object.keys(preparedFiles);
           const nextActiveFile =
             activeFile && activeFile in preparedFiles ? activeFile : paths[0];
+          useProjectDesignWorkspaceStore.getState().clearConversation(activeId);
           useSnapshotStore.getState().deleteSnapshotsForConversation(activeId);
           set((state) => {
             const conversation = state.conversations[activeId];
@@ -1262,6 +1265,7 @@ export const useConversationStore = create<ConversationState>()(
         resetProject: () => {
           const activeId = get().activeId;
           if (!activeId || !get().conversations[activeId]) return;
+          useProjectDesignWorkspaceStore.getState().clearConversation(activeId);
           const previousAssets = conversationBranchStates(
             get().conversations[activeId],
           ).map((branch) => branch.assets);

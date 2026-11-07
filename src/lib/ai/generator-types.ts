@@ -99,7 +99,7 @@ export interface MessageMetadata {
 }
 
 export interface DesignSelectionContext {
-  protocolVersion: 1;
+  protocolVersion: 2;
   elementId: string;
   idSource?: "explicit" | "runtime";
   anchorElementId?: string;
