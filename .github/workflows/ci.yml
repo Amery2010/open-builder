@@ -51,7 +51,7 @@ jobs:
         run: pnpm workflow:check
 
       - name: Unit tests
-        run: pnpm test
+        run: pnpm test:frontend
 
       - name: Component tests
         run: pnpm test:components
@@ -86,4 +86,4 @@ jobs:
         run: |
           cargo fmt --check || echo "::warning title=Rustfmt::Formatting issues were found. Review the log above; the build will continue."
           cargo clippy --all-targets --all-features
-          cargo test
+          cargo test --locked

@@ -92,6 +92,8 @@ For Vercel, Cloudflare, or Netlify, use `pnpm build` and output directory `dist`
 
 The application uses React 19, TypeScript 6, Vite 8, Tailwind CSS 4, Zustand, Sandpack, and Tauri 2.
 
+`pnpm test` runs frontend and Rust tests, so it requires Rust and the [Tauri platform prerequisites](https://v2.tauri.app/start/prerequisites/). Use `pnpm test:frontend` for Web-only changes or `pnpm test:rust` for native tests. These tests do not exercise installer downloads, signing, or notarization; release packaging has separate retries, tool caches, and macOS signing preflight.
+
 ```bash
 pnpm typecheck
 pnpm lint

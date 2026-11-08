@@ -8,6 +8,19 @@ Tagged versions use their Git tag date. Versions 1.4.0 through 1.7.0 were not ta
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+- Desktop releases now cache Tauri bundler tools and retry transient installer-download failures. macOS releases prepare signing credentials before compilation, use ad-hoc signing when no certificate is configured, and reject invalid certificate or incomplete notarization settings early.
+- Removed a Windows-only unused-parameter warning in local image permission handling.
+
+### Changed
+
+- `pnpm test` now runs frontend and Rust tests, with separate `test:frontend` and `test:rust` commands for focused validation.
+
+---
+
 ## [v2.0.0]
 
 This milestone summarizes changes since v1.9.0: a Design canvas for multi-page prototypes, broader preview selection and PNG exports, isolated desktop CLI runtimes, reusable project starters, conversation branches, local project-import preflight, and version-specific source/static deployment downloads.

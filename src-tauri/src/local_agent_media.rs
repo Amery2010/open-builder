@@ -200,11 +200,11 @@ fn extension_for_mime(mime_type: &str) -> &'static str {
     }
 }
 
-fn secure_file(path: &Path) -> Result<(), String> {
+fn secure_file(_path: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        std::fs::set_permissions(_path, std::fs::Permissions::from_mode(0o600))
             .map_err(|_| "failed to secure private local image reference".to_string())?;
     }
     Ok(())

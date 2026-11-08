@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { load } from "js-yaml";
 
 const workflowsDir = new URL("../.github/workflows/", import.meta.url);
 const files = readdirSync(workflowsDir).filter((name) => /\.ya?ml$/.test(name));
@@ -27,6 +28,43 @@ if (tagReleaseWorkflows !== 1) {
 }
 
 const release = readFileSync(new URL("release.yml", workflowsDir), "utf8");
+const releaseSteps = load(release).jobs.release.steps;
+const buildStep = releaseSteps.find(
+  (step) => step.name === "Build and release",
+);
+if (!(Number(buildStep?.with?.retryAttempts) >= 2)) {
+  failures.push("release.yml must retry transient bundler download failures.");
+}
+if (
+  Object.keys(buildStep?.env ?? {}).some((name) => name.startsWith("APPLE_"))
+) {
+  failures.push(
+    "release.yml must prepare Apple signing variables instead of injecting empty secrets into the build.",
+  );
+}
+const signingStep = releaseSteps.find(
+  (step) => step.run === "node scripts/prepare-macos-signing.mjs",
+);
+if (
+  !signingStep ||
+  signingStep.if !== "runner.os == 'macOS'" ||
+  releaseSteps.indexOf(signingStep) > releaseSteps.indexOf(buildStep)
+) {
+  failures.push("release.yml must prepare macOS signing before building.");
+}
+const toolsCache = releaseSteps.find((step) =>
+  step.uses?.startsWith("actions/cache@"),
+);
+if (
+  !["~/.cache/tauri", "~/AppData/Local/tauri"].every((path) =>
+    toolsCache?.with?.path?.includes(path),
+  ) ||
+  releaseSteps.indexOf(toolsCache) > releaseSteps.indexOf(buildStep)
+) {
+  failures.push(
+    "release.yml must restore Linux and Windows bundler tool caches.",
+  );
+}
 if (!/\brelease:\s*\n\s+needs:\s+quality\b/.test(release)) {
   failures.push(
     "release.yml must require the quality job before publishing assets.",

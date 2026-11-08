@@ -92,6 +92,8 @@ docker run --rm -p 8080:8080 ghcr.io/amery2010/open-builder:latest
 
 项目使用 React 19、TypeScript 6、Vite 8、Tailwind CSS 4、Zustand、Sandpack 和 Tauri 2。
 
+`pnpm test` 会运行前端与 Rust 测试，需要安装 Rust 和 [Tauri 平台依赖](https://v2.tauri.app/start/prerequisites/)。仅修改 Web 时可用 `pnpm test:frontend`，原生测试可单独运行 `pnpm test:rust`。这些测试不覆盖安装包工具下载、签名或公证；发布打包流程另有重试、工具缓存和 macOS 签名预检。
+
 ```bash
 pnpm typecheck
 pnpm lint

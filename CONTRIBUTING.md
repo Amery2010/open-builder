@@ -62,6 +62,8 @@ By participating in this project, you agree to abide by the following guidelines
 - pnpm 11
 - Git
 
+The combined `pnpm test` command also requires Rust and the [Tauri platform prerequisites](https://v2.tauri.app/start/prerequisites/). Web-only contributors can run `pnpm test:frontend` without the native toolchain. The signing preflight tests in `pnpm workflow:check` require OpenSSL.
+
 ### Local Development
 
 ```bash
@@ -91,7 +93,9 @@ pnpm format:check      # Prettier verification, including documentation
 pnpm version:check     # Package/Cargo/Tauri/in-app version contract
 pnpm version:sync      # Write package.json version to the other version files
 pnpm workflow:check    # GitHub Actions and release-workflow contract
-pnpm test              # Unit tests
+pnpm test              # Frontend and Rust tests
+pnpm test:frontend     # Frontend Vitest tests without the native toolchain
+pnpm test:rust         # Rust tests using the checked-in Cargo.lock
 pnpm test:components   # Component-level Vitest tests
 pnpm security:desktop  # Desktop capability and security policy checks
 ```
@@ -241,6 +245,16 @@ refactor(store): migrate session persistence to Zustand middleware
 `package.json` is the version source of truth. After intentionally changing it, run `pnpm version:sync` and verify with `pnpm version:check`. Do not edit Cargo, Tauri, or the in-app version independently.
 
 Keep `CHANGELOG.md` in reverse chronological order under `Unreleased`. Before pushing a `vX.Y.Z` tag, rename that section to `## [vX.Y.Z]`; legacy `## [X.Y.Z] - YYYY-MM-DD` headings remain supported. The tag triggers the desktop draft-release workflow only after the frontend and Rust quality gates pass, and the workflow uses that exact changelog section as the GitHub Release description. Missing, duplicate, or empty release sections fail before release creation. Pages deployment remains tied to `main` or a manual workflow run.
+
+Installer packaging depends on external downloads that unit tests cannot verify. The desktop release job caches Tauri bundler tools by runner OS, architecture, and lockfile/configuration hash, and retries failed builds up to three times after the initial attempt. A prolonged upstream outage can still fail a release.
+
+macOS signing is prepared before compilation:
+
+- With no Apple credentials configured, the workflow uses ad-hoc signing without notarization.
+- For Developer ID signing, set `APPLE_CERTIFICATE` to the Base64-encoded `.p12` export containing both the certificate and its private key, and set `APPLE_CERTIFICATE_PASSWORD` to its export password (an empty password is supported). `APPLE_SIGNING_IDENTITY` is optional; Tauri can infer it from the imported certificate.
+- For notarization, additionally configure all three of `APPLE_ID`, `APPLE_PASSWORD` (an app-specific password), and `APPLE_TEAM_ID`. Leave all three unset to skip notarization.
+
+The preflight rejects malformed certificates, unreadable private keys, incorrect export passwords, and incomplete credentials without logging secret values. It does not validate Apple account credentials, certificate trust, expiration, or the final signing identity; Tauri performs the actual keychain import, signing, and optional notarization during packaging.
 
 ---
 
