@@ -72,6 +72,18 @@ export function createIsolatedPreviewSession(
   if (bootstrap) {
     frame.removeAttribute("srcdoc");
     frame.src = "about:blank";
+  } else {
+    const url = new URL(source.src, window.location.href);
+    if (
+      url.protocol === "https:" &&
+      /^[a-z0-9]+-\d+\.nodebox\.codesandbox\.io$/i.test(url.hostname)
+    ) {
+      // Reusing Vite's document URL can produce an invalid cached response in
+      // Nodebox's service worker on WebKit. Only the disposable frame needs a
+      // fresh document; keep the active preview and its route untouched.
+      url.searchParams.set("__ob_capture", createDesignBridgeNonce());
+      frame.src = url.href;
+    }
   }
   frame.title = "Temporary prototype review preview";
   frame.tabIndex = -1;

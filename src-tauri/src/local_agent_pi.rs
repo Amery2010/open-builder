@@ -3681,6 +3681,12 @@ mod tests {
                     "{error}"
                 ),
             }
+            let invocation = std::fs::read_to_string(root.join("provider-invocation.log"))
+                .unwrap_or_else(|error| panic!("{mode}: missing Pi request log: {error}"));
+            assert!(
+                invocation.contains("\"type\":\"get_available_models\""),
+                "{mode}: Pi failure fixture must read the first RPC request"
+            );
             std::fs::remove_dir_all(root).unwrap();
         }
     }

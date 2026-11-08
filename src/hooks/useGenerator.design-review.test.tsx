@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act, renderHook } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useConversationStore } from "../store/conversation";
@@ -10,7 +10,65 @@ import type { AutomaticDesignReviewEvidence } from "../lib/design/automatic-revi
 import { computeDesignReviewSourceDigest } from "../lib/design/review-jobs/digest";
 import { useGenerator } from "./useGenerator";
 
-const reviewRunner = vi.hoisted(() => ({ start: vi.fn(), retry: vi.fn() }));
+const reviewRunner = vi.hoisted(() => ({
+  start: vi.fn(),
+  retry: vi.fn(),
+  cancel: vi.fn(),
+}));
+
+vi.mock("../lib/design/review-jobs/digest", async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import("../lib/design/review-jobs/digest")>();
+  return {
+    ...original,
+    computeDesignReviewSourceDigest: vi.fn(
+      original.computeDesignReviewSourceDigest,
+    ),
+  };
+});
+
+function setAutoQa(enabled: boolean) {
+  useSettingsStore.setState((state) => ({
+    system: { ...state.system, autoQaEnabled: enabled },
+  }));
+}
+
+function renderGenerator() {
+  const settings = useSettingsStore.getState();
+  return renderHook(() =>
+    useGenerator({
+      settings: settings.ai,
+      webSearchSettings: settings.webSearch,
+      assetSearchSettings: settings.assetSearch,
+      setMessages: useConversationStore.getState().setMessages,
+      setFiles: useConversationStore.getState().setFiles,
+      setIsGenerating: vi.fn(),
+      setTemplate: useConversationStore.getState().setTemplate,
+      restartSandpack: vi.fn(),
+    }),
+  );
+}
+
+function seedAutomatic() {
+  const conversationId = useConversationStore.getState().createConversation();
+  useConversationStore.getState().setWorkspaceMode("design");
+  useConversationStore.getState().setFiles({ "src/App.tsx": "export {}" });
+  const evidence = automaticEvidence(conversationId, "a".repeat(64));
+  useConversationStore.getState().setMessages([
+    { role: "user", content: "Build this page" },
+    {
+      role: "user",
+      content: "",
+      metadata: {
+        origin: "design_review",
+        reviewJobId: evidence.requestId,
+        reviewSummary: { status: "capturing" },
+      },
+    },
+  ]);
+  useDesignReviewStore.getState().requestAutomaticCapture(evidence);
+  return { conversationId, evidence };
+}
 
 vi.mock("../lib/design/review-jobs/runner", () => ({
   designReviewJobRunner: reviewRunner,
@@ -97,8 +155,13 @@ describe("useGenerator background Design Review", () => {
   beforeEach(() => {
     reviewRunner.start.mockReset();
     reviewRunner.retry.mockReset();
+    reviewRunner.cancel.mockReset().mockImplementation((id) => {
+      useDesignReviewStore.getState().updateRunStatus(id, "cancelled");
+      return true;
+    });
+    vi.mocked(computeDesignReviewSourceDigest).mockClear();
     useSettingsStore.setState((state) => ({
-      system: { ...state.system, language: "zh" },
+      system: { ...state.system, language: "zh", autoQaEnabled: false },
     }));
     useConversationStore.setState({
       conversations: {},
@@ -163,6 +226,7 @@ describe("useGenerator background Design Review", () => {
   });
 
   it("marks a failed automatic review unavailable instead of clean", async () => {
+    setAutoQa(true);
     const conversationId = useConversationStore.getState().createConversation();
     useConversationStore.getState().setWorkspaceMode("design");
     useConversationStore.getState().setFiles({ "src/App.tsx": "export {}" });
@@ -215,9 +279,56 @@ describe("useGenerator background Design Review", () => {
     expect(useDesignReviewStore.getState().automatic?.stage).not.toBe(
       "complete",
     );
+    expect(useDesignReviewStore.getState().dialogRequestId).toBe(0);
+  });
+
+  it("records automatic capture failure details without starting a review run", async () => {
+    setAutoQa(true);
+    const conversationId = useConversationStore.getState().createConversation();
+    useConversationStore.getState().setWorkspaceMode("design");
+    useConversationStore.getState().setFiles({ "src/App.tsx": "export {}" });
+    const settingsState = useSettingsStore.getState();
+    const hook = renderHook(() => {
+      const [, setIsGenerating] = useState(false);
+      return useGenerator({
+        settings: settingsState.ai,
+        webSearchSettings: settingsState.webSearch,
+        assetSearchSettings: settingsState.assetSearch,
+        setMessages: useConversationStore.getState().setMessages,
+        setFiles: useConversationStore.getState().setFiles,
+        setIsGenerating,
+        setTemplate: useConversationStore.getState().setTemplate,
+        restartSandpack: vi.fn(),
+      });
+    });
+    const files =
+      useConversationStore.getState().conversations[conversationId].files;
+    const evidence = automaticEvidence(
+      conversationId,
+      await computeDesignReviewSourceDigest({ files }),
+    );
+    useDesignReviewStore.getState().requestAutomaticCapture(evidence);
+    await act(async () => {
+      await hook.result.current.automaticDesignReviewUnavailable(
+        evidence,
+        "Preview bridge timed out",
+      );
+    });
+
+    const run =
+      useDesignReviewStore.getState().runsByConversation[conversationId]?.[0];
+    expect(run).toMatchObject({
+      id: evidence.requestId,
+      kind: "automatic",
+      status: "failed",
+      error: "Preview bridge timed out",
+    });
+    expect(reviewRunner.start).not.toHaveBeenCalled();
+    expect(useDesignReviewStore.getState().dialogRequestId).toBe(0);
   });
 
   it("waits for a manual review and revalidates before starting automatic review", async () => {
+    setAutoQa(true);
     const conversationId = useConversationStore.getState().createConversation();
     useConversationStore.getState().setWorkspaceMode("design");
     useConversationStore.getState().setFiles({ "src/App.tsx": "export {}" });
@@ -292,6 +403,7 @@ describe("useGenerator background Design Review", () => {
   });
 
   it("does not start automatic repair after leaving Design mode", async () => {
+    setAutoQa(true);
     const conversationId = useConversationStore.getState().createConversation();
     useConversationStore.getState().setWorkspaceMode("design");
     useConversationStore.getState().setFiles({ "src/App.tsx": "export {}" });
@@ -364,6 +476,7 @@ describe("useGenerator background Design Review", () => {
   });
 
   it("reports current Design findings without starting a repair request", async () => {
+    setAutoQa(true);
     const conversationId = useConversationStore.getState().createConversation();
     useConversationStore.getState().setWorkspaceMode("design");
     useConversationStore.getState().setFiles({ "src/App.tsx": "export {}" });
@@ -431,5 +544,207 @@ describe("useGenerator background Design Review", () => {
           (message) => message.metadata?.origin === "design_auto_fix",
         ),
     ).toBe(false);
+  });
+});
+
+describe("automatic Design Review QA setting", () => {
+  beforeEach(() => {
+    useDesignReviewStore.getState().reset();
+    useDesignReviewStore.getState().clearRuns();
+    useConversationStore.setState({
+      conversations: {},
+      activeId: null,
+      _hasHydrated: true,
+      legacyPlanModeMigrated: true,
+    });
+    reviewRunner.start.mockReset();
+    reviewRunner.cancel.mockReset().mockImplementation((id) => {
+      useDesignReviewStore.getState().updateRunStatus(id, "cancelled");
+      return true;
+    });
+    vi.mocked(computeDesignReviewSourceDigest).mockClear();
+    setAutoQa(false);
+  });
+
+  it("rejects automatic review and capture failure callbacks while disabled", async () => {
+    const { evidence } = seedAutomatic();
+    const hook = renderGenerator();
+    await act(async () => {
+      await hook.result.current.automaticDesignReview([screenshot], evidence);
+      await hook.result.current.designReview([screenshot], {
+        automaticEvidence: evidence,
+      });
+      await hook.result.current.automaticDesignReviewUnavailable(
+        evidence,
+        "Late capture failure",
+      );
+    });
+    expect(reviewRunner.start).not.toHaveBeenCalled();
+    expect(useDesignReviewStore.getState().automatic).toBeUndefined();
+    expect(
+      Object.values(useDesignReviewStore.getState().runsByConversation).flat(),
+    ).toHaveLength(0);
+  });
+
+  it("clears progress when QA is disabled before the preview consumes a capture request", async () => {
+    setAutoQa(true);
+    seedAutomatic();
+    renderGenerator();
+    expect(useDesignReviewStore.getState().status).toBe("capturing");
+    expect(useDesignReviewStore.getState().captureProgress).toBeDefined();
+    await act(async () => {
+      setAutoQa(false);
+    });
+    expect(useDesignReviewStore.getState().automatic).toBeUndefined();
+    expect(useDesignReviewStore.getState().status).toBe("idle");
+    expect(useDesignReviewStore.getState().captureProgress).toBeUndefined();
+    expect(reviewRunner.start).not.toHaveBeenCalled();
+  });
+
+  it("does not revive a review digest after QA is turned off and on", async () => {
+    setAutoQa(true);
+    const { conversationId, evidence } = seedAutomatic();
+    const hook = renderGenerator();
+    let finishDigest!: (value: string) => void;
+    vi.mocked(computeDesignReviewSourceDigest).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishDigest = resolve;
+        }),
+    );
+    let pending!: ReturnType<typeof hook.result.current.designReview>;
+    await act(async () => {
+      pending = hook.result.current.designReview([screenshot], {
+        automaticEvidence: evidence,
+      });
+      await Promise.resolve();
+      setAutoQa(false);
+      setAutoQa(true);
+      finishDigest("a".repeat(64));
+      await pending;
+      // A capture callback delivered after the toggle must also be ignored.
+      await hook.result.current.automaticDesignReview([screenshot], evidence);
+    });
+    expect(reviewRunner.start).not.toHaveBeenCalled();
+    expect(useDesignReviewStore.getState().automatic).toBeUndefined();
+    expect(
+      useConversationStore
+        .getState()
+        .conversations[conversationId].messages.at(-1)?.metadata?.reviewSummary
+        ?.status,
+    ).toBe("interrupted");
+  });
+
+  it("stops waiting for manual review immediately without cancelling it", async () => {
+    setAutoQa(true);
+    const { conversationId, evidence } = seedAutomatic();
+    useDesignReviewStore.getState().createRun({
+      id: "manual-running",
+      conversationId,
+      kind: "manual",
+      sourceDigest: "a".repeat(64),
+      provider: { runtime: "api", provider: "test", model: "test" },
+    });
+    useDesignReviewStore
+      .getState()
+      .updateRunStatus("manual-running", "running");
+    const hook = renderGenerator();
+    let pending!: Promise<void>;
+    await act(async () => {
+      pending = hook.result.current.automaticDesignReview(
+        [screenshot],
+        evidence,
+      );
+      await Promise.resolve();
+    });
+    expect(useDesignReviewStore.getState().automatic?.stage).toBe("deferred");
+    await act(async () => {
+      setAutoQa(false);
+      setAutoQa(true);
+      await pending;
+    });
+    expect(reviewRunner.cancel).not.toHaveBeenCalled();
+    expect(
+      useDesignReviewStore.getState().runsByConversation[conversationId][0]
+        .status,
+    ).toBe("running");
+    expect(reviewRunner.start).not.toHaveBeenCalled();
+  });
+
+  it("aborts an executing automatic review without accepting a late completion", async () => {
+    setAutoQa(true);
+    const { conversationId, evidence } = seedAutomatic();
+    reviewRunner.start.mockImplementation((input) => {
+      const run = useDesignReviewStore.getState().createRun({
+        id: "executing-automatic",
+        conversationId,
+        kind: "automatic",
+        sourceDigest: input.sourceDigest,
+        provider: { runtime: "api", provider: "test", model: "test" },
+      });
+      useDesignReviewStore
+        .getState()
+        .updateRunStatus("executing-automatic", "running");
+      return run;
+    });
+    const hook = renderGenerator();
+    let pending!: Promise<void>;
+    await act(async () => {
+      pending = hook.result.current.automaticDesignReview(
+        [screenshot],
+        evidence,
+      );
+    });
+    await waitFor(() => expect(reviewRunner.start).toHaveBeenCalledOnce());
+    await act(async () => {
+      setAutoQa(false);
+      expect(reviewRunner.cancel).toHaveBeenCalledWith("executing-automatic");
+      setAutoQa(true);
+      await pending;
+    });
+    expect(useDesignReviewStore.getState().automatic).toBeUndefined();
+    expect(
+      useDesignReviewStore.getState().runsByConversation[conversationId][0]
+        .status,
+    ).toBe("cancelled");
+    expect(useDesignReviewStore.getState().dialogRequestId).toBe(0);
+  });
+
+  it("cancels active and queued automatic runs while preserving manual and completed runs", async () => {
+    setAutoQa(true);
+    seedAutomatic();
+    for (const [id, kind, status] of [
+      ["automatic-running", "automatic", "running"],
+      ["automatic-queued", "automatic", "queued"],
+      ["manual-running", "manual", "running"],
+      ["automatic-complete", "automatic", "succeeded"],
+    ] as const) {
+      useDesignReviewStore.getState().createRun({
+        id,
+        conversationId: id,
+        kind,
+        sourceDigest: "a".repeat(64),
+        provider: { runtime: "api", provider: "test", model: "test" },
+      });
+      useDesignReviewStore.getState().updateRunStatus(id, status);
+    }
+    renderGenerator();
+    await act(async () => {
+      setAutoQa(false);
+    });
+    await waitFor(() => expect(reviewRunner.cancel).toHaveBeenCalledTimes(2));
+    expect(reviewRunner.cancel.mock.calls.map(([id]) => id).sort()).toEqual([
+      "automatic-queued",
+      "automatic-running",
+    ]);
+    expect(
+      useDesignReviewStore.getState().runsByConversation["manual-running"][0]
+        .status,
+    ).toBe("running");
+    expect(
+      useDesignReviewStore.getState().runsByConversation[
+        "automatic-complete"
+      ][0].status,
+    ).toBe("succeeded");
   });
 });

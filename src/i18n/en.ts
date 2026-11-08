@@ -193,7 +193,7 @@ export const en: typeof zh = {
       label: "Auto QA",
       on: "Enabled",
       off: "Disabled",
-      hint: "Automatically checks and fixes obvious issues after generation.",
+      hint: "Off by default. After generation, coding mode checks and fixes obvious issues, and design mode creates a design review report. Turning this off stops unfinished automatic design reviews.",
     },
     customSystemPrompt: {
       label: "Custom instructions",
@@ -363,11 +363,31 @@ export const en: typeof zh = {
     projectRoot: "(entire project)",
   },
   empty: {
+    title: "Start with an idea",
+    description:
+      "Tell me who your app is for, what it should do, and the style you like.",
+    referenceHint:
+      "You can also upload a reference screenshot and describe what to keep or change.",
     suggestionsLabel: "Quick suggestions",
     suggestions: {
-      todo: "Create a todo app",
-      weather: "Create a weather card",
-      calculator: "Create a calculator",
+      portfolio: {
+        title: "Personal portfolio",
+        description: "Showcase your work, bio, and contact details",
+        prompt:
+          "Create a designer portfolio with a personal introduction, a project showcase, and contact details. Use a simple black and white style and make it work on mobile.",
+      },
+      tasks: {
+        title: "Task manager",
+        description: "Set priorities and track completed tasks",
+        prompt:
+          "Create a personal task manager with task creation, priorities, completion tracking, and filters. Save data locally and keep the interface clear and simple.",
+      },
+      cafe: {
+        title: "Coffee shop website",
+        description: "Introduce your menu and location in three pages",
+        prompt:
+          "Create a coffee shop website with three pages: home, menu, and location. Use a warm, natural style and make it work on mobile.",
+      },
     },
   },
   chat: {
@@ -406,19 +426,28 @@ export const en: typeof zh = {
     projectImport: {
       title: "Upload Project",
       description:
-        "Import a local folder or ZIP into a new project conversation after successful Sandpack verification.",
+        "Choose a local folder or ZIP to check and import into a separate project conversation.",
       pickFolder: "Choose project folder",
-      folderHint: "Uses the File System Access API when available",
+      folderHint: "Read source files, images and fonts from a project",
       pickZip: "Choose ZIP archive",
-      zipHint: "Supports common project archives",
+      zipHint: "Automatically detect the project folder inside",
       stopFirst: "Stop the active generation before importing a new project.",
       reading: "Reading and checking the project...",
-      verifying: "Verifying Sandpack compilation in an isolated preview…",
-      verified: "Sandpack compilation verified.",
+      checked: "Checked and ready to import",
+      previewAfterImport:
+        "Preview starts after import. Compilation or network issues do not affect your imported files.",
+      previewMode: "Workspace mode",
+      previewAvailable: "Code and preview",
+      assets: "Resource files",
+      details: "View details",
+      errorDetails: "View error details",
+      readFailed:
+        "Could not read the project. Check the files and choose it again.",
+      importing: "Importing…",
       newConversation:
         "Import creates a new conversation and keeps your current project and history.",
-      retry: "Retry verification",
-      failed: "Project import failed: {message}",
+      failed:
+        "Project import did not finish. Retry or choose the project again.",
       fileSummary: "{count} files · {size}",
       template: "Preview template",
       filtered: "Filtered",
@@ -428,7 +457,8 @@ export const en: typeof zh = {
       symlink: "symlinks",
       redacted: "Redacted files",
       codeOnly:
-        "No supported preview framework was detected. The workspace will open in code-only mode.",
+        "This project will open in code mode. Source files and resources will be kept.",
+      codeOnlyMode: "Code only",
       replaceWarning:
         "This workspace already has files. Continuing keeps the chat, replaces the files, and clears old snapshots and resumable local-agent sessions.",
       cancel: "Cancel",
@@ -1152,19 +1182,41 @@ export const en: typeof zh = {
     emptySearch: "No files match.",
   },
   projectBuild: {
+    menuLabel: "Download",
+    downloadDeployment: "Download deployment ZIP",
+    saving: "Saving…",
+    saveCancelled:
+      "Save cancelled. The deployment ZIP is still ready to download.",
+    downloadFailed: "Download failed",
+    unavailable: "This project version is no longer available.",
     download: "Download project",
     source: "Download source",
     deployment: "Build static deployment ZIP",
     title: "Static deployment",
     compatibility:
       "Vite 4 compatibility build for modern browsers. Output is not minified; project build scripts and type checks are not run.",
-    start: "Build and download",
+    start: "Start build",
     cancel: "Cancel build",
     close: "Close",
-    ready: "The deployment ZIP has been downloaded.",
+    ready: "The deployment ZIP is ready.",
     cancelled: "Build cancelled. Project changes require a fresh build.",
     failed: "Build failed",
     preparing: "Preparing project…",
+  },
+  screenshot: {
+    title: "Export screenshot",
+    viewport: "Current viewport",
+    fullPage: "Full page",
+    region: "Selected area",
+    hint: "The current view is frozen. Drag to select the area to export.",
+    selectArea: "Select screenshot area",
+    reselect: "Reselect area",
+    export: "Export PNG",
+    exporting: "Exporting screenshot…",
+    cancel: "Cancel",
+    retry: "Retry",
+    unavailable: "Screenshots need a supported, loaded preview.",
+    exportFailed: "Could not export the screenshot. Try again.",
   },
   annotation: {
     title: "Annotate preview",
@@ -1252,6 +1304,21 @@ export const en: typeof zh = {
     exportedDirectory: "Exported to {path}",
     exportDirectoryFailed: "Directory export failed: {message}",
   },
+  previewCompilation: {
+    starting: "Starting preview…",
+    compiling: "Compiling preview…",
+    ready: "Preview compilation complete",
+    synced: "Preview files synchronized",
+    failed:
+      "Preview compilation failed. Your project files are kept and can be edited.",
+    timedOut:
+      "Preview timed out. Your project files are kept. Check your network or retry.",
+    retry: "Retry preview",
+    details: "View technical details",
+    codeOnly: "This project uses code mode",
+    codeOnlyHint:
+      "Sandpack cannot preview this project. You can still view and edit its source files and resources.",
+  },
   previewRecovery: {
     unavailableTitle: "Preview unavailable",
     renderDescription:
@@ -1284,6 +1351,8 @@ export const en: typeof zh = {
     zoomOut: "Zoom out of canvas",
     zoom: "Canvas zoom level",
     loading: "Preparing page preview",
+    updating: "Updating page preview",
+    updateFailed: "Preview update failed. Showing the previous preview.",
     waiting: "Waiting for page preview",
     failed: "Page preview could not be generated",
     retry: "Regenerate preview",
@@ -1486,6 +1555,9 @@ export const en: typeof zh = {
     },
     activityTitle: "Automatic Design Review",
     activityWaiting: "Waiting for the next review event…",
+    failureDetailsUnavailable:
+      "Failure details are unavailable. Recapture screenshots to retry.",
+    dismissNotice: "Dismiss notice",
     findingCount: "{count} findings",
     noFindings: "No findings remain.",
     openWorkspace: "Open review workspace",
@@ -1579,6 +1651,8 @@ export const en: typeof zh = {
       attention: "Needs attention",
     },
     fileHidden: "File content hidden",
+    designStyleApplied: "Applied the {style} design style.",
+    designStyleFailed: "Could not apply the design style: {reason}",
     noIssues: "No errors or warnings",
     failed: "Failed: ",
     found: "Found ",

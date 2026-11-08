@@ -18,6 +18,7 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   Dialog,
   DialogContent,
+  DialogBody,
   DialogDescription,
   DialogFooter,
   DialogHeader,
@@ -560,10 +561,10 @@ export function DesignSystemPanel({
           </div>
         )}
 
-        <div
+        <DialogBody
           ref={bodyRef}
           data-testid="design-system-scroll-region"
-          className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-5 sm:px-6"
+          className="px-4 py-5 sm:px-6"
         >
           {view === "custom" ? (
             <div className="mx-auto max-w-2xl space-y-5">
@@ -924,7 +925,7 @@ export function DesignSystemPanel({
               </p>
             </>
           )}
-        </div>
+        </DialogBody>
 
         {view === "catalog" && filteredCatalogEntries.length > 0 && (
           <nav

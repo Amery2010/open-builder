@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useConversationStore } from "../../store/conversation";
 import { useSnapshotStore } from "../../store/snapshot";
 import { digestProjectSnapshot } from "../project-runtime/snapshot";
+import { assessProjectRuntime } from "../project-runtime/capabilities";
+import { stageProjectAsset } from "../project-assets/core";
 import { commitImportedProject } from "./project-import-commit";
 import type { StagedProjectImport } from "./project-import";
 
@@ -35,21 +37,14 @@ async function fixture(): Promise<StagedProjectImport> {
       redactedFiles: 0,
       skipped: { ignored: 0, sensitive: 0, binary: 0, symlink: 0 },
     },
-    validation: {
+    preflight: {
       digest: await digestProjectSnapshot(files),
-      template: "static",
-      previewMode: "sandpack",
-      capabilities: {
-        template: "static",
-        previewMode: "sandpack",
-        preview: { supported: true },
-        staticBuild: { supported: true },
-      },
+      capabilities: assessProjectRuntime(files),
     },
   };
 }
 
-describe("validated project import commit", () => {
+describe("locally checked project import commit", () => {
   beforeEach(() => {
     useConversationStore.setState({
       conversations: {},
@@ -89,22 +84,69 @@ describe("validated project import commit", () => {
     });
   });
 
-  it("rejects missing or stale compilation evidence before materializing assets", async () => {
+  it("rejects missing or stale local checks before materializing assets", async () => {
     const project = await fixture();
     expect(
       await commitImportedProject(
-        { ...project, validation: undefined },
+        { ...project, preflight: undefined! },
         { isCurrent: () => true },
       ),
     ).toMatchObject({ ok: false });
     expect(
       await commitImportedProject(
-        { ...project, files: { "index.html": "changed after verification" } },
+        { ...project, files: { "index.html": "changed after checking" } },
         { isCurrent: () => true },
       ),
     ).toMatchObject({
       ok: false,
-      error: expect.stringContaining("changed after verification"),
+      error: expect.stringContaining("changed after checking"),
+    });
+    expect(mocks.materialize).not.toHaveBeenCalled();
+    expect(useConversationStore.getState().conversations).toEqual({});
+  });
+
+  it("imports unsupported source in code-only mode and recomputes untrusted preview metadata", async () => {
+    const project = await fixture();
+    project.files["package.json"] = JSON.stringify({
+      devDependencies: { vite: "8.2.2" },
+      scripts: { dev: "vite" },
+    });
+    project.template = "react";
+    project.preflight.digest = await digestProjectSnapshot(project.files);
+    expect(
+      await commitImportedProject(project, { isCurrent: () => true }),
+    ).toEqual({ ok: true });
+    const state = useConversationStore.getState();
+    expect(state.conversations[state.activeId!]).toMatchObject({
+      files: project.files,
+      template: "vite",
+      previewMode: "code-only",
+    });
+  });
+
+  it("validates unsafe paths and resource bytes even with a matching snapshot digest", async () => {
+    const project = await fixture();
+    project.files = { "../escape.js": "unsafe" };
+    project.preflight.digest = await digestProjectSnapshot(project.files);
+    expect(
+      await commitImportedProject(project, { isCurrent: () => true }),
+    ).toMatchObject({ ok: false });
+
+    project.files = { "index.html": "<h1>Imported</h1>" };
+    const asset = await stageProjectAsset(
+      "pixel.gif",
+      new Blob(["GIF89a-original"]),
+    );
+    project.assets = [{ ...asset, blob: new Blob(["GIF89a-modified"]) }];
+    project.preflight.digest = await digestProjectSnapshot(
+      project.files,
+      project.assets,
+    );
+    expect(
+      await commitImportedProject(project, { isCurrent: () => true }),
+    ).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("changed after checking"),
     });
     expect(mocks.materialize).not.toHaveBeenCalled();
     expect(useConversationStore.getState().conversations).toEqual({});

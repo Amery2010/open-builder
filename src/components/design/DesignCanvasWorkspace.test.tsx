@@ -7,6 +7,7 @@ import { TooltipProvider } from "../ui/tooltip";
 import type { DesignCanvasLayout } from "../../store/project-design-workspace";
 import { en } from "../../i18n/en";
 import type { CanvasPreviewSnapshot } from "../../lib/design/canvas-preview";
+import type { DesignBridgeCaptureResult } from "../../lib/design/preview-bridge";
 
 const state = vi.hoisted(() => ({
   layout: {} as DesignCanvasLayout,
@@ -130,6 +131,38 @@ function beginDrag(handle: HTMLElement, canvas: HTMLElement, x = 300, y = 250) {
 }
 
 describe("DesignCanvasWorkspace interactions", () => {
+  it("keeps the previous picture visible with update status and an accessible retry", () => {
+    const image = {
+      dataUrl: "data:image/png;base64,cHJldmlvdXM=",
+      viewport: { width: 400, fullHeight: 300 },
+    } as DesignBridgeCaptureResult;
+    const { props, rerender } = setup({
+      boards: [{ id: "home", name: "Home", previewKey: "latest" }],
+      previews: { latest: { status: "queued", result: image } },
+    });
+    expect(screen.getByRole("img")).toHaveAttribute("src", image.dataUrl);
+    expect(screen.getByText(en.designCanvas.updating)).toBeVisible();
+    rerender(
+      <DesignCanvasWorkspace
+        {...props}
+        previews={{
+          latest: {
+            status: "error",
+            result: image,
+            error: "Capture timed out",
+          },
+        }}
+      />,
+    );
+    expect(screen.getByRole("img")).toHaveAttribute("src", image.dataUrl);
+    expect(screen.getByText(en.designCanvas.updateFailed)).toBeVisible();
+    const retry = screen.getByRole("button", { name: en.designCanvas.retry });
+    fireEvent.keyDown(retry, { key: "Enter" });
+    fireEvent.click(retry);
+    expect(props.onRetry).toHaveBeenCalledExactlyOnceWith("latest");
+    expect(props.onPlay).not.toHaveBeenCalled();
+  });
+
   it("selects and drags without moving the camera, saving only that board", () => {
     const { props, canvas, handle } = setup();
     const before = camera(canvas);

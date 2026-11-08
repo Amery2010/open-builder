@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
+  DialogBody,
   DialogDescription,
   DialogFooter,
   DialogHeader,
@@ -336,8 +337,8 @@ export function McpPanel({
   return (
     <>
       <Dialog open={open} onOpenChange={(next) => !next && onClose()}>
-        <DialogContent className="flex max-h-[86vh] flex-col sm:max-w-xl">
-          <DialogHeader>
+        <DialogContent className="flex max-h-[86vh] flex-col overflow-hidden sm:max-w-xl">
+          <DialogHeader className="shrink-0">
             <DialogTitle>{t.mcp.title}</DialogTitle>
             <DialogDescription>{t.mcp.description}</DialogDescription>
           </DialogHeader>
@@ -422,7 +423,7 @@ export function McpPanel({
           {(editorOpen || importerOpen) && <Separator />}
 
           {editorOpen && (
-            <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+            <DialogBody className="pr-3">
               <McpServerEditor
                 key={editingServer?.id ?? "new"}
                 initial={editingServer}
@@ -434,17 +435,17 @@ export function McpPanel({
                 }}
                 onSave={handleSave}
               />
-            </div>
+            </DialogBody>
           )}
 
           {importerOpen && (
-            <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+            <DialogBody className="pr-3">
               <McpJsonImporter
                 onPreview={previewImport}
                 onApply={applyImport}
                 onImported={() => setError(null)}
               />
-            </div>
+            </DialogBody>
           )}
 
           {!editorOpen && !importerOpen && (
@@ -491,7 +492,7 @@ export function McpPanel({
           )}
 
           {!editorOpen && !importerOpen && (
-            <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
+            <DialogBody className="space-y-2 pr-3">
               {!hydrated ? (
                 <div className="flex flex-col items-center justify-center py-10 text-muted-foreground">
                   <Loader2
@@ -555,7 +556,7 @@ export function McpPanel({
                   ))}
                 </>
               )}
-            </div>
+            </DialogBody>
           )}
         </DialogContent>
       </Dialog>

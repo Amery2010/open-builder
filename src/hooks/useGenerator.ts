@@ -114,6 +114,7 @@ import {
   isDesignReviewRunActive,
   isDesignReviewTerminalStatus,
   type DesignReviewJobInput,
+  type DesignReviewProviderRef,
   type DesignReviewRun,
 } from "../lib/design/review-jobs/types";
 import { useMcpStore } from "../store/mcp";
@@ -594,7 +595,9 @@ function hasNewerGenuineUserMessage(
 
 function waitForDesignReviewRun(
   runId: string,
+  signal?: AbortSignal,
 ): Promise<DesignReviewRun | null> {
+  if (signal?.aborted) return Promise.resolve(null);
   const current = Object.values(
     useDesignReviewStore.getState().runsByConversation,
   )
@@ -609,9 +612,18 @@ function waitForDesignReviewRun(
         .flat()
         .find((candidate) => candidate.id === runId);
       if (run && !isDesignReviewTerminalStatus(run.status)) return;
-      unsubscribe();
+      cleanup();
       resolve(run ?? null);
     });
+    const abort = () => {
+      cleanup();
+      resolve(null);
+    };
+    const cleanup = () => {
+      unsubscribe();
+      signal?.removeEventListener("abort", abort);
+    };
+    signal?.addEventListener("abort", abort, { once: true });
   });
 }
 
@@ -867,6 +879,90 @@ export function useGenerator({
   const reviewContractByRunIdRef = useRef(
     new Map<string, DesignContract | null>(),
   );
+  // Each enabled interval owns a signal. Turning QA back on cannot revive
+  // digest, capture, or review promises from an earlier interval.
+  const automaticReviewControllerRef = useRef(new AbortController());
+  const reviewRunnerRef = useRef<
+    | typeof import("../lib/design/review-jobs/runner").designReviewJobRunner
+    | null
+  >(null);
+
+  useEffect(() => {
+    const stopAutomaticReviews = () => {
+      automaticReviewControllerRef.current.abort();
+      const reviewStore = useDesignReviewStore.getState();
+      const activeRuns = Object.values(reviewStore.runsByConversation)
+        .flat()
+        .filter(
+          (run) => run.kind === "automatic" && isDesignReviewRunActive(run),
+        );
+      const request = reviewStore.automatic;
+      const pendingRequest =
+        request &&
+        ["capturing", "reviewing", "fixing", "verifying", "deferred"].includes(
+          request.stage,
+        )
+          ? request
+          : undefined;
+      const pendingIds = new Set(pendingAutomaticCaptureIds);
+      if (pendingRequest) pendingIds.add(pendingRequest.evidence.requestId);
+      for (const run of activeRuns) pendingIds.add(run.id);
+      for (const conversation of Object.values(
+        useConversationStore.getState().conversations,
+      )) {
+        for (const message of conversation.messages) {
+          const id = message.metadata?.reviewJobId;
+          if (id && pendingIds.has(id)) {
+            updateAutomaticReviewActivity(conversation.id, id, {
+              status: "interrupted",
+            });
+            pendingAutomaticCaptureIds.delete(id);
+          }
+        }
+      }
+      // Only clear automatic ownership. A manual capture/review may share the
+      // dialog state, so resetting the review store would interrupt it too.
+      if (pendingRequest) {
+        useDesignReviewStore.setState({
+          automatic: undefined,
+          ...(["capturing", "verifying"].includes(pendingRequest.stage) &&
+          reviewStore.status === "capturing"
+            ? { status: "idle" as const, captureProgress: undefined }
+            : {}),
+        });
+      }
+      if (activeRuns.length) {
+        const cancel = (
+          runner: NonNullable<typeof reviewRunnerRef.current>,
+        ) => {
+          for (const run of activeRuns) runner.cancel(run.id);
+        };
+        if (reviewRunnerRef.current) cancel(reviewRunnerRef.current);
+        else
+          void import("../lib/design/review-jobs/runner").then(
+            ({ designReviewJobRunner }) => {
+              cancel(designReviewJobRunner);
+            },
+          );
+      }
+    };
+    const update = (enabled: boolean) => {
+      if (!enabled) stopAutomaticReviews();
+      else if (automaticReviewControllerRef.current.signal.aborted) {
+        automaticReviewControllerRef.current = new AbortController();
+      }
+    };
+    update(useSettingsStore.getState().system.autoQaEnabled);
+    const unsubscribe = useSettingsStore.subscribe((state, previous) => {
+      if (state.system.autoQaEnabled !== previous.system.autoQaEnabled) {
+        update(state.system.autoQaEnabled);
+      }
+    });
+    return () => {
+      unsubscribe();
+      automaticReviewControllerRef.current.abort();
+    };
+  }, []);
 
   const configureDesignRun = useCallback(
     (
@@ -3180,6 +3276,9 @@ export function useGenerator({
       prompt: string,
       options: GenerateRunOptions,
     ) => {
+      if (!useSettingsStore.getState().system.autoQaEnabled) return;
+      const automaticSignal = automaticReviewControllerRef.current.signal;
+      if (automaticSignal.aborted) return;
       const conversation =
         useConversationStore.getState().conversations[runConversationId];
       const beforeFiles = designRunInitialFilesRef.current;
@@ -3203,6 +3302,8 @@ export function useGenerator({
       }
       const reviewIdentity = captureConversationIdentity(conversation);
       const reviewIsCurrent = () =>
+        !automaticSignal.aborted &&
+        useSettingsStore.getState().system.autoQaEnabled &&
         isConversationIdentityCurrent(
           reviewIdentity,
           useConversationStore.getState().conversations[runConversationId],
@@ -4189,6 +4290,16 @@ export function useGenerator({
         retryOf?: string;
       },
     ) => {
+      const automaticSignal = options?.automaticEvidence
+        ? automaticReviewControllerRef.current.signal
+        : undefined;
+      const automaticIsCurrent = () =>
+        !options?.automaticEvidence ||
+        (!automaticSignal?.aborted &&
+          useSettingsStore.getState().system.autoQaEnabled &&
+          useDesignReviewStore.getState().automatic?.evidence.requestId ===
+            options.automaticEvidence.requestId);
+      if (!automaticIsCurrent()) return null;
       const runConversationId =
         options?.automaticEvidence?.conversationId ??
         useConversationStore.getState().activeId;
@@ -4207,6 +4318,7 @@ export function useGenerator({
       }
       const reviewIdentity = captureConversationIdentity(conversation);
       const reviewIsCurrent = () =>
+        automaticIsCurrent() &&
         isConversationIdentityCurrent(
           reviewIdentity,
           useConversationStore.getState().conversations[runConversationId],
@@ -4287,6 +4399,7 @@ export function useGenerator({
         const { designReviewJobRunner } =
           await import("../lib/design/review-jobs/runner");
         if (!reviewIsCurrent()) return null;
+        reviewRunnerRef.current = designReviewJobRunner;
         const run = options?.retryOf
           ? designReviewJobRunner.retry(options.retryOf, input)
           : designReviewJobRunner.start(input);
@@ -4341,6 +4454,13 @@ export function useGenerator({
       evidence: AutomaticDesignReviewEvidence,
       captureErrors: readonly string[] = [],
     ) => {
+      const automaticSignal = automaticReviewControllerRef.current.signal;
+      const automaticIsCurrent = () =>
+        !automaticSignal.aborted &&
+        useSettingsStore.getState().system.autoQaEnabled &&
+        useDesignReviewStore.getState().automatic?.evidence.requestId ===
+          evidence.requestId;
+      if (!automaticIsCurrent()) return;
       const conversation =
         useConversationStore.getState().conversations[evidence.conversationId];
       if (!conversation) {
@@ -4360,6 +4480,7 @@ export function useGenerator({
 
       const reviewIdentity = captureConversationIdentity(conversation);
       const reviewIsCurrent = () =>
+        automaticIsCurrent() &&
         isConversationIdentityCurrent(
           reviewIdentity,
           useConversationStore.getState().conversations[
@@ -4434,7 +4555,7 @@ export function useGenerator({
           evidence.requestId,
           { status: "deferred" },
         );
-        await waitForDesignReviewRun(activeRun.id);
+        await waitForDesignReviewRun(activeRun.id, automaticSignal);
         if (!reviewIsCurrent()) return;
         const resumedConversation =
           useConversationStore.getState().conversations[
@@ -4513,7 +4634,10 @@ export function useGenerator({
         }
         return;
       }
-      const completedRun = await waitForDesignReviewRun(startedRun.id);
+      const completedRun = await waitForDesignReviewRun(
+        startedRun.id,
+        automaticSignal,
+      );
       if (!reviewIsCurrent()) return;
       if (!completedRun) {
         if (
@@ -4609,11 +4733,63 @@ export function useGenerator({
   );
 
   const automaticDesignReviewUnavailable = useCallback(
-    async (evidence: AutomaticDesignReviewEvidence, message: string) => {
+    async (
+      evidence: AutomaticDesignReviewEvidence,
+      message: string,
+      outcome: "unavailable" | "superseded" = "unavailable",
+    ) => {
+      if (!useSettingsStore.getState().system.autoQaEnabled) return;
+      const conversation =
+        useConversationStore.getState().conversations[evidence.conversationId];
+      const identity = reviewBranchIdentities.get(
+        reviewIdentityKey(evidence.conversationId, evidence.requestId),
+      );
+      if (
+        !conversation ||
+        (identity && !isConversationIdentityCurrent(identity, conversation)) ||
+        useDesignReviewStore.getState().automatic?.evidence.requestId !==
+          evidence.requestId
+      ) {
+        return;
+      }
+      if (outcome === "superseded") {
+        updateAutomaticReviewActivity(
+          evidence.conversationId,
+          evidence.requestId,
+          { status: "superseded", stale: true },
+        );
+        useDesignReviewStore.getState().finishAutomatic("superseded");
+        return;
+      }
+      const provider: DesignReviewProviderRef =
+        settings.runtime === "localCli"
+          ? {
+              runtime: "local",
+              provider: settings.localAgent.provider,
+              model:
+                settings.localAgent.preferences[settings.localAgent.provider]
+                  .model || `${settings.localAgent.provider}-cli`,
+            }
+          : {
+              runtime: "api",
+              provider: settings.apiType ?? "openai-compatible",
+              model: settings.model ?? "",
+            };
+      const run = useDesignReviewStore
+        .getState()
+        .recordAutomaticCaptureFailure({
+          requestId: evidence.requestId,
+          conversationId: evidence.conversationId,
+          phase: evidence.phase,
+          sourceDigest: evidence.sourceDigest,
+          provider,
+          error: message,
+        });
       updateAutomaticReviewActivity(
         evidence.conversationId,
         evidence.requestId,
         { status: "failed" },
+        run.id,
       );
       if (
         useDesignReviewStore.getState().automatic?.evidence.requestId ===
@@ -4622,7 +4798,7 @@ export function useGenerator({
         useDesignReviewStore.getState().failAutomatic(message);
       }
     },
-    [],
+    [settings.apiType, settings.localAgent, settings.model, settings.runtime],
   );
 
   const continueTask = useCallback(async () => {

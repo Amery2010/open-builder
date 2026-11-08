@@ -1,9 +1,6 @@
+import { ScrollArea } from "@/components/ui/scroll-area";
 import { useEffect, useMemo, useRef, useState } from "react";
-import {
-  Dialog,
-  DialogContent,
-  DialogTitle,
-} from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { useCommandPaletteStore } from "../../store/command-palette";
 import { useT } from "../../i18n";
@@ -54,7 +51,8 @@ export function CommandPalette({ actions }: CommandPaletteProps) {
   useEffect(() => {
     const list = listRef.current;
     if (!list) return;
-    const item = list.children[selectedIdx] as HTMLElement | undefined;
+    const item =
+      list.querySelectorAll<HTMLElement>('[role="option"]')[selectedIdx];
     item?.scrollIntoView({ block: "nearest" });
   }, [selectedIdx]);
 
@@ -88,10 +86,12 @@ export function CommandPalette({ actions }: CommandPaletteProps) {
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogContent
-        className="max-w-md p-0 gap-0 overflow-hidden"
+        className="flex flex-col max-w-md p-0 gap-0 overflow-hidden"
         showCloseButton={false}
       >
-        <DialogTitle className="sr-only">{t.commandPalette.placeholder}</DialogTitle>
+        <DialogTitle className="sr-only">
+          {t.commandPalette.placeholder}
+        </DialogTitle>
         <Input
           autoFocus
           value={query}
@@ -100,10 +100,11 @@ export function CommandPalette({ actions }: CommandPaletteProps) {
           placeholder={t.commandPalette.placeholder}
           className="h-11 rounded-none border-0 border-b focus-visible:ring-0 focus-visible:border-b"
         />
-        <div
-          ref={listRef}
-          className="max-h-72 overflow-y-auto py-1"
-          role="listbox"
+        <ScrollArea
+          viewportRef={listRef}
+          className="max-h-72"
+          contentClassName="py-1"
+          viewportProps={{ role: "listbox" }}
         >
           {filtered.length === 0 ? (
             <p className="px-3 py-6 text-xs text-muted-foreground text-center">
@@ -133,7 +134,7 @@ export function CommandPalette({ actions }: CommandPaletteProps) {
               </button>
             ))
           )}
-        </div>
+        </ScrollArea>
       </DialogContent>
     </Dialog>
   );

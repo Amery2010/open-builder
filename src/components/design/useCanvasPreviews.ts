@@ -51,11 +51,12 @@ export function useCanvasPreviews({
     };
   }, [scopeKey]);
   useEffect(() => {
+    // Pause before replacing requests so a source update cannot start a capture
+    // in the render where its debounce/readiness gate has just closed.
+    if (paused) queue.current?.setPaused(true);
     queue.current?.setRequests(requests, priority.current);
-  }, [requests]);
-  useEffect(() => {
-    queue.current?.setPaused(paused);
-  }, [paused]);
+    if (!paused) queue.current?.setPaused(false);
+  }, [requests, paused]);
   const onVisiblePages = useCallback((ids: string[]) => {
     priority.current = ids;
     queue.current?.setPriorityPages(ids);

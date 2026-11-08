@@ -4,15 +4,17 @@
   --canvas-x: 64px;
   --canvas-y: 96px;
   --canvas-zoom: 0.4;
+  --canvas-background: var(--muted);
+  --canvas-dot: color-mix(in oklch, var(--muted-foreground) 45%, transparent);
   position: absolute;
   inset: 0;
   overflow: hidden;
   isolation: isolate;
   container-type: inline-size;
-  background-color: var(--background);
+  background-color: var(--canvas-background);
   background-image: radial-gradient(
     circle,
-    color-mix(in oklch, var(--muted-foreground) 24%, transparent) 0.75px,
+    var(--canvas-dot) 0.75px,
     transparent 0.75px
   );
   background-size: 20px 20px;
@@ -20,6 +22,10 @@
   outline: none;
   touch-action: none;
   user-select: none;
+}
+.dark .design-canvas {
+  --canvas-background: var(--background);
+  --canvas-dot: color-mix(in oklch, var(--muted-foreground) 24%, transparent);
 }
 .design-canvas[data-tool="hand"] {
   cursor: grab;
@@ -40,17 +46,45 @@
   pointer-events: none;
 }
 .design-canvas-board {
+  --board-radius: calc(var(--radius-lg) / var(--canvas-zoom));
+  --board-focus-color: var(--color-violet-500);
   position: absolute;
   left: 0;
   top: 0;
   transform: translate(var(--board-x), var(--board-y));
   pointer-events: auto;
   background: var(--background);
+  border-radius: var(--board-radius);
   box-shadow: 0 4px 24px color-mix(in oklch, var(--foreground) 10%, transparent);
 }
+.dark .design-canvas-board {
+  --board-focus-color: var(--color-violet-400);
+}
+.design-canvas-board::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 calc(1px / var(--canvas-zoom)) var(--border);
+  pointer-events: none;
+}
 .design-canvas-board[data-selected="true"] {
-  outline: calc(2px / var(--canvas-zoom)) solid var(--primary);
-  outline-offset: calc(4px / var(--canvas-zoom));
+  box-shadow:
+    0 0 0 calc(2px / var(--canvas-zoom))
+      color-mix(in oklch, var(--board-focus-color) 15%, transparent),
+    0 4px 24px color-mix(in oklch, var(--foreground) 10%, transparent);
+}
+.design-canvas-board[data-selected="true"]::after,
+.design-canvas-board:has(.design-canvas-board-content:focus-visible)::after {
+  box-shadow:
+    inset 0 0 0 calc(1px / var(--canvas-zoom))
+      color-mix(in oklch, var(--board-focus-color) 60%, transparent),
+    0 0 0 calc(1px / var(--canvas-zoom))
+      color-mix(in oklch, var(--board-focus-color) 50%, transparent);
+}
+.design-canvas-board:has(.design-canvas-board-content:focus-visible) {
+  box-shadow: 0 0 0 calc(2px / var(--canvas-zoom))
+    color-mix(in oklch, var(--board-focus-color) 15%, transparent);
 }
 .design-canvas-board-caption {
   position: absolute;
@@ -79,17 +113,28 @@
   height: 100%;
   overflow: hidden;
   position: relative;
+  border-radius: inherit;
   outline: none;
-}
-.design-canvas-board-content:focus-visible {
-  outline: calc(3px / var(--canvas-zoom)) solid var(--ring);
-  outline-offset: calc(6px / var(--canvas-zoom));
 }
 .design-canvas-page-image {
   display: block;
   width: 100%;
   height: auto;
   pointer-events: none;
+}
+.design-canvas-preview-status {
+  position: absolute;
+  top: calc(16px / var(--canvas-zoom));
+  left: calc(16px / var(--canvas-zoom));
+  transform: scale(calc(1 / var(--canvas-zoom)));
+  transform-origin: top left;
+  width: min(320px, calc(100% * var(--canvas-zoom) - 32px));
+  padding: 12px;
+  display: grid;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
 }
 .design-canvas-placeholder {
   width: 100%;

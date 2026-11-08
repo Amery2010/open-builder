@@ -42,11 +42,13 @@ A page reload can reconnect to a CLI run while the same desktop process is still
 
 **Code** works directly on project files. **Plan** explores the project and requests approval before writing. **Design** prepares visual context and generates runnable interfaces or product prototypes. The mode is remembered per project; approving a plan entered from Design returns to Design.
 
-Import a ZIP or project folder into a new conversation, or save a reusable copy in the Project Starter Library. Imports validate the staged framework/configuration and compile it in an isolated preview before acceptance. Unsupported projects explain the failure, and network failures can be retried. Starters preview excluded sensitive paths and redacted credentials before saving; they do not copy chat history or runtime sessions.
+Import a ZIP or project folder into a new conversation, or save a reusable copy in the Project Starter Library. Imports check file and resource integrity locally, exclude sensitive paths, redact credentials, and show file statistics and the preview mode. Once these checks pass, you can import while keeping your current project and chat history. Supported projects start Sandpack after import and show compilation status separately. Compilation errors and network timeouts leave imported files available for editing; you can retry the preview. Frameworks and versions that the current Sandpack runtime cannot preview open in code mode, with the reason available in the details. Starters preview excluded sensitive paths and redacted credentials before saving; they do not copy chat history or runtime sessions.
 
 Source downloads preserve project files and managed resources. Static deployment ZIPs are available for plain static sites and supported Vite 4 frontend projects. Compatibility builds target modern browsers, disable minification and CSS splitting, and do not run custom build scripts or type checks. They do not produce SSR/Node deployments. Configure the deployment base path and SPA routing for your host.
 
 ### Design canvas
+
+Single-page projects open directly in Preview/Code while retaining Design mode and its tools. Projects with two or more blueprint pages use the canvas, including unfinished pages in the count.
 
 - Select a page board to set the editing context; open the Code tab to inspect its source.
 - Double-click a board or press Enter to open its interactive preview. Returning to the canvas preserves the running page's state.
@@ -85,13 +87,17 @@ Static/Vite projects need a root `index.html` with a body element. Other templat
 
 ## Screenshots and review
 
+The **Camera icon** in the preview toolbar exports the **Current viewport**, **Full page**, or **Selected area** as a PNG at its original CSS pixel dimensions. Selected area freezes the current viewport for drag selection; reselect or press Escape to cancel. Capture preserves input and scroll state. Desktop opens a save dialog, while the browser downloads the file.
+
 **Annotate preview** captures the current viewport or full rendered page. Add shapes, arrows, text, or freehand marks, then choose **Attach image** to add the flattened image to the composer without sending it. Drawings remain temporary; cancelling or switching conversation, branch, or checkout discards them.
 
 The `capture_preview_sequence` tool samples the mounted preview at 1–5 increasing offsets between 0 and 30,000 ms. It preserves interaction state without refreshing or navigating, reports actual timing and partial failures, and stores summaries rather than image bytes in history.
 
-Full-page capture covers the currently rendered DOM; it does not expand virtual lists or infinite content. Video, WebGL, cross-origin frames, and external resources have capture limitations. Images may be uniformly scaled to fit transmission limits.
+Full-page capture covers the currently rendered DOM; it does not expand inner scroll containers, virtual lists, or infinite content. Video, WebGL, cross-origin frames, and external resources have capture limitations. Review evidence collected by tools may be uniformly scaled to fit transmission limits; exported PNGs retain their original CSS pixel dimensions.
 
 Design Review accepts uploaded screenshots or captures declared prototype pages and viewports. Reviews read project files and return findings; they cannot edit files or use external tools. Automatic Design Review also reports results without changing code. Select findings and choose **Apply selected fixes** to start a normal Design task. Missing captures stay unreviewed, source changes make evidence stale, and old scenario-based reports require a new page-level review. Sampled DOM diagnostics are not a complete accessibility audit.
+
+**Auto QA** in system settings is off by default and controls both automatic coding QA and automatic Design Review. Turning it off cancels unfinished automatic design reviews while retaining manual reviews and completed reports. Turning it back on only affects subsequent generation.
 
 ## History and storage
 

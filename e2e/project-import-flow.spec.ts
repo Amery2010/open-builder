@@ -14,7 +14,7 @@ async function openImport(
     .click();
 }
 
-test("imports a verified ZIP into a new conversation and downloads its deployment", async ({
+test("imports a locally checked ZIP into a new conversation and downloads its deployment", async ({
   page,
 }) => {
   test.setTimeout(150_000);
@@ -64,9 +64,9 @@ test("imports a verified ZIP into a new conversation and downloads its deploymen
     name: "Import project",
     exact: true,
   });
-  await expect(importButton).toBeEnabled({ timeout: 120_000 });
+  await expect(importButton).toBeEnabled();
   await expect(
-    page.getByText("Sandpack compilation verified.", { exact: true }),
+    page.getByText("Checked and ready to import", { exact: true }),
   ).toBeVisible();
   await importButton.click();
   await expect(
@@ -90,6 +90,12 @@ test("imports a verified ZIP into a new conversation and downloads its deploymen
   expect(state.id).not.toBe(original.id);
   expect(state.original).toBe(original.conversation);
   expect(state.current.assets["public/pixel.gif"].mimeType).toBe("image/gif");
+  await page.evaluate(() => {
+    Object.defineProperty(window, "showSaveFilePicker", {
+      configurable: true,
+      value: undefined,
+    });
+  });
   await page.getByRole("button", { name: "Code", exact: true }).last().click();
   await page
     .getByRole("button", { name: "Download project", exact: true })
@@ -97,12 +103,16 @@ test("imports a verified ZIP into a new conversation and downloads its deploymen
   await page
     .getByRole("menuitem", { name: "Build static deployment ZIP", exact: true })
     .click();
+  await page.getByRole("button", { name: "Start build", exact: true }).click();
+  const save = page.getByRole("button", {
+    name: "Download deployment ZIP",
+    exact: true,
+  });
+  await expect(save).toBeEnabled();
   const downloaded = page.waitForEvent("download");
-  await page
-    .getByRole("button", { name: "Build and download", exact: true })
-    .click();
+  await save.click();
   const download = await downloaded;
-  expect(download.suggestedFilename()).toBe("project-deploy.zip");
+  expect(download.suggestedFilename()).toMatch(/^website\d+\.zip$/);
   const archive = await JSZip.loadAsync(
     await readFile((await download.path())!),
   );
@@ -112,7 +122,7 @@ test("imports a verified ZIP into a new conversation and downloads its deploymen
   expect(await archive.file("pixel.gif")!.async("nodebuffer")).toEqual(gif);
 });
 
-test("rejects an unsupported version without adding a conversation", async ({
+test("imports an unsupported version into a separate code-only conversation", async ({
   page,
 }) => {
   await page.goto("/");
@@ -142,15 +152,27 @@ test("rejects an unsupported version without adding a conversation", async ({
     mimeType: "application/zip",
     buffer: await zip.generateAsync({ type: "nodebuffer" }),
   });
-  await expect(page.getByRole("alert")).toContainText("Vite 8.2.2");
+  await page.getByText("View details", { exact: true }).click();
+  await expect(page.getByText(/Vite 8.2.2 is outside/)).toBeVisible();
+  await page
+    .getByRole("button", { name: "Import project", exact: true })
+    .click();
   await expect(
-    page.getByRole("button", { name: "Import project", exact: true }),
-  ).toBeDisabled();
+    page.getByRole("dialog", { name: "Upload Project" }),
+  ).toHaveCount(0);
   expect(
     await page.evaluate(async () => {
       const storePath = "/src/store/conversation.ts";
       const { useConversationStore: store } = await import(storePath);
       return Object.keys(store.getState().conversations).length;
     }),
-  ).toBe(count);
+  ).toBe(count + 1);
+  expect(
+    await page.evaluate(async () => {
+      const { useConversationStore: store } =
+        await import("/src/store/conversation.ts");
+      const state = store.getState();
+      return state.conversations[state.activeId!].previewMode;
+    }),
+  ).toBe("code-only");
 });

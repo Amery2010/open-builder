@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { webcrypto } from "node:crypto";
+import { createHash, webcrypto } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
@@ -14,6 +14,12 @@ import type { ReactNode } from "react";
 import userEvent from "@testing-library/user-event";
 import type { CSSProperties, PropsWithChildren } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { CanvasPreviewRequest } from "../../lib/design/canvas-preview";
+import { useSettingsStore } from "../../store/settings";
+import { projectDesignSchema } from "../../lib/design/project-design";
+import { projectFilesForPreview } from "../../lib/utils/project-file-policy";
+import { capturePreviewImage } from "../../lib/preview-annotation/capture";
+import type { DesignBridgeCaptureResult } from "../../lib/design/preview-bridge";
 
 function render(ui: ReactNode) {
   return renderWithTestingLibrary(ui, { wrapper: TooltipProvider });
@@ -22,6 +28,42 @@ function render(ui: ReactNode) {
 let sandpackProviderError: Error | null = null;
 const projectFilesForSandpackMock = vi.hoisted(() => vi.fn());
 const getProjectAssetBlobMock = vi.hoisted(() => vi.fn());
+const canvasPreviewFixture = vi.hoisted(() => ({
+  retry: vi.fn(),
+  capture: undefined as
+    | Parameters<
+        typeof import("../design/useCanvasPreviews").useCanvasPreviews
+      >[0]["capture"]
+    | undefined,
+  input: null as
+    | Parameters<
+        typeof import("../design/useCanvasPreviews").useCanvasPreviews
+      >[0]
+    | null,
+}));
+vi.mock("../design/useCanvasPreviews", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("../design/useCanvasPreviews")>();
+  return {
+    ...actual,
+    useCanvasPreviews: (
+      input: Parameters<typeof actual.useCanvasPreviews>[0],
+    ) => {
+      canvasPreviewFixture.input = input;
+      const current = actual.useCanvasPreviews({
+        ...input,
+        capture: canvasPreviewFixture.capture ?? input.capture,
+      });
+      return {
+        ...current,
+        retry: (key: string) => {
+          canvasPreviewFixture.retry(key);
+          current.retry(key);
+        },
+      };
+    },
+  };
+});
 const bridgeProjectionFixture = vi.hoisted(() => ({
   files: {} as Record<string, { code: string }>,
   onFileChange: undefined as
@@ -34,6 +76,9 @@ const captureRuntimeFixture = vi.hoisted(() => ({
   restart: vi.fn(),
   adapter: null as
     import("../../lib/design/preview-runtime").PreviewRuntimeAdapter | null,
+}));
+const reviewCaptureFixture = vi.hoisted(() => ({
+  capture: undefined as (() => Promise<void>) | undefined,
 }));
 vi.mock("../../lib/design/preview-runtime", async (importOriginal) => {
   const actual =
@@ -130,7 +175,14 @@ vi.mock("../design/DesignTokenPanel", () => ({
   DesignTokenPanel: () => null,
 }));
 vi.mock("../design/DesignReviewDialog", () => ({
-  DesignReviewDialog: () => null,
+  DesignReviewDialog: ({
+    onCaptureScreenshots,
+  }: {
+    onCaptureScreenshots?: () => Promise<void>;
+  }) => {
+    reviewCaptureFixture.capture = onCaptureScreenshots;
+    return null;
+  },
 }));
 vi.mock("./SandpackPreviewActions", () => ({
   SandpackActionButton: ({
@@ -159,9 +211,13 @@ vi.mock("./ViewToolbar", () => ({
     onDeviceSizeChange: (device: "desktop" | "tablet" | "mobile") => void;
     onPreviewZoomIn: () => void;
     onPreviewZoomOut: () => void;
+    designWorkspace?: unknown;
   }) => (
     <div>
       <output data-testid="view-mode">{props.viewMode}</output>
+      <output data-testid="workspace-kind">
+        {props.designWorkspace ? "canvas" : "preview"}
+      </output>
       <output data-testid="device-size">{props.deviceSize}</output>
       <output data-testid="preview-scale">
         {Math.round(props.previewScale * 100)}
@@ -174,6 +230,9 @@ vi.mock("./ViewToolbar", () => ({
       </button>
       <button onClick={() => props.onDeviceSizeChange("tablet")}>
         Tablet device
+      </button>
+      <button onClick={() => props.onDeviceSizeChange("desktop")}>
+        Desktop device
       </button>
       <button onClick={() => props.onDeviceSizeChange("mobile")}>
         Mobile device
@@ -190,8 +249,18 @@ vi.mock("../../lib/design/desktop", () => ({
 
 const conversationState = {
   conversations: {
-    "conversation-a": { workspaceMode: "auto", title: "A", assets: {} },
-    "conversation-b": { workspaceMode: "auto", title: "B", assets: {} },
+    "conversation-a": {
+      id: "conversation-a",
+      workspaceMode: "auto",
+      title: "A",
+      assets: {},
+    },
+    "conversation-b": {
+      id: "conversation-b",
+      workspaceMode: "auto",
+      title: "B",
+      assets: {},
+    },
   },
   setAssetsForConversation: vi.fn(),
 };
@@ -206,18 +275,25 @@ vi.mock("../../store/conversation", () => {
 });
 
 const designReviewState = {
-  automatic: undefined,
+  automatic: undefined as ReturnType<
+    typeof import("../../store/design-review").useDesignReviewStore.getState
+  >["automatic"],
   dialogRequestId: 0,
   status: "idle",
   reset: vi.fn(),
   selectRun: vi.fn(),
+  beginCapture: vi.fn(),
+  failAutomatic: vi.fn(),
+  finishAutomatic: vi.fn(),
+  clearAutomatic: vi.fn(),
+  fail: vi.fn(),
 };
 
 vi.mock("../../store/design-review", () => {
   const useDesignReviewStore = Object.assign(
     (selector: (state: typeof designReviewState) => unknown) =>
       selector(designReviewState),
-    { getState: () => designReviewState },
+    { getState: () => designReviewState, setState: vi.fn() },
   );
   return { useDesignReviewStore };
 });
@@ -247,14 +323,59 @@ const baseProps = {
   onReloadPreview: vi.fn(),
 };
 
+const canvasBlueprint = JSON.stringify({
+  schemaVersion: "open-builder-design-project/v3",
+  revision: 1,
+  pages: [
+    { id: "home", name: "Home", route: "/", filePaths: ["index.html"] },
+    { id: "draft", name: "Draft" },
+  ],
+});
+const canvasFiles = (source: string) => ({
+  "index.html": source,
+  "design-project.json": canvasBlueprint,
+});
+
+function fastCrypto() {
+  vi.stubGlobal("crypto", {
+    randomUUID: () => webcrypto.randomUUID(),
+    getRandomValues: webcrypto.getRandomValues.bind(webcrypto),
+    subtle: {
+      digest: async (_algorithm: string, bytes: Uint8Array) =>
+        new Uint8Array(createHash("sha256").update(bytes).digest()).buffer,
+    },
+  });
+}
+
+const automaticEvidence = (requestId: string) =>
+  ({
+    conversationId: "conversation-a",
+    requestId,
+    contract: {},
+  }) as import("../../lib/design/automatic-review").AutomaticDesignReviewEvidence;
+
 describe("CodeViewer preview scale", () => {
   beforeEach(() => {
+    useSettingsStore.setState((state) => ({
+      system: { ...state.system, autoQaEnabled: true },
+    }));
+    canvasPreviewFixture.input = null;
+    reviewCaptureFixture.capture = undefined;
+    canvasPreviewFixture.capture = undefined;
+    canvasPreviewFixture.retry.mockClear();
     bridgeProjectionFixture.files = {};
     bridgeProjectionFixture.onFileChange = undefined;
     captureRuntimeFixture.enabled = false;
     captureRuntimeFixture.synchronized = false;
     captureRuntimeFixture.adapter = null;
     captureRuntimeFixture.restart.mockReset();
+    designReviewState.automatic = undefined;
+    designReviewState.dialogRequestId = 0;
+    designReviewState.beginCapture.mockClear();
+    designReviewState.reset.mockClear();
+    designReviewState.failAutomatic.mockClear();
+    designReviewState.finishAutomatic.mockClear();
+    designReviewState.fail.mockClear();
     conversationState.conversations["conversation-a"].workspaceMode = "auto";
     projectFilesForSandpackMock.mockReset();
     projectFilesForSandpackMock.mockImplementation(
@@ -300,6 +421,607 @@ describe("CodeViewer preview scale", () => {
     sandpackProviderError = null;
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
+  });
+
+  it("shows the traditional preview for a single design page and preserves the chosen Code view when pages change", async () => {
+    fastCrypto();
+    conversationState.conversations["conversation-a"].workspaceMode = "design";
+    const props = {
+      ...baseProps,
+      conversationId: "conversation-a",
+      template: "static",
+      files: { "index.html": "<h1>Single</h1>" },
+    };
+    const { rerender } = render(<CodeViewer {...props} />);
+    expect(screen.getByTestId("workspace-kind")).toHaveTextContent("preview");
+    expect(screen.queryByTestId("design-canvas")).toBeNull();
+    const single = JSON.parse(canvasBlueprint);
+    single.pages = [single.pages[0]];
+    rerender(
+      <CodeViewer
+        {...props}
+        files={{
+          ...props.files,
+          "design-project.json": JSON.stringify(single),
+        }}
+      />,
+    );
+    expect(screen.queryByTestId("design-canvas")).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Code view" }));
+    rerender(
+      <CodeViewer {...props} files={canvasFiles(props.files["index.html"])} />,
+    );
+    expect(screen.getByTestId("workspace-kind")).toHaveTextContent("canvas");
+    expect(screen.getByTestId("view-mode")).toHaveTextContent("code");
+    await userEvent.click(screen.getByRole("button", { name: "Preview view" }));
+    expect(screen.getByTestId("design-canvas")).toBeVisible();
+    rerender(
+      <CodeViewer
+        {...props}
+        files={{
+          ...props.files,
+          "design-project.json": JSON.stringify(single),
+        }}
+      />,
+    );
+    expect(screen.getByTestId("workspace-kind")).toHaveTextContent("preview");
+    expect(screen.queryByTestId("design-canvas")).toBeNull();
+    expect(
+      conversationState.conversations["conversation-a"].workspaceMode,
+    ).toBe("design");
+  });
+
+  it.each([
+    "{invalid",
+    JSON.stringify({
+      schemaVersion: "open-builder-design-project/v3",
+      revision: 1,
+      pages: [],
+    }),
+  ])(
+    "keeps the canvas error or empty state for an unusable blueprint: %s",
+    (blueprint) => {
+      conversationState.conversations["conversation-a"].workspaceMode =
+        "design";
+      render(
+        <CodeViewer
+          {...baseProps}
+          conversationId="conversation-a"
+          template="static"
+          files={{
+            "index.html": "<h1>Page</h1>",
+            "design-project.json": blueprint,
+          }}
+        />,
+      );
+      expect(screen.getByTestId("design-canvas")).toBeVisible();
+      expect(screen.getByTestId("workspace-kind")).toHaveTextContent("canvas");
+    },
+  );
+
+  it("does not consume automatic screenshot requests while QA is off", async () => {
+    fastCrypto();
+    useSettingsStore.setState((state) => ({
+      system: { ...state.system, autoQaEnabled: false },
+    }));
+    conversationState.conversations["conversation-a"].workspaceMode = "design";
+    designReviewState.automatic = {
+      captureRequestId: 100,
+      stage: "capturing",
+      evidence: automaticEvidence("qa-off"),
+    };
+    const unavailable = vi.fn();
+    render(
+      <CodeViewer
+        {...baseProps}
+        conversationId="conversation-a"
+        template="static"
+        files={{ "index.html": "<h1>Single</h1>" }}
+        onAutomaticDesignReviewUnavailable={unavailable}
+      />,
+    );
+    await act(async () => {});
+    expect(designReviewState.beginCapture).not.toHaveBeenCalled();
+    expect(unavailable).not.toHaveBeenCalled();
+  });
+
+  it("captures after two quiet seconds during generation, without an initial bridge notification", async () => {
+    fastCrypto();
+    const { loadDesignCaptureRuntimeSource } =
+      await import("../../lib/design/preview-capture");
+    await loadDesignCaptureRuntimeSource();
+    vi.useFakeTimers();
+    conversationState.conversations["conversation-a"].workspaceMode = "design";
+    const capture = vi.fn(
+      async (request: CanvasPreviewRequest) =>
+        ({
+          generation: request.generation,
+          dataUrl: "data:image/png;base64,cGFnZQ==",
+          viewport: { ...request.viewport, fullHeight: 900 },
+        }) as DesignBridgeCaptureResult,
+    );
+    canvasPreviewFixture.capture = capture;
+    const props = {
+      ...baseProps,
+      conversationId: "conversation-a",
+      template: "static",
+      files: canvasFiles("<html><body>First</body></html>"),
+      isGenerating: true,
+    };
+    const { rerender, unmount } = render(<CodeViewer {...props} />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1999);
+    });
+    expect(capture).not.toHaveBeenCalled();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(capture).toHaveBeenCalledOnce();
+    expect(screen.getByRole("img")).toBeInTheDocument();
+    rerender(
+      <CodeViewer
+        {...props}
+        files={canvasFiles("<html><body>Second</body></html>")}
+      />,
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1500);
+    });
+    rerender(
+      <CodeViewer
+        {...props}
+        files={canvasFiles("<html><body>Latest</body></html>")}
+      />,
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1999);
+    });
+    expect(capture).toHaveBeenCalledOnce();
+    expect(screen.getByRole("img")).toBeInTheDocument();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(capture).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(capture).toHaveBeenCalledTimes(2);
+    unmount();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("hides a failed automatic notice after eight seconds without clearing its state", async () => {
+    fastCrypto();
+    vi.useFakeTimers();
+    conversationState.conversations["conversation-a"].workspaceMode = "design";
+    designReviewState.automatic = {
+      stage: "unavailable",
+      captureRequestId: 1,
+      evidence: automaticEvidence("failed-a"),
+    };
+    const { getT } = await import("../../i18n");
+    const message = getT().designReview.automaticStages.unavailable;
+    render(<CodeViewer {...baseProps} conversationId="conversation-a" />);
+    expect(screen.getByText(message)).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: getT().designReview.openWorkspace }),
+    ).toBeInTheDocument();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(7999);
+    });
+    expect(screen.getByText(message)).toBeInTheDocument();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(screen.queryByText(message)).not.toBeInTheDocument();
+    expect(designReviewState.automatic?.stage).toBe("unavailable");
+    expect(designReviewState.reset).not.toHaveBeenCalled();
+  });
+
+  it("waits for the initial preview generation before consuming an automatic capture request", async () => {
+    fastCrypto();
+    vi.useFakeTimers();
+    conversationState.conversations["conversation-a"].workspaceMode = "design";
+    const digest = crypto.subtle.digest.bind(crypto.subtle);
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.spyOn(crypto.subtle, "digest").mockImplementation(
+      async (algorithm, bytes) => {
+        if (
+          new TextDecoder()
+            .decode(bytes as ArrayBuffer)
+            .startsWith('{"template":')
+        )
+          await pending;
+        return digest(algorithm, bytes);
+      },
+    );
+    designReviewState.automatic = {
+      stage: "capturing",
+      captureRequestId: 2,
+      evidence: automaticEvidence("pending-a"),
+    };
+    const unavailable = vi.fn();
+    const { unmount } = render(
+      <CodeViewer
+        {...baseProps}
+        conversationId="conversation-a"
+        template="static"
+        files={{ "index.html": "<html><body>Review</body></html>" }}
+        onAutomaticDesignReviewUnavailable={unavailable}
+      />,
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50);
+    });
+    expect(unavailable).not.toHaveBeenCalled();
+    expect(designReviewState.beginCapture).not.toHaveBeenCalled();
+    await act(async () => {
+      release();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    expect(designReviewState.beginCapture).toHaveBeenCalledOnce();
+    expect(unavailable).not.toHaveBeenCalled();
+    unmount();
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync();
+    });
+  });
+
+  it("actively requests bridge readiness again and accepts only its current nonce", async () => {
+    fastCrypto();
+    vi.useFakeTimers();
+    captureRuntimeFixture.enabled = true;
+    captureRuntimeFixture.synchronized = true;
+    conversationState.conversations["conversation-a"].workspaceMode = "design";
+    canvasPreviewFixture.capture = vi.fn(
+      async (request) =>
+        ({ generation: request.generation }) as DesignBridgeCaptureResult,
+    );
+    render(
+      <CodeViewer
+        {...baseProps}
+        conversationId="conversation-a"
+        template="static"
+        files={canvasFiles("<html><body>Page</body></html>")}
+      />,
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    const iframe = screen.getByTitle("Sandpack Preview") as HTMLIFrameElement;
+    Object.defineProperties(iframe, {
+      src: { value: "https://preview.example.test/", configurable: true },
+      clientWidth: { value: 1440, configurable: true },
+      clientHeight: { value: 900, configurable: true },
+    });
+    const sent: Array<Record<string, unknown>> = [];
+    vi.spyOn(iframe.contentWindow!, "postMessage").mockImplementation(
+      (message) => {
+        sent.push(message);
+      },
+    );
+    const controller = new AbortController();
+    const generation = captureRuntimeFixture.adapter!.getGeneration()!;
+    expect(generation).toBeTruthy();
+    let failure: unknown;
+    const capture = capturePreviewImage(
+      "conversation-a",
+      controller.signal,
+      "viewport",
+      "screenshot",
+    ).catch((error: unknown) => {
+      failure = error;
+      return error;
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    const requests = () =>
+      sent.filter(
+        (message) => message.type === "open-builder:design-bridge-readiness",
+      );
+    expect(
+      requests().length,
+      failure instanceof Error ? failure.message : String(failure),
+    ).toBeGreaterThan(1);
+    const reply = (nonce: unknown) =>
+      window.dispatchEvent(
+        new MessageEvent("message", {
+          source: iframe.contentWindow,
+          origin: "https://preview.example.test",
+          data: {
+            ...requests()[0],
+            type: "open-builder:design-bridge-ready",
+            nonce,
+            captureRuntimeAvailable: true,
+            route: "#/",
+          },
+        }),
+      );
+    await act(async () => {
+      reply("stale-nonce");
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    expect(
+      sent.some(
+        (message) => message.type === "open-builder:design-bridge-capture",
+      ),
+    ).toBe(false);
+    await act(async () => {
+      reply(requests()[0].nonce);
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    expect(
+      sent.filter(
+        (message) => message.type === "open-builder:design-bridge-capture",
+      ),
+    ).toHaveLength(1);
+    await act(async () => {
+      controller.abort();
+    });
+    expect(await capture).toMatchObject({ name: "AbortError" });
+  });
+
+  it("resumes a pending automatic request when a manual capture releases its slot", async () => {
+    fastCrypto();
+    vi.useFakeTimers();
+    conversationState.conversations["conversation-a"].workspaceMode = "design";
+    captureRuntimeFixture.enabled = true;
+    const props = {
+      ...baseProps,
+      conversationId: "conversation-a",
+      template: "static",
+      files: { "index.html": "<html><body>Review</body></html>" },
+      onDesignReview: vi.fn(),
+    };
+    const { rerender, unmount } = render(<CodeViewer {...props} />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    let failManual!: (error: Error) => void;
+    const captureModule = await import("../../lib/design/preview-capture");
+    vi.spyOn(
+      captureModule,
+      "loadDesignCaptureRuntimeSource",
+    ).mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          failManual = reject;
+        }),
+    );
+    const manual = reviewCaptureFixture.capture!();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(designReviewState.beginCapture).toHaveBeenCalledOnce();
+    designReviewState.automatic = {
+      stage: "capturing",
+      captureRequestId: 3,
+      evidence: automaticEvidence("after-manual"),
+    };
+    rerender(<CodeViewer {...props} />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    expect(designReviewState.beginCapture).toHaveBeenCalledOnce();
+    await act(async () => {
+      failManual(new Error("Manual capture failed"));
+      await manual;
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    expect(designReviewState.beginCapture).toHaveBeenCalledTimes(2);
+    rerender(<CodeViewer {...props} />);
+    expect(designReviewState.beginCapture).toHaveBeenCalledTimes(2);
+    unmount();
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync();
+    });
+  });
+
+  it("bounds readiness waiting and ignores an obsolete automatic request", async () => {
+    fastCrypto();
+    vi.useFakeTimers();
+    conversationState.conversations["conversation-a"].workspaceMode = "design";
+    const digest = crypto.subtle.digest.bind(crypto.subtle);
+    vi.spyOn(crypto.subtle, "digest").mockImplementation((algorithm, bytes) =>
+      new TextDecoder().decode(bytes as ArrayBuffer).startsWith('{"template":')
+        ? new Promise(() => undefined)
+        : digest(algorithm, bytes),
+    );
+    designReviewState.automatic = {
+      stage: "capturing",
+      captureRequestId: 4,
+      evidence: automaticEvidence("old-request"),
+    };
+    const unavailable = vi.fn();
+    const props = {
+      ...baseProps,
+      conversationId: "conversation-a",
+      template: "static",
+      files: { "index.html": "<html><body>Review</body></html>" },
+      onAutomaticDesignReviewUnavailable: unavailable,
+    };
+    const { rerender, unmount } = render(<CodeViewer {...props} />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+    designReviewState.automatic = {
+      stage: "capturing",
+      captureRequestId: 5,
+      evidence: automaticEvidence("latest-request"),
+    };
+    rerender(<CodeViewer {...props} />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(14_999);
+    });
+    expect(unavailable).not.toHaveBeenCalled();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(unavailable).toHaveBeenCalledOnce();
+    expect(unavailable.mock.calls[0][0].requestId).toBe("latest-request");
+    unmount();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(["digest", "capture"])(
+    "ends the old automatic request when source changes during %s",
+    async (phase) => {
+      fastCrypto();
+      vi.useFakeTimers();
+      captureRuntimeFixture.enabled = true;
+      captureRuntimeFixture.synchronized = true;
+      conversationState.conversations["conversation-a"].workspaceMode =
+        "design";
+      const files = { "index.html": "<html><body>Before</body></html>" };
+      const evidence = automaticEvidence(`changed-during-${phase}`);
+      const { computeDesignReviewSourceDigest } =
+        await import("../../lib/design/review-jobs/digest");
+      evidence.sourceDigest = await computeDesignReviewSourceDigest({
+        files,
+        designSystem: null,
+        designContract: evidence.contract,
+      });
+      const unavailable = vi.fn();
+      const review = vi.fn();
+      const props = {
+        ...baseProps,
+        conversationId: "conversation-a",
+        template: "static",
+        files,
+        onAutomaticDesignReviewUnavailable: unavailable,
+        onAutomaticDesignReview: review,
+      };
+      const { rerender, unmount } = render(<CodeViewer {...props} />);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      if (phase === "digest") {
+        const digest = crypto.subtle.digest.bind(crypto.subtle);
+        vi.spyOn(crypto.subtle, "digest").mockImplementation(
+          async (algorithm, bytes) => {
+            if (
+              new TextDecoder()
+                .decode(bytes as ArrayBuffer)
+                .startsWith('{"designContract":')
+            )
+              await gate;
+            return digest(algorithm, bytes);
+          },
+        );
+      } else {
+        const captureModule = await import("../../lib/design/preview-capture");
+        const source = await captureModule.loadDesignCaptureRuntimeSource();
+        vi.spyOn(
+          captureModule,
+          "loadDesignCaptureRuntimeSource",
+        ).mockImplementationOnce(async () => {
+          await gate;
+          return source;
+        });
+      }
+      designReviewState.automatic = {
+        stage: "capturing",
+        captureRequestId: 6,
+        evidence,
+      };
+      rerender(<CodeViewer {...props} />);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(50);
+      });
+      expect(designReviewState.beginCapture).toHaveBeenCalledOnce();
+      rerender(
+        <CodeViewer
+          {...props}
+          files={{ "index.html": "<html><body>After</body></html>" }}
+        />,
+      );
+      await act(async () => {
+        release();
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(50);
+      });
+      expect(unavailable).toHaveBeenCalledOnce();
+      expect(unavailable.mock.calls[0][2]).toBe("superseded");
+      expect(review).not.toHaveBeenCalled();
+      unmount();
+    },
+  );
+
+  it("keys canvas pictures by source and environment, independently of viewport navigation and metadata", async () => {
+    vi.stubGlobal("crypto", webcrypto);
+    conversationState.conversations["conversation-a"].workspaceMode = "design";
+    const { computeCanvasPreviewSources } =
+      await import("../../lib/design/canvas-preview-source");
+    const { computePreviewGeneration } =
+      await import("../../lib/design/preview-runtime");
+    const files = canvasFiles("<h1>Cached page</h1>");
+    const expected = await computeCanvasPreviewSources({
+      files: projectFilesForPreview(files),
+      assets: {},
+      template: "static",
+      previewMode: "sandpack",
+      design: projectDesignSchema.parse(JSON.parse(canvasBlueprint)),
+    });
+    const props = {
+      ...baseProps,
+      files,
+      template: "static",
+      conversationId: "conversation-a",
+      isGenerating: true,
+    };
+    const { rerender } = render(<CodeViewer {...props} />);
+    const current = () => canvasPreviewFixture.input!;
+    await waitFor(() =>
+      expect(JSON.parse(current().requests[0].key).at(-1)).toBe(
+        expected["home"],
+      ),
+    );
+    const scope = current().scopeKey;
+    const desktopKey = current().requests[0].key;
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Code view" }));
+    await user.click(screen.getByRole("button", { name: "Preview view" }));
+    expect(canvasPreviewFixture.retry).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Tablet device" }));
+    expect(current().scopeKey).toBe(scope);
+    expect(current().requests[0].key).not.toBe(desktopKey);
+    await user.click(screen.getByRole("button", { name: "Desktop device" }));
+    expect(current().requests[0].key).toBe(desktopKey);
+    const withDocs = { ...files, "README.md": "Documentation changed" };
+    const generation = await computePreviewGeneration({
+      files: withDocs,
+      template: "static",
+      previewMode: "sandpack",
+    });
+    rerender(<CodeViewer {...props} files={withDocs} />);
+    await waitFor(() =>
+      expect(current().requests[0].generation).toBe(generation),
+    );
+    expect(current().scopeKey).toBe(scope);
+    expect(current().requests[0].key).toBe(desktopKey);
+    rerender(
+      <CodeViewer {...props} files={canvasFiles("<h1>Changed source</h1>")} />,
+    );
+    await waitFor(() => expect(current().requests[0].key).not.toBe(desktopKey));
+    expect(current().scopeKey).toBe(scope);
+    rerender(<CodeViewer {...props} sandpackKey={2} />);
+    expect(current().scopeKey).not.toBe(scope);
   });
 
   it.each([

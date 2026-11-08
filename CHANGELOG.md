@@ -10,7 +10,7 @@ Tagged versions use their Git tag date. Versions 1.4.0 through 1.7.0 were not ta
 
 ## [v2.0.0]
 
-This milestone summarizes changes since v1.9.0: a Design canvas for multi-page prototypes, broader preview selection, isolated desktop CLI runtimes, reusable project starters, conversation branches, and source/static deployment downloads.
+This milestone summarizes changes since v1.9.0: a Design canvas for multi-page prototypes, broader preview selection and PNG exports, isolated desktop CLI runtimes, reusable project starters, conversation branches, local project-import preflight, and version-specific source/static deployment downloads.
 
 ### Added
 
@@ -34,12 +34,15 @@ This milestone summarizes changes since v1.9.0: a Design canvas for multi-page p
 - Added preview-only point selection across 19 Sandpack templates: `static`, all nine supported Vite templates, `react`, `react-ts`, `vue`, `vue-ts`, `svelte`, `solid`, `angular`, `vanilla`, and `vanilla-ts`. Selection uses stable `data-ob-id` attributes when present and bounded runtime locators for unmarked elements. Unresolved entries, custom Angular CLI entry configurations, Next.js, Astro, Node, test-only, and code-only projects remain unavailable for selection.
 - Added a semantic Token panel with live drafts and snapshot-backed canonical saves, plus explicit legacy `DESIGN.md` upgrade behavior.
 - Added viewport/full-page screenshot annotation with drawing tools, crop, undo/redo, and attachment export. Only the flattened image is retained; cancelling or switching conversation, branch, or checkout discards the temporary drawing. Preview sequences sample the current interaction state without refreshing or navigating and report actual timing and partial failures.
-- Added isolated runtime validation for ZIP/folder imports and static deployment ZIPs for plain static sites and supported Vite 4 frontend projects. Compatibility builds do not run custom build scripts or type checks and do not produce SSR/Node deployment packages.
+- Added direct PNG export from the preview toolbar for the current viewport, full rendered page, or a selected area. Area selection freezes the current viewport and supports reselection and Escape cancellation; exports retain their original CSS pixel dimensions and preserve the live preview's input and scroll state.
+- Added local preflight for ZIP/folder imports, with file/resource integrity checks, sensitive-path exclusions, credential redaction, file statistics, cancellable reads, and preview-mode details. Imports create a separate conversation without waiting for Sandpack compilation or network access; unsupported preview frameworks and versions remain editable in code mode.
+- Added static deployment ZIPs for plain static sites and supported Vite 4 frontend projects. Shared download menus expose source archives and deployment builds for the current project or a selected historical snapshot, with build configuration and progress in a dedicated dialog. Compatibility builds do not run custom build scripts or type checks and do not produce SSR/Node deployment packages.
+- Added separate preview compilation and file-synchronization status, error details, timeout handling, and retry controls. Preview failures leave imported conversations and source files available for editing.
 - Added upload-based visual review on Web and desktop, plus desktop unique-directory export, followed by a structured Design Review card and user-selected fix application.
 - Added provider-native image generation to supported Local CLI runs. Codex supports text-to-image and reference-image editing; Antigravity supports text-to-image only; generated results enter an initialized project only through the explicit managed-image import tool.
 - Added managed project images with content-addressed Blob storage, preview-only source/CSS/public-path projection, canonical ZIP restoration, snapshot and Starter ownership, storage accounting, and full-data reset coverage.
 - Added single-pass local image compression, enabled by default at a configurable quality of `0.85`, and Material Icon Theme artwork for the project file tree.
-- Added focused Vitest, component, Rust, and authorized Playwright coverage for mode migration, prompts, tool profiles, design-system validation, Bridge isolation, tokens, review gating, responsive previews, and non-overwriting export.
+- Added focused Vitest, component, Rust, and authorized Playwright coverage for mode migration, prompts, tool profiles, design-system validation, Bridge isolation, tokens, review gating, responsive previews, and non-overwriting export, plus preview PNG export, canvas refresh/recovery, offline and code-only imports, historical deployment downloads, onboarding, and shared scroll regions.
 
 ### Changed
 
@@ -55,18 +58,26 @@ This milestone summarizes changes since v1.9.0: a Design canvas for multi-page p
 - Replaced the built-in Skill catalog with eight detailed English version-2 manuals: `debug-web-app`, `build-tailwind-ui`, `build-accessible-ui`, `write-safe-typescript`, `art-direct-web`, `design-product-ui`, `review-code`, and `simplify-code`. The Skills Store migrates legacy built-in IDs and preserves their discovery preferences; `react-patterns` has been removed.
 - Conversation persistence now stores workspace mode, Plan return mode, AI design-system decisions, and versioned Design state per project while preserving existing conversations as Code through the `"auto"` compatibility value and migrating an active legacy global Plan selection once.
 - The composer now uses neutral, blue, and violet mode borders for Code, Plan, and Design; Design uses `PencilRuler`, while its Palette selector exposes the full Auto, AI, None, or manual system name through text, tooltip, and ARIA.
+- The empty workspace now offers localized portfolio, task-manager, and cafe starter prompts with descriptions, a Project Starter Library entry point, and reference-attachment guidance. Selecting a suggestion fills, resizes, and focuses the composer without sending it.
+- Chat, session lists, file trees, settings, command results, MCP panels, and dialog bodies now share scroll areas with draggable hover-responsive scrollbars, keyboard scrolling, touch behavior, and reduced-motion support.
+- Completed `apply_design_style` tool cards now show a concise applied-style summary; failed calls retain a bounded error summary instead of exposing the full style result.
+- Refreshed macOS and iOS icons from the shared SVG artwork, adding opaque App Store/iOS PNGs, a macOS source image and ICNS, and a reproducible Apple-icon export script with platform-specific usage notes.
 - The design-system dialog now keeps its header and custom-creation action footer visible around a bounded vertical scroll region, applies catalog choices without a redundant footer confirmation, uses responsive preview grids, and switches to custom creation in the same dialog while preserving the catalog selection and scroll position.
 - Design-system project contracts share the same `manifest.json + DESIGN.md + tokens.css` format on Web and desktop; Web stores imports in OPFS and desktop stores them in AppData.
 - Removed entry, JavaScript chunk, and CSS size budgets. The production artifact check still verifies lazy-loading boundaries and chunk initialization.
-- Rewrote the English and Chinese READMEs as concise project homepages, with setup, capabilities, platform support, and documentation links. Detailed workflows, preview compatibility, Local CLI configuration, and usage limits now live in paired user guides.
+- Rewrote the English and Chinese READMEs as concise project homepages, with setup, capabilities, platform support, and documentation links. Detailed workflows, preview compatibility, Local CLI configuration, and usage limits now live in paired user guides, including local import preflight, preview compilation status, single-page Design behavior, PNG export, and automatic-review settings.
 - Preview evidence now records each device category at its actual viewport dimensions, prefers WebP with PNG/JPEG fallback, and keeps capture and runtime synchronization separate from canonical project files.
 - Design blueprints now use schema v3 with page-level preview and review identities. Legacy v1/v2 blueprints remain readable and migrate on edit while preserving historical checkpoints and safe default preview locations. Legacy scenario-based reports remain stale history until a new page-level review is run.
 - The Design canvas replaces the page-tree and scenario-control workspace. Product goals and audience are maintained through normal Design requests, and new work follows the request's concrete tasks instead of fixed build phases.
+- Single-page Design projects open directly in Preview/Code while retaining Design tools and the page's declared route. The canvas appears for two or more blueprint pages, including unfinished pages.
 - Manual and automatic Design Review report findings without modifying code. Repairs start only after the user selects findings and chooses to apply them; stale evidence cannot authorize fixes.
 
 ### Fixed
 
 - Sandpack preview recovery now synchronizes the latest file and image projection after rapid edits, switches, and reloads, including static templates and mobile previews, while preserving viewport, theme, zoom, and console controls.
+- Canvas preview caches now track page dependencies, shared sources, managed images, and runtime identity so relevant edits refresh the affected boards. Refreshes preserve the previous image, expose updating/failed states and per-page retry, and reject obsolete capture results.
+- Preview capture now waits for mounted content and image readiness, handles lazy-loaded images with bounded fallbacks, and preserves scroll state. Automatic-review capture waits for an active foreground preview and releases its isolated capture session after use.
+- Long virtualized conversations now remain anchored near the newest message as rows resize, with deferred measurements that avoid synchronous updates during React ref commits.
 - Conversation persistence now orders reads, writes, and removals and provides a durable-write acknowledgement, preventing refresh recovery from observing unsaved tool changes or delayed writes from restoring cleared data.
 - Branch-aware snapshot replay and retention preserve reachable branch heads and assets; snapshots that record Design state restore it against the corresponding historical project instead of carrying it across unrelated versions.
 - Design review capture now waits for matching preview evidence, bounds its readiness wait, rejects stale page/viewport results, and reports unavailable captures explicitly instead of treating them as clean findings.
@@ -84,10 +95,10 @@ This milestone summarizes changes since v1.9.0: a Design canvas for multi-page p
 - Settings save validation now follows the fields that actually changed, so independent System preferences can be saved before model setup; closing Settings restores focus to its opener.
 - Project-image module identity now includes the canonical project path, imported source/CSS/public references resolve in preview without changing canonical exports, and Starter schema v3 preserves verified Blob ownership across save, reload, reuse, replacement, and deletion.
 - Reset & Clear All Data now includes imported Design systems and managed project-image Blobs, continues independent storage domains after a failure, and preserves dependent Blob domains when an owner store cannot be cleared. Storage Governance includes Design-system and project-image bytes in its total. Opportunistic image cleanup retains unowned deduplicated Blobs until this explicit clear, avoiding cross-tab owner races.
-- Automatic Design Review now distinguishes clean, findings, deferred, unavailable, and superseded outcomes; an active manual review defers the automatic run and stale or failed evidence can no longer appear clean.
+- Automatic Design Review now distinguishes clean, findings, deferred, unavailable, and superseded outcomes; an active manual review defers the automatic run and stale or failed evidence can no longer appear clean. The Auto QA setting also controls automatic Design Review: disabling it cancels unfinished automatic work and rejects late results while preserving manual reviews and completed reports. Capture failures retain explicit activity/error details and retry actions.
 - Design retry now rebuilds its current files, system, change-mode, and blueprint policy before exposing write tools. Missing Design policy fails closed, while accepted contracts remain scoped to their originating run.
 - Generation snapshots the request-start Code, Plan, or Design profile across asynchronous setup. User-selected Design repairs bind their reviewed source and conversation and reject stale evidence before entering the normal Design workflow.
-- The initial tool-metadata path no longer eagerly loads provider and AI SDK code. Rust lint failures and collision-prone Design test temporary directories were corrected.
+- The initial tool-metadata path no longer eagerly loads provider and AI SDK code. Rust lint failures and collision-prone Design test temporary directories were corrected; Pi failure fixtures now consume and record the first RPC request before exiting to avoid racing the adapter's initial stdin write.
 
 ### Security
 

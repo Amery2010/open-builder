@@ -94,7 +94,12 @@ export function sanitizePreviewCaptureGeometry(
 }
 
 export type PreviewCaptureOwner =
-  "tool" | "manual-review" | "automatic-review" | "annotation" | "canvas";
+  | "tool"
+  | "manual-review"
+  | "automatic-review"
+  | "annotation"
+  | "screenshot"
+  | "canvas";
 
 /**
  * Declarative identity for one prototype page at a concrete application route.
@@ -334,7 +339,10 @@ export async function withPreviewCaptureLock<T>(input: {
   }
   while (registration.active) {
     const active = registration.active;
-    if (input.owner === "canvas" || active.owner !== "canvas") {
+    if (
+      input.owner === "canvas" ||
+      (active.owner !== "canvas" && input.owner !== "automatic-review")
+    ) {
       throw new PreviewRuntimeError(
         "capture_busy",
         `Preview capture is busy (${active.owner}).`,
@@ -342,9 +350,11 @@ export async function withPreviewCaptureLock<T>(input: {
     }
     // Foreground work must wait for the isolated iframe and listeners to be
     // disposed before acquiring the same runtime. Abort alone is not release.
-    active.controller.abort(
-      abortError("Canvas capture yielded to a foreground request."),
-    );
+    if (active.owner === "canvas") {
+      active.controller.abort(
+        abortError("Canvas capture yielded to a foreground request."),
+      );
+    }
     await waitForCaptureCleanup(active.finished, input.signal);
     input.signal?.throwIfAborted();
     if (registrations.get(input.conversationId) !== registration) {

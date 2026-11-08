@@ -3,6 +3,7 @@
 import JSZip from "jszip";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useSettingsStore } from "../../store/settings";
+import { digestProjectSnapshot } from "../project-runtime/snapshot";
 import {
   PROJECT_IMPORT_LIMITS,
   inferProjectPreview,
@@ -150,6 +151,44 @@ describe("project import staging", () => {
       path: "public/logo.png",
       mimeType: "image/png",
     });
+    expect(staged.preflight.digest).toBe(
+      await digestProjectSnapshot(staged.files, staged.assets),
+    );
+    expect(staged.preflight.capabilities.preview.supported).toBe(true);
+  });
+
+  it("finishes local checks for unsupported source without compiling it", async () => {
+    const staged = await stageProjectFromFileList([
+      sourceFile("demo/index.html", "<main>Source</main>"),
+      sourceFile(
+        "demo/package.json",
+        JSON.stringify({
+          devDependencies: { vite: "8.2.2" },
+          scripts: { dev: "vite" },
+        }),
+      ),
+    ]);
+    expect(staged.previewMode).toBe("code-only");
+    expect(staged.preflight.capabilities.preview).toMatchObject({
+      supported: false,
+      reason: expect.stringContaining("Vite 8.2.2"),
+    });
+  });
+
+  it("stops reading later files when staging is cancelled", async () => {
+    const controller = new AbortController();
+    const nextRead = vi.fn();
+    const first = sourceFile("demo/a.js", "first");
+    first.arrayBuffer = async () => {
+      controller.abort();
+      return encoder.encode("first").buffer;
+    };
+    const second = sourceFile("demo/b.js", "second");
+    second.arrayBuffer = nextRead;
+    await expect(
+      stageProjectFromFileList([first, second], controller.signal),
+    ).rejects.toThrow();
+    expect(nextRead).not.toHaveBeenCalled();
   });
 
   it("imports a directory handle without descending into ignored directories", async () => {

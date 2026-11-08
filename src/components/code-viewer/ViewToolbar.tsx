@@ -15,6 +15,7 @@ import {
   ScanSearch,
   RefreshCw,
   Camera,
+  ScanEye,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { saveAs } from "file-saver";
@@ -29,6 +30,7 @@ import {
 import { buildProjectZip } from "@/lib/project-assets/archive";
 import { ProjectBuildDownload } from "./ProjectBuildDownload";
 import type { PreviewCaptureScope } from "../../lib/design/preview-runtime";
+import type { ScreenshotMode } from "./PreviewScreenshot";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -76,6 +78,8 @@ interface ViewToolbarProps {
   interactionLocked?: boolean;
   onAnnotate?: (scope: PreviewCaptureScope) => void;
   annotationUnavailableReason?: string;
+  onScreenshot?: (mode: ScreenshotMode) => void;
+  screenshotUnavailableReason?: string;
   designWorkspace?: {
     focused: boolean;
     actions: ReactNode;
@@ -186,6 +190,8 @@ export function ViewToolbar({
   interactionLocked = false,
   onAnnotate,
   annotationUnavailableReason,
+  onScreenshot,
+  screenshotUnavailableReason,
   designWorkspace,
 }: ViewToolbarProps) {
   const t = useT();
@@ -254,7 +260,7 @@ export function ViewToolbar({
                               aria-label={t.annotation.title}
                               disabled={!!annotationUnavailableReason}
                             >
-                              <Camera size={15} />
+                              <ScanEye size={15} />
                             </Button>
                           </DropdownMenuTrigger>
                         </span>
@@ -271,6 +277,47 @@ export function ViewToolbar({
                         onSelect={() => onAnnotate("full-page")}
                       >
                         {t.annotation.fullPage}
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                )}
+                {onScreenshot && (
+                  <DropdownMenu>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <span
+                          className="inline-flex"
+                          tabIndex={screenshotUnavailableReason ? 0 : undefined}
+                        >
+                          <DropdownMenuTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="icon-sm"
+                              aria-label={t.screenshot.title}
+                              disabled={!!screenshotUnavailableReason}
+                            >
+                              <Camera size={15} />
+                            </Button>
+                          </DropdownMenuTrigger>
+                        </span>
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        {screenshotUnavailableReason || t.screenshot.title}
+                      </TooltipContent>
+                    </Tooltip>
+                    <DropdownMenuContent align="end">
+                      <DropdownMenuItem
+                        onSelect={() => onScreenshot("viewport")}
+                      >
+                        {t.screenshot.viewport}
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
+                        onSelect={() => onScreenshot("full-page")}
+                      >
+                        {t.screenshot.fullPage}
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onSelect={() => onScreenshot("region")}>
+                        {t.screenshot.region}
                       </DropdownMenuItem>
                     </DropdownMenuContent>
                   </DropdownMenu>

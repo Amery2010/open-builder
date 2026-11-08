@@ -5,14 +5,15 @@ import {
 } from "../design/preview-runtime";
 
 /** Freeze the selected region of the mounted page without navigation or reload. */
-export function captureAnnotationPreview(
+export function capturePreviewImage(
   conversationId: string,
   signal: AbortSignal,
   scope: PreviewCaptureScope = "viewport",
+  owner: "annotation" | "screenshot" = "annotation",
 ) {
   return withPreviewCaptureLock({
     conversationId,
-    owner: "annotation",
+    owner,
     signal,
     run: async (adapter, captureSignal) => {
       const generation = adapter.getGeneration();
@@ -53,4 +54,12 @@ export function captureAnnotationPreview(
       return capture;
     },
   });
+}
+
+export function captureAnnotationPreview(
+  conversationId: string,
+  signal: AbortSignal,
+  scope: PreviewCaptureScope = "viewport",
+) {
+  return capturePreviewImage(conversationId, signal, scope, "annotation");
 }

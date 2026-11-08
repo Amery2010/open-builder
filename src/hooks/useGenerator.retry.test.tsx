@@ -391,6 +391,7 @@ describe("useGenerator retry Design policy", () => {
       legacyPlanModeMigrated: true,
     });
     useSettingsStore.setState((state) => ({
+      system: { ...state.system, autoQaEnabled: false },
       ai: {
         ...state.ai,
         runtime: "api",
@@ -400,6 +401,53 @@ describe("useGenerator retry Design policy", () => {
     useInteractiveStore.setState({ pending: [] });
     useProjectDesignWorkspaceStore.setState({ selections: {} });
   });
+
+  it.each([false, true])(
+    "schedules automatic Design capture only when Auto QA is enabled (%s)",
+    async (autoQaEnabled) => {
+      const conversationId = useConversationStore
+        .getState()
+        .createConversation();
+      useConversationStore.getState().setWorkspaceMode("design");
+      useConversationStore.getState().setFiles(prototypeFiles(0));
+      useDesignReviewStore.getState().reset();
+      useSettingsStore.setState((state) => ({
+        system: { ...state.system, autoQaEnabled },
+      }));
+      generateActionForNextBackend = async (backend) => {
+        backend.setFiles({
+          ...backend.getFiles(),
+          "src/App.tsx":
+            "export default function App() { return <main>Updated design</main>; }",
+        });
+        return resultFor(backend);
+      };
+      const hook = renderGenerator();
+      await act(async () => {
+        await hook.result.current.generate("Refine the interface");
+      });
+      if (autoQaEnabled) {
+        await waitFor(() =>
+          expect(
+            useDesignReviewStore.getState().automatic?.evidence.conversationId,
+          ).toBe(conversationId),
+        );
+      } else {
+        expect(useDesignReviewStore.getState().automatic).toBeUndefined();
+      }
+      const activities = useConversationStore
+        .getState()
+        .conversations[conversationId].messages.filter(
+          (message) => message.metadata?.origin === "design_review",
+        );
+      expect(activities).toHaveLength(autoQaEnabled ? 1 : 0);
+      hook.unmount();
+      useDesignReviewStore.getState().reset();
+      useSettingsStore.setState((state) => ({
+        system: { ...state.system, autoQaEnabled: false },
+      }));
+    },
+  );
 
   it.each(["generate", "continueTask"] as const)(
     "does not manufacture tasks from unfinished blueprint progress through %s",
@@ -581,6 +629,9 @@ describe("useGenerator retry Design policy", () => {
   });
 
   it("prepares Design writes and schedules an advisory review without submission", async () => {
+    useSettingsStore.setState((state) => ({
+      system: { ...state.system, autoQaEnabled: true },
+    }));
     const conversationId = useConversationStore.getState().createConversation();
     useConversationStore.getState().setWorkspaceMode("design");
     const initialFiles = {

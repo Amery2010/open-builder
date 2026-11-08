@@ -171,10 +171,53 @@ export default function installCaptureCanvasAdapter(runtime, html2canvas) {
     const signal = options.signal;
     if (signal && signal.aborted) throw abortReason(signal);
     let container;
+    let removedContainer;
     let canvas;
+    let primaryStopped = false;
     function cleanup() {
-      if (container) container.remove();
+      if (container && container !== removedContainer) {
+        container.remove();
+        removedContainer = container;
+      }
       container = undefined;
+    }
+    function waitForRendering(rendering) {
+      // html2canvas's imageTimeout does not bound iframe loading or fonts.ready.
+      // Leave time for the SVG fallback before the host's capture deadline.
+      return new Promise((resolve, reject) => {
+        let settled = false;
+        const timer = setTimeout(
+          () => finish(new Error("Screenshot document rendering timed out.")),
+          15000,
+        );
+        function abort() {
+          finish(abortReason(signal));
+        }
+        function finish(error, result) {
+          if (settled) {
+            // The library cannot be cancelled; discard any late allocation.
+            if (result) {
+              result.width = 0;
+              result.height = 0;
+            }
+            return;
+          }
+          settled = true;
+          primaryStopped = true;
+          clearTimeout(timer);
+          if (signal) signal.removeEventListener("abort", abort);
+          if (error) reject(error);
+          else resolve(result);
+        }
+        Promise.resolve(rendering).then(
+          (result) => finish(null, result),
+          (error) => finish(error),
+        );
+        if (signal) {
+          signal.addEventListener("abort", abort, { once: true });
+          if (signal.aborted) abort();
+        }
+      });
     }
     async function render() {
       try {
@@ -185,36 +228,58 @@ export default function installCaptureCanvasAdapter(runtime, html2canvas) {
               ownerDocument.querySelectorAll("iframe.html2canvas-container"),
             )
           : [];
-        const rendering = html2canvas(node, {
-          windowWidth: options.windowWidth,
-          windowHeight: options.windowHeight,
-          scrollX: region.x,
-          scrollY: region.y,
-          x: region.x,
-          y: region.y,
-          width: region.width,
-          height: region.height,
-          scale: options.scale,
-          useCORS: true,
-          allowTaint: false,
-          logging: false,
-          removeContainer: false,
-          ignoreElements: (element) =>
-            element.hasAttribute("data-ob-design-overlay"),
-          onclone: (clonedDocument) => {
-            container = clonedDocument.defaultView.frameElement;
-            if (signal && signal.aborted) throw abortReason(signal);
-          },
-        });
-        // The library appends its iframe synchronously before returning its
-        // promise. Remember it even when fonts fail before onclone runs.
-        if (!container && ownerDocument) {
-          const added = Array.from(
-            ownerDocument.querySelectorAll("iframe.html2canvas-container"),
-          ).filter((frame) => previousContainers.indexOf(frame) < 0);
-          if (added.length === 1) container = added[0];
+        // WebKit can leave a cloned lazy image's document permanently loading,
+        // even though html2canvas changes the image to eager after cloneNode.
+        // Set it before the synchronous clone, then restore the live document.
+        const lazyImages = node.querySelectorAll
+          ? Array.from(node.querySelectorAll("img"))
+              .filter((image) => image.loading === "lazy")
+              .map((image) => [image, image.getAttribute("loading")])
+          : [];
+        let rendering;
+        try {
+          lazyImages.forEach(([image]) =>
+            image.setAttribute("loading", "eager"),
+          );
+          rendering = html2canvas(node, {
+            windowWidth: options.windowWidth,
+            windowHeight: options.windowHeight,
+            scrollX: region.x,
+            scrollY: region.y,
+            x: region.x,
+            y: region.y,
+            width: region.width,
+            height: region.height,
+            scale: options.scale,
+            useCORS: true,
+            allowTaint: false,
+            logging: false,
+            removeContainer: false,
+            ignoreElements: (element) =>
+              element.hasAttribute("data-ob-design-overlay"),
+            onclone: (clonedDocument) => {
+              container = clonedDocument.defaultView.frameElement;
+              if (primaryStopped) {
+                cleanup();
+                throw new Error("Screenshot document rendering has ended.");
+              }
+              if (signal && signal.aborted) throw abortReason(signal);
+            },
+          });
+        } finally {
+          lazyImages.forEach(([image, loading]) =>
+            image.setAttribute("loading", loading),
+          );
+          // The library appends its iframe synchronously before returning its
+          // promise. Remember it even when fonts fail before onclone runs.
+          if (!container && ownerDocument) {
+            const added = Array.from(
+              ownerDocument.querySelectorAll("iframe.html2canvas-container"),
+            ).filter((frame) => previousContainers.indexOf(frame) < 0);
+            if (added.length === 1) container = added[0];
+          }
         }
-        canvas = await rendering;
+        canvas = await waitForRendering(rendering);
         if (signal && signal.aborted) {
           canvas.width = 0;
           canvas.height = 0;
@@ -231,6 +296,7 @@ export default function installCaptureCanvasAdapter(runtime, html2canvas) {
         }
         return canvas;
       } catch (error) {
+        primaryStopped = true;
         if (signal && signal.aborted) throw abortReason(signal);
         cleanup();
         return fallbackCanvas(node, options);
@@ -238,20 +304,6 @@ export default function installCaptureCanvasAdapter(runtime, html2canvas) {
         cleanup();
       }
     }
-    // html2canvas has no abort API. Detach its clone on abort and release any
-    // late canvas after rendering settles.
-    return new Promise((resolve, reject) => {
-      function abort() {
-        cleanup();
-        if (signal) signal.removeEventListener("abort", abort);
-        reject(abortReason(signal));
-      }
-      if (signal) signal.addEventListener("abort", abort, { once: true });
-      render()
-        .then(resolve, reject)
-        .finally(() => {
-          if (signal) signal.removeEventListener("abort", abort);
-        });
-    });
+    return render();
   };
 }

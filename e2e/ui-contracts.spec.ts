@@ -113,7 +113,8 @@ test("keeps affected dialogs usable in a short desktop viewport", async ({
     useConversationStore.getState().setWorkspaceMode("design");
   });
 
-  await page.getByRole("button", { name: "Review design" }).click();
+  await page.getByRole("button", { name: "More design actions" }).click();
+  await page.getByRole("menuitem", { name: "Review design" }).click();
   await page.evaluate(async () => {
     const reviewUrl = "/src/store/design-review.ts";
     const { useDesignReviewStore } = await import(reviewUrl);

@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
+  DialogBody,
   DialogDescription,
   DialogHeader,
   DialogTitle,
@@ -105,7 +106,7 @@ export function PermissionActivityDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="min-h-0 flex-1 overflow-y-auto">
+        <DialogBody>
           <section className="space-y-3 border-b bg-muted/20 px-5 py-4">
             <h2 className="text-sm font-medium">
               {t.permissionActivity.activeGrants}
@@ -233,7 +234,7 @@ export function PermissionActivityDialog({
               ))}
             </div>
           )}
-        </div>
+        </DialogBody>
       </DialogContent>
     </Dialog>
   );

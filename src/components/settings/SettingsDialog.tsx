@@ -1,4 +1,11 @@
-import { useState, useEffect, useMemo, useRef, useCallback } from "react";
+import {
+  useState,
+  useEffect,
+  useMemo,
+  useRef,
+  useCallback,
+  type ReactNode,
+} from "react";
 import type {
   AISettings,
   WebSearchSettings,
@@ -14,6 +21,7 @@ import {
 } from "@/components/ui/dialog";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import { useT } from "../../i18n";
 import { useSettingsStore } from "../../store/settings";
 import { ModelTab } from "./tabs/ModelTab";
@@ -332,22 +340,16 @@ export function SettingsDialog({
             </TabsTrigger>
           </TabsList>
 
-          <TabsContent
-            value="model"
-            className="min-h-0 overflow-y-auto py-4 pr-1 space-y-4"
-          >
+          <SettingsTabContent value="model">
             <ModelTab
               formData={formData}
               setFormData={setFormData}
               errors={showValidation ? modelErrorsForSave : {}}
               runtimeChangeLocked={runtimeChangeLocked}
             />
-          </TabsContent>
+          </SettingsTabContent>
 
-          <TabsContent
-            value="search"
-            className="min-h-0 overflow-y-auto py-4 pr-1 space-y-4"
-          >
+          <SettingsTabContent value="search">
             <SearchServicesTab
               webSearchForm={webSearchForm}
               setWebSearchForm={setWebSearchForm}
@@ -357,26 +359,17 @@ export function SettingsDialog({
               runtime={formData.runtime}
               localNativeSearchAvailable={localNativeSearchAvailable}
             />
-          </TabsContent>
+          </SettingsTabContent>
 
-          <TabsContent
-            value="storage"
-            className="min-h-0 overflow-y-auto py-4 pr-1 space-y-4"
-          >
+          <SettingsTabContent value="storage">
             <StorageTab />
-          </TabsContent>
+          </SettingsTabContent>
 
-          <TabsContent
-            value="system"
-            className="min-h-0 overflow-y-auto py-4 pr-1 space-y-4"
-          >
+          <SettingsTabContent value="system">
             <SystemTab form={systemForm} setForm={setSystemForm} />
-          </TabsContent>
+          </SettingsTabContent>
 
-          <TabsContent
-            value="advanced"
-            className="min-h-0 overflow-y-auto py-4 pr-1 space-y-4"
-          >
+          <SettingsTabContent value="advanced">
             <AdvancedTab
               form={systemForm}
               setForm={setSystemForm}
@@ -388,7 +381,7 @@ export function SettingsDialog({
                 setImageCompressionQualityDraft
               }
             />
-          </TabsContent>
+          </SettingsTabContent>
         </Tabs>
 
         <DialogFooter className="sticky bottom-0 z-10 shrink-0 flex-row justify-end border-t bg-background px-4 py-3 sm:static sm:border-t-0 sm:px-0 sm:py-0">
@@ -407,5 +400,25 @@ export function SettingsDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+function SettingsTabContent({
+  value,
+  children,
+}: {
+  value: string;
+  children: ReactNode;
+}) {
+  return (
+    <TabsContent
+      value={value}
+      tabIndex={-1}
+      className="flex min-h-0 flex-col overflow-hidden"
+    >
+      <ScrollArea className="flex-1" contentClassName="space-y-4 py-4 pr-3">
+        {children}
+      </ScrollArea>
+    </TabsContent>
   );
 }

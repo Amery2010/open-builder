@@ -10,6 +10,7 @@ import {
   type ReactNode,
 } from "react";
 import { ChatHeader } from "./chat/ChatHeader";
+import { ScrollArea } from "./ui/scroll-area";
 import { ChatInput } from "./chat/ChatInput";
 import { EmptyState } from "./chat/EmptyState";
 import { MessageBubble } from "./chat/MessageBubble";
@@ -21,6 +22,8 @@ import {
   ProjectArchiveAction,
   ProjectArchiveCard,
 } from "./chat/ProjectArchiveCard";
+import { ProjectBuildDialog } from "./code-viewer/ProjectBuildDialog";
+import type { ProjectBuildTarget } from "../lib/project-build/target";
 import { AskUserQuestionCard } from "./chat/AskUserQuestionCard";
 import { GeneratingIndicator } from "./chat/GeneratingIndicator";
 import { SettingsWarning } from "./chat/SettingsWarning";
@@ -220,6 +223,7 @@ export function ChatInterface({
 }: ChatInterfaceProps) {
   const t = useT();
   const [input, setInput] = useState("");
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [forcedSkillIds, setForcedSkillIds] = useState<string[]>([]);
   const [instructionSubmitError, setInstructionSubmitError] = useState<
@@ -228,9 +232,13 @@ export function ChatInterface({
   const [isSubmittingInstruction, setIsSubmittingInstruction] = useState(false);
   const instructionSubmissionRef = useRef<symbol | null>(null);
   const [showSessionList, setShowSessionList] = useState(false);
+  const [buildTarget, setBuildTarget] = useState<ProjectBuildTarget | null>(
+    null,
+  );
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesViewportRef = useRef<HTMLDivElement>(null);
   const virtualListRef = useRef<HTMLDivElement>(null);
+  const pendingMeasurements = useRef(new Set<number>());
   const shouldAutoScrollRef = useRef(true);
   const activeId = useConversationStore((s) => s.activeId);
   const activeConversation = useConversationStore((state) =>
@@ -256,7 +264,34 @@ export function ChatInterface({
       index,
     overscan: 6,
     scrollMargin: virtualScrollMargin,
+    anchorTo: "end",
+    followOnAppend: "auto",
+    scrollEndThreshold: 96,
+    useAnimationFrameWithResizeObserver: true,
   });
+  const measureMessageElement = useCallback(
+    (node: HTMLDivElement | null) => {
+      if (!node) {
+        messageVirtualizer.measureElement(null);
+        return;
+      }
+      // A measurement can synchronously correct the scroll offset. Schedule it
+      // outside React's ref commit so the virtualizer can safely flush updates.
+      const frame = requestAnimationFrame(() => {
+        pendingMeasurements.current.delete(frame);
+        if (node.isConnected) messageVirtualizer.measureElement(node);
+      });
+      pendingMeasurements.current.add(frame);
+    },
+    [messageVirtualizer],
+  );
+  useEffect(() => {
+    const frames = pendingMeasurements.current;
+    return () => {
+      for (const frame of frames) cancelAnimationFrame(frame);
+      frames.clear();
+    };
+  }, []);
   const pendingQuestionnaire = useInteractiveStore((state) =>
     state.pending.find(
       (item) =>
@@ -519,11 +554,22 @@ export function ChatInterface({
 
   useEffect(() => {
     if (!shouldAutoScrollRef.current) return;
+    if (shouldVirtualizeMessages) {
+      // Reconcile the end position as newly mounted rows are measured.
+      messageVirtualizer.scrollToEnd();
+      return;
+    }
     messagesEndRef.current?.scrollIntoView({
       behavior: isGenerating ? "auto" : "smooth",
       block: "end",
     });
-  }, [messages, pendingInstructions, isGenerating]);
+  }, [
+    messages,
+    pendingInstructions,
+    isGenerating,
+    shouldVirtualizeMessages,
+    messageVirtualizer,
+  ]);
 
   useEffect(() => {
     if (!showSessionList) return;
@@ -790,6 +836,13 @@ export function ChatInterface({
                 conversationId={activeId!}
                 snapshotIds={messageSnapshots.map((snapshot) => snapshot.id)}
                 labels={t.projectArchives}
+                onBuildSnapshot={(snapshotId) =>
+                  setBuildTarget({
+                    kind: "snapshot",
+                    conversationId: activeId!,
+                    snapshotId,
+                  })
+                }
               />
             ) : undefined
           }
@@ -836,11 +889,17 @@ export function ChatInterface({
           />
         )}
 
-        <div
-          ref={messagesViewportRef}
-          className="flex min-h-0 flex-1 flex-col space-y-4 overflow-y-auto p-4 pb-0"
+        <ScrollArea
+          viewportRef={messagesViewportRef}
+          viewportProps={{
+            className:
+              mergedMessages.length === 0 && hasConfiguredModelRuntime
+                ? "[&>div]:h-full"
+                : undefined,
+          }}
+          className="flex-1"
+          contentClassName="flex min-h-full flex-col space-y-4 p-4 pb-0"
           onScroll={updateAutoScrollIntent}
-          style={{ scrollbarGutter: "stable" }}
         >
           {!hasConfiguredModelRuntime && (
             <SettingsWarning onOpenSettings={onOpenSettings} />
@@ -854,7 +913,12 @@ export function ChatInterface({
           ) : null}
 
           {mergedMessages.length === 0 && hasConfiguredModelRuntime && (
-            <EmptyState onSelectSuggestion={setInput} />
+            <EmptyState
+              onSelectSuggestion={(text) => {
+                setInput(text);
+                inputRef.current?.focus();
+              }}
+            />
           )}
 
           {shouldVirtualizeMessages ? (
@@ -867,7 +931,7 @@ export function ChatInterface({
                 <div
                   key={virtualRow.key}
                   data-index={virtualRow.index}
-                  ref={messageVirtualizer.measureElement}
+                  ref={measureMessageElement}
                   className="absolute left-0 top-0 w-full pb-4"
                   style={{
                     transform: `translateY(${virtualRow.start - virtualScrollMargin}px)`,
@@ -931,6 +995,13 @@ export function ChatInterface({
                   conversationId={activeId}
                   snapshotId={snapshot.id}
                   labels={t.projectArchives}
+                  onBuildSnapshot={(snapshotId) =>
+                    setBuildTarget({
+                      kind: "snapshot",
+                      conversationId: activeId,
+                      snapshotId,
+                    })
+                  }
                 />
               ))}
           {isGenerating && runtimeWaitMessage && (
@@ -973,7 +1044,7 @@ export function ChatInterface({
             )}
 
           <div ref={messagesEndRef} />
-        </div>
+        </ScrollArea>
 
         <div className="relative shrink-0">
           {instructionSubmitError && (
@@ -982,6 +1053,7 @@ export function ChatInterface({
             </p>
           )}
           <ChatInput
+            inputRef={inputRef}
             input={input}
             onChange={setInput}
             onSubmit={handleSubmit}
@@ -1119,6 +1191,13 @@ export function ChatInterface({
           />
         )}
       </div>
+
+      {buildTarget && (
+        <ProjectBuildDialog
+          target={buildTarget}
+          onClose={() => setBuildTarget(null)}
+        />
+      )}
 
       {pendingQuestionnaire?.kind === "question" && (
         <div

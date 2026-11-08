@@ -109,7 +109,7 @@ export function designBridgeRuntimeRevision(
   generation: string,
   captureRuntimeAvailable: boolean,
 ): string {
-  return `${generation}:10:${captureRuntimeAvailable ? "capture" : "selection"}`;
+  return `${generation}:11:${captureRuntimeAvailable ? "capture" : "selection"}`;
 }
 
 export interface DesignPreviewSemanticElement {
@@ -306,12 +306,14 @@ export type DesignBridgeParentMessage =
 function previewBridgeClientSource(
   captureRuntimeAvailable: boolean,
   generation: string,
+  expectAppMount: boolean,
 ): string {
   return `(function () {
   "use strict";
   var VERSION = ${DESIGN_BRIDGE_PROTOCOL_VERSION};
   var GENERATION = ${JSON.stringify(generation)};
   var CAPTURE_RUNTIME_AVAILABLE = ${JSON.stringify(captureRuntimeAvailable)};
+  var EXPECT_APP_MOUNT = ${JSON.stringify(expectAppMount)};
   var RUNTIME_REVISION = ${JSON.stringify(designBridgeRuntimeRevision(generation, captureRuntimeAvailable))};
   var viewportSizeMatches = ${isPreviewViewportSize.toString()};
   var MAX_BYTES = ${DESIGN_BRIDGE_PAYLOAD_MAX_BYTES};
@@ -333,6 +335,13 @@ function previewBridgeClientSource(
   var parentOrigin = "*";
   var captureInFlight = false;
   var activeCapture = null;
+  var documentParsed = false;
+  var initialContentReady = false;
+  function onDocumentParsed() {
+    documentParsed = true;
+    document.removeEventListener("DOMContentLoaded", onDocumentParsed);
+  }
+  document.addEventListener("DOMContentLoaded", onDocumentParsed);
   var navigationInFlight = false;
   var runtimeIds = new WeakMap();
   var runtimeIdCounter = 0;
@@ -619,6 +628,74 @@ function previewBridgeClientSource(
       new Promise(function (resolve) { setTimeout(resolve, 3000); })
     ]).then(function () {});
   }
+  function isDocumentParsed() {
+    if (documentParsed || document.readyState === "complete") return true;
+    // The bridge may be installed after DOMContentLoaded while images still
+    // delay load. Conversely, interactive alone can precede module execution.
+    var navigation = typeof performance.getEntriesByType === "function"
+      ? performance.getEntriesByType("navigation")[0] : null;
+    return Boolean((navigation && navigation.domContentLoadedEventStart > 0) ||
+      (performance.timing && performance.timing.domContentLoadedEventStart > 0));
+  }
+  function hasPendingAppMount() {
+    if (!EXPECT_APP_MOUNT || !document.body) return false;
+    var roots = document.body.querySelectorAll("#root, #app, app-root");
+    var pending = false;
+    function hasContent(node) {
+      return Array.prototype.some.call(node.childNodes, function (child) {
+        return (child.nodeType === 3 && child.textContent.trim().length > 0) ||
+          (child.nodeType === 1 && !/^(SCRIPT|STYLE|LINK|META|TEMPLATE)$/.test(child.tagName) && !child.hasAttribute("data-ob-design-overlay"));
+      });
+    }
+    for (var i = 0; i < roots.length; i += 1) {
+      var root = roots[i];
+      if (root.parentElement !== document.body) continue;
+      pending = true;
+      if (hasContent(root) || (root.shadowRoot && hasContent(root.shadowRoot))) return false;
+    }
+    return pending;
+  }
+  function waitForInitialContent(signal) {
+    if (initialContentReady) return Promise.resolve();
+    function ready() { return isDocumentParsed() && !hasPendingAppMount(); }
+    if (ready()) {
+      initialContentReady = true;
+      return Promise.resolve();
+    }
+    return new Promise(function (resolve, reject) {
+      var settled = false;
+      var observer = new MutationObserver(check);
+      // Document observers cannot see attachShadow() or changes inside it.
+      // Only poll during bootstrap; subsequent captures have no sampling delay.
+      var pollTimer = setInterval(check, 50);
+      var timer = setTimeout(function () {
+        finish(new Error("Preview content is not ready: the document or application has not finished its initial render."));
+      }, 10000);
+      function finish(error) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        clearInterval(pollTimer);
+        observer.disconnect();
+        document.removeEventListener("DOMContentLoaded", check);
+        document.removeEventListener("readystatechange", check);
+        signal.removeEventListener("abort", abort);
+        if (error) reject(error);
+        else { initialContentReady = true; resolve(); }
+      }
+      function abort() { finish(signal.reason || new DOMException("Screenshot capture was cancelled.", "AbortError")); }
+      function check() {
+        if (settled) return;
+        if (signal.aborted) abort();
+        else if (ready()) finish();
+      }
+      observer.observe(document, { childList: true, subtree: true, characterData: true });
+      document.addEventListener("DOMContentLoaded", check);
+      document.addEventListener("readystatechange", check);
+      signal.addEventListener("abort", abort, { once: true });
+      check();
+    });
+  }
   function captureRuntime() {
     var runtime = window[CAPTURE_RUNTIME_KEY];
     return CAPTURE_RUNTIME_AVAILABLE && runtime && typeof runtime.toCanvas === "function" ? runtime : null;
@@ -840,6 +917,8 @@ function previewBridgeClientSource(
     try {
       var renderer = await loadCaptureLibrary();
       if (disposed || controller.signal.aborted) throw controller.signal.reason || new Error("Preview runtime was replaced.");
+      await waitForInitialContent(controller.signal);
+      if (disposed || controller.signal.aborted) throw controller.signal.reason || new Error("Preview runtime was replaced.");
       if (!currentViewport) await waitForFonts();
       if (disposed || controller.signal.aborted) throw controller.signal.reason || new Error("Preview runtime was replaced.");
       var size = currentViewport ? { width: window.innerWidth, height: window.innerHeight } : await stableViewport(viewport.name, controller.signal);
@@ -1026,6 +1105,7 @@ function previewBridgeClientSource(
       window.removeEventListener("hashchange", onHashChange);
       window.removeEventListener("message", onMessage);
       window.removeEventListener("open-builder:capture-runtime-ready", onCaptureRuntimeReady);
+      document.removeEventListener("DOMContentLoaded", onDocumentParsed);
       overlay.remove();
     }
   };
@@ -1146,6 +1226,7 @@ export function injectDesignBridge(
     [DESIGN_BRIDGE_VIRTUAL_PATH]: previewBridgeClientSource(
       Boolean(captureRuntimeSource),
       generation,
+      template !== "static",
     ),
   };
   if (captureRuntimeSource) {

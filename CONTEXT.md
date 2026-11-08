@@ -36,9 +36,13 @@ _Avoid_: Pixel diff, snapshot renderer
 A user-edited frozen image of the current visible preview or complete rendered document, with optional marks and a selected crop. Only its flattened image becomes a message attachment; the editable drawing is temporary and belongs to the active Conversation branch and checkout.
 _Avoid_: Preview Evidence, live page overlay, persisted drawing document
 
-**Project Runtime Validation**:
-An isolated compilation check bound to the exact staged project files and resources. Successful validation permits importing those contents as a new Conversation; a later content change invalidates it.
-_Avoid_: Framework-name detection, deployment proof
+**Project Import Preflight**:
+Local integrity checks bound to the exact staged project files and resources. Passing preflight permits creating a separate Conversation, including code-only projects; it does not establish preview compilation success.
+_Avoid_: Sandpack verification, deployment proof
+
+**Preview Compilation Status**:
+The temporary compilation outcome of the active preview for one project generation and runtime instance. Failure or a timeout does not invalidate an imported Conversation or its source files.
+_Avoid_: Import acceptance, deployment proof, rendered-page verification
 
 **Static Deployment Archive**:
 A ZIP containing the actual static site files produced from one project state. Compatibility builds target modern browsers and carry different guarantees from the project's original build workflow.

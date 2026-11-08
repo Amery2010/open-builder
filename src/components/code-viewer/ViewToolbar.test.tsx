@@ -29,7 +29,7 @@ describe("ViewToolbar preview availability", () => {
       </TooltipProvider>,
     );
     const camera = screen.getByRole("button", { name: "Annotate preview" });
-    expect(camera.querySelector("svg")).toHaveClass("lucide-camera");
+    expect(camera.querySelector("svg")).toHaveClass("lucide-scan-eye");
     await userEvent.click(camera);
     expect(onAnnotate).not.toHaveBeenCalled();
     await userEvent.click(
@@ -39,6 +39,38 @@ describe("ViewToolbar preview availability", () => {
     await userEvent.click(camera);
     await userEvent.click(screen.getByRole("menuitem", { name: "Full page" }));
     expect(onAnnotate).toHaveBeenLastCalledWith("full-page");
+  });
+
+  it("exports three screenshot ranges independently of annotation attachment availability", async () => {
+    const onScreenshot = vi.fn();
+    render(
+      <TooltipProvider>
+        <ViewToolbar
+          viewMode="preview"
+          onViewModeChange={vi.fn()}
+          deviceSize="desktop"
+          onDeviceSizeChange={vi.fn()}
+          files={{}}
+          onAnnotate={vi.fn()}
+          annotationUnavailableReason="Attachments unavailable"
+          onScreenshot={onScreenshot}
+        />
+      </TooltipProvider>,
+    );
+    expect(
+      screen.getByRole("button", { name: "Annotate preview" }),
+    ).toBeDisabled();
+    const camera = screen.getByRole("button", { name: "Export screenshot" });
+    expect(camera.querySelector("svg")).toHaveClass("lucide-camera");
+    for (const [label, mode] of [
+      ["Current viewport", "viewport"],
+      ["Full page", "full-page"],
+      ["Selected area", "region"],
+    ]) {
+      await userEvent.click(camera);
+      await userEvent.click(screen.getByRole("menuitem", { name: label }));
+      expect(onScreenshot).toHaveBeenLastCalledWith(mode);
+    }
   });
 
   it("keeps code actions but removes preview controls in code-only mode", () => {

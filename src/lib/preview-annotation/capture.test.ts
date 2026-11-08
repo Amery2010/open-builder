@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { captureAnnotationPreview } from "./capture";
+import { captureAnnotationPreview, capturePreviewImage } from "./capture";
 import {
   isPreviewCaptureBusy,
   registerPreviewRuntime,
@@ -31,6 +31,29 @@ function fixture() {
 }
 
 describe("annotation capture", () => {
+  it("gives screenshot capture its own lock ownership and preserves full-page source pixels", async () => {
+    const { runtime, result } = fixture();
+    const dispose = registerPreviewRuntime("screenshot", runtime);
+    try {
+      await expect(
+        capturePreviewImage(
+          "screenshot",
+          new AbortController().signal,
+          "full-page",
+          "screenshot",
+        ),
+      ).resolves.toBe(result);
+      expect(runtime.captureAnnotation).toHaveBeenCalledWith(
+        "first-generation",
+        expect.any(AbortSignal),
+        "full-page",
+      );
+      expect(runtime.capture).not.toHaveBeenCalled();
+      expect(isPreviewCaptureBusy("screenshot")).toBe(false);
+    } finally {
+      dispose();
+    }
+  });
   it("uses only the current viewport and releases the shared lock before editing", async () => {
     const { runtime, result } = fixture();
     const dispose = registerPreviewRuntime("annotation", runtime);

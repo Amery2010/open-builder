@@ -558,15 +558,20 @@ fn run_pi(mode: &str, args: &[String]) {
     let stdin = io::stdin();
     let mut reader = stdin.lock();
     let mut stdout = io::stdout().lock();
-    if emit_contract_failure(mode, &mut stdout) {
-        return;
-    }
     let mut transcript = String::new();
     let mut prompt_count = 0;
     loop {
         let mut line = String::new();
         if reader.read_line(&mut line).unwrap() == 0 {
             break;
+        }
+        // Consume the first RPC request before failing so process exit cannot
+        // race the adapter's initial stdin write.
+        if transcript.is_empty() {
+            write_invocation_log(args, &line);
+            if emit_contract_failure(mode, &mut stdout) {
+                return;
+            }
         }
         transcript.push_str(&line);
         let id = json_string_field(&line, "id").unwrap_or_default();

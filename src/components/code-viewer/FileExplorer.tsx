@@ -3,6 +3,7 @@ import { FilePlus, FolderPlus, Search } from "lucide-react";
 import JSZip from "jszip";
 import { TooltipIconButton } from "@/components/ui/tooltip-icon-button";
 import { Input } from "@/components/ui/input";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import { useT } from "../../i18n";
 import type { ProjectFiles } from "@/types";
 import { FileTreeNode } from "./file-explorer/FileTreeNode";
@@ -341,11 +342,13 @@ export function FileExplorer({
         </div>
       </div>
 
-      <div
-        className="flex-1 overflow-y-auto"
-        style={{ scrollbarGutter: "stable" }}
-        onDragOver={handleRootDragOver}
-        onDrop={handleRootDrop}
+      <ScrollArea
+        className="flex-1"
+        viewportProps={{
+          "aria-label": t.explorer.files,
+          onDragOver: handleRootDragOver,
+          onDrop: handleRootDrop,
+        }}
       >
         {trimmedQuery && fileTree.length === 0 ? (
           <p className="px-3 py-4 text-xs text-muted-foreground text-center">
@@ -378,7 +381,7 @@ export function FileExplorer({
             paddingRight={BASE_PAD}
           />
         )}
-      </div>
+      </ScrollArea>
     </div>
   );
 }

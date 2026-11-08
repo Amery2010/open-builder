@@ -63,6 +63,16 @@ export interface CreateDesignReviewRunInput {
   now?: number;
 }
 
+export interface RecordAutomaticCaptureFailureInput {
+  requestId: string;
+  conversationId: string;
+  phase?: "initial" | "verify";
+  sourceDigest?: string;
+  provider: DesignReviewProviderRef;
+  error: string;
+  now?: number;
+}
+
 interface DesignReviewState {
   // Volatile capture/dialog compatibility state. Excluded from persistence.
   status: DesignReviewStatus;
@@ -99,6 +109,9 @@ interface DesignReviewState {
   setAutomaticStage: (stage: AutomaticDesignReviewStage) => void;
   finishAutomatic: (outcome: AutomaticDesignReviewOutcome) => void;
   failAutomatic: (message: string) => void;
+  recordAutomaticCaptureFailure: (
+    input: RecordAutomaticCaptureFailureInput,
+  ) => DesignReviewRun;
   clearAutomatic: () => void;
   reset: () => void;
 
@@ -144,6 +157,48 @@ function createId(prefix: string, now = Date.now()): string {
     globalThis.crypto?.randomUUID?.() ??
     `${prefix}-${now}-${Math.random().toString(36).slice(2)}`
   );
+}
+
+function createAutomaticCaptureFailureRun(
+  input: RecordAutomaticCaptureFailureInput,
+): DesignReviewRun {
+  const now = input.now ?? Date.now();
+  const error = sanitizeDesignReviewLogText(input.error);
+  return {
+    id: input.requestId,
+    conversationId: input.conversationId,
+    kind: "automatic",
+    phase: input.phase ?? "initial",
+    status: "failed",
+    freshness: "fresh",
+    coverageVersion: DESIGN_REVIEW_COVERAGE_VERSION,
+    sourceDigest: input.sourceDigest ?? "0".repeat(64),
+    provider: {
+      runtime: input.provider.runtime,
+      provider: sanitizeDesignReviewLogText(input.provider.provider),
+      model: sanitizeDesignReviewLogText(input.provider.model),
+    },
+    logs: [
+      createDesignReviewLogEntry(
+        "capture_complete",
+        error ||
+          "Automatic Design Review capture failed before a report was started.",
+        { level: "error", at: now },
+      ),
+      createDesignReviewLogEntry(
+        "failed",
+        error ||
+          "Automatic Design Review capture failed before a report was started.",
+        { level: "error", at: now },
+      ),
+    ],
+    error:
+      error ||
+      "Automatic Design Review capture failed before a report was started.",
+    createdAt: now,
+    updatedAt: now,
+    completedAt: now,
+  };
 }
 
 export function pruneDesignReviewRuns(
@@ -459,8 +514,33 @@ export const useDesignReviewStore = create<DesignReviewState>()(
           automatic: state.automatic
             ? { ...state.automatic, stage: "unavailable" }
             : undefined,
-          dialogRequestId: ++nextDialogRequestId,
         })),
+      recordAutomaticCaptureFailure: (input) => {
+        const existing = Object.values(get().runsByConversation)
+          .flat()
+          .find(
+            (run) =>
+              run.id === input.requestId &&
+              run.kind === "automatic" &&
+              run.conversationId === input.conversationId,
+          );
+        if (existing) return existing;
+        const run = createAutomaticCaptureFailureRun(input);
+        set((state) => {
+          const current = state.runsByConversation[input.conversationId] ?? [];
+          return {
+            runsByConversation: {
+              ...state.runsByConversation,
+              [input.conversationId]: pruneDesignReviewRuns([run, ...current]),
+            },
+            selectedRunIdByConversation: {
+              ...state.selectedRunIdByConversation,
+              [input.conversationId]: run.id,
+            },
+          };
+        });
+        return run;
+      },
       clearAutomatic: () => set({ automatic: undefined }),
       // Existing callers use reset for transient dialog/capture cleanup. Runs
       // intentionally survive dialog close, project switches, and generation.

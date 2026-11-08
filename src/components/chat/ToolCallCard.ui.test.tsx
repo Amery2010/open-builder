@@ -12,6 +12,58 @@ import * as attachmentStore from "../../lib/attachments/store";
 const originalSystem = useSettingsStore.getState().system;
 
 describe("ToolCallCard UI", () => {
+  it("summarizes an applied design style while keeping the full result out of the page", async () => {
+    useSettingsStore.setState((state) => ({
+      system: { ...state.system, language: "en" },
+    }));
+    const spec = "Long private design specification";
+    render(
+      <ToolCallCard
+        toolName="apply_design_style"
+        toolCallId="style-ok"
+        path=""
+        title="Apply Design Style"
+        result={JSON.stringify({
+          ok: true,
+          style: "stripe",
+          spec,
+          sourceDigest: "source-digest",
+        })}
+      />,
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: /Apply Design Style/ }),
+    );
+    expect(screen.getByText("Applied the stripe design style.")).toBeVisible();
+    expect(
+      screen.queryByText(/Long private design specification|source-digest/),
+    ).toBeNull();
+  });
+
+  it("keeps failed design style calls diagnostic without dumping the specification", async () => {
+    useSettingsStore.setState((state) => ({
+      system: { ...state.system, language: "en" },
+    }));
+    render(
+      <ToolCallCard
+        toolName="apply_design_style"
+        toolCallId="style-error"
+        path=""
+        title="Apply Design Style"
+        result={JSON.stringify({
+          ok: false,
+          error: "Network unavailable",
+          available: ["stripe"],
+        })}
+      />,
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: /Apply Design Style/ }),
+    );
+    expect(
+      screen.getByText("Could not apply the design style: Network unavailable"),
+    ).toBeVisible();
+  });
   afterEach(() => {
     useSettingsStore.getState().setSystem(originalSystem);
     vi.restoreAllMocks();

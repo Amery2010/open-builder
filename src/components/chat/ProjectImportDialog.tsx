@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { FileArchive, FolderOpen, Loader2, ShieldCheck } from "lucide-react";
+import { CheckCircle2, FileArchive, FolderOpen, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -12,7 +12,6 @@ import {
 } from "@/components/ui/dialog";
 import { useT } from "../../i18n";
 import { useConversationStore } from "../../store/conversation";
-import { validateProjectRuntime } from "../../lib/project-runtime/validation";
 import {
   stageProjectFromDirectoryHandle,
   stageProjectFromFileList,
@@ -52,10 +51,6 @@ function isPickerCancellation(error: unknown): boolean {
   );
 }
 
-function isTauri(): boolean {
-  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-}
-
 export function ProjectImportDialog({
   open,
   isGenerating,
@@ -67,95 +62,129 @@ export function ProjectImportDialog({
   const folderInputRef = useRef<HTMLInputElement>(null);
   const zipInputRef = useRef<HTMLInputElement>(null);
   const operationRef = useRef<AbortController | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [progress, setProgress] = useState("");
+  const openSessionRef = useRef<object | null>(null);
+  const submittingRef = useRef(false);
+  const [phase, setPhase] = useState<"reading" | "importing" | null>(null);
   const [staged, setStaged] = useState<StagedProjectImport | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{
+    phase: "reading" | "importing";
+    detail: string;
+  } | null>(null);
+  const busy = phase !== null;
 
   useEffect(() => {
-    setBusy(false);
+    const session = open ? {} : null;
+    openSessionRef.current = session;
+    return () => {
+      if (openSessionRef.current === session) openSessionRef.current = null;
+    };
+  }, [open]);
+
+  useEffect(() => {
+    setPhase(null);
     setStaged(null);
     setError(null);
     return () => {
       operationRef.current?.abort();
+      operationRef.current = null;
+      submittingRef.current = false;
     };
   }, [open, conversationId]);
 
+  const close = () => {
+    openSessionRef.current = null;
+    operationRef.current?.abort();
+    operationRef.current = null;
+    onClose();
+  };
+
   const runStage = async (
-    loader: () => Promise<StagedProjectImport | null>,
+    loader: (signal: AbortSignal) => Promise<StagedProjectImport | null>,
   ) => {
+    if (submittingRef.current || isGenerating) return;
     operationRef.current?.abort();
     const controller = new AbortController();
     operationRef.current = controller;
-    setBusy(true);
-    setProgress(t.chat.projectImport.reading);
+    setPhase("reading");
     setError(null);
     setStaged(null);
     try {
-      const result = await loader();
-      controller.signal.throwIfAborted();
-      if (result) {
+      const result = await loader(controller.signal);
+      if (!controller.signal.aborted && operationRef.current === controller)
         setStaged(result);
-        setProgress(t.chat.projectImport.verifying);
-        const validation = await validateProjectRuntime({
-          files: result.files,
-          assets: result.assets,
-          signal: controller.signal,
-        });
-        controller.signal.throwIfAborted();
-        setStaged({
-          ...result,
-          template: validation.template,
-          previewMode: "sandpack",
-          validation,
-        });
-      }
     } catch (reason: unknown) {
-      if (!controller.signal.aborted && !isPickerCancellation(reason)) {
-        const message =
-          reason instanceof Error ? reason.message : String(reason);
-        setError(t.chat.projectImport.failed.replace("{message}", message));
+      if (
+        !controller.signal.aborted &&
+        operationRef.current === controller &&
+        !isPickerCancellation(reason)
+      ) {
+        setError({
+          phase: "reading",
+          detail: reason instanceof Error ? reason.message : String(reason),
+        });
       }
     } finally {
-      if (!controller.signal.aborted) setBusy(false);
+      if (!controller.signal.aborted && operationRef.current === controller)
+        setPhase(null);
     }
   };
 
   const pickFolder = async () => {
-    if (isTauri()) {
+    if ("__TAURI_INTERNALS__" in window) {
       await runStage(stageProjectFromTauriDirectory);
       return;
     }
     const picker = (window as DirectoryPickerWindow).showDirectoryPicker;
     if (picker) {
-      await runStage(async () =>
-        stageProjectFromDirectoryHandle(
-          await picker.call(window, { mode: "read" }),
-        ),
-      );
+      await runStage(async (signal) => {
+        const directory = await picker.call(window, { mode: "read" });
+        signal.throwIfAborted();
+        return stageProjectFromDirectoryHandle(directory, signal);
+      });
       return;
     }
     folderInputRef.current?.click();
   };
 
   const applyImport = async () => {
-    if (!staged?.validation || busy || isGenerating) return;
-    setBusy(true);
+    const session = openSessionRef.current;
+    if (
+      !session ||
+      !staged?.preflight ||
+      busy ||
+      submittingRef.current ||
+      isGenerating
+    )
+      return;
+    operationRef.current?.abort();
+    const controller = new AbortController();
+    operationRef.current = controller;
+    submittingRef.current = true;
+    setPhase("importing");
     setError(null);
     try {
-      const result = await onImport(staged, operationRef.current?.signal);
-      if (!result.ok) {
-        setError(
-          t.chat.projectImport.failed.replace("{message}", result.error),
-        );
+      const result = await onImport(staged, controller.signal);
+      // A successful commit activates its new Conversation, which cancels the
+      // source operation. Close only this opening, never a reopened dialog.
+      if (result.ok) {
+        if (openSessionRef.current === session) close();
         return;
       }
-      onClose();
+      if (controller.signal.aborted || operationRef.current !== controller)
+        return;
+      setError({ phase: "importing", detail: result.error });
     } catch (reason: unknown) {
-      const message = reason instanceof Error ? reason.message : String(reason);
-      setError(t.chat.projectImport.failed.replace("{message}", message));
+      if (!controller.signal.aborted && operationRef.current === controller) {
+        setError({
+          phase: "importing",
+          detail: reason instanceof Error ? reason.message : String(reason),
+        });
+      }
     } finally {
-      setBusy(false);
+      if (operationRef.current === controller) {
+        submittingRef.current = false;
+        setPhase(null);
+      }
     }
   };
 
@@ -188,13 +217,16 @@ export function ProjectImportDialog({
         .map(({ label, count }) => `${label} ${count}`)
         .join(" · ")
     : "";
+  const previewSupported = staged?.preflight.capabilities.preview.supported;
 
   return (
-    <Dialog open={open} onOpenChange={(next) => !next && onClose()}>
-      <DialogContent className="flex min-h-0 max-h-[calc(100dvh-2rem)] flex-col gap-0 overflow-hidden sm:max-w-lg">
-        <DialogHeader className="shrink-0">
-          <DialogTitle>{t.chat.projectImport.title}</DialogTitle>
-          <DialogDescription>
+    <Dialog open={open} onOpenChange={(next) => !next && close()}>
+      <DialogContent className="flex min-h-0 max-h-[calc(100dvh-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-2xl">
+        <DialogHeader className="shrink-0 px-4 pt-6 pb-4 text-left sm:px-6">
+          <DialogTitle className="pr-8">
+            {t.chat.projectImport.title}
+          </DialogTitle>
+          <DialogDescription className="pr-4 text-pretty">
             {t.chat.projectImport.description}
           </DialogDescription>
         </DialogHeader>
@@ -208,9 +240,11 @@ export function ProjectImportDialog({
           multiple
           className="hidden"
           onChange={(event) => {
-            const files = event.target.files;
-            if (files?.length)
-              void runStage(() => stageProjectFromFileList(files));
+            const files = Array.from(event.target.files ?? []);
+            if (files.length)
+              void runStage((signal) =>
+                stageProjectFromFileList(files, signal),
+              );
             event.target.value = "";
           }}
         />
@@ -221,26 +255,27 @@ export function ProjectImportDialog({
           className="hidden"
           onChange={(event) => {
             const file = event.target.files?.[0];
-            if (file) void runStage(() => stageProjectFromZip(file));
+            if (file)
+              void runStage((signal) => stageProjectFromZip(file, signal));
             event.target.value = "";
           }}
         />
 
-        <DialogBody className="space-y-4">
-          <div className="grid gap-2 sm:grid-cols-2">
+        <DialogBody className="space-y-4 px-4 sm:px-6">
+          <div className="grid gap-3 sm:grid-cols-2">
             <Button
               type="button"
               variant="outline"
-              className="h-auto justify-start gap-3 px-3 py-3 text-left"
+              className="h-auto min-w-0 items-start justify-start gap-3 whitespace-normal p-4 text-left"
               disabled={busy || isGenerating}
               onClick={() => void pickFolder()}
             >
               <FolderOpen className="size-5 shrink-0" aria-hidden="true" />
-              <span>
+              <span className="min-w-0 space-y-1">
                 <span className="block text-sm font-medium">
                   {t.chat.projectImport.pickFolder}
                 </span>
-                <span className="block text-xs font-normal text-muted-foreground">
+                <span className="block text-xs font-normal text-pretty text-muted-foreground">
                   {t.chat.projectImport.folderHint}
                 </span>
               </span>
@@ -248,16 +283,16 @@ export function ProjectImportDialog({
             <Button
               type="button"
               variant="outline"
-              className="h-auto justify-start gap-3 px-3 py-3 text-left"
+              className="h-auto min-w-0 items-start justify-start gap-3 whitespace-normal p-4 text-left"
               disabled={busy || isGenerating}
               onClick={() => zipInputRef.current?.click()}
             >
               <FileArchive className="size-5 shrink-0" aria-hidden="true" />
-              <span>
+              <span className="min-w-0 space-y-1">
                 <span className="block text-sm font-medium">
                   {t.chat.projectImport.pickZip}
                 </span>
-                <span className="block text-xs font-normal text-muted-foreground">
+                <span className="block text-xs font-normal text-pretty text-muted-foreground">
                   {t.chat.projectImport.zipHint}
                 </span>
               </span>
@@ -265,7 +300,7 @@ export function ProjectImportDialog({
           </div>
 
           {isGenerating && (
-            <p className="text-xs text-muted-foreground">
+            <p className="text-sm text-muted-foreground">
               {t.chat.projectImport.stopFirst}
             </p>
           )}
@@ -273,41 +308,53 @@ export function ProjectImportDialog({
           {busy && (
             <div
               role="status"
-              className="flex items-center justify-center gap-2 rounded-lg border bg-muted/30 px-3 py-8 text-sm text-muted-foreground"
+              className="flex items-center gap-2 text-sm text-muted-foreground"
             >
-              <Loader2 className="size-4 animate-spin" aria-hidden="true" />
-              {progress}
+              <Loader2
+                className="size-4 shrink-0 animate-spin motion-reduce:animate-none"
+                aria-hidden="true"
+              />
+              {phase === "importing"
+                ? t.chat.projectImport.importing
+                : t.chat.projectImport.reading}
             </div>
           )}
 
           {error && (
-            <p
+            <div
               role="alert"
-              className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive"
+              className="space-y-2 rounded-lg border border-destructive/30 bg-destructive/10 p-4 text-sm text-destructive"
             >
-              {error}
-              {staged && !busy && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="mt-2 block"
-                  onClick={() => void runStage(async () => staged)}
-                >
-                  {t.chat.projectImport.retry}
-                </Button>
-              )}
-            </p>
+              <p>
+                {error.phase === "reading"
+                  ? t.chat.projectImport.readFailed
+                  : t.chat.projectImport.failed}
+              </p>
+              <details className="text-xs">
+                <summary className="cursor-pointer rounded-sm focus-visible:outline-2 focus-visible:outline-ring">
+                  {t.chat.projectImport.errorDetails}
+                </summary>
+                <p className="mt-2 whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
+                  {error.detail}
+                </p>
+              </details>
+            </div>
           )}
 
-          {staged && !busy && (
-            <div className="space-y-3 rounded-lg border bg-muted/20 p-3">
-              <div className="flex items-start gap-2">
-                <ShieldCheck
-                  className={`mt-0.5 size-4 shrink-0 ${staged.validation ? "text-emerald-600" : "text-muted-foreground"}`}
+          {staged && (
+            <section
+              className="space-y-4 rounded-lg border bg-muted/20 p-4"
+              aria-label={staged.name}
+            >
+              <div className="flex items-start gap-3">
+                <CheckCircle2
+                  className="size-5 shrink-0 text-emerald-600 dark:text-emerald-400"
                   aria-hidden="true"
                 />
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm font-medium">{staged.name}</p>
+                <div className="min-w-0 space-y-1">
+                  <p className="break-words text-sm font-semibold [overflow-wrap:anywhere]">
+                    {staged.name}
+                  </p>
                   <p className="text-xs text-muted-foreground">
                     {t.chat.projectImport.fileSummary
                       .replace("{count}", String(staged.report.importedFiles))
@@ -315,51 +362,75 @@ export function ProjectImportDialog({
                   </p>
                 </div>
               </div>
-              <dl className="grid gap-1 text-xs text-muted-foreground sm:grid-cols-2">
-                <div>
-                  <dt className="inline">{t.chat.projectImport.template}: </dt>
-                  <dd className="inline font-mono text-foreground">
-                    {staged.template}
+              <dl className="grid grid-cols-2 gap-4 text-sm">
+                <div className="min-w-0 space-y-1">
+                  <dt className="text-xs text-muted-foreground">
+                    {t.chat.projectImport.previewMode}
+                  </dt>
+                  <dd>
+                    {previewSupported
+                      ? t.chat.projectImport.previewAvailable
+                      : t.chat.projectImport.codeOnlyMode}
                   </dd>
                 </div>
-                <div>
-                  <dt className="inline">{t.chat.projectImport.filtered}: </dt>
-                  <dd className="inline text-foreground">{skippedTotal}</dd>
-                </div>
-                <div>
-                  <dt className="inline">{t.chat.projectImport.redacted}: </dt>
-                  <dd className="inline text-foreground">
-                    {staged.report.redactedFiles}
-                  </dd>
+                <div className="min-w-0 space-y-1">
+                  <dt className="text-xs text-muted-foreground">
+                    {t.chat.projectImport.assets}
+                  </dt>
+                  <dd>{staged.assets?.length ?? 0}</dd>
                 </div>
               </dl>
-              {skippedDetails && (
-                <p className="text-xs text-muted-foreground">
-                  {skippedDetails}
+              <div className="space-y-1 text-sm">
+                <p className="font-medium text-emerald-700 dark:text-emerald-300">
+                  {t.chat.projectImport.checked}
                 </p>
-              )}
-              {staged.validation && (
-                <p className="text-xs text-emerald-700 dark:text-emerald-300">
-                  {t.chat.projectImport.verified}
+                <p className="text-pretty text-muted-foreground">
+                  {previewSupported
+                    ? t.chat.projectImport.previewAfterImport
+                    : t.chat.projectImport.codeOnly}
                 </p>
-              )}
-              <p className="text-xs text-muted-foreground">
-                {t.chat.projectImport.newConversation}
-              </p>
-            </div>
+              </div>
+              <details className="text-xs text-muted-foreground">
+                <summary className="cursor-pointer rounded-sm focus-visible:outline-2 focus-visible:outline-ring">
+                  {t.chat.projectImport.details}
+                </summary>
+                <div className="mt-3 space-y-2 break-words [overflow-wrap:anywhere]">
+                  {!previewSupported && (
+                    <p>{staged.preflight.capabilities.preview.reason}</p>
+                  )}
+                  <p>
+                    {t.chat.projectImport.template}:{" "}
+                    <span className="font-mono text-foreground">
+                      {staged.template}
+                    </span>
+                  </p>
+                  <p>
+                    {t.chat.projectImport.filtered}: {skippedTotal} ·{" "}
+                    {t.chat.projectImport.redacted}:{" "}
+                    {staged.report.redactedFiles}
+                  </p>
+                  {skippedDetails && <p>{skippedDetails}</p>}
+                </div>
+              </details>
+            </section>
           )}
+          <p className="text-xs text-pretty text-muted-foreground">
+            {t.chat.projectImport.newConversation}
+          </p>
         </DialogBody>
 
-        <DialogFooter className="shrink-0">
-          <Button type="button" variant="outline" onClick={onClose}>
+        <DialogFooter className="shrink-0 px-4 pt-4 pb-6 sm:px-6">
+          <Button type="button" variant="outline" onClick={close}>
             {t.chat.projectImport.cancel}
           </Button>
           <Button
             type="button"
-            disabled={!staged?.validation || busy || isGenerating}
+            disabled={!staged?.preflight || busy || isGenerating}
             onClick={() => void applyImport()}
           >
-            {t.chat.projectImport.import}
+            {phase === "importing"
+              ? t.chat.projectImport.importing
+              : t.chat.projectImport.import}
           </Button>
         </DialogFooter>
       </DialogContent>

@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Tooltip,
   TooltipContent,
@@ -319,7 +320,7 @@ export function SessionList({ onClose }: SessionListProps) {
           />
         </div>
       </div>
-      <div className="flex-1 overflow-y-auto">
+      <ScrollArea className="flex-1">
         {sorted.length === 0 ? (
           <p className="px-3 py-4 text-xs text-muted-foreground text-center">
             {t.sessions.emptySearch}
@@ -380,7 +381,7 @@ export function SessionList({ onClose }: SessionListProps) {
             )}
           </>
         )}
-      </div>
+      </ScrollArea>
     </nav>
   );
 }

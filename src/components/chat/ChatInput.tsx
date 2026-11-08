@@ -6,6 +6,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  type RefObject,
 } from "react";
 import { MousePointer2, X } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
@@ -105,6 +106,7 @@ function formatSelectionReference(selection: SelectionDisplayContext): string {
 }
 
 interface ChatInputProps {
+  inputRef?: RefObject<HTMLTextAreaElement | null>;
   input: string;
   onChange: (value: string) => void;
   onSubmit: (e: React.SyntheticEvent<HTMLFormElement>) => void;
@@ -134,6 +136,7 @@ interface ChatInputProps {
 }
 
 export function ChatInput({
+  inputRef,
   input,
   onChange,
   onSubmit,
@@ -244,7 +247,8 @@ export function ChatInput({
       onForcedSkillIdsChange(validIds);
     }
   }, [forcedSkillIds, onForcedSkillIdsChange, skills]);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const localTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const textareaRef = inputRef ?? localTextareaRef;
   const questionnaireWasPendingRef = useRef(false);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -297,13 +301,14 @@ export function ChatInput({
     if (!el) return;
     el.style.height = "auto";
     el.style.height = Math.min(el.scrollHeight, 200) + "px";
-  }, []);
+  }, [textareaRef]);
 
   useEffect(() => {
-    if (!input && textareaRef.current) {
+    if (input) autoResize();
+    else if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
     }
-  }, [input]);
+  }, [autoResize, input, textareaRef]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (isQuestionnairePending) {
@@ -591,7 +596,6 @@ export function ChatInput({
               value={input}
               onChange={(e) => {
                 onChange(e.target.value);
-                autoResize();
               }}
               onKeyDown={handleKeyDown}
               onPaste={handlePaste}

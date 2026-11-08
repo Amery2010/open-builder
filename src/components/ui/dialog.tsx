@@ -4,6 +4,7 @@ import { Dialog as DialogPrimitive } from "radix-ui"
 
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
+import { ScrollArea } from "@/components/ui/scroll-area"
 
 function Dialog({
   ...props
@@ -85,13 +86,27 @@ function DialogContent({
   )
 }
 
-function DialogBody({ className, ...props }: React.ComponentProps<"div">) {
+function DialogBody({
+  className,
+  children,
+  ref,
+  onScroll,
+  ...props
+}: React.ComponentProps<"div">) {
   return (
-    <div
-      data-slot="dialog-body"
-      className={cn("min-h-0 flex-1 overflow-y-auto", className)}
-      {...props}
-    />
+    <ScrollArea
+      className="min-h-0 flex-1"
+      viewportRef={ref}
+      viewportProps={{
+        ...props,
+        "data-slot": "dialog-body",
+        className: "min-h-0 flex-1 overflow-y-auto overscroll-contain",
+      }}
+      contentClassName={className}
+      onScroll={onScroll}
+    >
+      {children}
+    </ScrollArea>
   )
 }
 

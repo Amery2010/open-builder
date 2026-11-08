@@ -5,9 +5,11 @@ import {
   type PrototypePreviewTarget,
 } from "./preview-runtime";
 
-/** The key includes checkout, generation, target, and viewport identity. */
+/** The display key describes page source/route/viewport within one environment. */
 export interface CanvasPreviewRequest {
   key: string;
+  /** Runtime provenance guards new captures, but does not invalidate unchanged images. */
+  generation?: string;
   pageId: string;
   target?: PrototypePreviewTarget;
   viewport: DesignReviewViewport;
@@ -36,6 +38,15 @@ export interface CanvasPreviewQueue {
 
 const CAPTURE_RETRY_DELAY_MS = 150;
 
+function imageSlot(request: CanvasPreviewRequest): string {
+  return JSON.stringify([
+    request.pageId,
+    request.viewport.name,
+    request.viewport.width,
+    request.viewport.height,
+  ]);
+}
+
 /**
  * Display-only captures. This module never publishes Preview Evidence or Review
  * Coverage. One callback owns capture and its cleanup; cancellation waits for
@@ -50,8 +61,15 @@ export function createCanvasPreviewQueue(options: {
 }): CanvasPreviewQueue {
   let requests = new Map<string, CanvasPreviewRequest>();
   let states = new Map<string, CanvasPreviewState>();
+  // Retain the latest successful image per page/viewport, including inactive
+  // viewports. Tasks and failures are never cached across request removal.
+  const images = new Map<
+    string,
+    { key: string; pageId: string; state: CanvasPreviewState }
+  >();
   let priorityPages = new Set<string>();
-  let active: { key: string; controller: AbortController } | undefined;
+  let active:
+    { request: CanvasPreviewRequest; controller: AbortController } | undefined;
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
   let paused = false;
   let disposed = false;
@@ -73,9 +91,14 @@ export function createCanvasPreviewQueue(options: {
       pending.find((candidate) => priorityPages.has(candidate.pageId)) ??
       pending[0];
     if (!request) return;
-    const task = { key: request.key, controller: new AbortController() };
+    const task = { request, controller: new AbortController() };
     active = task;
-    states.set(request.key, { status: "loading" });
+    states.set(request.key, {
+      status: "loading",
+      ...(states.get(request.key)?.result
+        ? { result: states.get(request.key)!.result }
+        : {}),
+    });
     publish();
     void (async () => {
       let retryLater = false;
@@ -84,7 +107,13 @@ export function createCanvasPreviewQueue(options: {
         const result = await options.capture(request, task.controller.signal);
         task.controller.signal.throwIfAborted();
         if (!disposed && requests.get(request.key) === request) {
-          states.set(request.key, { status: "ready", result });
+          const state: CanvasPreviewState = { status: "ready", result };
+          states.set(request.key, state);
+          images.set(imageSlot(request), {
+            key: request.key,
+            pageId: request.pageId,
+            state,
+          });
         }
       } catch (error) {
         if (!disposed && requests.get(request.key) === request) {
@@ -94,11 +123,17 @@ export function createCanvasPreviewQueue(options: {
             (error instanceof PreviewRuntimeError &&
               error.code === "capture_busy");
           if (interrupted) {
-            states.set(request.key, { status: "queued" });
+            states.set(request.key, {
+              status: "queued",
+              result: states.get(request.key)?.result,
+            });
             retryLater = !paused;
           } else {
             states.set(request.key, {
               status: "error",
+              ...(states.get(request.key)?.result
+                ? { result: states.get(request.key)!.result }
+                : {}),
               error: error instanceof Error ? error.message : String(error),
             });
           }
@@ -124,17 +159,48 @@ export function createCanvasPreviewQueue(options: {
       // Stable request objects let an in-flight capture survive harmless React
       // rerenders. A removed key can never accept an earlier request's result.
       const nextRequests = new Map(
-        next.map((request) => [
-          request.key,
-          requests.get(request.key) ?? request,
-        ]),
+        next.map((request) => {
+          const previous = requests.get(request.key);
+          return [
+            request.key,
+            previous && previous.generation === request.generation
+              ? previous
+              : request,
+          ];
+        }),
       );
+      if (next.length) {
+        const pageIds = new Set(next.map((request) => request.pageId));
+        for (const [slot, image] of images) {
+          if (!pageIds.has(image.pageId)) images.delete(slot);
+        }
+      }
       states = new Map(
-        next.map(({ key }) => [key, states.get(key) ?? { status: "queued" }]),
+        next.map((request) => {
+          const { key } = request;
+          const slot = imageSlot(request);
+          const cached = images.get(slot);
+          const previous =
+            requests.get(key) === nextRequests.get(key)
+              ? states.get(key)
+              : undefined;
+          return [
+            key,
+            cached?.key === key
+              ? cached.state
+              : (previous ?? {
+                  status: "queued",
+                  ...(cached?.state.result
+                    ? { result: cached.state.result }
+                    : {}),
+                }),
+          ];
+        }),
       );
       requests = nextRequests;
       if (priorityPageIds) priorityPages = new Set(priorityPageIds);
-      if (active && !requests.has(active.key)) active.controller.abort();
+      if (active && requests.get(active.request.key) !== active.request)
+        active.controller.abort();
       publish();
       pump();
     },
@@ -155,8 +221,12 @@ export function createCanvasPreviewQueue(options: {
     },
     retry(key) {
       if (disposed || !requests.has(key)) return;
-      if (active?.key === key) return;
-      states.set(key, { status: "queued" });
+      if (active?.request.key === key) return;
+      images.delete(imageSlot(requests.get(key)!));
+      states.set(key, {
+        status: "queued",
+        result: states.get(key)?.result,
+      });
       cancelRetry();
       publish();
       pump();
@@ -167,6 +237,7 @@ export function createCanvasPreviewQueue(options: {
       active?.controller.abort();
       requests.clear();
       states.clear();
+      images.clear();
     },
   };
 }

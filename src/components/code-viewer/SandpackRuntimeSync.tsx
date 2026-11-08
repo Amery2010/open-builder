@@ -7,6 +7,13 @@ type Sandpack = ReturnType<typeof useSandpack>["sandpack"];
 type Client = Sandpack["clients"][string];
 type Setup = Client["sandboxSetup"];
 
+export interface SandpackCompilationState {
+  status: "starting" | "compiling" | "ready" | "synced" | "failed";
+  detail?: string;
+  /** Mount-local identity of the clients supplying this result. */
+  runtime?: object;
+}
+
 export interface SandpackRuntimeSyncHandle {
   isSynchronized: (expected: ProjectFiles) => boolean;
   restart: () => Promise<void>;
@@ -54,8 +61,10 @@ function filesEqual(left: Setup["files"], right: Setup["files"]): boolean {
 interface Delivery {
   submitted: Setup;
   completed: Setup | null;
+  completedBy: "compilation" | "file-ack";
   inFlight: boolean;
   started: boolean;
+  error: string | null;
   pending: {
     setup: Setup;
     options: Client["options"];
@@ -68,8 +77,12 @@ interface Delivery {
 /** Repairs skipped writes while serializing Provider and repair submissions. */
 export function SandpackRuntimeSync({
   onChange,
+  expectedFiles,
+  onCompilationChange,
 }: {
   onChange?: (handle: SandpackRuntimeSyncHandle | null) => void;
+  expectedFiles?: ProjectFiles;
+  onCompilationChange?: (state: SandpackCompilationState) => void;
 }) {
   const { sandpack, listen } = useSandpack();
   const deliveries = useRef(new Map<Client, Delivery>());
@@ -77,6 +90,26 @@ export function SandpackRuntimeSync({
   latest.current = sandpack;
   const reconcileRef = useRef<(() => void) | null>(null);
   const isolatedClients = useRef(new Set<() => void>());
+  const compilationObserver = useRef({ expectedFiles, onCompilationChange });
+  compilationObserver.current = { expectedFiles, onCompilationChange };
+  const observedRuntime = useRef({ clients: [] as Client[], identity: {} });
+  const expectedInput = useRef({
+    files: expectedFiles,
+    providerFiles: sandpack.files,
+    awaitingProvider: false,
+  });
+  const previousInput = expectedInput.current;
+  if (
+    expectedFiles !== previousInput.files &&
+    !equalValue(expectedFiles, previousInput.files)
+  ) {
+    previousInput.awaitingProvider =
+      sandpack.files === previousInput.providerFiles;
+    previousInput.files = expectedFiles;
+  }
+  if (sandpack.files !== previousInput.providerFiles)
+    previousInput.awaitingProvider = false;
+  previousInput.providerFiles = sandpack.files;
 
   useEffect(() => {
     onChange?.({
@@ -145,6 +178,7 @@ export function SandpackRuntimeSync({
             return (
               client.status === "done" &&
               delivery &&
+              !delivery.error &&
               !delivery.inFlight &&
               !delivery.pending &&
               delivery.completed !== null &&
@@ -163,16 +197,90 @@ export function SandpackRuntimeSync({
     function notify(): void {
       queueMicrotask(() => reconcileRef.current?.());
     }
+    function publishCompilation(clients: Client[]): void {
+      const { expectedFiles: expected, onCompilationChange: publish } =
+        compilationObserver.current;
+      if (!publish) return;
+      if (
+        clients.length !== observedRuntime.current.clients.length ||
+        clients.some(
+          (client, index) => client !== observedRuntime.current.clients[index],
+        )
+      ) {
+        observedRuntime.current = { clients, identity: {} };
+      }
+      const runtime = observedRuntime.current.identity;
+      const current = latest.current;
+      const matchesExpected =
+        !expected ||
+        Object.entries(expected).every(
+          ([path, code]) =>
+            current.files[`/${path.replace(/^\/+/, "")}`]?.code === code,
+        );
+      if (
+        expectedInput.current.awaitingProvider ||
+        !matchesExpected ||
+        clients.length === 0
+      ) {
+        publish({ status: "starting", runtime });
+        return;
+      }
+      const records = clients.map((client) => deliveries.current.get(client));
+      const failed = records.find(
+        (record) =>
+          record?.error &&
+          !record.pending &&
+          filesEqual(record.submitted.files, current.files),
+      );
+      if (failed?.error) {
+        publish({ status: "failed", detail: failed.error, runtime });
+      } else if (
+        clients.every((client, index) => {
+          const record = records[index];
+          return (
+            client.status === "done" &&
+            record &&
+            !record.inFlight &&
+            !record.pending &&
+            record.completed &&
+            filesEqual(record.completed.files, current.files)
+          );
+        })
+      ) {
+        publish({
+          status: records.some((record) => record?.completedBy === "file-ack")
+            ? "synced"
+            : "ready",
+          runtime,
+        });
+      } else {
+        publish({
+          runtime,
+          status: clients.every((client) => client.status === "initializing")
+            ? "starting"
+            : "compiling",
+        });
+      }
+    }
     function attach(client: Client): Delivery {
       const original = client.updateSandbox;
       let submittedOptions = { ...client.options };
       let fileAcks = new Map<string, string | undefined>();
       const initial = copySetup(client.sandboxSetup);
+      // Runtime may finish before it is registered with the Provider. Its own
+      // cached errors belong to this client, unlike the Provider's global error.
+      const initialErrors =
+        "errors" in client && Array.isArray(client.errors) ? client.errors : [];
+      const initialError = initialErrors.length
+        ? String(initialErrors[0]?.message || "Sandpack compilation failed.")
+        : null;
       const delivery: Delivery = {
         submitted: initial,
-        completed: client.status === "done" ? initial : null,
+        completed: client.status === "done" && !initialError ? initial : null,
+        completedBy: "compilation",
         inFlight: client.status !== "done",
         started: true, // Initial compilation can start before registration.
+        error: initialError,
         pending: null,
         flush() {
           if (!delivery.pending) return;
@@ -201,6 +309,7 @@ export function SandpackRuntimeSync({
             if (previous.files[path]?.code !== code) fileAcks.set(path, code);
           }
           delivery.submitted = next.setup;
+          delivery.error = null;
           if (next.initial) delivery.completed = null;
           submittedOptions = next.options;
           delivery.inFlight = true;
@@ -220,21 +329,41 @@ export function SandpackRuntimeSync({
             client.updateSandbox = original;
         },
       };
-      function complete(): void {
+      function complete(completedBy: Delivery["completedBy"]): void {
         if (!delivery.inFlight) return;
-        delivery.completed = delivery.submitted;
+        delivery.completed = delivery.error ? null : delivery.submitted;
+        delivery.completedBy = completedBy;
         delivery.inFlight = false;
         fileAcks.clear();
         notify();
       }
       const unsubscribe = client.listen((message) => {
+        // A removed client's late messages never update its replacement.
+        if (!Object.values(latest.current.clients).includes(client)) return;
+        if (message.type === "action" && message.action === "show-error") {
+          delivery.error = message.message || "Sandpack compilation failed.";
+          notify();
+        } else if (
+          message.type === "action" &&
+          message.action === "notification" &&
+          message.notificationType === "error"
+        ) {
+          delivery.error = message.title || "Sandpack compilation failed.";
+          notify();
+        }
         if (!delivery.inFlight) return;
         if (
           message.type === "start" ||
           (message.type === "status" && message.status !== "done")
-        )
+        ) {
           delivery.started = true;
-        if (message.type === "done" && delivery.started) complete();
+          notify();
+        }
+        if (message.type === "done" && delivery.started) {
+          if (message.compilatonError)
+            delivery.error ||= "Sandpack compilation failed.";
+          complete("compilation");
+        }
         // Node's running shell writes files directly: it emits fs/change rather
         // than another compile/done pair. Wait for each changed file's echo.
         if (delivery.submitted.template === "node" && fileAcks.size > 0) {
@@ -250,7 +379,7 @@ export function SandpackRuntimeSync({
             fileAcks.get(message.path) === undefined
           )
             fileAcks.delete(message.path);
-          if (fileAcks.size === 0) complete();
+          if (fileAcks.size === 0) complete("file-ack");
         }
       });
       const observeUpdate: typeof client.updateSandbox = (
@@ -314,6 +443,7 @@ export function SandpackRuntimeSync({
         }
         delivery.flush();
       }
+      publishCompilation(clients);
       // Poll only for asynchronously installed clients, never to infer completion.
       if (
         clients.length === 0 &&
@@ -331,7 +461,13 @@ export function SandpackRuntimeSync({
       unsubscribe();
       reconcileRef.current = null;
     };
-  }, [sandpack.files, sandpack.environment, listen]);
+  }, [
+    sandpack.files,
+    sandpack.environment,
+    expectedFiles,
+    onCompilationChange,
+    listen,
+  ]);
   useEffect(() => {
     const records = deliveries.current;
     const temporary = isolatedClients.current;

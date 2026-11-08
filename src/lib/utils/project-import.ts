@@ -16,8 +16,11 @@ import {
   stageProjectAsset,
   type StagedProjectAsset,
 } from "../project-assets/core";
-import type { ProjectRuntimeValidation } from "../project-runtime";
-import { assessProjectRuntime } from "../project-runtime/capabilities";
+import {
+  assessProjectRuntime,
+  type ProjectRuntimeCapabilities,
+} from "../project-runtime/capabilities";
+import { digestProjectSnapshot } from "../project-runtime/snapshot";
 
 export const PROJECT_IMPORT_LIMITS = {
   maxArchiveBytes: 16 * 1024 * 1024,
@@ -43,8 +46,11 @@ export interface StagedProjectImport {
   previewMode: ProjectPreviewMode;
   activeFile?: string;
   report: ProjectImportReport;
-  /** Present only after the staged files and assets pass isolated compilation. */
-  validation?: ProjectRuntimeValidation;
+  /** Local checks bind the reviewed source snapshot, not successful compilation. */
+  preflight: {
+    digest: string;
+    capabilities: ProjectRuntimeCapabilities;
+  };
 }
 
 export type ProjectImportCommitResult =
@@ -310,13 +316,16 @@ async function stageSourceEntries(
   name: string,
   entries: SourceEntry[],
   report = createReport(),
+  signal?: AbortSignal,
 ): Promise<StagedProjectImport> {
+  signal?.throwIfAborted();
   const accepted: SourceEntry[] = [];
   const acceptedAssets: SourceEntry[] = [];
   const seen = new Set<string>();
   let declaredBytes = 0;
 
   for (const entry of entries) {
+    signal?.throwIfAborted();
     const path = normalizeProjectPath(entry.path);
     if (entry.symlink) {
       incrementSkip(report, "symlink");
@@ -363,7 +372,9 @@ async function stageSourceEntries(
 
   const files: ProjectFiles = {};
   for (const entry of accepted) {
+    signal?.throwIfAborted();
     const bytes = await entry.read();
+    signal?.throwIfAborted();
     if (bytes.byteLength !== entry.size) {
       throw new Error(`Project file "${entry.path}" changed while importing.`);
     }
@@ -379,7 +390,9 @@ async function stageSourceEntries(
 
   const assets: StagedProjectAsset[] = [];
   for (const entry of acceptedAssets) {
+    signal?.throwIfAborted();
     const bytes = await entry.read();
+    signal?.throwIfAborted();
     if (bytes.byteLength !== entry.size) {
       throw new Error(`Project asset "${entry.path}" changed while importing.`);
     }
@@ -397,7 +410,9 @@ async function stageSourceEntries(
   }
   const validation = validateProjectFiles(files);
   if (!validation.ok) throw new Error(validation.error);
-  const preview = inferProjectPreview(files);
+  const capabilities = assessProjectRuntime(files);
+  const digest = await digestProjectSnapshot(files, assets);
+  signal?.throwIfAborted();
   const stats = getProjectFilesStats(files);
   report.importedFiles = stats.fileCount + assets.length;
   report.totalBytes =
@@ -406,10 +421,11 @@ async function stageSourceEntries(
     name: cleanProjectName(name),
     files,
     assets,
-    template: preview.template,
-    previewMode: preview.previewMode,
+    template: capabilities.template,
+    previewMode: capabilities.previewMode,
     activeFile: chooseActiveFile(files),
     report,
+    preflight: { digest, capabilities },
   };
 }
 
@@ -543,13 +559,16 @@ function parseZipCentralDirectory(buffer: ArrayBuffer): ZipEntryMetadata[] {
 
 export async function stageProjectFromZip(
   file: Pick<File, "name" | "size" | "arrayBuffer">,
+  signal?: AbortSignal,
 ): Promise<StagedProjectImport> {
+  signal?.throwIfAborted();
   if (file.size > PROJECT_IMPORT_LIMITS.maxArchiveBytes) {
     throw new Error(
       `Project ZIP exceeds ${PROJECT_IMPORT_LIMITS.maxArchiveBytes} byte limit.`,
     );
   }
   const buffer = await file.arrayBuffer();
+  signal?.throwIfAborted();
   const allMetadata = parseZipCentralDirectory(buffer);
   const report = createReport();
   const metadata = allMetadata.filter((entry) => {
@@ -563,6 +582,7 @@ export async function stageProjectFromZip(
   if (metadata.length === 0) throw new Error("Project ZIP contains no files.");
   const stripped = stripCommonRoot(metadata.map((entry) => entry.archivePath));
   const zip = await JSZip.loadAsync(buffer, { checkCRC32: true });
+  signal?.throwIfAborted();
   const entries: SourceEntry[] = metadata.map((entry, index) => {
     const object = zip.file(entry.archivePath);
     if (!object) {
@@ -575,12 +595,19 @@ export async function stageProjectFromZip(
       read: () => object.async("uint8array"),
     };
   });
-  return stageSourceEntries(stripped.name ?? file.name, entries, report);
+  return stageSourceEntries(
+    stripped.name ?? file.name,
+    entries,
+    report,
+    signal,
+  );
 }
 
 export async function stageProjectFromFileList(
   fileList: FileList | readonly File[],
+  signal?: AbortSignal,
 ): Promise<StagedProjectImport> {
+  signal?.throwIfAborted();
   const files = Array.from(fileList);
   if (files.length === 0) throw new Error("No project files were selected.");
   const rawPaths = files.map((file) => file.webkitRelativePath || file.name);
@@ -591,18 +618,25 @@ export async function stageProjectFromFileList(
     lastModified: file.lastModified,
     read: async () => new Uint8Array(await file.arrayBuffer()),
   }));
-  return stageSourceEntries(stripped.name ?? "Imported project", entries);
+  return stageSourceEntries(
+    stripped.name ?? "Imported project",
+    entries,
+    undefined,
+    signal,
+  );
 }
 
 export async function stageProjectFromDirectoryHandle(
   root: FileSystemDirectoryHandle,
+  signal?: AbortSignal,
 ): Promise<StagedProjectImport> {
+  signal?.throwIfAborted();
   const report = createReport();
   const entries: SourceEntry[] = [];
   const rootReason = classifyProjectPath(root.name, true);
   if (rootReason) {
     incrementSkip(report, rootReason);
-    return stageSourceEntries(root.name, entries, report);
+    return stageSourceEntries(root.name, entries, report, signal);
   }
   async function walk(
     handle: FileSystemDirectoryHandle,
@@ -613,6 +647,7 @@ export async function stageProjectFromDirectoryHandle(
         entries(): AsyncIterableIterator<[string, FileSystemHandle]>;
       }
     ).entries()) {
+      signal?.throwIfAborted();
       const path = prefix ? `${prefix}/${name}` : name;
       if (child.kind === "directory") {
         const reason = classifyProjectPath(path, true);
@@ -632,6 +667,7 @@ export async function stageProjectFromDirectoryHandle(
         continue;
       }
       const file = await (child as FileSystemFileHandle).getFile();
+      signal?.throwIfAborted();
       entries.push({
         path,
         size: file.size,
@@ -641,16 +677,21 @@ export async function stageProjectFromDirectoryHandle(
     }
   }
   await walk(root, "");
-  return stageSourceEntries(root.name, entries, report);
+  return stageSourceEntries(root.name, entries, report, signal);
 }
 
-export async function stageProjectFromTauriDirectory(): Promise<StagedProjectImport | null> {
+export async function stageProjectFromTauriDirectory(
+  signal?: AbortSignal,
+): Promise<StagedProjectImport | null> {
+  signal?.throwIfAborted();
   const [dialog, fs, pathModule] = await Promise.all([
     import("@tauri-apps/plugin-dialog"),
     import("@tauri-apps/plugin-fs"),
     import("@tauri-apps/api/path"),
   ]);
+  signal?.throwIfAborted();
   const selection = await dialog.open({ directory: true, multiple: false });
+  signal?.throwIfAborted();
   if (typeof selection !== "string") return null;
 
   const report = createReport();
@@ -659,10 +700,12 @@ export async function stageProjectFromTauriDirectory(): Promise<StagedProjectImp
   const rootReason = classifyProjectPath(projectName, true);
   if (rootReason) {
     incrementSkip(report, rootReason);
-    return stageSourceEntries(projectName, entries, report);
+    return stageSourceEntries(projectName, entries, report, signal);
   }
   async function walk(absolute: string, prefix: string): Promise<void> {
+    signal?.throwIfAborted();
     for (const entry of await fs.readDir(absolute)) {
+      signal?.throwIfAborted();
       const childPath = prefix ? `${prefix}/${entry.name}` : entry.name;
       if (entry.isSymlink) {
         incrementSkip(report, "symlink");
@@ -686,6 +729,7 @@ export async function stageProjectFromTauriDirectory(): Promise<StagedProjectImp
           continue;
         }
         const stat = await fs.stat(childAbsolute);
+        signal?.throwIfAborted();
         entries.push({
           path: childPath,
           size: stat.size,
@@ -695,5 +739,5 @@ export async function stageProjectFromTauriDirectory(): Promise<StagedProjectImp
     }
   }
   await walk(selection, "");
-  return stageSourceEntries(projectName, entries, report);
+  return stageSourceEntries(projectName, entries, report, signal);
 }

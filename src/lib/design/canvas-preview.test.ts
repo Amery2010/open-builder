@@ -67,6 +67,44 @@ afterEach(() => {
 });
 
 describe("canvas preview queue", () => {
+  it("retains the last image while changed source waits, loads, fails and retries", async () => {
+    const next = deferred<DesignBridgeCaptureResult>();
+    const capture = vi.fn(async () => result()).mockResolvedValueOnce(result());
+    const onChange = vi.fn();
+    const queue = createCanvasPreviewQueue({ capture, onChange });
+    queue.setRequests([request("home")]);
+    await settle();
+    queue.setPaused(true);
+    const updated = request("home", "b");
+    capture.mockImplementationOnce(() => next.promise);
+    queue.setRequests([updated]);
+    expect(onChange.mock.lastCall?.[0][updated.key]).toMatchObject({
+      status: "queued",
+      result: result(),
+    });
+    queue.setPaused(false);
+    expect(onChange.mock.lastCall?.[0][updated.key]).toMatchObject({
+      status: "loading",
+      result: result(),
+    });
+    next.reject(new Error("Preview temporarily unavailable"));
+    await settle();
+    expect(onChange.mock.lastCall?.[0][updated.key]).toMatchObject({
+      status: "error",
+      result: result(),
+      error: "Preview temporarily unavailable",
+    });
+    capture.mockResolvedValueOnce(result("b"));
+    queue.retry(updated.key);
+    expect(onChange.mock.lastCall?.[0][updated.key]?.result).toEqual(result());
+    await settle();
+    expect(onChange.mock.lastCall?.[0][updated.key]).toEqual({
+      status: "ready",
+      result: result("b"),
+    });
+    queue.dispose();
+  });
+
   it("serializes captures, prioritizes visible pages, and keeps CSS geometry", async () => {
     const gates = [
       deferred<DesignBridgeCaptureResult>(),
@@ -141,6 +179,68 @@ describe("canvas preview queue", () => {
     expect(onChange.mock.lastCall?.[0][request("home").key].status).toBe(
       "ready",
     );
+    queue.dispose();
+  });
+
+  it("reuses completed images after leaving and returning to a viewport", async () => {
+    const capture = vi.fn(async () => result());
+    const onChange = vi.fn();
+    const queue = createCanvasPreviewQueue({ capture, onChange });
+    const desktop = request("home");
+    const mobile = {
+      ...desktop,
+      key: "a:home:mobile",
+      viewport: { name: "mobile" as const, width: 375, height: 667 },
+    };
+    queue.setRequests([desktop]);
+    await settle();
+    const cached = onChange.mock.lastCall![0][desktop.key];
+    queue.setRequests([]);
+    queue.setRequests([mobile]);
+    await settle();
+    queue.setRequests([desktop]);
+    await settle();
+    expect(capture).toHaveBeenCalledTimes(2);
+    expect(onChange.mock.lastCall![0][desktop.key]).toBe(cached);
+    queue.dispose();
+  });
+
+  it("keeps unaffected page images when the runtime generation changes", async () => {
+    const capture = vi.fn(async () => result());
+    const onChange = vi.fn();
+    const queue = createCanvasPreviewQueue({ capture, onChange });
+    const home = { ...request("home"), generation: "runtime-a" };
+    const about = { ...request("about"), generation: "runtime-a" };
+    queue.setRequests([home, about]);
+    await settle();
+    const cachedAbout = onChange.mock.lastCall![0][about.key];
+    queue.setRequests([
+      { ...home, key: "changed:home:desktop", generation: "runtime-b" },
+      { ...about, generation: "runtime-b" },
+    ]);
+    await settle();
+    expect(capture).toHaveBeenCalledTimes(3);
+    expect(onChange.mock.lastCall![0][about.key]).toBe(cachedAbout);
+    queue.dispose();
+  });
+
+  it("cancels stale in-flight captures even when the display cache key is unchanged", async () => {
+    const gate = deferred<DesignBridgeCaptureResult>();
+    const capture = vi
+      .fn(async (_request: CanvasPreviewRequest, _signal: AbortSignal) =>
+        result("new"),
+      )
+      .mockImplementationOnce(() => gate.promise);
+    const onChange = vi.fn();
+    const queue = createCanvasPreviewQueue({ capture, onChange });
+    const home = request("home");
+    queue.setRequests([{ ...home, generation: "old" }]);
+    queue.setRequests([{ ...home, generation: "new" }]);
+    expect(capture.mock.calls[0][1].aborted).toBe(true);
+    gate.resolve(result("old"));
+    await settle();
+    expect(capture).toHaveBeenCalledTimes(2);
+    expect(onChange.mock.lastCall![0][home.key].result.generation).toBe("new");
     queue.dispose();
   });
 

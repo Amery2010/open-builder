@@ -45,10 +45,18 @@ export function DesignReviewActivityBlock({
       : (run?.status ?? summary?.status ?? "capturing");
   const stale = run?.freshness === "stale" || summary?.stale === true;
   const findingCount = run?.report?.findings.length ?? summary?.findingCount;
+  const failed = [
+    "failed",
+    "interrupted",
+    "superseded",
+    "unavailable",
+  ].includes(status);
   const latestLog = run?.logs.at(-1);
-  const latestLogText = latestLog
-    ? formatDesignReviewLogEntry(latestLog, t, run?.provider.runtime)
-    : undefined;
+  const latestLogText =
+    (failed && run?.error) ||
+    (latestLog
+      ? formatDesignReviewLogEntry(latestLog, t, run?.provider.runtime)
+      : undefined);
   const running = [
     "capturing",
     "queued",
@@ -59,12 +67,6 @@ export function DesignReviewActivityBlock({
   ].includes(status)
     ? true
     : Boolean(run && isDesignReviewRunActive(run));
-  const failed = [
-    "failed",
-    "interrupted",
-    "superseded",
-    "unavailable",
-  ].includes(status);
   const cancelled = status === "cancelled";
   const canOpen = Boolean(run && activeConversationId === run.conversationId);
 
@@ -117,7 +119,9 @@ export function DesignReviewActivityBlock({
             >
               {latestLogText ??
                 (findingCount === undefined
-                  ? t.designReview.activityWaiting
+                  ? failed
+                    ? t.designReview.failureDetailsUnavailable
+                    : t.designReview.activityWaiting
                   : t.designReview.findingCount.replace(
                       "{count}",
                       String(findingCount),
@@ -166,7 +170,10 @@ export function DesignReviewActivityBlock({
               </>
             ) : (
               <p className="text-xs text-muted-foreground">
-                {latestLogText ?? t.designReview.activityWaiting}
+                {latestLogText ??
+                  (failed
+                    ? t.designReview.failureDetailsUnavailable
+                    : t.designReview.activityWaiting)}
               </p>
             )}
             {canOpen && (

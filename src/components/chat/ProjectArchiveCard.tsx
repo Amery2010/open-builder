@@ -1,17 +1,12 @@
-import { useState, type ReactNode } from "react";
-import { Archive, RotateCcw } from "lucide-react";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuTrigger,
-} from "../ui/dropdown-menu";
+import { useState } from "react";
+import { Archive, Download } from "lucide-react";
 import {
   archiveRecordKey,
   useProjectArchiveStore,
 } from "../../store/project-archives";
 import { downloadSnapshotArchive } from "../../lib/project-archives/download";
+import { ProjectDownloadMenu } from "../code-viewer/ProjectDownloadMenu";
+import { useT } from "../../i18n";
 
 export interface ProjectArchiveLabels {
   title: string;
@@ -26,182 +21,76 @@ interface ProjectArchiveActionProps {
   conversationId: string;
   snapshotIds: readonly string[];
   labels: ProjectArchiveLabels;
+  onBuildSnapshot: (snapshotId: string) => void;
   onDownloadStart?: (snapshotId: string) => void;
   onDownloadError?: (snapshotId: string, error: string) => void;
 }
 
-interface ArchiveDownloadState {
-  snapshotId: string | null;
-  errors: Record<string, string>;
-}
-
-function archiveLabel(
-  snapshotId: string,
-  fileName: string | undefined,
-): string {
-  return fileName || snapshotId;
-}
-
-function ActionButton({
-  ariaLabel,
-  disabled,
-  onClick,
-  children,
-}: {
-  ariaLabel: string;
-  disabled: boolean;
-  onClick: () => void;
-  children: ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      aria-label={ariaLabel}
-      aria-busy={disabled}
-      disabled={disabled}
-      onClick={onClick}
-      className="flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
-    >
-      {children}
-    </button>
-  );
-}
-
-/** Compact source action used beside message actions. */
+/** History actions keep their version identity; the stable parent owns the build dialog. */
 export function ProjectArchiveAction({
   conversationId,
   snapshotIds,
   labels,
+  onBuildSnapshot,
   onDownloadStart,
   onDownloadError,
 }: ProjectArchiveActionProps) {
+  const t = useT().projectBuild;
   const records = useProjectArchiveStore((state) => state.records);
-  const [downloadState, setDownloadState] = useState<ArchiveDownloadState>({
-    snapshotId: null,
-    errors: {},
-  });
-  const distinctSnapshotIds = [...new Set(snapshotIds)];
-  if (distinctSnapshotIds.length === 0) return null;
+  const [pendingId, setPendingId] = useState<string | null>(null);
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const ids = [...new Set(snapshotIds)];
+  if (!ids.length) return null;
 
-  const download = async (snapshotId: string) => {
+  async function download(snapshotId: string): Promise<void> {
     onDownloadStart?.(snapshotId);
-    setDownloadState((current) => ({
-      snapshotId,
-      errors: { ...current.errors, [snapshotId]: "" },
-    }));
+    setPendingId(snapshotId);
+    setErrors((previous) => ({ ...previous, [snapshotId]: "" }));
     try {
       await downloadSnapshotArchive(conversationId, snapshotId);
     } catch (cause) {
-      const message = cause instanceof Error ? cause.message : String(cause);
-      onDownloadError?.(snapshotId, message);
-      setDownloadState((current) => ({
-        snapshotId: null,
-        errors: {
-          ...current.errors,
-          [snapshotId]: message,
-        },
-      }));
-      return;
+      const error = cause instanceof Error ? cause.message : String(cause);
+      setErrors((previous) => ({ ...previous, [snapshotId]: error }));
+      onDownloadError?.(snapshotId, error);
+    } finally {
+      setPendingId(null);
     }
-    setDownloadState((current) => ({
-      ...current,
-      snapshotId: null,
-    }));
-  };
-
-  const getRecord = (snapshotId: string) =>
-    records[archiveRecordKey(conversationId, snapshotId)];
-  const isPending = (snapshotId: string) =>
-    downloadState.snapshotId === snapshotId ||
-    getRecord(snapshotId)?.status === "pending";
-  const hasFailed = (snapshotId: string) =>
-    Boolean(downloadState.errors[snapshotId]) ||
-    getRecord(snapshotId)?.status === "failed";
-  const sourceLabel = labels.source ?? labels.download;
-  const hasFailedSnapshot = distinctSnapshotIds.some(hasFailed);
-  const hasActiveDownload = downloadState.snapshotId !== null;
-  const actionIcon = hasFailedSnapshot ? (
-    <RotateCcw className="size-3.5" aria-hidden="true" />
-  ) : (
-    <Archive className="size-3.5" aria-hidden="true" />
-  );
-
-  if (distinctSnapshotIds.length === 1) {
-    const snapshotId = distinctSnapshotIds[0];
-    const failed = hasFailed(snapshotId);
-    return (
-      <>
-        <ActionButton
-          ariaLabel={failed ? labels.retry : labels.download}
-          disabled={isPending(snapshotId)}
-          onClick={() => void download(snapshotId)}
-        >
-          {failed ? (
-            <RotateCcw className="size-3.5" aria-hidden="true" />
-          ) : (
-            <Archive className="size-3.5" aria-hidden="true" />
-          )}
-          <span>{isPending(snapshotId) ? labels.preparing : sourceLabel}</span>
-        </ActionButton>
-        {downloadState.errors[snapshotId] && (
-          <span className="text-xs text-destructive" role="alert">
-            {downloadState.errors[snapshotId]}
-          </span>
-        )}
-      </>
-    );
   }
 
   return (
     <>
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
+      <ProjectDownloadMenu
+        align="start"
+        trigger={
           <button
             type="button"
-            aria-label={hasFailedSnapshot ? labels.retry : labels.download}
-            aria-busy={hasActiveDownload}
-            disabled={hasActiveDownload}
-            className="flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
+            aria-label={t.menuLabel}
+            className="flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
           >
-            {actionIcon}
-            <span>{sourceLabel}</span>
+            <Download className="size-3.5" aria-hidden="true" />
+            <span>{t.menuLabel}</span>
           </button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="start">
-          <DropdownMenuLabel>{sourceLabel}</DropdownMenuLabel>
-          {distinctSnapshotIds.map((snapshotId) => {
-            const record = getRecord(snapshotId);
-            const failed = hasFailed(snapshotId);
-            const pending = isPending(snapshotId);
-            const error = downloadState.errors[snapshotId];
-            return (
-              <DropdownMenuItem
-                key={snapshotId}
-                disabled={
-                  pending ||
-                  (hasActiveDownload && downloadState.snapshotId !== snapshotId)
-                }
-                onSelect={() => void download(snapshotId)}
-              >
-                <span className="min-w-0 truncate">
-                  {archiveLabel(snapshotId, record?.fileName)}
-                </span>
-                <span className="ml-auto text-xs text-muted-foreground">
-                  {pending
-                    ? labels.preparing
-                    : failed
-                      ? labels.retry
-                      : sourceLabel}
-                </span>
-                {error && <span className="sr-only">{error}</span>}
-              </DropdownMenuItem>
-            );
-          })}
-        </DropdownMenuContent>
-      </DropdownMenu>
-      {Object.values(downloadState.errors).some(Boolean) && (
+        }
+        versions={ids.map((id) => {
+          const record = records[archiveRecordKey(conversationId, id)];
+          const pending = pendingId === id || record?.status === "pending";
+          return {
+            id,
+            label: record?.fileName ?? id,
+            sourceDisabled: pending || pendingId !== null,
+            sourceStatus: pending
+              ? labels.preparing
+              : errors[id] || record?.status === "failed"
+                ? labels.retry
+                : undefined,
+          };
+        })}
+        onSource={(id) => void download(id)}
+        onBuild={onBuildSnapshot}
+      />
+      {Object.values(errors).some(Boolean) && (
         <span className="text-xs text-destructive" role="alert">
-          {Object.values(downloadState.errors).filter(Boolean).join(" ")}
+          {Object.values(errors).filter(Boolean).join(" ")}
         </span>
       )}
     </>
@@ -212,10 +101,12 @@ export function ProjectArchiveCard({
   conversationId,
   snapshotId,
   labels,
+  onBuildSnapshot,
 }: {
   conversationId: string;
   snapshotId: string;
   labels: ProjectArchiveLabels;
+  onBuildSnapshot: (snapshotId: string) => void;
 }) {
   const record = useProjectArchiveStore(
     (state) => state.records[archiveRecordKey(conversationId, snapshotId)],
@@ -253,6 +144,7 @@ export function ProjectArchiveCard({
         conversationId={conversationId}
         snapshotIds={[snapshotId]}
         labels={labels}
+        onBuildSnapshot={onBuildSnapshot}
         onDownloadStart={() => setError(undefined)}
         onDownloadError={(_snapshotId, cause) => setError(cause)}
       />

@@ -361,7 +361,7 @@ export class ProjectArchiveManager {
   }
 }
 
-function source(
+export function resolveSnapshotArchiveSource(
   conversationId: string,
   snapshotId: string,
 ): ArchiveSource | undefined {
@@ -381,7 +381,7 @@ function source(
 }
 export const projectArchiveManager = new ProjectArchiveManager({
   storage: opfsArchiveStorage,
-  source,
+  source: resolveSnapshotArchiveSource,
   records: () => useProjectArchiveStore.getState().records,
   put: (record) => useProjectArchiveStore.getState().put(record),
   remove: (keys) => useProjectArchiveStore.getState().remove(keys),

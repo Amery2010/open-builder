@@ -1,3 +1,5 @@
+import { encodePngCrop } from "../images/png-crop";
+
 export interface AnnotationPoint {
   x: number;
   y: number;
@@ -215,35 +217,8 @@ export async function exportAnnotation(
   document: AnnotationDocument,
   signal: AbortSignal,
 ): Promise<File> {
-  signal.throwIfAborted();
-  const crop = document.crop ?? {
-    x: 0,
-    y: 0,
-    width: image.naturalWidth,
-    height: image.naturalHeight,
-  };
-  const canvas = window.document.createElement("canvas");
-  canvas.width = crop.width;
-  canvas.height = crop.height;
-  try {
-    const context = canvas.getContext("2d");
-    if (!context) throw new Error("Canvas is unavailable.");
-    context.translate(-crop.x, -crop.y);
-    context.drawImage(image, 0, 0);
-    drawAnnotationMarks(context, document.marks);
-    const blob = await new Promise<Blob>((resolve, reject) => {
-      canvas.toBlob(
-        (value) =>
-          value
-            ? resolve(value)
-            : reject(new Error("Could not encode the annotation.")),
-        "image/png",
-      );
-    });
-    signal.throwIfAborted();
-    return new File([blob], "preview-annotation.png", { type: "image/png" });
-  } finally {
-    canvas.width = 0;
-    canvas.height = 0;
-  }
+  const blob = await encodePngCrop(image, document.crop, signal, (context) =>
+    drawAnnotationMarks(context, document.marks),
+  );
+  return new File([blob], "preview-annotation.png", { type: "image/png" });
 }

@@ -368,6 +368,26 @@ export const ToolCallCard = memo(function ToolCallCard({
           cancelledToolReason(toolOutput) ?? "interrupted"
         ]
       : t.tool.status[status];
+  const styleResult =
+    toolName === "apply_design_style" ? parseToolJson(result) : null;
+  const appliedStyle =
+    typeof styleResult?.style === "string"
+      ? styleResult.style
+      : typeof rawArgs?.style === "string"
+        ? rawArgs.style
+        : "";
+  const designStyleSummary =
+    status === "completed" && appliedStyle
+      ? t.tool.designStyleApplied.replace("{style}", appliedStyle.slice(0, 120))
+      : status === "failed"
+        ? t.tool.designStyleFailed.replace(
+            "{reason}",
+            String(styleResult?.error ?? toolOutput?.text ?? result).slice(
+              0,
+              240,
+            ),
+          )
+        : statusLabel;
 
   const searchSummary =
     toolName === "web_search" && result
@@ -505,6 +525,10 @@ export const ToolCallCard = memo(function ToolCallCard({
           <div className="px-3 py-2 border-t border-border/60 bg-muted/20">
             {status === "aborted" ? (
               <p className="text-xs text-muted-foreground">{statusLabel}</p>
+            ) : toolName === "apply_design_style" ? (
+              <p className="text-xs text-muted-foreground">
+                {designStyleSummary}
+              </p>
             ) : emptyResult ? (
               <p className="text-xs text-muted-foreground">
                 {status === "completed" ? t.tool.emptyResult : statusLabel}

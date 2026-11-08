@@ -627,6 +627,8 @@ describe("controlled SVG image loading", () => {
 
 describe("html2canvas primary rendering", () => {
   afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
     vi.unstubAllGlobals();
   });
   const options = {
@@ -638,6 +640,88 @@ describe("html2canvas primary rendering", () => {
     region: { x: 0, y: 400, width: 1000, height: 500 },
     scale: 0.1,
   };
+  function lazyImage() {
+    let loading = "lazy";
+    return {
+      get loading() {
+        return loading;
+      },
+      getAttribute: () => loading,
+      setAttribute: (_name: string, value: string) => {
+        loading = value;
+      },
+    };
+  }
+  it("clones lazy images as eager and immediately restores the live document", async () => {
+    const image = lazyImage();
+    let loadingAtClone: string | undefined;
+    let settle!: (value: unknown) => void;
+    const canvas = { width: 100, height: 50, getContext: () => ({}) };
+    const html2canvas = vi.fn(() => {
+      loadingAtClone = image.loading;
+      return new Promise((resolve) => {
+        settle = resolve;
+      });
+    });
+    const fixture = canvasRuntime([], html2canvas);
+    const pending = fixture.runtime.toCanvas(
+      { querySelectorAll: () => [image] } as unknown as HTMLElement,
+      options,
+    );
+    expect(html2canvas).toHaveBeenCalledOnce();
+    expect(loadingAtClone).toBe("eager");
+    expect(image.loading).toBe("lazy");
+    settle(canvas);
+    await expect(pending).resolves.toBe(canvas);
+  });
+  it("restores lazy images even if starting the clone throws", async () => {
+    const image = lazyImage();
+    let loadingAtClone: string | undefined;
+    const fixture = canvasRuntime(["success"], () => {
+      loadingAtClone = image.loading;
+      throw new Error("Clone failed");
+    });
+    await fixture.runtime.toCanvas(
+      { querySelectorAll: () => [image] } as unknown as HTMLElement,
+      options,
+    );
+    expect(loadingAtClone).toBe("eager");
+    expect(image.loading).toBe("lazy");
+    expect(fixture.runtime.toSvg).toHaveBeenCalledOnce();
+  });
+  it("falls back when clone loading stalls and releases a late primary canvas", async () => {
+    vi.useFakeTimers();
+    const previous = { remove: vi.fn() };
+    const own = { remove: vi.fn() };
+    const querySelectorAll = vi
+      .fn()
+      .mockReturnValueOnce([previous])
+      .mockReturnValue([previous, own]);
+    let settle!: (value: unknown) => void;
+    const fixture = canvasRuntime(
+      ["success"],
+      () =>
+        new Promise((resolve) => {
+          settle = resolve;
+        }),
+    );
+    const pending = fixture.runtime.toCanvas(
+      { ownerDocument: { querySelectorAll } } as unknown as HTMLElement,
+      options,
+    );
+    await vi.advanceTimersByTimeAsync(14_999);
+    expect(fixture.runtime.toSvg).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fixture.runtime.toSvg).toHaveBeenCalledOnce();
+    await expect(pending).resolves.toBe(fixture.canvas);
+    expect(own.remove).toHaveBeenCalledOnce();
+    expect(previous.remove).not.toHaveBeenCalled();
+    const lateCanvas = { width: 100, height: 50, getContext: () => ({}) };
+    settle(lateCanvas);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(lateCanvas).toMatchObject({ width: 0, height: 0 });
+    expect(vi.getTimerCount()).toBe(0);
+  });
   it("preserves viewport geometry and removes the exact clone after rendering", async () => {
     const remove = vi.fn();
     const canvas = { width: 100, height: 50, getContext: () => ({}) };

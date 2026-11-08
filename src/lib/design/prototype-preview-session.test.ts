@@ -9,9 +9,12 @@ import { DESIGN_BRIDGE_CAPTURE_TIMEOUT_MS } from "./preview-bridge";
 
 const controllers: AbortController[] = [];
 
-function setupSession(bootstrap?: IsolatedPreviewBootstrap) {
+function setupSession(
+  bootstrap?: IsolatedPreviewBootstrap,
+  sourceUrl = "about:blank",
+) {
   const source = document.createElement("iframe");
-  source.src = "about:blank";
+  source.src = sourceUrl;
   const controller = new AbortController();
   controllers.push(controller);
   const session = createIsolatedPreviewSession(
@@ -20,9 +23,11 @@ function setupSession(bootstrap?: IsolatedPreviewBootstrap) {
     controller.signal,
     bootstrap,
   );
-  const frame = document.querySelector<HTMLIFrameElement>(
-    'iframe[title="Temporary prototype review preview"]',
-  )!;
+  const frame = Array.from(
+    document.querySelectorAll<HTMLIFrameElement>(
+      'iframe[title="Temporary prototype review preview"]',
+    ),
+  ).at(-1)!;
   const post = vi
     .spyOn(frame.contentWindow!, "postMessage")
     .mockImplementation(() => {});
@@ -42,7 +47,7 @@ function setupSession(bootstrap?: IsolatedPreviewBootstrap) {
       captureRuntimeAvailable: true,
       route: "#/dashboard",
     });
-  return { session, frame, controller, post, reply, ready };
+  return { source, session, frame, controller, post, reply, ready };
 }
 
 afterEach(() => {
@@ -53,6 +58,50 @@ afterEach(() => {
 });
 
 describe("isolated prototype preview session", () => {
+  it("uses a fresh Nodebox document URL for each capture without changing the active preview", async () => {
+    const url =
+      "https://abc123-5173.nodebox.codesandbox.io/start?lang=zh&tag=a&tag=b#/home?tab=one";
+    const first = setupSession(undefined, url);
+    const second = setupSession(undefined, url);
+    const settled = [first.session, second.session].map((session) =>
+      session.catch(() => undefined),
+    );
+    try {
+      const capturedUrl = new URL(first.frame.src);
+      expect(capturedUrl.origin).toBe(new URL(url).origin);
+      expect(capturedUrl.pathname).toBe("/start");
+      expect(capturedUrl.searchParams.get("lang")).toBe("zh");
+      expect(capturedUrl.searchParams.getAll("tag")).toEqual(["a", "b"]);
+      expect(capturedUrl.hash).toBe("#/home?tab=one");
+      expect(capturedUrl.searchParams.get("__ob_capture")).toBeTruthy();
+      expect(first.frame.src).not.toBe(second.frame.src);
+      expect(first.source.src).toBe(url);
+      expect(second.source.src).toBe(url);
+    } finally {
+      first.controller.abort();
+      second.controller.abort();
+      await Promise.all(settled);
+    }
+    expect(first.frame.isConnected).toBe(false);
+    expect(second.frame.isConnected).toBe(false);
+  });
+
+  it.each([
+    "https://example.test/page?lang=zh#/home",
+    "https://preview.sandpack-static-server.codesandbox.io/",
+    "https://abc123-5173.nodebox.codesandbox.io.example.test/",
+    "http://abc123-5173.nodebox.codesandbox.io/",
+  ])("preserves non-Nodebox document URL %s", async (url) => {
+    const setup = setupSession(undefined, url);
+    const settled = setup.session.catch(() => undefined);
+    try {
+      expect(setup.frame.src).toBe(url);
+    } finally {
+      setup.controller.abort();
+      await settled;
+    }
+  });
+
   it("installs readiness listeners before bootstrapping and releases the compiled client", async () => {
     const release = vi.fn();
     const bootstrap = vi.fn(async (frame: HTMLIFrameElement) => {

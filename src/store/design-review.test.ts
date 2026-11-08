@@ -119,6 +119,97 @@ describe("Design review automation state", () => {
       "unavailable",
     );
     expect(useDesignReviewStore.getState().error).toBe("Review failed");
+    expect(useDesignReviewStore.getState().dialogRequestId).toBe(
+      initialDialogRequest + 1,
+    );
+  });
+
+  it("records automatic capture failures without opening the review dialog", () => {
+    const store = useDesignReviewStore.getState();
+    store.requestAutomaticCapture(evidence);
+    const initialDialogRequest = store.dialogRequestId;
+    const run = store.recordAutomaticCaptureFailure({
+      requestId: evidence.requestId,
+      conversationId: evidence.conversationId,
+      sourceDigest: "a".repeat(64),
+      provider: { runtime: "api", provider: "openai", model: "gpt" },
+      error: "Bearer sk-secret-value was rejected by the preview bridge",
+      now: 100,
+    });
+
+    expect(run).toMatchObject({
+      id: evidence.requestId,
+      kind: "automatic",
+      status: "failed",
+      error: "Bearer [redacted] was rejected by the preview bridge",
+    });
+    expect(run.logs.at(-1)?.event).toBe("failed");
+    expect(useDesignReviewStore.getState().dialogRequestId).toBe(
+      initialDialogRequest,
+    );
+    expect(
+      useDesignReviewStore.getState().runsByConversation[
+        evidence.conversationId
+      ],
+    ).toContainEqual(run);
+  });
+
+  it("deduplicates automatic capture failure records and coexists with an active manual run", () => {
+    const store = useDesignReviewStore.getState();
+    const active = store.createRun({
+      id: "manual-active",
+      conversationId: evidence.conversationId,
+      kind: "manual",
+      sourceDigest: "a".repeat(64),
+      provider: { runtime: "api", provider: "openai", model: "gpt" },
+    });
+    expect(active).not.toBeNull();
+    const input = {
+      requestId: "automatic-failure",
+      conversationId: evidence.conversationId,
+      provider: { runtime: "api" as const, provider: "openai", model: "gpt" },
+      error: "Preview bridge timed out",
+    };
+    const first = store.recordAutomaticCaptureFailure(input);
+    const second = store.recordAutomaticCaptureFailure(input);
+
+    expect(second).toBe(first);
+    expect(
+      useDesignReviewStore
+        .getState()
+        .runsByConversation[evidence.conversationId].map((run) => run.id),
+    ).toEqual(expect.arrayContaining(["manual-active", "automatic-failure"]));
+  });
+
+  it("persists failure records without volatile screenshots or source files", async () => {
+    localforageMock.instance.setItem.mockClear();
+    useDesignReviewStore.getState().recordAutomaticCaptureFailure({
+      requestId: "automatic-persisted-failure",
+      conversationId: evidence.conversationId,
+      provider: { runtime: "api", provider: "openai", model: "gpt" },
+      error: "Preview failed",
+    });
+
+    await vi.waitFor(() =>
+      expect(localforageMock.instance.setItem).toHaveBeenCalled(),
+    );
+    const serialized = localforageMock.instance.setItem.mock.calls.at(-1)?.[1];
+    expect(serialized).toContain("automatic-persisted-failure");
+    expect(serialized).not.toContain("screenshots");
+    expect(serialized).not.toContain("files");
+    useDesignReviewStore.getState().reset();
+    expect(
+      useDesignReviewStore.getState().runsByConversation[
+        evidence.conversationId
+      ],
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "automatic-persisted-failure",
+          status: "failed",
+        }),
+      ]),
+    );
   });
 
   it("allows at most one nonterminal run per conversation", () => {

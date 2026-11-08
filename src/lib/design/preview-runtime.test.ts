@@ -222,6 +222,72 @@ describe("preview runtime registry", () => {
     unregister();
   });
 
+  it("keeps automatic review waiting for a foreground capture without interrupting it", async () => {
+    const conversationId = "automatic-waits-for-tool";
+    const unregister = registerPreviewRuntime(conversationId, adapter());
+    const gate = deferred<void>();
+    let foregroundSignal!: AbortSignal;
+    const foreground = withPreviewCaptureLock({
+      conversationId,
+      owner: "tool",
+      run: async (_runtime, signal) => {
+        foregroundSignal = signal;
+        await gate.promise;
+      },
+    });
+    const run = vi.fn(async () => "review");
+    const automatic = withPreviewCaptureLock({
+      conversationId,
+      owner: "automatic-review",
+      run,
+    });
+    expect(run).not.toHaveBeenCalled();
+    expect(foregroundSignal.aborted).toBe(false);
+    gate.resolve();
+    await expect(automatic).resolves.toBe("review");
+    await foreground;
+    expect(run).toHaveBeenCalledOnce();
+    unregister();
+  });
+
+  it.each(["cancel", "replace"])(
+    "never runs automatic review after its waiting context is %s",
+    async (action) => {
+      const conversationId = `automatic-wait-${action}`;
+      const unregister = registerPreviewRuntime(conversationId, adapter());
+      const gate = deferred<void>();
+      const foreground = withPreviewCaptureLock({
+        conversationId,
+        owner: "annotation",
+        run: async () => gate.promise,
+      });
+      const foregroundResult = foreground.catch((error: unknown) => error);
+      const controller = new AbortController();
+      const run = vi.fn(async () => undefined);
+      const automatic = withPreviewCaptureLock({
+        conversationId,
+        owner: "automatic-review",
+        signal: controller.signal,
+        run,
+      });
+      const rejected = expect(automatic).rejects.toMatchObject({
+        name: "AbortError",
+      });
+      let unregisterReplacement: (() => void) | undefined;
+      if (action === "cancel") controller.abort();
+      else
+        unregisterReplacement = registerPreviewRuntime(
+          conversationId,
+          adapter(),
+        );
+      gate.resolve();
+      await Promise.all([rejected, foregroundResult]);
+      expect(run).not.toHaveBeenCalled();
+      unregister();
+      unregisterReplacement?.();
+    },
+  );
+
   it("permits only one competing foreground waiter to take the released lock", async () => {
     const conversationId = "canvas-waiter-race";
     const unregister = registerPreviewRuntime(conversationId, adapter());

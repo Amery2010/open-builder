@@ -780,6 +780,7 @@ export function DesignCanvasWorkspace({
                 aria-label={board.name}
                 aria-pressed={selectedPageId === board.id}
                 onKeyDown={(event) => {
+                  if (event.target !== event.currentTarget) return;
                   if (event.key === "Enter") {
                     event.preventDefault();
                     event.stopPropagation();
@@ -791,20 +792,54 @@ export function DesignCanvasWorkspace({
                     onSelect(board.id);
                   }
                 }}
-                onDoubleClick={() => {
+                onDoubleClick={(event) => {
+                  if ((event.target as Element).closest("[data-canvas-ui]"))
+                    return;
                   if (!dragged.current && !board.issue) onPlay(board.id);
                 }}
               >
                 {state?.result && !board.issue ? (
-                  <img
-                    src={state.result.dataUrl}
-                    alt={t.designCanvas.previewAlt.replace(
-                      "{name}",
-                      board.name,
+                  <>
+                    <img
+                      src={state.result.dataUrl}
+                      alt={t.designCanvas.previewAlt.replace(
+                        "{name}",
+                        board.name,
+                      )}
+                      draggable={false}
+                      className="design-canvas-page-image"
+                    />
+                    {state.status !== "ready" && (
+                      <div
+                        data-canvas-ui
+                        role="status"
+                        className="design-canvas-panel design-canvas-preview-status"
+                      >
+                        <p>
+                          {state.status === "error"
+                            ? t.designCanvas.updateFailed
+                            : t.designCanvas.updating}
+                        </p>
+                        {state.status === "error" && board.previewKey && (
+                          <>
+                            <p className="text-muted-foreground">
+                              {state.error}
+                            </p>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                onRetry(board.previewKey!);
+                              }}
+                            >
+                              {t.designCanvas.retry}
+                            </Button>
+                          </>
+                        )}
+                      </div>
                     )}
-                    draggable={false}
-                    className="design-canvas-page-image"
-                  />
+                  </>
                 ) : (
                   <div className="design-canvas-placeholder">
                     {board.issue || state?.status === "error" ? (

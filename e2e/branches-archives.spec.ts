@@ -139,15 +139,14 @@ test("restores both branches and downloads immutable OPFS project versions", asy
     .toBe("C");
 
   await expect(
-    page
-      .getByRole("button", { name: "Download project ZIP", exact: true })
-      .last(),
+    page.getByRole("button", { name: "Download", exact: true }).last(),
   ).toBeEnabled();
   const downloadEvent = page.waitForEvent("download");
   await page
-    .getByRole("button", { name: "Download project ZIP", exact: true })
+    .getByRole("button", { name: "Download", exact: true })
     .last()
     .click();
+  await page.getByRole("menuitem", { name: "Download source" }).click();
   const download = await downloadEvent;
   expect(download.suggestedFilename()).toMatch(/^Branch package test-.+\.zip$/);
   expect(download.suggestedFilename()).not.toContain("Unknown");

@@ -55,7 +55,7 @@
   );
   --scrollbar-thumb-hover: color-mix(
     in oklch,
-    var(--muted-foreground) 65%,
+    var(--muted-foreground) 75%,
     transparent
   );
   --radius: 0.625rem;
@@ -133,6 +133,12 @@
     @apply border-border outline-ring/50;
     scrollbar-width: thin;
     scrollbar-color: var(--scrollbar-thumb) transparent;
+  }
+
+  @supports not selector(::-webkit-scrollbar) {
+    *:hover {
+      scrollbar-color: var(--scrollbar-thumb-hover) transparent;
+    }
   }
 
   /* Keep standard properties from overriding the detailed WebKit treatment. */

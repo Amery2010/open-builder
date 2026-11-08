@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useSettingsStore } from "../../store/settings";
@@ -12,7 +12,6 @@ const importMocks = vi.hoisted(() => ({
   stageFileList: vi.fn(),
   stageTauriDirectory: vi.fn(),
   stageZip: vi.fn(),
-  validate: vi.fn(),
 }));
 
 vi.mock("../../lib/utils/project-import", async (importOriginal) => {
@@ -27,10 +26,6 @@ vi.mock("../../lib/utils/project-import", async (importOriginal) => {
   };
 });
 
-vi.mock("../../lib/project-runtime/validation", () => ({
-  validateProjectRuntime: importMocks.validate,
-}));
-
 const stagedProject: StagedProjectImport = {
   name: "sample-project",
   files: {
@@ -40,6 +35,15 @@ const stagedProject: StagedProjectImport = {
   template: "vite",
   previewMode: "sandpack",
   activeFile: "src/main.ts",
+  preflight: {
+    digest: "checked-digest",
+    capabilities: {
+      template: "vite",
+      previewMode: "sandpack",
+      preview: { supported: true },
+      staticBuild: { supported: true },
+    },
+  },
   report: {
     importedFiles: 2,
     totalBytes: 72,
@@ -51,12 +55,6 @@ const stagedProject: StagedProjectImport = {
 describe("ProjectImportDialog", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    importMocks.validate.mockResolvedValue({
-      digest: "verified-digest",
-      template: "vite",
-      previewMode: "sandpack",
-      capabilities: { preview: { supported: true } },
-    });
     useSettingsStore.setState((state) => ({
       system: { ...state.system, language: "en" },
     }));
@@ -90,7 +88,7 @@ describe("ProjectImportDialog", () => {
     expect(body).toHaveClass("min-h-0", "flex-1", "overflow-y-auto");
   });
 
-  it("stages a File System Access folder, verifies compilation and imports into a new conversation", async () => {
+  it("stages a folder with local checks and imports without starting a verification runtime", async () => {
     const user = userEvent.setup();
     const directoryHandle = { kind: "directory", name: "sample-project" };
     const picker = vi.fn(async () => directoryHandle);
@@ -118,41 +116,49 @@ describe("ProjectImportDialog", () => {
     );
 
     expect(picker).toHaveBeenCalledWith({ mode: "read" });
-    expect(importMocks.stageDirectory).toHaveBeenCalledWith(directoryHandle);
+    expect(importMocks.stageDirectory).toHaveBeenCalledWith(
+      directoryHandle,
+      expect.any(AbortSignal),
+    );
     expect(await screen.findByText("sample-project")).toBeInTheDocument();
     expect(screen.getByText(/2 files · 72 B/)).toBeInTheDocument();
-    expect(screen.getByText(/ignored 3/i)).toBeInTheDocument();
+    await user.click(screen.getByText("View details"));
+    expect(screen.getByText(/ignored 3/i)).toBeVisible();
     expect(screen.getByText(/keeps your current project/i)).toBeInTheDocument();
-    expect(importMocks.validate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        files: stagedProject.files,
-        signal: expect.any(AbortSignal),
-      }),
-    );
+    expect(screen.getByText("Checked and ready to import")).toBeInTheDocument();
+    expect(
+      document.querySelector('iframe[title="Project import verification"]'),
+    ).toBeNull();
 
     await user.click(screen.getByRole("button", { name: /^import project$/i }));
     expect(onImport).toHaveBeenCalledWith(
       expect.objectContaining({
         ...stagedProject,
-        validation: expect.objectContaining({ digest: "verified-digest" }),
+        preflight: expect.objectContaining({ digest: "checked-digest" }),
       }),
       expect.any(AbortSignal),
     );
     expect(onClose).toHaveBeenCalledOnce();
   });
 
-  it("rejects an unsupported ZIP instead of allowing a code-only import", async () => {
+  it("allows an unsupported ZIP in code mode and explains the preview limitation", async () => {
     const user = userEvent.setup();
     const codeOnlyProject: StagedProjectImport = {
       ...stagedProject,
       name: "source-only",
       template: "static",
       previewMode: "code-only",
+      preflight: {
+        digest: "checked-digest",
+        capabilities: {
+          template: "static",
+          previewMode: "code-only",
+          preview: { supported: false, reason: "Unsupported project version." },
+          staticBuild: { supported: false },
+        },
+      },
     };
     importMocks.stageZip.mockResolvedValue(codeOnlyProject);
-    importMocks.validate.mockRejectedValue(
-      new Error("Unsupported project version."),
-    );
     render(
       <ProjectImportDialog
         open
@@ -175,16 +181,137 @@ describe("ProjectImportDialog", () => {
     });
     await user.upload(input!, zip);
 
-    expect(importMocks.stageZip).toHaveBeenCalledWith(zip);
-    expect(await screen.findByText("source-only")).toBeInTheDocument();
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Unsupported project version",
+    expect(importMocks.stageZip).toHaveBeenCalledWith(
+      zip,
+      expect.any(AbortSignal),
     );
+    expect(await screen.findByText("source-only")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByText("Code only")).toBeInTheDocument();
+    await user.click(screen.getByText("View details"));
+    expect(screen.getByText("Unsupported project version.")).toBeVisible();
     expect(
       screen.getByRole("button", { name: /^import project$/i }),
-    ).toBeDisabled();
+    ).toBeEnabled();
+  });
+
+  it("keeps the project summary visible while submitting and blocks duplicate clicks", async () => {
+    const user = userEvent.setup();
+    let finish!: (result: { ok: true }) => void;
+    const onImport = vi.fn(
+      () =>
+        new Promise<{ ok: true }>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    importMocks.stageZip.mockResolvedValue(stagedProject);
+    render(
+      <ProjectImportDialog
+        open
+        hasExistingProject={false}
+        isGenerating={false}
+        onClose={vi.fn()}
+        onImport={onImport}
+      />,
+    );
+    const input = document.querySelector<HTMLInputElement>(
+      'input[accept*="application/zip"]',
+    )!;
+    await user.upload(
+      input,
+      new File(["zip"], "demo.zip", { type: "application/zip" }),
+    );
+    await user.dblClick(
+      screen.getByRole("button", { name: /^import project$/i }),
+    );
+    expect(onImport).toHaveBeenCalledOnce();
+    expect(screen.getByText("sample-project")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Importing…" })).toBeDisabled();
+    await act(async () => finish({ ok: true }));
+  });
+
+  it("aborts a closed operation and ignores its late result after reopening", async () => {
+    const user = userEvent.setup();
+    let finish!: (project: StagedProjectImport) => void;
+    let signal!: AbortSignal;
+    importMocks.stageZip.mockImplementationOnce((_file, value: AbortSignal) => {
+      signal = value;
+      return new Promise<StagedProjectImport>((resolve) => {
+        finish = resolve;
+      });
+    });
+    const props = {
+      hasExistingProject: false,
+      isGenerating: false,
+      onClose: vi.fn(),
+      onImport: vi.fn(() => ({ ok: true as const })),
+    };
+    const { rerender } = render(<ProjectImportDialog {...props} open />);
+    await user.upload(
+      document.querySelector<HTMLInputElement>(
+        'input[accept*="application/zip"]',
+      )!,
+      new File(["zip"], "old.zip", { type: "application/zip" }),
+    );
+    await user.click(screen.getByRole("button", { name: /^Cancel$/ }));
+    expect(signal.aborted).toBe(true);
+    rerender(<ProjectImportDialog {...props} open={false} />);
+    rerender(<ProjectImportDialog {...props} open />);
+    importMocks.stageZip.mockResolvedValueOnce({
+      ...stagedProject,
+      name: "new-project",
+    });
+    await user.upload(
+      document.querySelector<HTMLInputElement>(
+        'input[accept*="application/zip"]',
+      )!,
+      new File(["zip"], "new.zip", { type: "application/zip" }),
+    );
+    await act(async () => finish(stagedProject));
+    expect(screen.getByText("new-project")).toBeVisible();
+    expect(screen.queryByText("sample-project")).not.toBeInTheDocument();
+  });
+
+  it("does not close a reopened dialog when an old import callback finishes", async () => {
+    const user = userEvent.setup();
+    let finish!: (result: { ok: true }) => void;
+    const onClose = vi.fn();
+    const onImport = vi.fn(
+      () =>
+        new Promise<{ ok: true }>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const props = {
+      hasExistingProject: false,
+      isGenerating: false,
+      onClose,
+      onImport,
+    };
+    importMocks.stageZip.mockResolvedValue(stagedProject);
+    const { rerender } = render(<ProjectImportDialog {...props} open />);
+    const upload = () =>
+      user.upload(
+        document.querySelector<HTMLInputElement>(
+          'input[accept*="application/zip"]',
+        )!,
+        new File(["zip"], "demo.zip", { type: "application/zip" }),
+      );
+    await upload();
+    await user.click(screen.getByRole("button", { name: /^import project$/i }));
+    await user.click(screen.getByRole("button", { name: /^Cancel$/ }));
+    rerender(<ProjectImportDialog {...props} open={false} />);
+    rerender(<ProjectImportDialog {...props} open />);
+    importMocks.stageZip.mockResolvedValueOnce({
+      ...stagedProject,
+      name: "new-project",
+    });
+    await upload();
+    await act(async () => finish({ ok: true }));
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(screen.getByText("new-project")).toBeVisible();
     expect(
-      screen.getByRole("button", { name: /retry verification/i }),
+      screen.getByRole("button", { name: /^import project$/i }),
     ).toBeEnabled();
   });
 

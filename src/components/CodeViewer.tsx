@@ -22,6 +22,7 @@ import {
 import { DesignCanvasActions } from "./design/DesignCanvasActions";
 import { useCanvasPreviews } from "./design/useCanvasPreviews";
 import type { CanvasPreviewRequest } from "../lib/design/canvas-preview";
+import { computeCanvasPreviewSources } from "../lib/design/canvas-preview-source";
 import {
   defaultBranchId,
   isConversationIdentityCurrent,
@@ -33,13 +34,20 @@ import { SandpackListener } from "./code-viewer/SandpackListener";
 import { projectStaticPreview } from "./code-viewer/sandpack-static-preview";
 import { projectSandpackRuntime } from "./code-viewer/sandpack-runtime-preview";
 import { projectReactPreview } from "./code-viewer/sandpack-react-preview";
+import { type SandpackRuntimeSyncHandle } from "./code-viewer/SandpackRuntimeSync";
 import {
-  SandpackRuntimeSync,
-  type SandpackRuntimeSyncHandle,
-} from "./code-viewer/SandpackRuntimeSync";
+  CodeOnlyPreviewNotice,
+  PreviewCompilationStatus,
+} from "./code-viewer/PreviewCompilationStatus";
+import { assessProjectRuntime } from "../lib/project-runtime/capabilities";
 import type { ProjectFileChangeGuard } from "./code-viewer/sandpack-file-changes";
 import { ViewToolbar } from "./code-viewer/ViewToolbar";
 import { PreviewAnnotation } from "./code-viewer/PreviewAnnotation";
+import {
+  PreviewScreenshot,
+  type ScreenshotMode,
+} from "./code-viewer/PreviewScreenshot";
+import { useSettingsStore } from "../store/settings";
 import { useAttachmentIntakeContext } from "./chat/chat-input/AttachmentIntakeContext";
 import { FileExplorer } from "./code-viewer/FileExplorer";
 import { ProjectAssetList } from "./code-viewer/ProjectAssetList";
@@ -64,6 +72,7 @@ import { useConversationStore } from "../store/conversation";
 import { DesignSystemPanel } from "./design/DesignSystemPanel";
 import { DesignTokenPanel } from "./design/DesignTokenPanel";
 import { DesignReviewDialog } from "./design/DesignReviewDialog";
+import { AutomaticDesignReviewNotice } from "./design/AutomaticDesignReviewNotice";
 import { resolvePageSource } from "../lib/design/page-source";
 import { useDesignSelectionStore } from "../store/design-selection";
 import {
@@ -420,6 +429,7 @@ interface CodeViewerProps {
   onAutomaticDesignReviewUnavailable?: (
     evidence: AutomaticDesignReviewEvidence,
     message: string,
+    outcome?: "unavailable" | "superseded",
   ) => Promise<void> | void;
   onApplyDesignReviewFixes?: (
     findings: readonly DesignReviewFinding[],
@@ -449,10 +459,21 @@ export function CodeViewer({
 }: CodeViewerProps) {
   const t = useT();
   const previewEnabled = previewMode !== "code-only";
+  const codeOnlyReason = useMemo(
+    () =>
+      previewEnabled ? undefined : assessProjectRuntime(files).preview.reason,
+    [files, previewEnabled],
+  );
   const [annotationScope, setAnnotationScope] =
     useState<PreviewCaptureScope | null>(null);
   const annotationOpen = annotationScope !== null;
+  const [screenshotMode, setScreenshotMode] = useState<ScreenshotMode | null>(
+    null,
+  );
+  const imageCaptureOpen = annotationOpen || screenshotMode !== null;
+  const closeScreenshot = useCallback(() => setScreenshotMode(null), []);
   const [designFocus, setDesignFocus] = useState(false);
+  const [canvasRuntimeEpoch, setCanvasRuntimeEpoch] = useState(0);
   const [canvasFocusRequest, setCanvasFocusRequest] = useState<{
     pageId: string;
     requestId: number;
@@ -549,7 +570,16 @@ export function CodeViewer({
     () => ({ conversationId, branchId, checkoutEpoch }),
     [conversationId, branchId, checkoutEpoch],
   );
-  const designCanvasEnabled = workspaceMode === "design" && previewEnabled;
+  const projectDesign = useMemo(() => readProjectDesign(files), [files]);
+  const designCanvasEnabled =
+    workspaceMode === "design" &&
+    previewEnabled &&
+    (projectDesign.status === "invalid" ||
+      (projectDesign.status === "ready" &&
+        projectDesign.design.pages.length !== 1));
+  useEffect(() => {
+    setDesignFocus(false);
+  }, [conversationId, branchId, checkoutEpoch, designCanvasEnabled]);
   const canvasMode =
     designCanvasEnabled && effectiveViewMode === "preview" && !designFocus;
   const canvasModeRef = useRef(canvasMode);
@@ -578,7 +608,7 @@ export function CodeViewer({
   );
   const handledAutomaticCaptureRef = useRef<number | undefined>(undefined);
   const handledDialogRequestRef = useRef(0);
-  const projectDesign = useMemo(() => readProjectDesign(files), [files]);
+  const autoQaEnabled = useSettingsStore((state) => state.system.autoQaEnabled);
   const explicitPrototypePageRef = useRef<string | undefined>(undefined);
   useEffect(() => {
     explicitPrototypePageRef.current = undefined;
@@ -1622,6 +1652,7 @@ export function CodeViewer({
           restart: () => {
             const runtime = runtimeSyncRef.current;
             if (!runtime) throw new Error("The preview client is unavailable.");
+            setCanvasRuntimeEpoch((epoch) => epoch + 1);
             return runtime.restart();
           },
           isCurrent: () => previewGenerationRef.current === generation,
@@ -1813,26 +1844,41 @@ export function CodeViewer({
           "preview_unavailable",
           "The live preview iframe is unavailable.",
         );
-      iframe.contentWindow.postMessage(
-        {
-          type: "open-builder:design-bridge-readiness",
-          version: DESIGN_BRIDGE_PROTOCOL_VERSION,
-          generation,
-          runtimeRevision: designBridgeRuntimeRevision(generation, true),
-          nonce: `live-${createDesignBridgeNonce()}`,
-        },
-        origin,
-      );
-      await waitForPreviewReadiness({
-        isReady: () =>
-          captureRuntimeReadyRef.current &&
-          bridgeGenerationRef.current === generation,
-        isCurrent: () => previewGenerationRef.current === generation,
-        signal,
-        timeoutMs: 5_000,
-        errorMessage:
-          "The current preview screenshot runtime is not ready. Live capture never reloads the page.",
-      });
+      const nonce = `live-${createDesignBridgeNonce()}`;
+      readinessRequestRef.current = nonce;
+      readinessReplyRef.current = null;
+      try {
+        await waitForPreviewReadiness({
+          isReady: () => {
+            if (
+              readinessReplyRef.current === nonce &&
+              captureRuntimeReadyRef.current &&
+              bridgeGenerationRef.current === generation
+            )
+              return true;
+            iframe.contentWindow!.postMessage(
+              {
+                type: "open-builder:design-bridge-readiness",
+                version: DESIGN_BRIDGE_PROTOCOL_VERSION,
+                generation,
+                runtimeRevision: designBridgeRuntimeRevision(generation, true),
+                nonce,
+              },
+              origin,
+            );
+            return false;
+          },
+          isCurrent: () => previewGenerationRef.current === generation,
+          signal,
+          timeoutMs: 5_000,
+          pollIntervalMs: 100,
+          errorMessage:
+            "The current preview screenshot runtime is not ready. Live capture never reloads the page.",
+        });
+      } finally {
+        if (readinessRequestRef.current === nonce)
+          readinessRequestRef.current = null;
+      }
     },
     [previewEnabled, bridgeInjection.supported, getPreviewIframe],
   );
@@ -1905,7 +1951,10 @@ export function CodeViewer({
         await waitForDesignBridge(generation, signal);
         await requestPreviewNavigation(target, generation, signal);
         signal.throwIfAborted();
-        softRefreshRef.current?.();
+        if (softRefreshRef.current) {
+          setCanvasRuntimeEpoch((epoch) => epoch + 1);
+          softRefreshRef.current();
+        }
         await afterPreviewPaint();
         await waitForDesignBridge(generation, signal);
         return requestPreviewNavigation(target, generation, signal);
@@ -1966,16 +2015,88 @@ export function CodeViewer({
     [onDesignReview],
   );
 
+  const reportAutomaticCaptureUnavailable = useCallback(
+    async (
+      evidence: AutomaticDesignReviewEvidence,
+      message: string,
+      outcome: "unavailable" | "superseded" = "unavailable",
+    ) => {
+      const store = useDesignReviewStore.getState();
+      if (
+        store.automatic?.evidence.requestId !== evidence.requestId ||
+        !isConversationIdentityCurrent(
+          canvasIdentity,
+          useConversationStore.getState().conversations[conversationId],
+        )
+      )
+        return;
+      if (onAutomaticDesignReviewUnavailable) {
+        await onAutomaticDesignReviewUnavailable(evidence, message, outcome);
+      } else if (outcome === "superseded") {
+        store.finishAutomatic("superseded");
+      } else {
+        store.failAutomatic(message);
+      }
+    },
+    [canvasIdentity, conversationId, onAutomaticDesignReviewUnavailable],
+  );
+
   const captureDesignReviewScreenshots = useCallback(
-    (options: { automatic?: boolean } = {}) => {
+    (options: { automatic?: boolean; signal?: AbortSignal } = {}) => {
       if (captureTaskRef.current) return captureTaskRef.current;
+      if (
+        options.automatic &&
+        !useSettingsStore.getState().system.autoQaEnabled
+      )
+        return Promise.resolve();
       const controller = new AbortController();
+      const automaticRequestId = options.automatic
+        ? useDesignReviewStore.getState().automatic?.evidence.requestId
+        : undefined;
+      const unsubscribeQa = options.automatic
+        ? useSettingsStore.subscribe((state) => {
+            if (!state.system.autoQaEnabled) controller.abort();
+          })
+        : undefined;
+      const cancel = () => controller.abort(options.signal?.reason);
+      options.signal?.addEventListener("abort", cancel, { once: true });
+      if (options.signal?.aborted) cancel();
       captureAbortRef.current = controller;
       const task = (async () => {
         const reviewStore = useDesignReviewStore.getState();
         const automaticEvidence = options.automatic
           ? reviewStore.automatic?.evidence
           : undefined;
+        const isCurrent = () =>
+          !controller.signal.aborted &&
+          isConversationIdentityCurrent(
+            canvasIdentity,
+            useConversationStore.getState().conversations[conversationId],
+          ) &&
+          (!options.automatic ||
+            (useSettingsStore.getState().system.autoQaEnabled &&
+              !!automaticEvidence &&
+              useDesignReviewStore.getState().automatic?.evidence.requestId ===
+                automaticEvidence.requestId));
+        const assertCurrent = () => {
+          if (!isCurrent())
+            throw new DOMException(
+              "Review capture was replaced.",
+              "AbortError",
+            );
+        };
+        const unavailable = (
+          message: string,
+          outcome: "unavailable" | "superseded" = "unavailable",
+        ) => {
+          if (!automaticEvidence || !isCurrent()) return;
+          return reportAutomaticCaptureUnavailable(
+            automaticEvidence,
+            message,
+            outcome,
+          );
+        };
+        assertCurrent();
         if (!options.automatic) reviewStore.clearAutomatic();
         const prototypePlan =
           prototypeWorkspaceEnabled && projectDesign.status === "ready"
@@ -2000,45 +2121,51 @@ export function CodeViewer({
             (automaticEvidence
               ? " Static Design-system checks completed; visual evidence is unavailable."
               : "");
-          if (automaticEvidence && onAutomaticDesignReviewUnavailable) {
-            void Promise.resolve(
-              onAutomaticDesignReviewUnavailable(automaticEvidence, message),
-            ).catch((error) =>
-              useDesignReviewStore
-                .getState()
-                .failAutomatic(
-                  error instanceof Error ? error.message : String(error),
-                ),
-            );
-          } else if (automaticEvidence) {
-            reviewStore.failAutomatic(message);
+          if (automaticEvidence) {
+            await unavailable(message);
           } else {
             reviewStore.fail(message);
           }
           return;
         }
         try {
+          const generation = previewGenerationRef.current;
+          if (!generation) {
+            throw new Error("The current preview generation is not ready.");
+          }
           if (automaticEvidence?.sourceDigest) {
             const currentDigest = await computeDesignReviewSourceDigest({
               files,
               designSystem: designState?.appliedSystem ?? null,
               designContract: automaticEvidence.contract,
             });
-            if (currentDigest !== automaticEvidence.sourceDigest) {
-              throw new Error(
-                "The project changed before automatic Design Review capture started.",
+            assertCurrent();
+            if (previewGenerationRef.current !== generation) {
+              throw new PreviewRuntimeError(
+                "stale_generation",
+                "The project changed while validating Design Review source.",
               );
             }
-          }
-          const generation = previewGenerationRef.current;
-          if (!generation) {
-            throw new Error("The current preview generation is not ready.");
+            if (currentDigest !== automaticEvidence.sourceDigest) {
+              await unavailable(
+                "The project changed before automatic Design Review capture started.",
+                "superseded",
+              );
+              return;
+            }
           }
           const collection = await withPreviewCaptureLock({
             conversationId,
             owner: options.automatic ? "automatic-review" : "manual-review",
             signal: controller.signal,
             run: async (adapter, signal) => {
+              assertCurrent();
+              if (adapter.getGeneration() !== generation) {
+                throw new PreviewRuntimeError(
+                  "stale_generation",
+                  "The project changed while waiting for Design Review capture.",
+                );
+              }
               if (prototypeTargets) {
                 if (prototypeTargets.length === 0)
                   return { generation, captures: [], errors: skippedMessages };
@@ -2083,7 +2210,8 @@ export function CodeViewer({
                   isolated.dispose();
                 }
                 if (adapter.getGeneration() !== generation) {
-                  throw new Error(
+                  throw new PreviewRuntimeError(
+                    "stale_generation",
                     "The project changed while prototype review evidence was captured.",
                   );
                 }
@@ -2106,11 +2234,13 @@ export function CodeViewer({
             },
           });
           controller.signal.throwIfAborted();
+          assertCurrent();
           if (
             collection.generation !== generation ||
             previewGenerationRef.current !== generation
           ) {
-            throw new Error(
+            throw new PreviewRuntimeError(
+              "stale_generation",
               "The project changed before prototype review evidence completed.",
             );
           }
@@ -2141,22 +2271,7 @@ export function CodeViewer({
               collection.errors.join(" ") ||
               "Automatic preview capture did not return an image.";
             if (automaticEvidence) {
-              if (onAutomaticDesignReviewUnavailable) {
-                void Promise.resolve(
-                  onAutomaticDesignReviewUnavailable(
-                    automaticEvidence,
-                    message,
-                  ),
-                ).catch((error) =>
-                  useDesignReviewStore
-                    .getState()
-                    .failAutomatic(
-                      error instanceof Error ? error.message : String(error),
-                    ),
-                );
-              } else {
-                useDesignReviewStore.getState().failAutomatic(message);
-              }
+              await unavailable(message);
             } else {
               useDesignReviewStore.getState().fail(message);
             }
@@ -2173,36 +2288,37 @@ export function CodeViewer({
                 collection.errors,
               ),
             ).catch((error) => {
-              useDesignReviewStore
-                .getState()
-                .failAutomatic(
-                  error instanceof Error ? error.message : String(error),
-                );
+              void unavailable(
+                error instanceof Error ? error.message : String(error),
+              );
             });
           } else {
             await submitManualDesignReview(screenshots);
           }
         } catch (error) {
-          if ((error as { name?: string })?.name !== "AbortError") {
+          if ((error as { name?: string })?.name === "AbortError") {
+            if (isCurrent()) {
+              if (automaticEvidence)
+                await unavailable(
+                  "The preview was replaced during Design Review capture.",
+                  "superseded",
+                );
+              else
+                reviewStore.fail(
+                  "Preview capture was interrupted. Recapture screenshots to retry.",
+                );
+            }
+          } else {
             const message =
               error instanceof Error ? error.message : String(error);
             if (automaticEvidence) {
-              if (onAutomaticDesignReviewUnavailable) {
-                void Promise.resolve(
-                  onAutomaticDesignReviewUnavailable(
-                    automaticEvidence,
-                    message,
-                  ),
-                ).catch((reason) =>
-                  useDesignReviewStore
-                    .getState()
-                    .failAutomatic(
-                      reason instanceof Error ? reason.message : String(reason),
-                    ),
-                );
-              } else {
-                useDesignReviewStore.getState().failAutomatic(message);
-              }
+              await unavailable(
+                message,
+                error instanceof PreviewRuntimeError &&
+                  error.code === "stale_generation"
+                  ? "superseded"
+                  : "unavailable",
+              );
             } else {
               useDesignReviewStore.getState().fail(message);
             }
@@ -2210,18 +2326,31 @@ export function CodeViewer({
         }
       })();
       captureTaskRef.current = task;
-      void task.then(
-        () => {
-          if (captureTaskRef.current === task) captureTaskRef.current = null;
-          if (captureAbortRef.current === controller)
-            captureAbortRef.current = null;
-        },
-        () => {
-          if (captureTaskRef.current === task) captureTaskRef.current = null;
-          if (captureAbortRef.current === controller)
-            captureAbortRef.current = null;
-        },
-      );
+      const release = () => {
+        unsubscribeQa?.();
+        options.signal?.removeEventListener("abort", cancel);
+        if (
+          options.automatic &&
+          controller.signal.aborted &&
+          captureAbortRef.current === controller
+        ) {
+          const store = useDesignReviewStore.getState();
+          if (
+            store.status === "capturing" &&
+            (!store.automatic ||
+              store.automatic.evidence.requestId === automaticRequestId)
+          ) {
+            useDesignReviewStore.setState({
+              status: "idle",
+              captureProgress: undefined,
+            });
+          }
+        }
+        if (captureTaskRef.current === task) captureTaskRef.current = null;
+        if (captureAbortRef.current === controller)
+          captureAbortRef.current = null;
+      };
+      void task.then(release, release);
       return task;
     },
     [
@@ -2230,35 +2359,141 @@ export function CodeViewer({
       capturePreviewCollection,
       bootstrapIsolatedPreview,
       conversationId,
+      canvasIdentity,
       designState?.appliedSystem,
       files,
       getPreviewIframe,
       onAutomaticDesignReview,
-      onAutomaticDesignReviewUnavailable,
+      reportAutomaticCaptureUnavailable,
       projectDesign,
       submitManualDesignReview,
     ],
   );
+
+  const automaticCaptureLatest = useRef({
+    capture: captureDesignReviewScreenshots,
+    sourceReady: false,
+    error: undefined as string | undefined,
+    reportUnavailable: reportAutomaticCaptureUnavailable,
+  });
+  automaticCaptureLatest.current = {
+    capture: captureDesignReviewScreenshots,
+    sourceReady:
+      !!previewGeneration &&
+      !assetProjectionPendingRef.current &&
+      assetProjectionStatus === "ready" &&
+      (!previewEnabled || captureRuntimeSettled),
+    error:
+      assetProjectionStatus === "error"
+        ? (assetProjectionError ?? "Preview asset projection failed.")
+        : undefined,
+    reportUnavailable: reportAutomaticCaptureUnavailable,
+  };
+  const automaticCapturePending =
+    automaticStage === "capturing" || automaticStage === "verifying";
 
   useEffect(() => {
     if (
       !automaticCaptureRequestId ||
       automaticCaptureConversationId !== conversationId ||
       handledAutomaticCaptureRef.current === automaticCaptureRequestId ||
+      !automaticCapturePending ||
       isGenerating ||
+      !autoQaEnabled ||
       workspaceMode !== "design"
     ) {
       return;
     }
-    handledAutomaticCaptureRef.current = automaticCaptureRequestId;
-    void captureDesignReviewScreenshots({ automatic: true });
+    const evidence = useDesignReviewStore.getState().automatic!.evidence;
+    const controller = new AbortController();
+    const clearWaitingProgress = () => {
+      const store = useDesignReviewStore.getState();
+      if (
+        !captureTaskRef.current &&
+        !store.automatic &&
+        store.status === "capturing"
+      ) {
+        useDesignReviewStore.setState({
+          status: "idle",
+          captureProgress: undefined,
+        });
+      }
+    };
+    const unsubscribeQa = useSettingsStore.subscribe((state) => {
+      if (!state.system.autoQaEnabled) {
+        handledAutomaticCaptureRef.current = automaticCaptureRequestId;
+        controller.abort();
+        clearWaitingProgress();
+      }
+    });
+    const isCurrent = () =>
+      useSettingsStore.getState().system.autoQaEnabled &&
+      useDesignReviewStore.getState().automatic?.captureRequestId ===
+        automaticCaptureRequestId &&
+      isConversationIdentityCurrent(
+        canvasIdentity,
+        useConversationStore.getState().conversations[conversationId],
+      );
+    void (async () => {
+      // A manual capture owns its cleanup. Keep the automatic request pending
+      // until that task releases the capture slot instead of consuming it.
+      if (captureTaskRef.current)
+        await captureTaskRef.current.catch(() => undefined);
+      controller.signal.throwIfAborted();
+      await waitForPreviewReadiness({
+        isReady: () => {
+          const current = automaticCaptureLatest.current;
+          if (current.error) throw new Error(current.error);
+          return (
+            current.sourceReady &&
+            !!previewGenerationRef.current &&
+            !assetProjectionPendingRef.current
+          );
+        },
+        isCurrent,
+        signal: controller.signal,
+        timeoutMs: 5_000,
+        errorMessage:
+          "The current preview source and assets did not become ready for Design Review.",
+      });
+      controller.signal.throwIfAborted();
+      handledAutomaticCaptureRef.current = automaticCaptureRequestId;
+      await automaticCaptureLatest.current.capture({
+        automatic: true,
+        signal: controller.signal,
+      });
+    })().catch((error: unknown) => {
+      if (
+        controller.signal.aborted ||
+        !isCurrent() ||
+        (error as { name?: string })?.name === "AbortError"
+      )
+        return;
+      handledAutomaticCaptureRef.current = automaticCaptureRequestId;
+      void automaticCaptureLatest.current.reportUnavailable(
+        evidence,
+        error instanceof Error ? error.message : String(error),
+      );
+    });
+    return () => {
+      unsubscribeQa();
+      controller.abort(
+        new DOMException(
+          "Automatic review capture was replaced.",
+          "AbortError",
+        ),
+      );
+      clearWaitingProgress();
+    };
   }, [
     automaticCaptureRequestId,
     automaticCaptureConversationId,
-    captureDesignReviewScreenshots,
+    automaticCapturePending,
+    canvasIdentity,
     conversationId,
     isGenerating,
     workspaceMode,
+    autoQaEnabled,
   ]);
 
   useEffect(() => {
@@ -2421,9 +2656,56 @@ export function CodeViewer({
   );
   const canvasScopeKey = JSON.stringify([
     canvasIdentity,
-    previewGeneration,
-    deviceSize,
+    sandpackKey,
+    previewRenderRetry,
+    canvasRuntimeEpoch,
+    template,
+    previewMode,
   ]);
+  const canvasSourceInput = useMemo(
+    () => ({
+      files: previewFiles,
+      assets: projectAssets,
+      template,
+      previewMode,
+      design: projectDesign.status === "ready" ? projectDesign.design : null,
+    }),
+    [previewFiles, projectAssets, template, previewMode, projectDesign],
+  );
+  const [canvasSources, setCanvasSources] = useState<{
+    input: typeof canvasSourceInput;
+    sources: Record<string, string> | null;
+  }>();
+  const [settledCanvasSource, setSettledCanvasSource] = useState<{
+    input: typeof canvasSourceInput;
+    scopeKey: string;
+  }>();
+  useEffect(() => {
+    if (!designCanvasEnabled) return;
+    const timer = window.setTimeout(() => {
+      setSettledCanvasSource({
+        input: canvasSourceInput,
+        scopeKey: canvasScopeKey,
+      });
+    }, 2_000);
+    return () => window.clearTimeout(timer);
+  }, [canvasSourceInput, canvasScopeKey, designCanvasEnabled]);
+  useEffect(() => {
+    if (!designCanvasEnabled) return;
+    let cancelled = false;
+    void computeCanvasPreviewSources(canvasSourceInput).then(
+      (sources) => {
+        if (!cancelled) setCanvasSources({ input: canvasSourceInput, sources });
+      },
+      () => {
+        if (!cancelled)
+          setCanvasSources({ input: canvasSourceInput, sources: null });
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [canvasSourceInput, designCanvasEnabled]);
   const canvasTargets = useMemo(
     () =>
       projectDesign.status === "ready"
@@ -2442,7 +2724,13 @@ export function CodeViewer({
     if (projectDesign.status === "missing")
       return [
         {
-          key: JSON.stringify([canvasScopeKey, "current-preview"]),
+          key: JSON.stringify([
+            canvasScopeKey,
+            "current-preview",
+            deviceSize,
+            canvasSources?.sources?.["current-preview"] ?? previewGeneration,
+          ]),
+          generation: previewGeneration,
           pageId: "current-preview",
           viewport: canvasViewport,
         },
@@ -2455,7 +2743,10 @@ export function CodeViewer({
                 canvasScopeKey,
                 page.id,
                 resolution.target.route,
+                deviceSize,
+                canvasSources?.sources?.[page.id] ?? previewGeneration,
               ]),
+              generation: previewGeneration,
               pageId: page.id,
               target: resolution.target,
               viewport: canvasViewport,
@@ -2463,7 +2754,15 @@ export function CodeViewer({
           ]
         : [],
     );
-  }, [canvasScopeKey, canvasViewport, projectDesign.status, canvasTargets]);
+  }, [
+    canvasScopeKey,
+    canvasViewport,
+    projectDesign.status,
+    canvasTargets,
+    canvasSources,
+    deviceSize,
+    previewGeneration,
+  ]);
   const canvasRequestKeys = useRef(new Set<string>());
   canvasRequestKeys.current = new Set(
     canvasRequests.map((request) => request.key),
@@ -2475,6 +2774,7 @@ export function CodeViewer({
         signal.throwIfAborted();
         if (
           !generation ||
+          generation !== request.generation ||
           generation !== previewGenerationRef.current ||
           !canvasRequestKeys.current.has(request.key) ||
           !isConversationIdentityCurrent(
@@ -2490,6 +2790,26 @@ export function CodeViewer({
         owner: "canvas",
         signal,
         run: async (_adapter, captureSignal) => {
+          // Asset bytes can change without changing the text-only runtime
+          // generation. Do not cache a new source key against the old frame.
+          await waitForPreviewReadiness({
+            isReady: () => {
+              assertCurrent();
+              return (
+                !assetProjectionPendingRef.current &&
+                runtimeSyncRef.current?.isSynchronized(
+                  preparedProjectionRef.current,
+                ) === true
+              );
+            },
+            isCurrent: () =>
+              previewGenerationRef.current === generation &&
+              canvasRequestKeys.current.has(request.key),
+            signal: captureSignal,
+            timeoutMs: 5_000,
+            errorMessage:
+              "The preview has not synchronized its current source and assets.",
+          });
           await prepareCurrentPreview(generation!, captureSignal);
           assertCurrent();
           if (!request.target) {
@@ -2546,10 +2866,13 @@ export function CodeViewer({
     requests: designCanvasEnabled ? canvasRequests : EMPTY_CANVAS_REQUESTS,
     paused:
       !canvasMode ||
-      !designBridgeReady ||
+      !previewGeneration ||
+      settledCanvasSource?.input !== canvasSourceInput ||
+      settledCanvasSource?.scopeKey !== canvasScopeKey ||
+      canvasSources?.input !== canvasSourceInput ||
+      assetProjectionPendingRef.current ||
       !captureRuntimeSettled ||
-      isGenerating ||
-      annotationOpen ||
+      imageCaptureOpen ||
       designReviewOpen ||
       (!!automaticStage &&
         ["capturing", "reviewing", "fixing", "verifying"].includes(
@@ -2637,8 +2960,6 @@ export function CodeViewer({
       deactivateDesignSelection();
       setDesignFocus(false);
       if (selectedPrototypePageId) focusCanvasPage(selectedPrototypePageId);
-      if (projectDesign.status === "missing" && canvasRequests[0])
-        retryCanvasPreview(canvasRequests[0].key);
     }
     setViewMode(mode);
   };
@@ -2703,7 +3024,7 @@ export function CodeViewer({
   return (
     <div className="editor w-full h-full flex flex-col bg-background">
       <ViewToolbar
-        interactionLocked={annotationOpen}
+        interactionLocked={imageCaptureOpen}
         viewMode={
           assetProjectionStatus === "error" ? "code" : effectiveViewMode
         }
@@ -2745,6 +3066,18 @@ export function CodeViewer({
                 ? t.chat.attachmentErrors.busy
                 : undefined
         }
+        onScreenshot={(mode) => {
+          deactivateDesignSelection();
+          setDesktopActionMessage(null);
+          setScreenshotMode(mode);
+        }}
+        screenshotUnavailableReason={
+          !bridgeInjection.supported ||
+          !previewGeneration ||
+          !captureRuntimeSettled
+            ? t.screenshot.unavailable
+            : undefined
+        }
         designSelectionSupported={bridgeInjection.supported}
         designSelectionActive={designSelectionActive}
         onToggleDesignSelection={() =>
@@ -2754,7 +3087,7 @@ export function CodeViewer({
         }
         designSelectionUnavailableReason={bridgeUnavailableReason}
         designWorkspace={
-          designCanvasEnabled || prototypeWorkspaceEnabled
+          designCanvasEnabled
             ? {
                 focused: designFocus,
                 actions: (
@@ -2814,23 +3147,24 @@ export function CodeViewer({
       )}
 
       <div className="relative flex min-h-0 flex-1 overflow-hidden bg-muted/50">
-        <div inert={annotationOpen} className="contents"></div>
         <div
-          inert={annotationOpen}
+          inert={imageCaptureOpen}
           className="relative min-w-0 flex-1 overflow-hidden"
         >
           {workspaceMode === "design" &&
             automaticStage &&
-            !designReviewOpen && (
-              <div
-                role="status"
-                className={cn(
-                  "absolute z-40 max-w-md rounded-lg border bg-background/95 px-3 py-2 text-xs shadow-lg backdrop-blur",
-                  canvasMode ? "bottom-20 right-4" : "right-3 top-3",
-                )}
-              >
-                {t.designReview.automaticStages[automaticStage]}
-              </div>
+            automaticCaptureConversationId === conversationId && (
+              <AutomaticDesignReviewNotice
+                key={JSON.stringify([
+                  canvasIdentity,
+                  automaticCaptureRequestId,
+                  automaticStage,
+                ])}
+                stage={automaticStage}
+                visible={!designReviewOpen}
+                className={canvasMode ? "bottom-20 right-4" : "right-3 top-3"}
+                onOpen={openDesignReview}
+              />
             )}
           {desktopActionMessage && (
             <div
@@ -2851,7 +3185,7 @@ export function CodeViewer({
                   ? "z-10"
                   : "hidden",
               )}
-              inert={annotationOpen}
+              inert={imageCaptureOpen}
             >
               <DesignCanvasWorkspace
                 key={workspaceKey}
@@ -2920,18 +3254,30 @@ export function CodeViewer({
                 theme={isDark ? "dark" : "light"}
                 files={sandpackFiles}
                 options={{ activeFile: sandpackCurrentFile }}
-                style={{ height: "100%" }}
+                style={{
+                  height: "100%",
+                  display: "flex",
+                  flexDirection: "column",
+                }}
               >
                 <SandpackRefreshRegistration onChange={registerSoftRefresh} />
-                {previewEnabled && (
-                  <SandpackRuntimeSync onChange={registerRuntimeSync} />
+                {previewEnabled ? (
+                  <PreviewCompilationStatus
+                    identity={`${conversationId}:${sandpackKey}:${previewRenderRetry}:${previewGeneration ?? "pending"}`}
+                    files={sandpackSourceFiles}
+                    hidden={canvasMode}
+                    onRuntimeChange={registerRuntimeSync}
+                    onRetry={handleReloadPreview}
+                  />
+                ) : (
+                  <CodeOnlyPreviewNotice reason={codeOnlyReason} />
                 )}
                 <SandpackListener
                   conversationId={conversationId}
                   requestedActiveFile={sandpackCurrentFile}
                   onFileChange={handleSandpackFileChange}
                 />
-                <SandpackLayout>
+                <SandpackLayout style={{ flex: 1, minHeight: 0 }}>
                   {/* Preview */}
                   {previewEnabled && assetProjectionStatus === "ready" && (
                     <div
@@ -3136,6 +3482,13 @@ export function CodeViewer({
             conversationId={conversationId}
             scope={annotationScope}
             onClose={closeAnnotation}
+          />
+        )}
+        {screenshotMode && (
+          <PreviewScreenshot
+            conversationId={conversationId}
+            mode={screenshotMode}
+            onClose={closeScreenshot}
           />
         )}
       </div>

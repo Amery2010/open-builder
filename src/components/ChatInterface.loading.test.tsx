@@ -77,10 +77,9 @@ describe("ChatInterface generation loading", () => {
       "min-h-0",
       "overflow-hidden",
     );
-    expect(screen.getByRole("status").parentElement).toHaveClass(
-      "min-h-0",
-      "overflow-y-auto",
-    );
+    expect(
+      screen.getByRole("status").closest("[data-radix-scroll-area-viewport]"),
+    ).toHaveClass("app-scroll-area-viewport");
 
     act(() => {
       void useInteractiveStore.getState().askPlanApproval({
