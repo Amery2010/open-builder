@@ -10,6 +10,10 @@ export const zh = {
     officialWebsite: "官方网站",
     openSourceProject: "开源项目",
   },
+  notifications: {
+    label: "通知",
+    close: "关闭通知",
+  },
   approvals: {
     registryHeader: "组件来源",
     registryQuestion: "允许此组件 registry 来源吗？{origin}",

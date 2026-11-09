@@ -1,11 +1,21 @@
 // @vitest-environment jsdom
-import { act, fireEvent, render, screen } from "@testing-library/react";
-import { useEffect } from "react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+} from "@testing-library/react";
+import { useEffect, type PropsWithChildren } from "react";
+import { Toaster, toast } from "sonner";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SandpackProvider, useSandpack } from "@codesandbox/sandpack-react";
 import { useSettingsStore } from "../../store/settings";
 import type { ProjectFiles } from "../../types";
-import { PreviewCompilationStatus } from "./PreviewCompilationStatus";
+import {
+  CodeOnlyPreviewNotice,
+  PreviewCompilationStatus,
+} from "./PreviewCompilationStatus";
 import type { SandpackRuntimeSyncHandle } from "./SandpackRuntimeSync";
 
 type Sandpack = ReturnType<typeof useSandpack>["sandpack"];
@@ -35,13 +45,27 @@ function clientFixture(status: Client["status"] = "initializing") {
 
 async function flush() {
   await act(async () => {
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(1);
   });
+}
+
+function Notifications({ children }: PropsWithChildren) {
+  return (
+    <>
+      <Toaster />
+      {children}
+    </>
+  );
+}
+
+function notification() {
+  return document.querySelector("[data-sonner-toast]");
 }
 
 function mountPreview(
   cachedError?: string,
   environment: "parcel" | "node" = "parcel",
+  hidden = false,
 ) {
   const initial = clientFixture(cachedError ? "done" : "initializing");
   if (cachedError)
@@ -80,13 +104,14 @@ function mountPreview(
         <PreviewCompilationStatus
           identity={identity}
           files={nextFiles}
+          hidden={hidden}
           onRuntimeChange={register}
           onRetry={retry}
         />
       </SandpackProvider>
     );
   }
-  const mounted = render(content(files));
+  const mounted = render(content(files), { wrapper: Notifications });
   async function send(
     message: Message,
     target = initial,
@@ -97,6 +122,7 @@ function mountPreview(
       for (const listener of [...target.listeners]) listener(message);
       await vi.advanceTimersByTimeAsync(0);
     });
+    await flush();
   }
   return {
     ...mounted,
@@ -123,7 +149,12 @@ describe("preview compilation status on the existing runtime", () => {
       system: { ...state.system, language: "en" },
     }));
   });
-  afterEach(() => vi.useRealTimers());
+  afterEach(() => {
+    cleanup();
+    toast.dismiss();
+    vi.runOnlyPendingTimers();
+    vi.useRealTimers();
+  });
 
   it("reports Node file acknowledgements as synchronization without claiming another compilation", async () => {
     const preview = mountPreview(undefined, "node");
@@ -146,12 +177,10 @@ describe("preview compilation status on the existing runtime", () => {
     expect(preview.handle()!.isSynchronized(nextFiles)).toBe(false);
     await preview.send({ type: "fs/remove", path: "/obsolete.js" });
     expect(preview.handle()!.isSynchronized(nextFiles)).toBe(true);
-    expect(screen.getByRole("status")).toHaveTextContent(
+    expect(notification()).toHaveTextContent(
       /files.*synced|files.*synchronized/i,
     );
-    expect(screen.getByRole("status")).not.toHaveTextContent(
-      "compilation complete",
-    );
+    expect(notification()).not.toHaveTextContent("compilation complete");
     await act(async () => {
       await vi.advanceTimersByTimeAsync(90_000);
     });
@@ -163,14 +192,14 @@ describe("preview compilation status on the existing runtime", () => {
       notificationType: "error",
       title: "Server compilation failed",
     });
-    expect(screen.getByRole("status")).toHaveTextContent(/failed/i);
+    expect(notification()).toHaveTextContent(/failed/i);
     preview.unmount();
   });
 
   it("reads a client's cached failure if it finished before registration", async () => {
     const preview = mountPreview("Early compilation failure");
     await flush();
-    expect(screen.getByRole("status")).toHaveTextContent(/failed/i);
+    expect(notification()).toHaveTextContent(/failed/i);
     expect(screen.getByText("Early compilation failure")).toBeInTheDocument();
     expect(preview.handle()!.isSynchronized(preview.files)).toBe(false);
     preview.unmount();
@@ -179,7 +208,7 @@ describe("preview compilation status on the existing runtime", () => {
   it("reports actual compilation completion and only generates the runtime package manifest", async () => {
     const preview = mountPreview();
     await flush();
-    expect(screen.getByRole("status")).toHaveTextContent("Starting");
+    expect(notification()).toHaveTextContent("Starting");
     expect(preview.state().files["/package.json"].code).toContain(
       '"dependencies": {}',
     );
@@ -189,17 +218,19 @@ describe("preview compilation status on the existing runtime", () => {
       undefined,
       "transpiling",
     );
-    expect(screen.getByRole("status")).toHaveTextContent("Compiling");
+    expect(notification()).toHaveTextContent("Compiling");
     await preview.send(
       { type: "done", compilatonError: false },
       undefined,
       "done",
     );
-    expect(screen.getByRole("status")).toHaveTextContent(
-      "compilation complete",
-    );
+    expect(notification()).toHaveTextContent("compilation complete");
     expect(preview.handle()!.isSynchronized(preview.files)).toBe(true);
     expect(document.querySelectorAll("iframe")).toHaveLength(0);
+    expect(document.querySelectorAll("[data-sonner-toast]")).toHaveLength(1);
+    expect(
+      preview.container.querySelector("[data-preview-compilation]"),
+    ).toBeNull();
     preview.unmount();
   });
 
@@ -208,9 +239,8 @@ describe("preview compilation status on the existing runtime", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(90_000);
     });
-    expect(screen.getByRole("status")).toHaveTextContent(
-      /taking longer|timed out/i,
-    );
+    await flush();
+    expect(notification()).toHaveTextContent(/taking longer|timed out/i);
     fireEvent.click(screen.getByRole("button", { name: /retry/i }));
     expect(preview.retry).toHaveBeenCalledOnce();
     await preview.send(
@@ -218,12 +248,13 @@ describe("preview compilation status on the existing runtime", () => {
       undefined,
       "done",
     );
-    expect(screen.getByRole("status")).toHaveTextContent(
-      "compilation complete",
-    );
+    expect(notification()).toHaveTextContent("compilation complete");
     expect(screen.queryByRole("button", { name: /retry/i })).toBeNull();
     preview.unmount();
     expect(preview.initial.listeners.size).toBe(0);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(250);
+    });
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -241,13 +272,13 @@ describe("preview compilation status on the existing runtime", () => {
       undefined,
       "done",
     );
-    expect(screen.getByRole("status")).toHaveTextContent(/failed/i);
+    expect(notification()).toHaveTextContent(/failed/i);
     expect(screen.getByText("Missing ./app.js")).toBeInTheDocument();
     expect(preview.handle()!.isSynchronized(preview.files)).toBe(false);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(90_000);
     });
-    expect(screen.getByRole("status")).toHaveTextContent(/failed/i);
+    expect(notification()).toHaveTextContent(/failed/i);
     preview.unmount();
   });
 
@@ -260,9 +291,7 @@ describe("preview compilation status on the existing runtime", () => {
     );
     preview.update({ "index.html": preview.files["index.html"] });
     await flush();
-    expect(screen.getByRole("status")).not.toHaveTextContent(
-      "compilation complete",
-    );
+    expect(notification()).not.toHaveTextContent("compilation complete");
     await act(async () => {
       await vi.advanceTimersByTimeAsync(600);
     });
@@ -276,9 +305,7 @@ describe("preview compilation status on the existing runtime", () => {
       undefined,
       "done",
     );
-    expect(screen.getByRole("status")).toHaveTextContent(
-      "compilation complete",
-    );
+    expect(notification()).toHaveTextContent("compilation complete");
     preview.unmount();
   });
 
@@ -294,7 +321,7 @@ describe("preview compilation status on the existing runtime", () => {
       undefined,
       "done",
     );
-    expect(screen.getByRole("status")).not.toHaveTextContent(
+    expect(notification()).not.toHaveTextContent(
       /failed|compilation complete/i,
     );
     await preview.send(
@@ -307,9 +334,7 @@ describe("preview compilation status on the existing runtime", () => {
       undefined,
       "done",
     );
-    expect(screen.getByRole("status")).toHaveTextContent(
-      "compilation complete",
-    );
+    expect(notification()).toHaveTextContent("compilation complete");
     preview.unmount();
   });
 
@@ -325,7 +350,7 @@ describe("preview compilation status on the existing runtime", () => {
         listener({ type: "done", compilatonError: true });
       await vi.advanceTimersByTimeAsync(0);
     });
-    expect(screen.getByRole("status")).not.toHaveTextContent(
+    expect(notification()).not.toHaveTextContent(
       /failed|compilation complete/i,
     );
     await preview.send(
@@ -333,9 +358,47 @@ describe("preview compilation status on the existing runtime", () => {
       replacement,
       "done",
     );
-    expect(screen.getByRole("status")).toHaveTextContent(
-      "compilation complete",
-    );
+    expect(notification()).toHaveTextContent("compilation complete");
     preview.unmount();
+  });
+
+  it("dismisses a successful toast without changing synchronization", async () => {
+    const preview = mountPreview();
+    await preview.send(
+      { type: "done", compilatonError: false },
+      undefined,
+      "done",
+    );
+    expect(notification()).toHaveAttribute("data-type", "success");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4_200);
+    });
+    expect(notification()).toBeNull();
+    expect(preview.handle()!.isSynchronized(preview.files)).toBe(true);
+  });
+
+  it("keeps observing a hidden preview without publishing notifications", async () => {
+    const preview = mountPreview(undefined, "parcel", true);
+    await preview.send(
+      { type: "done", compilatonError: false },
+      undefined,
+      "done",
+    );
+    expect(notification()).toBeNull();
+    expect(preview.handle()!.isSynchronized(preview.files)).toBe(true);
+  });
+
+  it("shows code-only limitations in an informational toast without a banner", async () => {
+    const { container, unmount } = render(
+      <CodeOnlyPreviewNotice reason="Unsupported project runtime" />,
+      { wrapper: Notifications },
+    );
+    await flush();
+    expect(notification()).toHaveAttribute("data-type", "info");
+    expect(notification()).toHaveTextContent("This project uses code mode");
+    expect(screen.getByText("Unsupported project runtime")).toBeInTheDocument();
+    expect(container.querySelector(".border-b")).toBeNull();
+    unmount();
+    expect(toast.getToasts()).toHaveLength(0);
   });
 });

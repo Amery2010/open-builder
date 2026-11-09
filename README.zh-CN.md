@@ -108,6 +108,8 @@ pnpm build
 
 ## 参与贡献
 
+社区支持：[LinuxDo](https://linux.do/)、[V2EX](https://www.v2ex.com/)。
+
 欢迎提交 [Bug 报告](https://github.com/Amery2010/open-builder/issues)、功能建议和 Pull Request。提交代码前请阅读[贡献指南](CONTRIBUTING.md)。
 
 ## 许可证

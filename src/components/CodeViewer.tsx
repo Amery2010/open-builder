@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -15,6 +16,7 @@ import {
 } from "@codesandbox/sandpack-react";
 import type { SandpackPredefinedTemplate } from "@codesandbox/sandpack-react";
 import { Terminal } from "lucide-react";
+import { toast } from "sonner";
 import {
   DesignCanvasWorkspace,
   type DesignCanvasBoard,
@@ -509,9 +511,15 @@ export function CodeViewer({
   const [previewGeneration, setPreviewGeneration] = useState<
     string | undefined
   >(undefined);
-  const [desktopActionMessage, setDesktopActionMessage] = useState<
-    string | null
-  >(null);
+  const desktopActionToastId = useId();
+  const desktopActionScopeRef = useRef<symbol | null>(null);
+  useEffect(() => {
+    desktopActionScopeRef.current = Symbol();
+    return () => {
+      desktopActionScopeRef.current = null;
+      toast.dismiss(desktopActionToastId);
+    };
+  }, [conversationId, desktopActionToastId]);
   const [designBridgeReady, setDesignBridgeReady] = useState(false);
   const designBridgeReadyRef = useRef(false);
   const bridgeGenerationRef = useRef<string | undefined>(undefined);
@@ -1535,7 +1543,8 @@ export function CodeViewer({
 
   const handleExportDirectory = useCallback(async () => {
     if (isGenerating) return;
-    setDesktopActionMessage(null);
+    const scope = desktopActionScopeRef.current;
+    toast.dismiss(desktopActionToastId);
     try {
       const result = await exportProjectToUniqueDirectory(
         files,
@@ -1544,20 +1553,30 @@ export function CodeViewer({
           : conversationTitle,
         projectAssets,
       );
-      if (result) {
-        setDesktopActionMessage(
+      if (result && desktopActionScopeRef.current === scope) {
+        toast.success(
           t.toolbar.exportedDirectory.replace("{path}", result.path),
+          { id: desktopActionToastId },
         );
       }
     } catch (error) {
-      setDesktopActionMessage(
+      if (desktopActionScopeRef.current !== scope) return;
+      toast.error(
         t.toolbar.exportDirectoryFailed.replace(
           "{message}",
           error instanceof Error ? error.message : String(error),
         ),
+        { id: desktopActionToastId, duration: 8_000 },
       );
     }
-  }, [conversationTitle, files, isGenerating, projectAssets, t.toolbar]);
+  }, [
+    conversationTitle,
+    desktopActionToastId,
+    files,
+    isGenerating,
+    projectAssets,
+    t.toolbar,
+  ]);
 
   const waitForPreviewViewport = useCallback(
     async (
@@ -2579,7 +2598,8 @@ export function CodeViewer({
         (candidate) => candidate.id === pageId,
       );
       if (!page) return;
-      setDesktopActionMessage(null);
+      const scope = desktopActionScopeRef.current;
+      toast.dismiss(desktopActionToastId);
       explicitPrototypePageRef.current = pageId;
       prototypeNavigationAbortRef.current?.abort();
       prototypeNavigationAbortRef.current = null;
@@ -2593,9 +2613,10 @@ export function CodeViewer({
         pageId,
       );
       if (resolution.status === "unavailable") {
-        setDesktopActionMessage(
-          t.prototypeWorkspace.previewReasons[resolution.reason],
-        );
+        toast.warning(t.prototypeWorkspace.previewReasons[resolution.reason], {
+          id: desktopActionToastId,
+          duration: 8_000,
+        });
         return;
       }
       const generation = previewGenerationRef.current;
@@ -2609,10 +2630,14 @@ export function CodeViewer({
         await requestPreviewNavigation(target, generation, controller.signal);
         controller.signal.throwIfAborted();
       } catch (error) {
-        if ((error as { name?: string })?.name !== "AbortError") {
-          setDesktopActionMessage(
-            error instanceof Error ? error.message : String(error),
-          );
+        if (
+          desktopActionScopeRef.current === scope &&
+          (error as { name?: string })?.name !== "AbortError"
+        ) {
+          toast.error(error instanceof Error ? error.message : String(error), {
+            id: desktopActionToastId,
+            duration: 8_000,
+          });
         }
       } finally {
         if (prototypeNavigationAbortRef.current === controller) {
@@ -2622,10 +2647,12 @@ export function CodeViewer({
     },
     [
       conversationId,
+      desktopActionToastId,
       projectDesign,
       prototypeWorkspaceEnabled,
       requestPreviewNavigation,
       setProjectDesignWorkspaceSelection,
+      t.prototypeWorkspace.previewReasons,
       waitForDesignBridge,
     ],
   );
@@ -3054,7 +3081,7 @@ export function CodeViewer({
         isGenerating={isGenerating}
         onAnnotate={(scope) => {
           deactivateDesignSelection();
-          setDesktopActionMessage(null);
+          toast.dismiss(desktopActionToastId);
           setAnnotationScope(scope);
         }}
         annotationUnavailableReason={
@@ -3068,7 +3095,7 @@ export function CodeViewer({
         }
         onScreenshot={(mode) => {
           deactivateDesignSelection();
-          setDesktopActionMessage(null);
+          toast.dismiss(desktopActionToastId);
           setScreenshotMode(mode);
         }}
         screenshotUnavailableReason={
@@ -3162,21 +3189,9 @@ export function CodeViewer({
                 ])}
                 stage={automaticStage}
                 visible={!designReviewOpen}
-                className={canvasMode ? "bottom-20 right-4" : "right-3 top-3"}
                 onOpen={openDesignReview}
               />
             )}
-          {desktopActionMessage && (
-            <div
-              role="status"
-              className={cn(
-                "absolute z-40 max-w-md rounded-lg border bg-background/95 px-3 py-2 text-xs shadow-lg backdrop-blur",
-                canvasMode ? "bottom-20 right-4" : "right-3 top-3",
-              )}
-            >
-              {desktopActionMessage}
-            </div>
-          )}
           {designCanvasEnabled && (
             <div
               className={cn(

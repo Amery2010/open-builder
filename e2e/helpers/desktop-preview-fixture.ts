@@ -1,7 +1,18 @@
-import { createElement } from "react";
+import { createElement, Fragment } from "react";
 import { createRoot } from "react-dom/client";
 import { SandpackPreview, SandpackProvider } from "@codesandbox/sandpack-react";
-import { PreviewCompilationStatus } from "../../src/components/code-viewer/PreviewCompilationStatus";
+import {
+  CodeOnlyPreviewNotice,
+  PreviewCompilationStatus,
+} from "../../src/components/code-viewer/PreviewCompilationStatus";
+import { Toaster } from "../../src/components/ui/sonner";
+import "../../src/index.css";
+
+/** Mobile chat does not mount a code-only editor; observe the notice separately. */
+export function mountCodeOnlyPreviewNotice(): void {
+  const host = document.body.appendChild(document.createElement("div"));
+  createRoot(host).render(createElement(CodeOnlyPreviewNotice));
+}
 
 /** Exercise the desktop runtime configuration with a real vendor client. */
 export function mountDesktopStaticPreview(): void {
@@ -11,18 +22,23 @@ export function mountDesktopStaticPreview(): void {
   });
   createRoot(document.getElementById("root")!).render(
     createElement(
-      SandpackProvider,
-      { template: "static", customSetup: { environment: "parcel" }, files },
-      createElement(PreviewCompilationStatus, {
-        identity: "desktop-import-fixture",
-        files,
-        onRuntimeChange: () => {},
-        onRetry: () => {},
-      }),
-      createElement(SandpackPreview, {
-        showOpenInCodeSandbox: false,
-        showRefreshButton: false,
-      }),
+      Fragment,
+      null,
+      createElement(Toaster),
+      createElement(
+        SandpackProvider,
+        { template: "static", customSetup: { environment: "parcel" }, files },
+        createElement(PreviewCompilationStatus, {
+          identity: "desktop-import-fixture",
+          files,
+          onRuntimeChange: () => {},
+          onRetry: () => {},
+        }),
+        createElement(SandpackPreview, {
+          showOpenInCodeSandbox: false,
+          showRefreshButton: false,
+        }),
+      ),
     ),
   );
 }

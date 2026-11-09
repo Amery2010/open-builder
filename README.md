@@ -108,6 +108,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the complete validation and release w
 
 ## Contributing
 
+Community support: [LinuxDo](https://linux.do/), [V2EX](https://www.v2ex.com/).
+
 [Bug reports](https://github.com/Amery2010/open-builder/issues), feature proposals, and pull requests are welcome. Read the [contributing guide](CONTRIBUTING.md) before opening a pull request.
 
 ## License

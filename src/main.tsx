@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import App from "./App";
 import { ConfirmationDialogHost } from "./components/ConfirmationDialogHost";
 import { TooltipProvider } from "./components/ui/tooltip";
+import { Toaster } from "./components/ui/sonner";
 import "./index.css";
 
 async function bootstrap() {
@@ -23,6 +24,7 @@ async function bootstrap() {
       <TooltipProvider>
         <ConfirmationDialogHost />
         <App />
+        <Toaster />
       </TooltipProvider>
     </StrictMode>,
   );

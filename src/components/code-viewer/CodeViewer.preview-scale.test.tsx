@@ -10,6 +10,7 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { TooltipProvider } from "../ui/tooltip";
+import { Toaster, toast } from "sonner";
 import type { ReactNode } from "react";
 import userEvent from "@testing-library/user-event";
 import type { CSSProperties, PropsWithChildren } from "react";
@@ -19,6 +20,7 @@ import { useSettingsStore } from "../../store/settings";
 import { projectDesignSchema } from "../../lib/design/project-design";
 import { projectFilesForPreview } from "../../lib/utils/project-file-policy";
 import { capturePreviewImage } from "../../lib/preview-annotation/capture";
+import { exportProjectToUniqueDirectory } from "../../lib/design/desktop";
 import type { DesignBridgeCaptureResult } from "../../lib/design/preview-bridge";
 
 function render(ui: ReactNode) {
@@ -211,6 +213,7 @@ vi.mock("./ViewToolbar", () => ({
     onDeviceSizeChange: (device: "desktop" | "tablet" | "mobile") => void;
     onPreviewZoomIn: () => void;
     onPreviewZoomOut: () => void;
+    onExportDirectory: () => void;
     designWorkspace?: unknown;
   }) => (
     <div>
@@ -223,6 +226,7 @@ vi.mock("./ViewToolbar", () => ({
         {Math.round(props.previewScale * 100)}
       </output>
       <button onClick={props.onPreviewZoomOut}>Zoom out</button>
+      <button onClick={props.onExportDirectory}>Export directory</button>
       <button onClick={props.onPreviewZoomIn}>Zoom in</button>
       <button onClick={() => props.onViewModeChange("code")}>Code view</button>
       <button onClick={() => props.onViewModeChange("preview")}>
@@ -423,6 +427,45 @@ describe("CodeViewer preview scale", () => {
     vi.restoreAllMocks();
   });
 
+  it.each(["success", "failure"])(
+    "does not publish a late export %s after leaving the project",
+    async (outcome) => {
+      type ExportResult = Awaited<
+        ReturnType<typeof exportProjectToUniqueDirectory>
+      >;
+      let complete!: (result: ExportResult) => void;
+      let fail!: (error: Error) => void;
+      const pending = new Promise<ExportResult>((resolve, reject) => {
+        complete = resolve;
+        fail = reject;
+      });
+      vi.mocked(exportProjectToUniqueDirectory).mockReturnValueOnce(pending);
+      const success = vi.spyOn(toast, "success");
+      const error = vi.spyOn(toast, "error");
+      const { unmount } = render(
+        <CodeViewer {...baseProps} conversationId="conversation-a" />,
+      );
+      await userEvent.click(
+        screen.getByRole("button", { name: "Export directory" }),
+      );
+      unmount();
+      await act(async () => {
+        if (outcome === "success") {
+          complete({
+            path: "/tmp/exported-project",
+            directoryName: "exported-project",
+            fileCount: 1,
+          });
+        } else {
+          fail(new Error("Export failed"));
+        }
+        await pending.catch(() => undefined);
+      });
+      expect(success).not.toHaveBeenCalled();
+      expect(error).not.toHaveBeenCalled();
+    },
+  );
+
   it("shows the traditional preview for a single design page and preserves the chosen Code view when pages change", async () => {
     fastCrypto();
     conversationState.conversations["conversation-a"].workspaceMode = "design";
@@ -587,6 +630,9 @@ describe("CodeViewer preview scale", () => {
     });
     expect(capture).toHaveBeenCalledTimes(2);
     unmount();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50);
+    });
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -601,7 +647,15 @@ describe("CodeViewer preview scale", () => {
     };
     const { getT } = await import("../../i18n");
     const message = getT().designReview.automaticStages.unavailable;
-    render(<CodeViewer {...baseProps} conversationId="conversation-a" />);
+    render(
+      <>
+        <Toaster />
+        <CodeViewer {...baseProps} conversationId="conversation-a" />
+      </>,
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
     expect(screen.getByText(message)).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: getT().designReview.openWorkspace }),
@@ -611,7 +665,7 @@ describe("CodeViewer preview scale", () => {
     });
     expect(screen.getByText(message)).toBeInTheDocument();
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(1);
+      await vi.advanceTimersByTimeAsync(201);
     });
     expect(screen.queryByText(message)).not.toBeInTheDocument();
     expect(designReviewState.automatic?.stage).toBe("unavailable");
@@ -871,6 +925,9 @@ describe("CodeViewer preview scale", () => {
     expect(unavailable).toHaveBeenCalledOnce();
     expect(unavailable.mock.calls[0][0].requestId).toBe("latest-request");
     unmount();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50);
+    });
     expect(vi.getTimerCount()).toBe(0);
   });
 

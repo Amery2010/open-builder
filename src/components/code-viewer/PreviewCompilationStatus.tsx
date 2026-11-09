@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Button } from "@/components/ui/button";
+import { useCallback, useEffect, useId, useMemo, useState } from "react";
+import { toast, type ExternalToast } from "sonner";
 import { useT } from "../../i18n";
 import type { ProjectFiles } from "../../types";
 import {
@@ -25,6 +25,7 @@ export function PreviewCompilationStatus({
   onRetry,
 }: PreviewCompilationStatusProps) {
   const t = useT();
+  const toastId = useId();
   const scope = useMemo(() => ({ identity, files }), [identity, files]);
   const [observed, setObserved] = useState<{
     scope: typeof scope;
@@ -68,58 +69,91 @@ export function PreviewCompilationStatus({
     !settled && expiredAttempt === attempt ? "timedOut" : state.status;
   const canRetry = status === "timedOut" || status === "failed";
 
+  useEffect(
+    () => () => {
+      toast.dismiss(toastId);
+    },
+    [toastId],
+  );
+  useEffect(() => {
+    if (hidden) {
+      toast.dismiss(toastId);
+      return;
+    }
+    const options: ExternalToast = {
+      id: toastId,
+      duration: canRetry || !settled ? Infinity : 4_000,
+      description:
+        status === "failed" && state.detail ? (
+          <details>
+            <summary className="cursor-pointer rounded-sm focus-visible:outline-2 focus-visible:outline-ring">
+              {t.previewCompilation.details}
+            </summary>
+            <p className="mt-2 max-h-32 overflow-auto whitespace-pre-wrap break-all font-mono">
+              {state.detail}
+            </p>
+          </details>
+        ) : undefined,
+      action: canRetry
+        ? { label: t.previewCompilation.retry, onClick: onRetry }
+        : undefined,
+    };
+    const notify =
+      status === "failed"
+        ? toast.error
+        : status === "timedOut"
+          ? toast.warning
+          : settled
+            ? toast.success
+            : toast.loading;
+    notify(t.previewCompilation[status], options);
+  }, [
+    toastId,
+    hidden,
+    status,
+    state.detail,
+    canRetry,
+    settled,
+    onRetry,
+    t.previewCompilation,
+  ]);
+
   return (
-    <>
-      <SandpackRuntimeSync
-        onChange={onRuntimeChange}
-        expectedFiles={files}
-        onCompilationChange={observe}
-      />
-      {!hidden && (
-        <div
-          data-preview-compilation={status}
-          className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b bg-background px-3 py-2 text-xs text-muted-foreground"
-        >
-          <span role="status" aria-live="polite" className="min-w-0 flex-1">
-            {t.previewCompilation[status]}
-          </span>
-          {state.status === "failed" && state.detail && (
-            <details className="max-w-full">
-              <summary className="cursor-pointer rounded-sm focus-visible:outline-2 focus-visible:outline-ring">
-                {t.previewCompilation.details}
-              </summary>
-              <p className="mt-2 max-h-32 overflow-auto whitespace-pre-wrap break-all font-mono text-destructive">
-                {state.detail}
-              </p>
-            </details>
-          )}
-          {canRetry && (
-            <Button type="button" variant="outline" size="xs" onClick={onRetry}>
-              {t.previewCompilation.retry}
-            </Button>
-          )}
-        </div>
-      )}
-    </>
+    <SandpackRuntimeSync
+      onChange={onRuntimeChange}
+      expectedFiles={files}
+      onCompilationChange={observe}
+    />
   );
 }
 
 export function CodeOnlyPreviewNotice({ reason }: { reason?: string }) {
   const t = useT();
-  return (
-    <div className="shrink-0 border-b bg-muted/20 px-4 py-3 text-xs text-muted-foreground">
-      <p className="font-medium text-foreground">
-        {t.previewCompilation.codeOnly}
-      </p>
-      <p className="mt-1">{t.previewCompilation.codeOnlyHint}</p>
-      {reason && (
-        <details className="mt-2">
-          <summary className="cursor-pointer rounded-sm focus-visible:outline-2 focus-visible:outline-ring">
-            {t.previewCompilation.details}
-          </summary>
-          <p className="mt-2 break-words">{reason}</p>
-        </details>
-      )}
-    </div>
+  const toastId = useId();
+  useEffect(() => {
+    toast.info(t.previewCompilation.codeOnly, {
+      id: toastId,
+      duration: 8_000,
+      description: (
+        <>
+          <p>{t.previewCompilation.codeOnlyHint}</p>
+          {reason && (
+            <details className="mt-2">
+              <summary className="cursor-pointer rounded-sm focus-visible:outline-2 focus-visible:outline-ring">
+                {t.previewCompilation.details}
+              </summary>
+              <p className="mt-2 break-words">{reason}</p>
+            </details>
+          )}
+        </>
+      ),
+    });
+  }, [reason, t.previewCompilation, toastId]);
+  useEffect(
+    () => () => {
+      toast.dismiss(toastId);
+    },
+    [toastId],
   );
+  return null;
 }

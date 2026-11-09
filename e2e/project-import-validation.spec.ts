@@ -22,8 +22,9 @@ test("previews standalone HTML using the desktop Parcel configuration", async ({
   );
   await page.goto("/__desktop_preview_test__");
   await expect(
-    page.locator('[data-preview-compilation="ready"]'),
+    page.locator('[data-sonner-toast][data-type="success"]'),
   ).toBeVisible();
+  await expect(page.locator("[data-preview-compilation]")).toHaveCount(0);
   await expect(
     page
       .frameLocator(".sp-preview-iframe")

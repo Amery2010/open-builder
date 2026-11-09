@@ -12,6 +12,10 @@ export const en: typeof zh = {
     officialWebsite: "Official website",
     openSourceProject: "Open-source project",
   },
+  notifications: {
+    label: "Notifications",
+    close: "Close notification",
+  },
   approvals: {
     registryHeader: "Registry origin",
     registryQuestion: "Allow this component registry origin? {origin}",

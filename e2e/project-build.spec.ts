@@ -73,7 +73,15 @@ for (const template of templates) {
         files["index.html"] +=
           '<script type="module" src="/deployment-probe.js"></script>';
         files["deployment-probe.js"] =
-          'import "./deployment-probe.css"; import image from "./src/deployment-image.png"; const img = new Image(); img.id = "deployment-image"; img.src = image; document.body.append(img); import("./deployment-lazy.js").then(module => module.ready());';
+          'import "./deployment-probe.css"; import image from "./src/deployment-image.png"; import { title as first } from "./deployment-large-a.tsx"; import { title as second } from "./deployment-large-b.tsx"; const heading = document.createElement("h2"); heading.id = "large-modules"; heading.textContent = first + second; document.body.append(heading); const img = new Image(); img.id = "deployment-image"; img.src = image; document.body.append(img); import("./deployment-lazy.js").then(module => module.ready());';
+        // Exercise concurrent esbuild packets beyond Nodebox's stdin read buffer.
+        for (const [name, title] of [
+          ["a", "Large "],
+          ["b", "modules compiled"],
+        ]) {
+          files[`deployment-large-${name}.tsx`] =
+            `/*${"padding".repeat(5_000)}*/\nexport const title = ${JSON.stringify(title)};`;
+        }
         files["deployment-lazy.js"] =
           'export function ready() { document.body.dataset.deploymentProbe = "ready"; }';
         files["deployment-probe.css"] =
@@ -155,6 +163,9 @@ for (const template of templates) {
         await expect(page.locator("body")).toHaveAttribute(
           "data-deployment-probe",
           "ready",
+        );
+        await expect(page.locator("#large-modules")).toHaveText(
+          "Large modules compiled",
         );
         const image = page.locator("#deployment-image");
         await expect(image).toBeVisible();
