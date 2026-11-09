@@ -1,3 +1,5 @@
+import type { DesignSystemRef } from "@open-builder/core";
+export type { DesignSystemSource, DesignSystemRef } from "@open-builder/core";
 import type {
   Message as _Message,
   ProjectFiles as _ProjectFiles,
@@ -286,18 +288,6 @@ export function normalizePreviewView(value: unknown): PreviewView {
 export type WorkspaceMode = "auto" | "plan" | "design";
 
 export type PlanReturnMode = Exclude<WorkspaceMode, "plan">;
-
-export type DesignSystemSource = "builtin" | "imported" | "custom" | "legacy";
-
-export interface DesignSystemRef {
-  id: string;
-  name: string;
-  source: DesignSystemSource;
-  version: string;
-  /** SHA-256 of the normalized package. Legacy DESIGN.md references may not
-   * have a digest until the user explicitly upgrades them. */
-  digest?: string;
-}
 
 export interface DesignRecommendation {
   systemId: string | null;

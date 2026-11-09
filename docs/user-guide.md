@@ -155,3 +155,7 @@ pnpm tauri:android:build
 ```
 
 For architecture and contribution workflows, see [CONTEXT.md](../CONTEXT.md) and [CONTRIBUTING.md](../CONTRIBUTING.md).
+
+## Headless tools
+
+Portable Skills, native project commands and the local stdio MCP are documented in the [headless guide](headless.md). They use real project directories and their own native templates.

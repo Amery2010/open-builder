@@ -48,7 +48,7 @@ Center primary content with `--container-max` and the matching `--container-gutt
 
 Marketing pages may alternate text-led, diagram-led, and proof-led compositions while sharing one alignment grid. Product interfaces should use stable columns, clear label-value alignment, and predictable action placement. Keep a visible relationship between a technical explanation and the evidence, code, or visualization it describes.
 
-At tablet widths, reduce peripheral decoration before compressing text. On phones, stack comparisons, pricing, and split panels; preserve the order of explanation before action. Tables should retain critical identifiers and values, then move secondary columns into disclosure. Keep touch targets at least 44px and prevent code or long identifiers from forcing horizontal page overflow.
+At tablet widths, reduce peripheral decoration before compressing text. On phones, stack comparisons, pricing, and split panels; preserve the order of explanation before action. Tables should retain critical identifiers and values, then move secondary columns into disclosure. Keep touch targets operable for their context and input methods and prevent code or long identifiers from forcing horizontal page overflow.
 
 ## 5. Components and interaction
 

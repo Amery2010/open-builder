@@ -6,6 +6,9 @@ export default tseslint.config(
   {
     ignores: [
       "dist/**",
+      "packages/*/dist/**",
+      "packages/cli/assets/**",
+      "artifacts/**",
       "node_modules/**",
       "src-tauri/gen/**",
       "src-tauri/target/**",
@@ -14,6 +17,8 @@ export default tseslint.config(
   {
     files: [
       "src/**/*.{ts,tsx}",
+      "packages/**/*.ts",
+      "vitest.headless.config.ts",
       "e2e/**/*.ts",
       "vite.config.ts",
       "playwright.config.ts",

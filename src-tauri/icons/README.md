@@ -3,6 +3,14 @@
 The editable brand source is [`public/logo.svg`](../../public/logo.svg). The
 export preserves its purple/pink gradient and white artwork.
 
+The `icon-background` path in the SVG uses continuous corners exported from
+Apple's SwiftUI `RoundedRectangle(cornerRadius: 43, style: .continuous)` on a
+192 × 192 coordinate grid. The web logo and legacy macOS export share this one
+outline; neither uses circular `rx` corners or a separate hand-drawn approximation.
+This radius is a design choice for these rendered assets, not an App Store
+submission requirement. Current Apple app icons receive their final mask from
+the operating system.
+
 | Asset           | Purpose                                                                                                                                                                                                                                          |
 | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `app-store.png` | 1024 × 1024, 8-bit RGB PNG, full-bleed square with no alpha channel, baked-in corners, or outer padding.                                                                                                                                         |
@@ -36,5 +44,6 @@ App Store Connect upload and review must still be validated with a signed build.
 References (checked 2026-11-08):
 
 - [Apple Human Interface Guidelines: App icons](https://developer.apple.com/design/human-interface-guidelines/app-icons)
+- [Apple SwiftUI: Continuous curvature rounded corners](https://developer.apple.com/documentation/swiftui/roundedcornerstyle/continuous)
 - [Apple: High-resolution icon representations and iconutil](https://developer.apple.com/library/archive/documentation/GraphicsAnimation/Conceptual/HighResolutionOSX/Optimizing/Optimizing.html)
 - [Tauri: App Icons](https://v2.tauri.app/develop/icons/)

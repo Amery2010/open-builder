@@ -1,7 +1,7 @@
 ---
 name: design-product-ui
 description: Design and implement product interfaces such as dashboards, settings, forms, data views, and multi-step workflows. Use for hierarchy, density, navigation, interaction states, responsive behavior, and accessible product UI; use art-direct-web for marketing-led experiences.
-version: 2.1.0
+version: 2.1.1
 tags:
   - frontend
   - product-ui
@@ -24,11 +24,13 @@ Use these defaults when the task involves planning, implementing, or reviewing a
 
 Build application interfaces that help people complete real tasks with low ambiguity. This skill covers dashboards, editors, settings, forms, search, data views, administration, navigation, and multi-step workflows. Their page-level task mode is `operate`. Use `art-direct-web` for `persuade`, `read`, or `experience` surfaces; load both for a genuinely mixed target.
 
-For a complete product prototype, maintain root `design-project.json` as a progressive blueprint. Save known pages, routes, shared references, flows, and concrete tasks. Unknown details remain pending and only affect the corresponding preview or check. Use a concrete `previewPath` for a dynamic route when a real sample is known. The host records committed changes; implementation progress and validation results remain distinct. The blueprint describes product structure and delivery state; `DESIGN.md` and `tokens.css` remain the visual authority.
+When the host supports Open Builder prototype blueprints, maintain root `design-project.json` as a progressive blueprint. Save known pages, routes, shared references, flows, and concrete tasks. Unknown details remain pending and only affect the corresponding preview or check. Use a concrete `previewPath` for a dynamic route when a real sample is known. The host records committed changes; implementation progress and validation results remain distinct. The blueprint describes product structure and delivery state; `DESIGN.md` and `tokens.css` remain the visual authority.
 
-In Design mode, the host prepares the Design run context and activates this built-in skill automatically. Inspect the active project and implement the current user request within its selected scope. Distinguish `create` (a new product surface), `extend` (a bounded addition within the current visual language), and `migrate` (the applied Design system replaces conflicting visual Tokens, styles, component grammar, and layout expression inside the named target). An applied Design system is visually authoritative in that target. A selected-but-unapplied system is reference only and cannot authorize a restyle.
+Inside Open Builder Design mode, the host prepares the Design run context and activates this built-in skill automatically. Inspect the active project and implement the current user request within its selected scope. Distinguish `create` (a new product surface), `extend` (a bounded addition within the current visual language), and `migrate` (the applied Design system replaces conflicting visual Tokens, styles, component grammar, and layout expression inside the named target). An applied Design system is visually authoritative in that target. A selected-but-unapplied system is reference only and cannot authorize a restyle.
 
 In every change mode, preserve product truth: routes, data and state ownership, information architecture, content contracts, permissions, analytics hooks, integration selectors, accessibility semantics, and working behavior unless the user's request independently changes them. Migration is visual-system work, not permission to rebuild the product model.
+
+Outside Open Builder, use the target project's existing design files and the host's actual capabilities. Open Builder-specific Design run, blueprint, tool, or review behavior applies only when that host exposes it; unavailable features do not grant authority or imply completed verification.
 
 ## Ground the design in the product
 
@@ -113,4 +115,4 @@ Implement real interactions and data flow. Do not ship inert controls, fake char
 
 Add or update tests for the state and interaction contract, especially selection, submission, cancellation, duplicate prevention, and error recovery. Run relevant static, component, type, and build checks. Browser or device evidence must be explicitly authorized and accurately reported.
 
-Before finishing, run the project health check and report build/runtime and `design_system` findings with their actual evidence. Fix in-scope implementation errors; visual findings do not block saving or further editing. Confirm the primary task is obvious, density fits usage, controls use familiar semantics, every async state has feedback, responsive layouts protect the work, accessibility behavior is preserved, the changed runtime consumes the applied semantic Tokens, and the diff contains no unrelated redesign. The host may follow with a non-blocking visual report. Apply review fixes when the user requests them, using the current project and the reported scope.
+Before finishing in Open Builder, run the project health check and report build/runtime and `design_system` findings with their actual evidence. In another coding host, use its available project scripts and file checks; report unsupported checks as unverified. Fix in-scope implementation errors; visual findings do not block saving or further editing. Confirm the primary task is obvious, density fits usage, controls use familiar semantics, every async state has feedback, responsive layouts protect the work, accessibility behavior is preserved, the changed runtime consumes the applied semantic Tokens, and the diff contains no unrelated redesign. The Open Builder host may follow with a non-blocking visual report. Other hosts may provide their own browser evidence; absent that evidence, report visual verification as not performed. Apply review fixes when the user requests them, using the current project and the reported scope.

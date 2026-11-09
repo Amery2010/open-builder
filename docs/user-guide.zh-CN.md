@@ -155,3 +155,7 @@ pnpm tauri:android:build
 ```
 
 架构术语与贡献流程见 [CONTEXT.md](../CONTEXT.md) 和 [CONTRIBUTING.md](../CONTRIBUTING.md)。
+
+## 无界面工具
+
+可移植 Skills、原生项目命令与本地 stdio MCP 见[无界面工具指南](headless.zh-CN.md)。这些工具以真实项目目录为准，使用独立原生模板。

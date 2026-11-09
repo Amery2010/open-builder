@@ -13,7 +13,7 @@
       "en": "Playful consumer campaigns or warm editorial stories",
       "zh": "活泼消费活动或温暖叙事型编辑内容"
     },
-    "digest": "0cc9ad9f9c4533b6e54a9ce07fd89bf83d84f673c987836a919d54e46d7dd691",
+    "digest": "89666214c740f51b9e5bdc17e2d352c8aec380932500dc7fd749ee306be3adf5",
     "version": "2.0.0",
     "files": {
       "manifest": "linear/manifest.json",
@@ -35,7 +35,7 @@
       "en": "Quiet editorial layouts or low-tech community products",
       "zh": "安静编辑布局或低技术感社区产品"
     },
-    "digest": "d35503b379d80b3a5084c052fb1682302c6872a50319c622fdd4870a4711f10b",
+    "digest": "b67908f251413409343d9d1dae689b311ac88b4989edbf52055634b1ecbf6627",
     "version": "2.0.0",
     "files": {
       "manifest": "stripe/manifest.json",
@@ -145,7 +145,7 @@
       "en": "Cinematic launches or highly expressive retail",
       "zh": "电影感发布页或高度表现型零售页面"
     },
-    "digest": "73e5ebb857f771e56b14fe2f8374affbf5ecb576b3e6e1b8b34ccd4d64c055d0",
+    "digest": "cc537e8bc1f4a082447b6a53e60ad82263c6b9e7ed9293fb1e06c49f22c2f3b0",
     "version": "2.0.0",
     "files": {
       "manifest": "notion/manifest.json",

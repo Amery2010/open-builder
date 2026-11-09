@@ -73,7 +73,7 @@ The result should feel precise, quiet, and fast. Density comes from disciplined 
 
 - Apply `--focus-ring` consistently to keyboard-interactive controls and ensure it remains visible on every dark surface.
 - Maintain sufficient contrast for `--muted` and `--meta`; neither should carry essential instructions alone when contrast becomes marginal.
-- Keep pointer and touch targets at least 44 by 44 CSS pixels where possible, even when the visible control is compact.
+- Keep pointer and touch targets operable for their context, density, and input methods, even when the visible control is compact.
 - Pair success, warning, and danger colors with text or icons. Selected and active states also need a non-color cue where ambiguity is possible.
 - Respect reduced-motion preferences and remove nonessential transforms and spatial transitions.
 - Preserve semantic landmarks, heading order, control names, field labels, status announcements, and predictable keyboard order.

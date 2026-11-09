@@ -2,7 +2,7 @@
   "name": "open-builder",
   "description": "Open Builder is an open-source AI-powered app generator. Build web applications through natural language conversations.",
   "private": true,
-  "version": "2.0.0",
+  "version": "2.1.0",
   "type": "module",
   "engines": {
     "node": ">=24 <26",
@@ -22,8 +22,8 @@
     "tauri:android:dev": "tauri android dev",
     "tauri:android:build": "tauri android build",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint src scripts e2e vite.config.ts playwright.config.ts eslint.config.js --max-warnings=0",
-    "format:check": "prettier --check --no-error-on-unmatched-pattern \"src/{App,main}.tsx\" \"src/index.css\" \"src/components/{AppLayout*,ChatInterface*,CodeViewer}.tsx\" \"src/components/chat/{AskUserQuestionCard*,ChatInput,DiffModal*,GeneratingIndicator*,LazyMarkdownContent,MessageBubble*,PlanApprovalCard}.tsx\" \"src/components/chat/{ProjectImportDialog*,ProjectTemplateDialog,ResetProjectConfirmDialog*,SessionListOverlay*,SnapshotHistoryDialog,SubagentCallCard,ToolCallCard*}.tsx\" \"src/components/chat/chat-input/{AttachmentPreview,ChatInputToolbar*,McpMenu,SkillsMenu,SlashCommandMenu*}.tsx\" \"src/components/chat/session-list/SessionItem.tsx\" \"src/components/code-viewer/{FileExplorer,SandpackListener,ViewToolbar*,sandpack-file-changes*}.{ts,tsx}\" \"src/components/design/*.tsx\" \"src/components/mcp/**/*.tsx\" \"src/components/settings/{SettingsDialog*,tabs/AdvancedTab,tabs/LocalAgentSettings*,tabs/ModelTab*,tabs/StorageTab,tabs/SystemTab}.tsx\" \"src/components/skills/SkillCard.tsx\" \"src/components/ui/{capsule-group*,tooltip,tooltip-icon-button}.tsx\" \"src/hooks/{useAppLayout*,useAppState,useGenerator,useTitleAndCompression}.ts\" \"src/i18n/{en,zh}.ts\" \"src/lib/app-version.ts\" \"src/lib/ai/{ask-user-question-contract*,client,conversation-context*,custom-system-prompt*,generator*,messages*,plan-mode*,project-guidelines*,provider-config*,run-system-prompt*,tool-policy-version,tools-schema*}.ts\" \"src/lib/ai/subagents/**/*.ts\" \"src/lib/design/**/*.ts\" \"src/lib/design-systems/**/*.{ts,json}\" \"src/lib/{attachments,infra,local-agent,mcp,runtime,security,storage}/**/*.ts\" \"src/lib/skills/{active-context,display-text,import-limits,importer*,instance,manifest,parser,paths,registry,script-execution-guard*,script-executor*,text-creator,tool-handler*}.ts\" \"src/lib/tools/{advanced-write-tools.test,console-log-format*,design-style*,design-styles,fs-tools*,handler-factory,install-component,network-guard*,project-health*,sandpack-template-manifest*}.ts\" \"src/lib/utils/{attachments*,compress-context*,merge-messages,message-security*,project-file-policy*,project-files*,project-import*,smart-title,tool-result}.ts\" \"src/store/{conversation*,design-*,mcp*}.ts\" \"src/store/settings/{ai,migrations*,system}.ts\" \"src/test/setup.ts\" \"src/types/index.ts\" \"src-tauri/capabilities/*.json\" \"public/mcp/**/*.html\" \"scripts/**/*.mjs\" \"e2e/**/*.ts\" \"*.{json,ts,js,md}\" \"docs/*.md\" \".github/workflows/*.{yml,yaml}\"",
+    "lint": "eslint src scripts e2e packages vite.config.ts vitest.headless.config.ts playwright.config.ts eslint.config.js --max-warnings=0",
+    "format:check": "prettier --check --no-error-on-unmatched-pattern \"src/{App,main}.tsx\" \"src/index.css\" \"src/components/{AppLayout*,ChatInterface*,CodeViewer}.tsx\" \"src/components/chat/{AskUserQuestionCard*,ChatInput,DiffModal*,GeneratingIndicator*,LazyMarkdownContent,MessageBubble*,PlanApprovalCard}.tsx\" \"src/components/chat/{ProjectImportDialog*,ProjectTemplateDialog,ResetProjectConfirmDialog*,SessionListOverlay*,SnapshotHistoryDialog,SubagentCallCard,ToolCallCard*}.tsx\" \"src/components/chat/chat-input/{AttachmentPreview,ChatInputToolbar*,McpMenu,SkillsMenu,SlashCommandMenu*}.tsx\" \"src/components/chat/session-list/SessionItem.tsx\" \"src/components/code-viewer/{FileExplorer,SandpackListener,ViewToolbar*,sandpack-file-changes*}.{ts,tsx}\" \"src/components/design/*.tsx\" \"src/components/mcp/**/*.tsx\" \"src/components/settings/{SettingsDialog*,tabs/AdvancedTab,tabs/LocalAgentSettings*,tabs/ModelTab*,tabs/StorageTab,tabs/SystemTab}.tsx\" \"src/components/skills/SkillCard.tsx\" \"src/components/ui/{capsule-group*,tooltip,tooltip-icon-button}.tsx\" \"src/hooks/{useAppLayout*,useAppState,useGenerator,useTitleAndCompression}.ts\" \"src/i18n/{en,zh}.ts\" \"src/lib/app-version.ts\" \"src/lib/ai/{ask-user-question-contract*,client,conversation-context*,custom-system-prompt*,generator*,messages*,plan-mode*,project-guidelines*,provider-config*,run-system-prompt*,tool-policy-version,tools-schema*}.ts\" \"src/lib/ai/subagents/**/*.ts\" \"src/lib/design/**/*.ts\" \"src/lib/design-systems/**/*.{ts,json}\" \"src/lib/{attachments,infra,local-agent,mcp,runtime,security,storage}/**/*.ts\" \"src/lib/skills/{active-context,display-text,import-limits,importer*,instance,manifest,parser,paths,registry,script-execution-guard*,script-executor*,text-creator,tool-handler*}.ts\" \"src/lib/tools/{advanced-write-tools.test,console-log-format*,design-style*,design-styles,fs-tools*,handler-factory,install-component,network-guard*,project-health*,sandpack-template-manifest*}.ts\" \"src/lib/utils/{attachments*,compress-context*,merge-messages,message-security*,project-file-policy*,project-files*,project-import*,smart-title,tool-result}.ts\" \"src/store/{conversation*,design-*,mcp*}.ts\" \"src/store/settings/{ai,migrations*,system}.ts\" \"src/test/setup.ts\" \"src/types/index.ts\" \"src-tauri/capabilities/*.json\" \"public/mcp/**/*.html\" \"scripts/**/*.mjs\" \"e2e/**/*.ts\" \"*.{json,ts,js,md}\" \"docs/*.md\" \".github/workflows/*.{yml,yaml}\" \"packages/*/src/**/*.ts\" \"packages/*/tests/**/*.ts\" \"packages/*/{package,tsconfig}.json\" \"packages/*/README.md\" \"skills/**/*.md\"",
     "test": "pnpm test:frontend && pnpm test:rust",
     "test:frontend": "vitest run",
     "test:rust": "cargo test --locked --manifest-path src-tauri/Cargo.toml",
@@ -32,7 +32,13 @@
     "security:desktop": "node scripts/check-desktop-security.mjs",
     "workflow:check": "node scripts/check-workflows.mjs && node --test scripts/extract-release-notes.test.mjs scripts/prepare-macos-signing.test.mjs",
     "version:sync": "node scripts/version-contract.mjs --write",
-    "version:check": "node scripts/version-contract.mjs"
+    "version:check": "node scripts/version-contract.mjs",
+    "headless:build": "node scripts/headless/build.mjs",
+    "headless:typecheck": "pnpm --filter @open-builder/core typecheck && pnpm --filter @open-builder/cli typecheck",
+    "headless:test": "vitest run --config vitest.headless.config.ts",
+    "headless:pack": "pnpm headless:build && pnpm --dir packages/cli pack --pack-destination ../../artifacts/headless",
+    "skills:pack": "node scripts/package-workflow-skill.mjs",
+    "headless:smoke": "pnpm headless:pack && node scripts/headless/smoke.mjs"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^4.0.41",
@@ -73,7 +79,8 @@
     "remark-gfm": "^4.0.1",
     "semver": "7.8.5",
     "zod": "^4.4.3",
-    "zustand": "^5.0.15"
+    "zustand": "^5.0.15",
+    "@open-builder/core": "workspace:*"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -101,6 +108,7 @@
     "typescript-eslint": "^8.67.0",
     "vite": "^8.2.2",
     "vitest": "^4.1.11",
-    "vitest-axe": "^0.1.0"
+    "vitest-axe": "^0.1.0",
+    "esbuild": "0.27.3"
   }
 }

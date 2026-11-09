@@ -88,6 +88,8 @@ Open [localhost:8080](http://localhost:8080). The container serves the Web app; 
 
 For Vercel, Cloudflare, or Netlify, use `pnpm build` and output directory `dist`. Repository automation is defined in the [Pages](.github/workflows/deploy.yml) and [release](.github/workflows/release.yml) workflows.
 
+For portable Skills, the standalone CLI and local MCP setup, see the [headless guide](docs/headless.md).
+
 ## Development
 
 The application uses React 19, TypeScript 6, Vite 8, Tailwind CSS 4, Zustand, Sandpack, and Tauri 2.

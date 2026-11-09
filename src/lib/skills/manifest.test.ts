@@ -71,7 +71,7 @@ describe("public skills manifest", () => {
       expect(skill.name).toBe(skill.id);
       expect(skill.version).toBe(
         skill.id === "art-direct-web" || skill.id === "design-product-ui"
-          ? "2.1.0"
+          ? "2.1.1"
           : "2.0.0",
       );
       expect(skill.description.length).toBeGreaterThan(80);

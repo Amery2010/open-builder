@@ -4,6 +4,8 @@ WORKDIR /app
 ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY packages/core/package.json ./packages/core/package.json
+COPY packages/cli/package.json ./packages/cli/package.json
 RUN corepack pnpm@11.0.0 install --frozen-lockfile
 
 COPY . .

@@ -18,14 +18,15 @@ ET.register_namespace("", SVG)
 srgb = PngInfo()
 srgb.add(b"sRGB", b"\x00")
 
-# Keep the existing brand artwork; only the platform's background shape changes.
-source = ET.parse(ROOT / "public/logo.svg").getroot()
-source.set("viewBox", "0 0 192 192")
-source.set("width", "1024")
-source.set("height", "1024")
-background = source.find(f".//{{{SVG}}}rect")
-background.attrib.pop("rx", None)
-background.attrib.pop("ry", None)
+# Reuse the web logo's continuous corner outline for the legacy macOS icon.
+logo = ET.parse(ROOT / "public/logo.svg").getroot()
+source = deepcopy(logo)
+# Store/iOS artwork must have an opaque, unmasked square background.
+background = source.find(".//*[@id='icon-background']")
+background.tag = f"{{{SVG}}}rect"
+background.attrib.pop("d")
+background.set("width", "192")
+background.set("height", "192")
 
 macos = ET.Element(f"{{{SVG}}}svg", {
     "width": "1024", "height": "1024", "viewBox": "0 0 1024 1024",
@@ -34,19 +35,7 @@ macos = ET.Element(f"{{{SVG}}}svg", {
 body = ET.SubElement(macos, f"{{{SVG}}}g", {
     "transform": "translate(100 100) scale(4.291666666666667)",
 })
-macos_source = deepcopy(source)
-macos_background = macos_source.find(f".//{{{SVG}}}rect")
-macos_background.tag = f"{{{SVG}}}path"
-macos_background.attrib.pop("width")
-macos_background.attrib.pop("height")
-# Smoothly transitioning corners on an 824px body inside a 1024px canvas.
-macos_background.set("d", (
-    "M43 0H149C164 0 175 0 183.5 8.5C192 17 192 28 192 43"
-    "V149C192 164 192 175 183.5 183.5C175 192 164 192 149 192"
-    "H43C28 192 17 192 8.5 183.5C0 175 0 164 0 149"
-    "V43C0 28 0 17 8.5 8.5C17 0 28 0 43 0Z"
-))
-body.extend(macos_source)
+body.extend(deepcopy(logo))
 
 ios_sizes = {
     "AppIcon-20x20@1x.png": 20,

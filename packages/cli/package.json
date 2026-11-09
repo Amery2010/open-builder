@@ -1,0 +1,33 @@
+{
+  "name": "@open-builder/cli",
+  "version": "0.1.0",
+  "description": "Headless Open Builder project tools and local MCP server",
+  "license": "GPL-3.0-only",
+  "type": "module",
+  "bin": {
+    "open-builder": "dist/main.js"
+  },
+  "files": [
+    "dist",
+    "assets",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.4.0",
+    "cross-spawn": "7.0.6",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@open-builder/core": "workspace:*",
+    "@types/cross-spawn": "^6.0.6",
+    "@modelcontextprotocol/client": "2.0.0"
+  }
+}

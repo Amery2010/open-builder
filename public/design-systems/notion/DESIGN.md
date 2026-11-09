@@ -74,7 +74,7 @@ The design should behave like a flexible working canvas. Product interfaces use 
 
 - Apply `--focus-ring` consistently and ensure it is visible against both `--bg` and `--surface`.
 - Maintain readable contrast for body, muted, metadata, placeholder, and disabled text. Essential instructions should not rely on the lightest text tier.
-- Keep pointer and touch targets at least 44 by 44 CSS pixels where possible, even when visible labels and icons remain compact.
+- Keep pointer and touch targets operable for their context, density, and input methods, even when visible labels and icons remain compact.
 - Pair semantic colors with text, icons, or patterns. Do not encode document status or selection through color alone.
 - Respect reduced-motion preferences and remove nonessential transforms or spatial transitions.
 - Preserve landmarks, heading order, document structure, control names, field labels, live status announcements, and logical keyboard order.

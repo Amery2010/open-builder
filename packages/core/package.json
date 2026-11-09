@@ -1,0 +1,20 @@
+{
+  "name": "@open-builder/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./project-file-policy": "./src/project-file-policy.ts",
+    "./redact": "./src/redact.ts",
+    "./design-validation": "./src/design-validation.ts",
+    "./reference-header": "./src/reference-header.ts",
+    "./design-apply": "./src/design-apply.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "zod": "4.4.3"
+  }
+}

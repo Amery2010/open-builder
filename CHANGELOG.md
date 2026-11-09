@@ -10,8 +10,13 @@ Tagged versions use their Git tag date. Versions 1.4.0 through 1.7.0 were not ta
 
 ## [Unreleased]
 
+### Added
+
+- Added a standalone project CLI, local stdio MCP server, and portable workflow Skill. See the [headless guide](docs/headless.md) and [CLI release notes](packages/cli/CHANGELOG.md) for setup and package details.
+
 ### Fixed
 
+- Headless verification preserves completed script results during cleanup, packaging supports cross-platform checkout line endings, and static Token wiring checks exclude non-loading HTML references.
 - Desktop releases now cache Tauri bundler tools and retry transient installer-download failures. macOS releases prepare signing credentials before compilation, use ad-hoc signing when no certificate is configured, and reject invalid certificate or incomplete notarization settings early.
 - Removed a Windows-only unused-parameter warning in local image permission handling.
 

@@ -1,0 +1,6 @@
+# Keep hash-pinned design resources and packaged Skill sources stable on checkout.
+public/design-systems/**/*.json text eol=lf
+public/design-systems/**/*.md text eol=lf
+public/design-systems/**/*.css text eol=lf
+public/skills/**/*.md text eol=lf
+skills/**/*.md text eol=lf

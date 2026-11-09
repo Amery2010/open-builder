@@ -88,6 +88,8 @@ docker run --rm -p 8080:8080 ghcr.io/amery2010/open-builder:latest
 
 在 Vercel、Cloudflare 或 Netlify 中，使用构建命令 `pnpm build` 和输出目录 `dist`。仓库自动化配置见 [Pages](.github/workflows/deploy.yml) 与[发布流程](.github/workflows/release.yml)。
 
+可移植 Skills、独立 CLI 与本地 MCP 的安装和使用见[无界面工具指南](docs/headless.zh-CN.md)。
+
 ## 开发
 
 项目使用 React 19、TypeScript 6、Vite 8、Tailwind CSS 4、Zustand、Sandpack 和 Tauri 2。

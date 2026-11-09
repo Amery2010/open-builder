@@ -1,7 +1,7 @@
 ---
 name: art-direct-web
 description: Art-direct marketing sites, landing pages, portfolios, editorial pages, and campaign experiences from a concrete brief. Use when visual narrative, composition, typography, imagery, and motion are central; use design-product-ui instead for routine application workflows.
-version: 2.1.0
+version: 2.1.1
 tags:
   - frontend
   - art-direction
@@ -10,6 +10,8 @@ tags:
 ---
 
 # Art-direct the web
+
+Outside Open Builder, use the target project's existing design files and the host's actual capabilities. Open Builder-specific Design run, blueprint, tool, or review behavior applies only when that host exposes it; unavailable features do not grant authority or imply completed verification.
 
 ## Shared visual principles
 
@@ -24,7 +26,7 @@ Use these defaults when the task involves planning, implementing, or reviewing a
 
 Create a coherent visual experience for `persuade`, `read`, and `experience` surfaces: marketing, portfolio, editorial, cultural, or campaign work. Start from the user's content, audience, brand, conversion goal, and existing project—not from a generic visual trend. Use `design-product-ui` for `operate` surfaces such as dashboards, settings, forms, and multi-step workflows; load both for a genuinely mixed target.
 
-In Design mode, the host prepares the Design run context and activates this built-in skill automatically. Inspect the active project and implement the current user request within its selected scope. Distinguish `create` (a new surface), `extend` (a bounded addition within the current visual language), and `migrate` (the applied Design system replaces conflicting visual Tokens, styles, component grammar, and layout expression inside the named target). An applied Design system is visually authoritative in that target. A selected-but-unapplied system is reference only and cannot authorize a restyle.
+Inside Open Builder Design mode, the host prepares the Design run context and activates this built-in skill automatically. Inspect the active project and implement the current user request within its selected scope. Distinguish `create` (a new surface), `extend` (a bounded addition within the current visual language), and `migrate` (the applied Design system replaces conflicting visual Tokens, styles, component grammar, and layout expression inside the named target). An applied Design system is visually authoritative in that target. A selected-but-unapplied system is reference only and cannot authorize a restyle.
 
 In every change mode, preserve product truth: routes, data and state ownership, information architecture, content, permissions, analytics hooks, integration selectors, accessibility semantics, and working interactions unless the user's request independently changes them. Migration replaces the visual world, not the product contract.
 
@@ -116,4 +118,4 @@ Before finishing, verify:
 8. no asset, dependency, or external action was invented or added without need;
 9. checks and preview evidence reported were actually run.
 
-Run the project health check and report build/runtime and `design_system` findings with their actual evidence. Fix in-scope implementation errors; a visual check is advisory and does not block saving or further editing. Trace root `tokens.css` into the active runtime style entry and prove that changed UI consumes semantic color, typography, shape, and layout roles; use motion and easing roles when interaction or animation is present. Use browser or screenshot validation only when it is available and authorized, and distinguish it from source-based review. The host may follow with a non-blocking visual report. Apply review fixes when the user requests them, using the current project and the reported scope.
+Run the project health check and report build/runtime and `design_system` findings with their actual evidence. Fix in-scope implementation errors; a visual check is advisory and does not block saving or further editing. Trace root `tokens.css` into the active runtime style entry and prove that changed UI consumes semantic color, typography, shape, and layout roles; use motion and easing roles when interaction or animation is present. Use browser or screenshot validation only when it is available and authorized, and distinguish it from source-based review. The Open Builder host may follow with a non-blocking visual report. Other hosts may provide their own browser evidence; absent that evidence, report visual verification as not performed. Apply review fixes when the user requests them, using the current project and the reported scope.

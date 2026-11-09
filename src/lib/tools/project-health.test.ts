@@ -6,6 +6,28 @@ import {
 } from "./project-health";
 
 describe("runProjectHealthCheck", () => {
+  it("aggregates static, design and runtime findings before selecting visible issues", () => {
+    const report = runProjectHealthCheck(
+      { "DESIGN.md": "# Legacy contract", "index.html": "<title>App</title>" },
+      Array.from({ length: 25 }, (_, i) => ({
+        method: "error",
+        data: [`failure ${i}`],
+      })),
+      { design: { beforeFiles: {} } },
+    );
+    expect(report.summary).toMatchObject({
+      errors: 25,
+      warnings: 2,
+      info: 1,
+      totalIssues: 28,
+    });
+    expect(report.issues).toHaveLength(PROJECT_HEALTH_LIMITS.maxIssues);
+    expect(report.issues.every((issue) => issue.category === "runtime")).toBe(
+      true,
+    );
+    expect(report.truncated).toBe(true);
+    expect(report.ok).toBe(false);
+  });
   it("reports a healthy Vite React project with no runtime issues", () => {
     const report = runProjectHealthCheck(
       {

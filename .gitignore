@@ -27,3 +27,6 @@ playwright-report
 
 .claude
 /tmp
+/artifacts/
+/packages/cli/assets/
+/packages/cli/LICENSE

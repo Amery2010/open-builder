@@ -153,7 +153,12 @@ export default defineConfig(() => {
       // Node's built-in test runner owns these workflow tests. Excluding them
       // here prevents Vitest from executing the file and then reporting that it
       // contains no Vitest suite; `pnpm workflow:check` still runs it directly.
-      exclude: [...configDefaults.exclude, "e2e/**", "scripts/**/*.test.mjs"],
+      exclude: [
+        ...configDefaults.exclude,
+        "e2e/**",
+        "packages/**",
+        "scripts/**/*.test.mjs",
+      ],
     },
     envPrefix: ["VITE_", "TAURI_ENV_*"],
   };

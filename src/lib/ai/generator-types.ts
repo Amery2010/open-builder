@@ -1,3 +1,5 @@
+import type { ProjectFiles, FileChange } from "@open-builder/core";
+export type { ProjectFiles, FileChange } from "@open-builder/core";
 import type { ToolResultPart, ToolSet } from "ai";
 import type {
   AskUserQuestion,
@@ -35,9 +37,6 @@ export type {
   AskUserAnswers,
   PlanDecision,
 } from "../../types/api";
-
-/** Project files: path -> content */
-export type ProjectFiles = Record<string, string>;
 
 /** OpenAI multimodal content block */
 export type ContentPart =
@@ -235,12 +234,6 @@ export interface ToolDefinition {
     description: string;
     inputSchema: Record<string, unknown>;
   };
-}
-
-/** File change record */
-export interface FileChange {
-  path: string;
-  action: "created" | "modified" | "deleted";
 }
 
 /** Final return value of generate() */

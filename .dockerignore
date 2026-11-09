@@ -16,3 +16,7 @@ docs
 **/.DS_Store
 
 coverage
+artifacts
+packages/*/node_modules
+packages/*/dist
+packages/cli/assets
